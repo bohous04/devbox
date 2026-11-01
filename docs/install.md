@@ -32,6 +32,7 @@ The core is always installed: Docker, Bun, git, jq, ufw, Tailscale, the GitHub C
 | `cloudflared` | the Cloudflare Tunnel binary, for reaching the dashboard from outside the tailnet. You connect the tunnel yourself: `cloudflared service install <token>` and put Cloudflare Access in front of it |
 | `op` | 1Password CLI. devd uses a service account to broker SSH keys to sessions |
 | `cliproxy` | local proxy for subscription-backed proxy profiles; generates its own random API key |
+| `auto-update` | nightly deploy of `origin/main` once CI passed on it, with a health check and automatic rollback — see [Upgrades and deploys](#upgrades-and-deploys) |
 | `storage-guard` | disk and per-session storage budgets, and cleanup that only deletes what is verified in an offsite borg archive — see [`infra/storage-guard/README.md`](../infra/storage-guard/README.md) |
 
 Example: `DEVBOX_FEATURES="samba op" bash /opt/vps-dev-infra/infra/setup.sh`.
@@ -248,7 +249,23 @@ auth key, `settings.instabox`, base image) is described in
 
 ## Upgrades and deploys
 
-devd does **not** pull code by itself. To deploy:
+With the `auto-update` feature, `devbox-update.timer` deploys every night at 05:15 (after
+the Claude Code upkeep window), and `devbox-update` runs the same thing on demand. It:
+
+- deploys **only `origin/main`**, and only once every CI check on that commit succeeded;
+- refuses a checkout with local changes, another branch checked out or diverged history
+  (it notifies instead), so the server never runs something that is not on main;
+- rebuilds only what changed (dependencies, dashboard, session image — the previous image is
+  kept as `devbox:previous`) and restarts devd only when devd itself changed;
+- after a restart requires `/api/health` to report the new commit, otherwise rolls back to
+  the previous commit and restarts again;
+- reports changes under `infra/` (units, setup.sh) instead of applying them, and records the
+  deployed commit in `/var/lib/devd/deployed.json`.
+
+A restart locks the vault; the update notifies through Pushover (`/etc/devd/watch.env`) so
+you know to unlock it.
+
+Without `auto-update`, deploy by hand:
 
 ```bash
 cd /opt/vps-dev-infra && git pull

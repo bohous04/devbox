@@ -49,6 +49,7 @@ Template: [`infra/devd.env.example`](../infra/devd.env.example).
 | `DEVBOX_BORG_KEY` | `/root/.ssh/id_ed25519_backup` | SSH key for the borg repo |
 | `DEVBOX_BORG_PASSFILE` | `/etc/devd/borg-passphrase` | borg passphrase file |
 | `DEVBOX_BORG_REMOTE_PATH` | — | borg binary on the remote side (e.g. `borg-1.4` on a Hetzner Storage Box) |
+| `DEVBOX_REPO_DIR` | `/opt/vps-dev-infra` | checkout that `devbox-update` deploys (set by the unit from `REPO_DIR`) |
 
 ### Integrations
 

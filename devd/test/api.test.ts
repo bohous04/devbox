@@ -298,7 +298,10 @@ test("health and empty sessions", async () => {
   const { a } = app();
   const h = await a.request("/api/health");
   expect(h.status).toBe(200);
-  expect(((await h.json()) as { ok: boolean }).ok).toBe(true);
+  const health = (await h.json()) as { ok: boolean; commit: string | null };
+  expect(health.ok).toBe(true);
+  // devd reports the commit it runs from, so a deploy can be verified.
+  expect(health.commit).toMatch(/^[0-9a-f]{40}$/);
   const s = await a.request("/api/sessions");
   expect(await s.json()).toEqual([]);
 });

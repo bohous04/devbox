@@ -380,7 +380,7 @@ export interface CreatedShare { id: string; url: string; expiresAt: number }
 export interface ActiveShare { id: string; session_id: string; name: string | null; created_at: number; expires_at: number }
 
 export const api = {
-  health: () => j<{ ok: boolean; version: string }>("/api/health"),
+  health: () => j<{ ok: boolean; version: string; commit: string | null }>("/api/health"),
   hardware: () => j<HardwareSnapshot>("/api/hardware"),
   hardwareSeries: (id: string, range: SeriesRange) => j<MachineSample[]>(`/api/hardware/${encodeURIComponent(id)}/series?range=${range}`),
   runBackup: (id: string) => j<{ ok: true }>(`/api/hardware/${encodeURIComponent(id)}/backup/run`, { method: "POST" }),

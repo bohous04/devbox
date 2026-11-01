@@ -1,0 +1,12 @@
+[Unit]
+Description=devbox auto-update (deploy origin/main after CI passed)
+After=network-online.target docker.service devd.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/devd/devd.env
+ExecStart=/usr/local/bin/bun __REPO__/infra/devbox-update.ts
+Environment=DEVBOX_REPO_DIR=__REPO__
+Nice=10
+TimeoutStartSec=2h

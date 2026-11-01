@@ -52,6 +52,9 @@ jobs:
         working-directory: listener
         run: bun test
 
+      - name: infra and tools
+        run: bun test infra tools
+
       - name: Python tests
         run: |
           python3 -m unittest discover -s devd/test -p '*_test.py'

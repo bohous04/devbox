@@ -16,6 +16,7 @@ read -r -a FOLDERS <<< "${DEVD_FOLDERS:-apps websites}"
 #   op           1Password CLI; devd brokers SSH keys to sessions with an op service account
 #   cliproxy     local proxy for subscription-backed proxy profiles (see docs/account-pool.md)
 #   storage-guard  disk/session budgets, offsite-verified cleanup (infra/storage-guard; needs borg)
+#   auto-update    nightly deploy of origin/main once CI passed (infra/devbox-update.ts)
 DEVBOX_FEATURES="${DEVBOX_FEATURES:-}"
 has_feature() { [[ " $DEVBOX_FEATURES " == *" all "* || " $DEVBOX_FEATURES " == *" $1 "* ]]; }
 
@@ -345,6 +346,18 @@ if add:
 PY
 }
 
+install_auto_update() {
+  # Nightly: fast-forward to origin/main only after CI passed on it, rebuild what changed,
+  # restart devd with a health check and roll back on failure. Manual run: devbox-update.
+  has_feature auto-update || return 0
+  sed -e "s#__REPO__#$REPO_DIR#g" "$REPO_DIR/infra/devbox-update.service" > /etc/systemd/system/devbox-update.service
+  cp "$REPO_DIR/infra/devbox-update.timer" /etc/systemd/system/devbox-update.timer
+  printf '#!/bin/sh\nexec systemctl start --wait devbox-update.service "$@"\n' > /usr/local/bin/devbox-update
+  chmod 755 /usr/local/bin/devbox-update
+  systemctl daemon-reload
+  systemctl enable --now devbox-update.timer
+}
+
 install_storage_guard() {
   # Budgets and backup-verified cleanup for session storage. Wraps the host docker CLI and
   # needs borg + an offsite repo in /etc/devbox-storage/config.json (see its README).
@@ -360,7 +373,7 @@ provision_claude() {
 main() {
   install_packages; install_gh; install_docker; install_cloudflared; install_op; install_bun; install_tailscale
   configure_ufw; configure_docker_firewall; configure_samba; make_structure; fetch_config
-  build_image; install_cc; build_dashboard; install_devd_service; prepare_instabox_dirs; install_cliproxy; install_devd_watch; install_oom_guard; disable_codex_remote; install_codex_yolo_defaults; install_storage_guard; provision_claude
+  build_image; install_cc; build_dashboard; install_devd_service; prepare_instabox_dirs; install_cliproxy; install_devd_watch; install_oom_guard; disable_codex_remote; install_codex_yolo_defaults; install_storage_guard; install_auto_update; provision_claude
   log "Done (features: ${DEVBOX_FEATURES:-core only}). Remaining: tailscale up --ssh · gh auth login · claude login (in the first session)"
   has_feature samba && log "Samba: smbpasswd -a root"
   log "Security: once tailscale ssh works, consider closing public SSH: ufw delete allow <ssh-port>/tcp"

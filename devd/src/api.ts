@@ -61,7 +61,7 @@ import { parseOtlpMetrics, pointsToRows } from "./metrics";
 import { classifyClaudeState } from "./stats";
 import { isValidTmuxName, killSessionCmd, labelSetCmd, parseProbe, probeCmd, type TmuxSession } from "./tmux";
 import { sessionWorkdir, type TreeProject } from "./tree";
-import { VERSION } from "./version";
+import { COMMIT, VERSION } from "./version";
 import type { Decision } from "./criticGate";
 import {
   authStatus, codexLoginStart, codexLoginStatus, codexLogout, CLIPROXY_CALLBACK_PORT,
@@ -338,7 +338,7 @@ export function createApp(d: ApiDeps): Hono {
   // to /git/* would get HTML instead of git (verified live 2026-08-22).
   if (d.gitProxy) app.route("/", d.gitProxy);
 
-  app.get("/api/health", (c) => c.json({ ok: true, version: VERSION }));
+  app.get("/api/health", (c) => c.json({ ok: true, version: VERSION, commit: COMMIT }));
   app.route("/api/codex-accounts", codexAccountsRoutes(d.codexAccounts));
   // Cloudflare cuts a response after 100 s, but handing off a conversation with
   // hundreds of agents takes minutes. A slow switch answers 202 and finishes in
