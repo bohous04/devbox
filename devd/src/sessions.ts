@@ -14,7 +14,7 @@ import { deleteGitStat, deleteSession, getRepoAgent, getSession, insertSession, 
 import { containerEnv, containerMountDestinations, containerState, execInContainer, removeContainer, runContainer, startContainer, stopContainer, type RunOpts } from "./docker";
 import { dockerArgv } from "./dockerTarget";
 import { inspectCanonicalWorkspace, removeStoppedWorkspaceContainer, type CanonicalWorkspaceContainer } from "./canonicalWorkspace";
-import { archiveBranch, cloneBare, cloneRepo, conflictPrompt, type CloneProgress, defaultBranch, ensureWorktree, pullWithRebase, removeWorktree, sh, trackRemote, worktreeBranch, type PullResult } from "./git";
+import { archiveBranch, cloneBare, cloneRepo, conflictPrompt, type CloneProgress, defaultBranch, ensureWorktree, fetchBare, pullWithRebase, removeWorktree, sh, trackRemote, worktreeBranch, type PullResult } from "./git";
 import { contextLengthCached } from "./openrouterModels";
 import { allocatePortBase } from "./ports";
 import { barePath, isBareLayout, workspacePath } from "./tree";
@@ -828,6 +828,11 @@ export class SessionManager {
     let settledBranch: string | null = null;
 
     if (worktree) {
+      if (existsSync(bare) && !existsSync(worktree)) {
+        // A new worktree is cut from origin/<default> (addWorktree) — make that fresh first.
+        progress({ step: "pull" });
+        await fetchBare(bare, authEnv);
+      }
       if (!existsSync(bare)) {
         if (!t.cloneUrl) throw new Error(`No clone URL for ${t.project}/${t.repo}`);
         mkdirSync(dirname(bare), { recursive: true });

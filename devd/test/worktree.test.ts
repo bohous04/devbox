@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addWorktree, archiveBranch, cloneBare, defaultBranch, ensureWorktree, pullWithRebase, removeWorktree, trackRemote, worktreeBranch, worktreeChanges, worktreeHealthy } from "../src/git";
+import { addWorktree, archiveBranch, cloneBare, defaultBranch, ensureWorktree, fetchBare, pullWithRebase, removeWorktree, trackRemote, worktreeBranch, worktreeChanges, worktreeHealthy } from "../src/git";
 import { sh } from "./helpers/sh";
 import { restoreBranch, sessionBranch, sessionWorktreePath, worktreeMounts } from "../src/sessions";
 
@@ -444,4 +444,57 @@ test("archiveBranch leaves alone a nonexistent branch and a branch held by a liv
   await addWorktree(bare, live, "session/app-2", await defaultBranch(bare));
   expect(await archiveBranch(bare, "session/app-2", new Date())).toBeNull();
   expect(branchOf(live)).toBe("session/app-2");
+});
+
+// 1 Nov 2026: the local default branch of a bare clone is never fetched into, so on the biggest
+// repo it was six weeks old. A new session checked out that tree and the first pull then rebased
+// it onto origin through ~100k changed files — most of the time of opening a session.
+test("a new session branch starts from the freshly fetched origin, not from the stale local default", async () => {
+  const { root, url } = makeOrigin();
+  const bare = join(root, "app.git");
+  await cloneBare(url, bare);
+  await trackRemote(bare);
+  const seed = join(root, "seed");
+  writeFileSync(join(seed, "g.txt"), "new upstream\n");
+  sh(seed, "git", "add", "."); sh(seed, "git", "commit", "-m", "upstream moved");
+  sh(seed, "git", "push", url, "HEAD:main");
+  const upstream = sh(seed, "git", "rev-parse", "HEAD").stdout.trim();
+
+  await fetchBare(bare);
+  expect(sh(bare, "git", "rev-parse", "refs/heads/main").stdout.trim()).not.toBe(upstream);   // local main stays behind
+  const wt = join(root, "_sessions", "dev-p-app-2");
+  await ensureWorktree(bare, wt, "session/app-2", await defaultBranch(bare));
+  expect(sh(wt, "git", "rev-parse", "HEAD").stdout.trim()).toBe(upstream);
+  expect(existsSync(join(wt, "g.txt"))).toBe(true);
+  // Upstream is still the default branch, so the session's pull rebases onto it as before.
+  expect(sh(wt, "git", "rev-parse", "--abbrev-ref", "@{u}").stdout.trim()).toBe("origin/main");
+  expect((await pullWithRebase(wt)).status).toBe("clean");
+});
+
+// A prune with no sibling list — an agent's `git worktree prune` inside a container, where the
+// registration's host path does not exist — deleted live sessions' registrations.
+test("ensureWorktree locks the registration, so even a blind prune leaves a live session alone", async () => {
+  const { root, url } = makeOrigin();
+  const bare = join(root, "app.git");
+  await cloneBare(url, bare);
+  await trackRemote(bare);
+  const wt = join(root, "_sessions", "dev-p-app-2");
+  await ensureWorktree(bare, wt, "session/app-2", await defaultBranch(bare));
+  const admin = join(bare, "worktrees", "dev-p-app-2");
+  expect(existsSync(join(admin, "locked"))).toBe(true);
+
+  writeFileSync(join(admin, "gitdir"), "/workspace/.git\n");   // the path as a container sees it
+  sh(bare, "git", "worktree", "prune");
+  expect(existsSync(admin)).toBe(true);
+
+  // A session that already exists gets the lock on its next open, too.
+  rmSync(join(admin, "locked"));
+  writeFileSync(join(admin, "gitdir"), `${join(realpathSync(wt), ".git")}\n`);
+  expect(await ensureWorktree(bare, wt, "session/app-2", "main")).toBe("ok");
+  expect(existsSync(join(admin, "locked"))).toBe(true);
+
+  // Ending the session still removes it.
+  await removeWorktree(bare, wt);
+  expect(existsSync(wt)).toBe(false);
+  expect(existsSync(admin)).toBe(false);
 });

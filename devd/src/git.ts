@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { redactArgv, run, timeoutFor, type RunResult } from "./proc";
 
 // Network git subcommands get a longer cap (cloning a large repo takes minutes).
@@ -141,6 +141,31 @@ export type PullResult =
   | { status: "conflict"; files: string[] }
   | { status: "error"; message: string };
 
+// Parallel checkout: a full checkout of a 9.6 GB / 124k-file tree took 30 s single-threaded and
+// 11 s with 8 workers (measured on the VPS, 1 Nov 2026). Not "all cores" — sessions share the host.
+export const PARALLEL_CHECKOUT = ["-c", "checkout.workers=8"];
+
+/** Refreshes `origin/*` in a bare clone before a new worktree is cut from it. A failure is not fatal:
+ *  the session starts from the last fetched state and the pull reports the problem as before. */
+export async function fetchBare(bare: string, authEnv: Record<string, string> = {}): Promise<void> {
+  const r = await shWith(bare, authEnv, "git", "-C", bare, "-c", `safe.directory=${bare}`, "fetch", "--quiet", "origin");
+  if (r.code !== 0) console.error(`git fetch in ${bare} failed: ${r.stderr.trim()}`);
+}
+
+/** Locks a session's worktree registration against `git worktree prune`. A prune — devd's own in
+ *  addWorktree, a manual one on the host, or an agent's inside a container, where the host path in
+ *  `gitdir` does not exist — otherwise deletes a LIVE session's registration: git in it then says
+ *  "not a git repository" until someone rebuilds HEAD and the index by hand (1 Nov 2026: six
+ *  sessions of one repo, four of them broken for days). The marker is the file git itself writes
+ *  for `git worktree lock`; written directly because `worktree lock <path>` cannot find a
+ *  registration whose gitdir holds the container path. */
+export function lockWorktree(bare: string, dest: string): void {
+  const marker = join(bare, "worktrees", basename(dest), "locked");
+  try {
+    if (existsSync(dirname(marker)) && !existsSync(marker)) writeFileSync(marker, "devbox session (container path /workspace)\n");
+  } catch (e) { console.error(`locking worktree ${dest} failed:`, e); }
+}
+
 export async function pullWithRebase(dir: string, authEnv: Record<string, string> = {}): Promise<PullResult> {
   // safe.directory: devd runs as root, but the workspace is owned by the container user
   // (uid 1000). Without it git refuses with "detected dubious ownership" (exit 128) and
@@ -149,7 +174,7 @@ export async function pullWithRebase(dir: string, authEnv: Record<string, string
   // gitea repo right after cloning would end with an auth error (see giteaAuthEnv). Only pull
   // touches the network; the local diff needs no auth.
   const safe = ["-c", `safe.directory=${dir}`];
-  const r = await shWith(dir, authEnv, "git", ...safe, "pull", "--rebase", "--autostash");
+  const r = await shWith(dir, authEnv, "git", ...safe, ...PARALLEL_CHECKOUT, "pull", "--rebase", "--autostash");
   if (r.code === 0) return { status: "clean" };
   const unmerged = await sh(dir, "git", ...safe, "diff", "--name-only", "--diff-filter=U");
   const files = unmerged.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
@@ -308,6 +333,14 @@ export type WorktreeState = "ok" | "created" | "repaired";
 export async function ensureWorktree(
   bare: string, dest: string, branch: string | null, from: string, siblings: string[] = [],
 ): Promise<WorktreeState> {
+  const state = await ensureWorktreeUnlocked(bare, dest, branch, from, siblings);
+  lockWorktree(bare, dest);
+  return state;
+}
+
+async function ensureWorktreeUnlocked(
+  bare: string, dest: string, branch: string | null, from: string, siblings: string[],
+): Promise<WorktreeState> {
   const born = async (): Promise<WorktreeState> => {
     await addWorktree(bare, dest, branch, from, siblings);
     return "created";
@@ -383,13 +416,19 @@ export async function addWorktree(bare: string, dest: string, branch: string | n
   // That is exactly why end() deliberately does not delete branches: an orphaned branch is an acceptable price, lost
   // work is not. A new session may thus inherit the previous one's work in progress; that is visible
   // and the user can deal with it, whereas vanished commits are seen by no one.
+  // A NEW session branch starts from `origin/<from>`, not from the local `<from>`: a bare clone's
+  // local heads are never fetched into (see trackRemote), so the local default branch was six
+  // weeks old on the biggest repo — the session checked out that tree and the first pull then
+  // rebased it onto origin through ~100k changed files. The caller fetches right before this.
+  const start = branch && await has(`refs/remotes/origin/${from}^{commit}`) ? `origin/${from}` : from;
+  const add = ["-C", bare, ...safe, ...PARALLEL_CHECKOUT, "worktree", "add"];
   const args = branch && await has(`refs/heads/${branch}`)
-    ? ["-C", bare, ...safe, "worktree", "add", dest, branch]
+    ? [...add, dest, branch]
     : unborn
-      ? ["-C", bare, ...safe, "worktree", "add", "--orphan", "-b", branch ?? from, dest]
+      ? [...add, "--orphan", "-b", branch ?? from, dest]
       : branch
-        ? ["-C", bare, ...safe, "worktree", "add", "-b", branch, dest, from]
-        : ["-C", bare, ...safe, "worktree", "add", dest, from];
+        ? [...add, "--no-track", "-b", branch, dest, start]
+        : [...add, dest, from];
   const r = await sh(bare, "git", ...args);
   if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr.trim()}`);
   // The session branch's upstream is the DEFAULT branch, not the remote of the same name (that one does not exist):
@@ -432,7 +471,8 @@ export async function removeWorktree(bare: string, dest: string): Promise<void> 
   // `--force`: the worktree of a running session contains uncommitted changes and git would otherwise
   // refuse to delete it. Ending a session is a conscious user step (F9 → End), so here
   // this is the correct behavior, not bypassing a safeguard.
-  const r = await sh(bare, "git", "-C", bare, "-c", `safe.directory=${bare}`, "worktree", "remove", "--force", dest);
+  // Twice: a session's registration is locked (lockWorktree) and a single --force does not remove a locked one.
+  const r = await sh(bare, "git", "-C", bare, "-c", `safe.directory=${bare}`, "worktree", "remove", "--force", "--force", dest);
   if (r.code !== 0) {
     // Non-critical: the container is already gone, an orphaned directory must not prevent deleting the row.
     console.error(`git worktree remove ${dest} failed: ${r.stderr.trim()}`);
