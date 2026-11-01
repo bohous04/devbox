@@ -22,4 +22,4 @@ bash test-mcp-oom-guard.sh
 python3 -m unittest discover -s codex-remote -p 'test_native_update.py'
 # optional components are opt-in via DEVBOX_FEATURES
 ( DEVBOX_FEATURES=""; ! has_feature samba ) && ( DEVBOX_FEATURES="op samba"; has_feature samba && ! has_feature cliproxy ) \
-  && ( DEVBOX_FEATURES="all"; has_feature cliproxy && has_feature storage-guard ) && echo "features OK"
+  && ( DEVBOX_FEATURES="all"; has_feature cliproxy && has_feature storage-guard && has_feature auto-update ) && echo "features OK"
