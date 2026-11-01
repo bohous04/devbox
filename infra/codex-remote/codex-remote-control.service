@@ -1,0 +1,31 @@
+[Unit]
+Description=Permanent Codex Remote server for all devbox projects
+Wants=network-online.target
+After=network-online.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=1000
+Group=1000
+SupplementaryGroups=docker
+Environment=HOME=/home/dev
+Environment=CODEX_HOME=/home/dev/.codex
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=DEVD_CODEX_ROUTES_FILE=/etc/codex-devbox/routes.json
+Environment=DEVD_CODEX_EXEC_DISPATCH=/opt/codex-devbox/dispatch.py
+Environment=DEVD_CODEX_HOOK_DISPATCH=/opt/codex-devbox/dispatch.py
+Environment=DEVD_CODEX_RUNTIME_DIR=/home/dev/.codex/devbox-runtime
+Environment=DEVD_CODEX_MOUNT_IMAGE=devbox:codex-remote-base
+BindPaths=/var/lib/docker/volumes/codex-home/_data:/home/dev/.codex
+WorkingDirectory=/srv/dev
+ExecStartPre=/usr/bin/test -x /opt/codex-devbox/runtime/bin/codex-code-mode-host
+ExecStart=/opt/codex-devbox/codex app-server --remote-control --listen unix:///home/dev/.codex/app-server-control/app-server-control.sock
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly check for a newer Codex release for the central app-server
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=10min
+Persistent=true
+Unit=codex-native-update.service
+
+[Install]
+WantedBy=timers.target

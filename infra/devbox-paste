@@ -1,0 +1,26 @@
+#!/bin/sh
+# devbox-paste (mac): stage a file from the mac clipboard into the SHARED devbox inbox
+# (/api/clipboard/file?target=shared → /srv/dev/_inbox, mounted at /inbox in every
+# container) and put the container path /inbox/<name> on the clipboard as TEXT.
+# Called by Hammerspoon on ⌘⇧V; on success (exit 0) it prints the path to STDOUT and Hammerspoon
+# types it character by character. A synthetic ⌘V is not used — Warp does not react to it as its own
+# keyboard shortcut (Ctrl+V works, ⌘V does not), so the paste was silently lost.
+# The path is uniform across sessions → no need to guess the target session.
+set -u
+DEVD="${DEVD_URL:-}"
+[ -n "$DEVD" ] || DEVD=$(sed -n 's/.*"devdUrl"[^"]*"\([^"]*\)".*/\1/p' "$HOME/.config/devbox-cli/config.json" 2>/dev/null)
+[ -n "$DEVD" ] || DEVD="http://127.0.0.1:4300"
+
+notify() { osascript -e "display notification \"$1\" with title \"Devbox paste\"" >/dev/null 2>&1; }
+
+out=$(mktemp) || exit 2
+code=$(curl -s -o "$out" -w "%{http_code}" --max-time 60 "$DEVD/api/clipboard/file?target=shared") || { rm -f "$out"; notify "devd unreachable"; exit 2; }
+case "$code" in
+  200) p=$(cat "$out"); rm -f "$out"
+       printf '%s' "$p" | pbcopy   # clipboard stays as a backup for a manual ⌘V
+       printf '%s' "$p"            # stdout = what Hammerspoon types into the prompt
+       exit 0 ;;
+  204) rm -f "$out"; notify "No file on the clipboard — ⌘C in Finder"; exit 1 ;;
+  413) rm -f "$out"; notify "File is too large (>25 MB)"; exit 1 ;;
+  *)   rm -f "$out"; notify "Error $code"; exit 2 ;;
+esac

@@ -1,0 +1,11 @@
+[Unit]
+Description=Re-apply OOM priorities to newly spawned MCP servers in devbox sessions
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=10s
+AccuracySec=2s
+Unit=mcp-oom-guard.service
+
+[Install]
+WantedBy=timers.target

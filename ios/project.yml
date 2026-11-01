@@ -1,0 +1,154 @@
+name: DevboxApp
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "17.0"
+
+packages:
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    exactVersion: "1.20.0"
+
+targets:
+  DevboxApp:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: DevboxApp
+      - path: Shared
+    dependencies:
+      - package: SwiftTerm
+      - target: DevboxLiveActivity
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.devbox
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: DevboxApp/DevboxApp.entitlements
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        MARKETING_VERSION: "0.3.0"
+        CURRENT_PROJECT_VERSION: "22"
+        # aps-environment in entitlements and the value used for registering Live Activity tokens
+        # (`AgentLiveActivityManager.apnsEnvironment` → devd sends to sandbox/production APNs).
+        APS_ENVIRONMENT: development
+      configs:
+        # App Store archives (Stage H1, task 31) need a distribution signature. Automatic
+        # signing via the ASC API key hits Apple's "cloud-managed distribution certificate"
+        # gate (a separate permission outside the regular ASC roles) — see task-H1-report.md. Fix:
+        # a manual distribution cert + App Store profile (minted directly via the ASC REST API), and
+        # manual signing only for the Release config, so Debug keeps the convenient Automatic.
+        Release:
+          APS_ENVIRONMENT: production
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: "iPhone Distribution"
+          PROVISIONING_PROFILE_SPECIFIER: ""
+    info:
+      path: Generated-Info.plist
+      properties:
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UIBackgroundModes:
+          - remote-notification
+        # The app uses only standard HTTPS/TLS (exempt) — without this key every
+        # TestFlight build has to get export compliance set manually via the ASC API, otherwise it sits as
+        # "Missing Compliance" and is not offered to testers (builds 1–3 were handled via the API).
+        ITSAppUsesNonExemptEncryption: false
+        NSSupportsLiveActivities: true
+        # The server sends agent state changes more often than the default Live Activity budget.
+        NSSupportsLiveActivitiesFrequentUpdates: true
+        DevboxAPNSEnvironment: "$(APS_ENVIRONMENT)"
+        CFBundleURLTypes:
+          - CFBundleURLName: com.example.devbox.session
+            CFBundleURLSchemes:
+              - devbox
+        # Vault unlock (Stage G, task 30) reads `vaultPassphrase` from Keychain with access control
+        # `.biometryCurrentSet` (see KeychainStore), and SSH key approval goes through LAContext
+        # (see Biometrics.swift) — without this key the app would crash on a real device at the
+        # first biometric prompt (Face ID requires a usage description).
+        NSFaceIDUsageDescription: "Face ID confirms SSH key approvals and unlocks the vault without typing the passphrase."
+        # ATS blocks plain HTTP by default. The tailnet path (see AppModel/DevdClient) goes to a
+        # bare IP without TLS (Tailscale certificates are not easy for the app to verify) — instead of
+        # a blanket NSAllowsArbitraryLoads, only a narrow exception for this one devbox IP.
+        NSAppTransportSecurity:
+          NSExceptionDomains:
+            100.64.0.10:
+              NSExceptionAllowsInsecureHTTPLoads: true
+              NSIncludesSubdomains: false
+
+  DevboxLiveActivity:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: DevboxLiveActivity
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.devbox.live-activity
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_STYLE: Automatic
+        # App Group `group.com.example.devbox` — the widget reads the last state written by the app
+        # (`SharedActivityStore`). The extension has no network access and no credentials.
+        CODE_SIGN_ENTITLEMENTS: DevboxLiveActivity/DevboxLiveActivity.entitlements
+        SWIFT_VERSION: "5.0"
+        SKIP_INSTALL: YES
+        MARKETING_VERSION: "0.3.0"
+        CURRENT_PROJECT_VERSION: "22"
+    info:
+      path: DevboxLiveActivity-Info.plist
+      properties:
+        CFBundleDisplayName: Devbox
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+
+  DevboxAppTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: DevboxAppTests
+    dependencies:
+      - target: DevboxApp
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+
+  # Live E2E (Task 15) — gated inside the test (XCTSkip without DEVBOX_LIVE_TESTS=1 env), so
+  # a normal `xcodebuild test` skips it rather than excluding it from the scheme. devd address in
+  # DEVBOX_TAILNET_URL.
+  DevboxAppUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: DevboxAppUITests
+    dependencies:
+      - target: DevboxApp
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  DevboxApp:
+    build:
+      targets:
+        DevboxApp: all
+        DevboxAppTests: [test]
+        DevboxAppUITests: [test]
+    test:
+      targets:
+        - DevboxAppTests
+        - DevboxAppUITests
+    run:
+      config: Debug

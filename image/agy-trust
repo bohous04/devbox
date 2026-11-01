@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""agy-trust <dir> — marks a directory as trusted for Antigravity CLI.
+
+In an untrusted folder agy asks "Do you trust the contents of this project?" and
+a parent folder is NOT INHERITED (measured, the Antigravity research notes, Question 6.4) —
+so the `ag` wrapper adds exactly $PWD before every start.
+
+settings.json lives on the SHARED antigravity-home volume: two sessions starting
+at the same time would overwrite each other's entry without a lock (read-modify-write). The lock is
+fcntl, not flock(1): tests also run on the mac, where flock(1) does not exist.
+
+Exit: 0 = the path is in trustedWorkspaces, 1 = settings.json unreadable (unchanged),
+2 = bad arguments.
+"""
+import fcntl
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        print("usage: agy-trust <dir>", file=sys.stderr)
+        return 2
+    target = os.path.realpath(sys.argv[1])
+    home = Path(os.environ.get("AGY_HOME") or Path.home() / ".gemini" / "antigravity-cli")
+    home.mkdir(parents=True, exist_ok=True)
+    path = home / "settings.json"
+    with open(home / ".settings.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            data = json.loads(path.read_text()) if path.exists() else {}
+        except (OSError, ValueError):
+            print(f"agy-trust: {path} (settings.json) cannot be read — leaving it alone, agy will ask about trust.", file=sys.stderr)
+            return 1
+        if not isinstance(data, dict):
+            print(f"agy-trust: {path} (settings.json) is not a JSON object — leaving it alone.", file=sys.stderr)
+            return 1
+        workspaces = data.get("trustedWorkspaces")
+        if not isinstance(workspaces, list):
+            workspaces = []
+        if target in workspaces:
+            return 0
+        data["trustedWorkspaces"] = workspaces + [target]
+        fd, tmp = tempfile.mkstemp(dir=home, prefix=".settings.")
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

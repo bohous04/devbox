@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# gr — Grok Build with approvals turned off (yolo mode), the counterpart of `cc` and `co`.
+# The container itself IS the sandbox, so permission prompting is just friction.
+# Flag verified by research (Task 7) on grok 1.0.5, not guessed.
+case "${1:-}" in
+  --help|-h|--version|-v|version) ;;
+  *) if [ "${DEVD_AGENT_AUTO_UPDATE:-1}" != 0 ]; then
+       timeout -k 2s 45s /usr/local/bin/agent-auto-update grok </dev/null || true
+     fi ;;
+esac
+case "${1:-}" in
+  --help|-h|--version|-v|version) ;;
+  *) [ ! -x /usr/local/bin/devbox-recovery ] || /usr/local/bin/devbox-recovery record-launch grok -- "$@" 2>/dev/null || true ;;
+esac
+exec grok --no-auto-update --always-approve "$@"

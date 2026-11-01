@@ -1,0 +1,9 @@
+{
+  "name": "dev-cli",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": { "dev": "src/main.ts" },
+  "dependencies": { "@clack/prompts": "^0.11" }
+}

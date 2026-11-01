@@ -1,0 +1,13 @@
+[Unit]
+Description=DOCKER-USER firewall (containers unreachable from the public interface)
+# PartOf=docker.service: a docker restart rebuilds the chains, so we add the rule back afterwards.
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/docker-user-firewall.sh
+
+[Install]
+WantedBy=multi-user.target docker.service

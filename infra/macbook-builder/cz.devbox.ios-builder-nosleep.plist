@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Keeps `pmset disablesleep 1` on the iOS builder. The AlDente helper resets it to 0
+     while managing charging, and then the builder falls asleep with the lid closed
+     (Clamshell Sleep, seen live 2026-11-01). Install: /Library/LaunchDaemons/, owner root:wheel. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>cz.devbox.ios-builder-nosleep</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string><string>-c</string>
+    <string>pmset -g | grep -qE 'SleepDisabled[[:space:]]+1' || /usr/bin/pmset -a disablesleep 1</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>15</integer>
+</dict>
+</plist>

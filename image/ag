@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# ag — Antigravity CLI (agy) with approvals turned off, the counterpart of `cc`, `co` and `gr`.
+# The container itself IS the sandbox. Flag verified by research (the Antigravity research notes,
+# Question 6), not guessed.
+#
+# Subcommands and --help/--version go straight through, without marking the folder.
+case "${1:-}" in
+  -h|--help|help|--version|-v|version|models|mcp|plugin|plugins|update|changelog|agent|agents|install|remote-control)
+    exec agy "$@" ;;
+esac
+# Otherwise agy asks for trust in every new folder, and a parent folder is not inherited.
+# Failure is not fatal: the session starts, agy just asks.
+[ ! -x /usr/local/bin/devbox-recovery ] || /usr/local/bin/devbox-recovery record-launch agy -- "$@" 2>/dev/null || true
+/usr/local/bin/agy-trust "$PWD" || true
+exec agy --dangerously-skip-permissions "$@"

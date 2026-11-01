@@ -1,0 +1,12 @@
+[Unit]
+Description=Keep the central Codex app-server on the current Codex release (native.patch rebuild)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/vps-dev-infra/infra/codex-remote/native-update.py
+StateDirectory=codex-native-update
+# The build runs in Docker with its own memory cap; the script itself only waits.
+TimeoutStartSec=4h
+Nice=10

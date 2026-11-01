@@ -1,0 +1,16 @@
+#compdef dev
+_dev() {
+  local -a cmds
+  cmds=(ls stop end ports doctor attach resume recover instabox)
+  if (( CURRENT == 2 )); then
+    _describe 'command' cmds
+    compadd -- --codex --claude --instabox $(dev _targets 2>/dev/null)
+  elif (( CURRENT == 3 )); then
+    case $words[2] in
+      stop|end|ports) compadd -- --all $(dev _targets 2>/dev/null) ;;
+      recover) compadd -- --snapshot --tabs ;;
+      instabox) compadd -- status rebuild-base ;;
+    esac
+  fi
+}
+_dev "$@"

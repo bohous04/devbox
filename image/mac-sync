@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# mac-sync — copies the session workspace to the build Mac (iOS builder) and generates the .xcodeproj there.
+#
+# Called from the bridge preflight (see /etc/devd/mac-mcp/xcode/registration.json), not by hand.
+# Two steps on purpose: `srv` writes its own messages to stdout ("✓ key … is available"),
+# so as an `rsync -e` transport rsync would read them as protocol and break the connection.
+# So srv first only activates the key (and logs the target), then rsync runs via the agent socket.
+set -euo pipefail
+
+IOS_DIR="${1:-ios}"
+TARGET="${2:-}"   # user@host of the build Mac, from registration.json `target`
+# The 1P key title belongs to the target (registration.json `keyTitle`) — the runner can be
+# swapped (mini → MacBook "iOS builder"), so the preflight must not hard-code it.
+KEY_TITLE="${3:-SSH Key - Mac mini}"
+KNOWN_HOSTS="/opt/mac-mcp/xcode/known_hosts"
+SOCK="/run/devd/ssh-agent.sock"
+SESSION="${DEVD_SESSION_ID:-}"
+
+[ -n "$SESSION" ] || { echo "mac-sync: DEVD_SESSION_ID missing — this runs only in a devbox session." >&2; exit 1; }
+[ -n "$TARGET" ] || { echo "mac-sync: missing target (user@host of the build mac) — the preflight passes it from registration.json" >&2; exit 1; }
+
+# The script is installed into /usr/local/bin, runnable from the agent's shell — so the caller
+# is not only the bridge preflight but anything the agent writes in the container.
+# Both variables go on into the remote command and into the --delete target, so they are
+# validated with the same whitelist devd already enforces for the session id (it is
+# also the docker container name), and IOS_DIR additionally must not contain "..".
+[[ "$SESSION" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "mac-sync: suspicious DEVD_SESSION_ID" >&2; exit 1; }
+[[ "$IOS_DIR" =~ ^[A-Za-z0-9][A-Za-z0-9_./-]*$ && "$IOS_DIR" != *..* ]] || { echo "mac-sync: suspicious subdirectory" >&2; exit 1; }
+# TARGET goes straight into the ssh/rsync command line — same discipline as for SESSION
+# and IOS_DIR above. The regex mirrors TARGET_RE from registration.py, so the bridge and preflight
+# do not disagree on the shape of "what is a valid target".
+[[ "$TARGET" =~ ^[A-Za-z0-9_.-]+@[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || { echo "mac-sync: suspicious target" >&2; exit 1; }
+# The title goes to srv only as a single argument (devd whitelists it against SSH-key
+# items anyway), but nobody should be able to turn it into an option like "-o…".
+[[ "$KEY_TITLE" =~ ^[A-Za-z0-9][A-Za-z0-9\ ._-]*$ ]] || { echo "mac-sync: suspicious key title" >&2; exit 1; }
+
+# `true` at the end: the key gets activated, the target logged, and srv exits immediately
+# (without arguments it would only print help and the target would be missing from the audit).
+/usr/local/bin/srv "$KEY_TITLE" \
+  --why "rsync of sources and xcodegen for an iOS build from session $SESSION" \
+  "$TARGET" -T -o BatchMode=yes -o StrictHostKeyChecking=yes \
+  -o "UserKnownHostsFile=$KNOWN_HOSTS" -o GlobalKnownHostsFile=/dev/null true >&2
+
+SSH="ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KNOWN_HOSTS \
+  -o GlobalKnownHostsFile=/dev/null -o ConnectTimeout=15"
+
+export SSH_AUTH_SOCK="$SOCK"
+REMOTE="\$HOME/builds/$SESSION"
+
+# --delete keeps the Mac an exact copy of the workspace; SESSION and IOS_DIR are validated above.
+rsync -az --delete \
+  --exclude=node_modules --exclude=.next --exclude=.git \
+  --exclude=DerivedData --exclude='*.xcuserstate' \
+  -e "$SSH" /workspace/ "$TARGET:builds/$SESSION/" >&2
+
+# The .xcodeproj is generated and gitignored (see ios/.gitignore) — it never goes over the wire.
+# Without ios/project.yml (a repo where the iOS project does not exist yet) xcodegen is skipped
+# and the preflight passes: otherwise it would also block tools that do not need the project
+# (list_sims, doctor, boot_sim), and the agent could not verify Xcode before the first Swift code.
+$SSH "$TARGET" "d=\"\$HOME/builds/$SESSION/$IOS_DIR\"; if [ -f \"\$d/project.yml\" ]; then cd \"\$d\" && /opt/homebrew/bin/xcodegen generate; else echo \"mac-sync: \$d/project.yml does not exist — xcodegen skipped (no iOS project created yet)\"; fi" >&2
+
+echo "mac-sync: $REMOTE synced" >&2

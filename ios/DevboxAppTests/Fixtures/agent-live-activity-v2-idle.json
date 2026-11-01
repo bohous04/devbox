@@ -1,0 +1,43 @@
+{
+  "version": 2,
+  "counts": {
+    "waiting": 0,
+    "working": 0,
+    "done": 2,
+    "stalled": 0,
+    "unknown": 1
+  },
+  "dot": "idle",
+  "sessions": [
+    {
+      "id": "dev-done-b",
+      "title": "DONE-B",
+      "agent": "codex",
+      "project": "portal/web",
+      "status": "done",
+      "reason": null,
+      "since": "2026-10-19T09:58:00.000Z"
+    },
+    {
+      "id": "dev-done",
+      "title": "DONE",
+      "agent": "claude",
+      "project": "portal/web",
+      "status": "done",
+      "reason": null,
+      "since": "2026-10-19T09:48:00.000Z"
+    },
+    {
+      "id": "dev-unknown-a",
+      "title": "UNKNOWN-A",
+      "agent": "claude",
+      "project": "portal/web",
+      "status": "unknown",
+      "reason": null,
+      "since": "2026-10-19T09:30:00.000Z"
+    }
+  ],
+  "overflow": 0,
+  "changedAt": "2026-10-19T09:58:00.000Z",
+  "updatedAt": "2026-10-19T10:00:00.000Z"
+}

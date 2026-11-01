@@ -1,0 +1,20 @@
+{
+  "name": "vps-dev-infra",
+  "private": true,
+  "license": "Apache-2.0",
+  "workspaces": [
+    "devd",
+    "cli",
+    "listener",
+    "dashboard"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit && bun run --cwd dashboard typecheck",
+    "build:dashboard": "bun run --cwd dashboard build && bun run tools/prune-dist-assets.ts && bun run tools/prune-dist-assets.ts dashboard/dist/share",
+    "ci": "bun run typecheck && bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}

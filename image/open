@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Ask devd to open a file on the Mac (devd forwards to the open-listener; Plans 4/5).
+target="${1:?usage: open <file>}"
+abs=$(realpath "$target")
+payload=$(jq -n --arg s "${DEVD_SESSION_ID:-}" --arg p "$abs" '{sessionId: $s, path: $p}')
+if ! curl -fsS -m 5 -X POST "${DEVD_URL:-http://host.docker.internal:4300}/api/open" \
+     -H 'content-type: application/json' -d "$payload" >/dev/null 2>&1; then
+  echo "open: devd unreachable or /api/open not available yet" >&2
+  exit 1
+fi

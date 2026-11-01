@@ -1,0 +1,16 @@
+[Unit]
+Description=Run the devd watchdog every 2 minutes
+
+[Timer]
+# 2 min: a deploy is reported almost immediately, but an outage
+# during a restart cannot be reported twice in a row (see DOWN_AFTER).
+OnBootSec=2min
+OnUnitActiveSec=2min
+# 1s, not 30s: the Kuma heartbeat comes from this timer and the monitor window is also 120 s.
+# With 30s accuracy systemd may fire as late as 150 s — Kuma would meanwhile report
+# an outage that did not happen. Precision costs nothing here, the timer runs once every 2 min.
+AccuracySec=1s
+Unit=devd-watch.service
+
+[Install]
+WantedBy=timers.target

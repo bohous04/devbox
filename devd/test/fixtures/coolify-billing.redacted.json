@@ -1,0 +1,18 @@
+{
+  "uuid": "dbfixture000000000000001",
+  "name": "billing-db",
+  "database_type": "standalone-postgresql",
+  "status": "running:healthy",
+  "postgres_db": "billing",
+  "environment_id": 9,
+  "environment": {
+    "name": "production"
+  },
+  "destination": {
+    "server": {
+      "uuid": "srvfixture00000000000001",
+      "name": "Main VPS",
+      "ip": "host.docker.internal"
+    }
+  }
+}

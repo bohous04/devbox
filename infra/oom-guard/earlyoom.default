@@ -1,0 +1,15 @@
+# Installed by infra/setup.sh (install_oom_guard) to /etc/default/earlyoom.
+#
+# The kernel OOM killer only steps in when the server has long been stuck thrashing
+# (on 2 Oct 2026 it did not even serve the SSH banner). earlyoom kills the largest process earlier —
+# SIGTERM at < 5 % available RAM (~3 GB of 64 GB), SIGKILL at < 2 %. Swap "100,100" =
+# do not wait for swap — the default kill threshold is half of swap, and as long as nobody uses swap,
+# SIGKILL would never come.
+#
+# WARNING: systemd splits this variable on spaces and does NOT handle quotes inside —
+# so the regexes contain no spaces and no quotes. The regex is matched against the process name (comm).
+#   --prefer: dev servers and headless browsers in sessions (the usual hogs). No "$" —
+#             Next.js is named "next-server (v1" in comm.
+#   --avoid:  what keeps the server manageable (sshd, tailscale, docker; devd runs as bun
+#             and has OOMScoreAdjust=-900 from oom-protect.conf, because sessions are also named "bun")
+EARLYOOM_ARGS="-m 5,2 -s 100,100 -r 3600 -p --prefer ^(next-server|chrome|chromium|node|vite|esbuild) --avoid ^(sshd|sshd-session|tailscaled|dockerd|containerd|containerd-shim|systemd|systemd-journal|cloudflared|smbd)$"

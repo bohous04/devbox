@@ -1,0 +1,4 @@
+import { resetCountdown } from "../accountsView";
+export function QuotaBar({ percent, resetsAt, now, label = "Weekly allowance" }: {percent: number | null; resetsAt: number | null; now: number; label?: string}) {
+  return <div className="rounded-lg bg-muted/40 p-4"><div className="flex items-baseline justify-between gap-3"><span className="text-xs text-muted-foreground">{label}</span><span className="text-xl font-semibold tabular-nums">{percent === null ? "—" : `${Math.round(percent)}%`}</span></div><div className="my-3 h-1.5 overflow-hidden rounded-full bg-muted">{percent !== null && <div className={`h-full rounded-full ${percent >= 90 ? "bg-amber-500" : "bg-primary"}`} style={{width:`${Math.max(0,Math.min(100,percent))}%`}} />}</div><p className="text-xs text-muted-foreground">{percent === null ? "No weekly measurement available" : resetCountdown(resetsAt, now)}</p></div>;
+}

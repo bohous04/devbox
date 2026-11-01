@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily devbox backup
+
+[Timer]
+# 02:30 deliberately BEFORE 04:00, when borg runs on the backup server — it then ships to the Storage Box
+# an already fresh devbox state, not yesterday's.
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

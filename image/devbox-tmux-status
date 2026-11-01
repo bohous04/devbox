@@ -1,0 +1,15 @@
+#!/bin/sh
+# Right side of the devbox tmux status bar: git branch + number of changed files
+# in the workspace, in the form `⎇ <branch> ±<N>` (no ±N when clean). tmux calls it via
+# `#(...)` every status-interval seconds; it runs as dev (uid 1000), /workspace has
+# `safe.directory` from the entrypoint. Silently prints nothing when it is not git / has no HEAD.
+cd /workspace 2>/dev/null || exit 0
+b=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || exit 0
+[ -n "$b" ] || exit 0
+n=$(git status --porcelain 2>/dev/null | grep -c .)
+# The "· " separator is carried by the helper, so a lone "· time" does not remain on the right for a non-git workspace.
+if [ "${n:-0}" -gt 0 ]; then
+  printf '⎇ %s ±%s · ' "$b" "$n"
+else
+  printf '⎇ %s · ' "$b"
+fi

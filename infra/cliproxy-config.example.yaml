@@ -1,0 +1,14 @@
+host: ""          # bind inside the container; only -p in the unit exposes it
+port: 8317
+auth-dir: "/root/.cli-proxy-api"
+# Shared key the containers authenticate with. On its first run `setup.sh`
+# replaces this placeholder with a generated `openssl rand -hex 32` and prints
+# it — store that value in the vault as cliproxy.apiKey (see Task 12). If you edit
+# the file by hand, generate the key the same way — while the placeholder stays here, the service
+# is started neither by setup.sh nor by systemd on reboot (ExecStartPre in cliproxy.service
+# checks for the same placeholder).
+api-keys:
+  - "__CHANGE_ME__"
+remote-management:
+  allow-remote: false
+  secret-key: ""

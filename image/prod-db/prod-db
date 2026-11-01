@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Production credentials and tunnel keys stay on the host. Every lookup is live,
+# so newly approved catalog entries work in existing sessions without a restart.
+set -euo pipefail
+DEVD="${DEVD_URL:-http://host.docker.internal:4300}"
+SESSION="${DEVD_SESSION_ID:-$(hostname)}"
+response_file="$(mktemp)"
+trap 'rm -f "$response_file"' EXIT
+api() {
+  local method="$1" route="$2" body="${3:-}" code
+  local args=(-sS --max-time 30 -X "$method" -H "X-Devbox-Session: $SESSION" -o "$response_file" -w '%{http_code}')
+  if [ -n "$body" ]; then args+=(-H 'content-type: application/json' --data-binary "$body"); fi
+  if ! code="$(curl "${args[@]}" "$DEVD$route")"; then
+    echo '{"code":"devd_unreachable","error":"Cannot connect to Devd. Retry this same request after connectivity returns."}' >&2; return 1
+  fi
+  case "$code" in
+    2??) cat "$response_file";;
+    *) cat "$response_file" >&2; echo >&2; return 1;;
+  esac
+}
+trim() { jq -nr --arg v "$1" '$v | gsub("^\\s+|\\s+$"; "")'; }
+name() {
+  local v; v="$(trim "$1")"
+  [[ "$v" =~ ^[a-z_][a-z0-9_]{0,62}$ ]] || { echo 'Invalid database identifier.' >&2; return 2; }
+  printf '%s' "$v"
+}
+case "${1:-}" in
+  list) api GET /api/prod-db/catalog | jq -r '.databases[] | [.name,.server,.engine] | @tsv';;
+  url) dbname="$(name "${2:-}")"; api GET "/api/prod-db/$dbname/url";;
+  connect)
+    dbname="$(name "${2:-}")"
+    url="$(api GET "/api/prod-db/$dbname/url")"
+    case "$url" in
+      postgresql://*) psql "$url" "${@:3}";;
+      mysql://*)
+        if [[ "$url" =~ ^mysql://([^:]+):([^@]+)@([^:/]+):([0-9]+)/([a-z_][a-z0-9_]*)$ ]]; then
+          proxy_user="${BASH_REMATCH[1]}"; proxy_password="${BASH_REMATCH[2]}"
+          proxy_host="${BASH_REMATCH[3]}"; proxy_port="${BASH_REMATCH[4]}"; proxy_db="${BASH_REMATCH[5]}"
+          client="$(command -v mariadb || command -v mysql)" || { echo 'Install a MariaDB client.' >&2; exit 2; }
+          if "$client" --version | grep -qi mariadb; then tls=(--skip-ssl); else tls=(--ssl-mode=DISABLED); fi
+          MYSQL_PWD="$proxy_password" "$client" --protocol=TCP "${tls[@]}" --host="$proxy_host" --port="$proxy_port" --user="$proxy_user" --database="$proxy_db" "${@:3}"
+        else echo 'Devd returned an invalid MariaDB proxy URL.' >&2; exit 1; fi;;
+      *) echo 'Devd returned an invalid proxy URL.' >&2; exit 1;;
+    esac;;
+  write)
+    dbname="$(name "${2:-}")"; shift 2
+    sql=""; scope=dml; key=""; exception=""; nowait=0
+    while [ "$#" -gt 0 ]; do case "$1" in
+      --sql) sql="${2:?--sql requires a value}"; shift 2;;
+      --scope) scope="${2:?--scope requires dml or migration}"; shift 2;;
+      --idempotency-key) key="${2:?--idempotency-key requires a value}"; shift 2;;
+      --exception) exception="${2:?--exception requires the explicit user instruction}"; shift 2;;
+      --no-wait) nowait=1; shift;;
+      *) echo "Unknown argument: $1" >&2; exit 2;;
+    esac; done
+    [ -n "$sql" ] || { echo 'Usage: prod-db write DB --sql SQL [--scope migration] [--idempotency-key KEY] [--no-wait]' >&2; exit 2; }
+    body="$(jq -nc --arg sql "$sql" --arg scope "$scope" --arg key "$key" --arg exception "$exception" '{sql:$sql,scope:$scope} + (if $key=="" then {} else {idempotencyKey:$key} end) + (if $exception=="" then {} else {exception:$exception} end)')"
+    result="$(api POST "/api/prod-db/$dbname/write" "$body")"
+    printf '%s\n' "$result"
+    id="$(printf '%s' "$result" | jq -er '.id')"
+    [ "$nowait" -eq 1 ] && exit 0
+    previous=""
+    while :; do
+      state="$(printf '%s' "$result" | jq -r '.status')"
+      if [ "$state" != "$previous" ]; then printf '%s\n' "$result" >&2; previous="$state"; fi
+      case "$state" in
+        executed) exit 0;;
+        rejected|failed) exit 1;;
+        blocked|pending|approved) sleep 3; result="$(api GET "/api/prod-db/writes/$id")";;
+        *) echo "Unknown write state: $state" >&2; exit 1;;
+      esac
+    done;;
+  write-status)
+    [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || { echo 'Usage: prod-db write-status ID' >&2; exit 2; }
+    api GET "/api/prod-db/writes/$2";;
+  down) echo 'Database tunnels are owned and managed by the host proxy.';;
+  *) echo 'Usage: prod-db list | url DB | connect DB [client args] | write DB --sql SQL [--scope migration] [--no-wait] | write-status ID' >&2; exit 2;;
+esac

@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# cc — Claude Code with permission prompts skipped (bypass mode). The container
+# runs as the uid-1000 `dev` user, so --dangerously-skip-permissions is allowed
+# (Claude Code refuses it as root). Use inside a `dev` session or `cc` on the host.
+#
+# Remote Control: inside a devbox session (DEVD_SESSION_ID set) EVERY `claude`
+# start registers under the stable session id — the initial one from claude-launch
+# and any manual `cc` in a new pane/window/after a restart — so it always shows up
+# in the Claude app with no manual step. On the host (no DEVD_SESSION_ID) it stays
+# a plain local session. Requires Claude Code >= 2.1.51 and an OAuth login; a
+# failed registration only shows a notice, the session still runs.
+#
+# Remote Control is tied to Anthropic OAuth — with a proxy profile (a third-party model via
+# CLIProxyAPI) there is nothing to register, so do not even try.
+# Codex/Grok keep their conversation title in pane options. Release those when
+# switching back to Claude so its native title can follow the new conversation.
+case "${1:-}" in
+  --help|-h|--version|-v) ;;
+  *)
+    if [ -n "${TMUX_PANE:-}" ]; then
+      tmux set-option -pu -t "$TMUX_PANE" @devd_auto_title 2>/dev/null || true
+      tmux set-option -pu -t "$TMUX_PANE" @devd_title_session 2>/dev/null || true
+    fi
+    ;;
+esac
+RC=()
+case "${1:-}" in
+  --help|-h|--version|-v) ;;
+  *) [ ! -x /usr/local/bin/devbox-recovery ] || /usr/local/bin/devbox-recovery record-launch claude -- "$@" 2>/dev/null || true ;;
+esac
+if [ -n "${DEVD_SESSION_ID:-}" ] && [ -z "${DEVBOX_PROXY_PROFILE:-}" ]; then
+  RC=(--remote-control "$DEVD_SESSION_ID")
+fi
+exec claude --dangerously-skip-permissions "${RC[@]}" "$@"

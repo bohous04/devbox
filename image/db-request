@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Prepare/poll the same durable request. Access approval never authorizes SQL.
+set -euo pipefail
+DEVD="${DEVD_URL:-http://host.docker.internal:4300}"
+SESSION="${DEVD_SESSION_ID:-$(hostname)}"
+response_file="$(mktemp)"
+trap 'rm -f "$response_file"' EXIT
+api() {
+  local method="$1" route="$2" body="${3:-}" code
+  local args=(-sS --max-time 30 -X "$method" -H "X-Devbox-Session: $SESSION" -o "$response_file" -w '%{http_code}')
+  if [ -n "$body" ]; then args+=(-H 'content-type: application/json' --data-binary "$body"); fi
+  if ! code="$(curl "${args[@]}" "$DEVD$route")"; then echo '{"code":"devd_unreachable","error":"Devd did not respond; retry the same request."}' >&2; return 1; fi
+  case "$code" in 2??) cat "$response_file";; *) cat "$response_file" >&2; echo >&2; return 1;; esac
+}
+command="${1:-}"; shift || true
+case "$command" in
+  status|wait|prepare|resume)
+    id="${1:-}"; shift || true
+    [[ "$id" =~ ^[1-9][0-9]*$ ]] || { echo 'Request ID must be a positive integer.' >&2; exit 2; }
+    timeout=600
+    if [ "${1:-}" = --timeout ]; then timeout="${2:-}"; shift 2; fi
+    [[ "$timeout" =~ ^[0-9]+$ ]] || { echo 'Timeout must be seconds.' >&2; exit 2; }
+    [ "$#" -eq 0 ] || { echo "Unknown argument: $1. Request broader access with db-request DB --scope SCOPE --why PURPOSE." >&2; exit 2; }
+    case "$command" in
+      prepare|resume) api POST "/api/prod-db/requests/$id/$command" '{}';;
+      status) api GET "/api/prod-db/requests/$id";;
+      wait)
+        deadline=$((SECONDS + timeout)); previous=""
+        while :; do
+          result="$(api GET "/api/prod-db/requests/$id")"
+          state="$(printf '%s' "$result" | jq -r '.state')"
+          if [ "$result" != "$previous" ]; then printf '%s\n' "$result"; previous="$result"; fi
+          case "$state" in ready) exit 0;; rejected|failed) exit 1;; esac
+          if [ "$SECONDS" -ge "$deadline" ]; then echo "Request #$id remains $state; poll the same ID to continue." >&2; exit 3; fi
+          sleep 3
+        done;;
+    esac;;
+  *)
+    wanted="$(jq -nr --arg v "$command" '$v | gsub("^\\s+|\\s+$"; "")')"; why=""; scope=read
+    while [ "$#" -gt 0 ]; do case "$1" in
+      --why) why="${2:?--why requires a value}"; shift 2;;
+      --scope) scope="${2:?--scope requires read, dml or migration}"; shift 2;;
+      *) echo "Unknown argument: $1" >&2; exit 2;;
+    esac; done
+    case "$scope" in read|dml|migration) ;; *) echo 'Scope must be read, dml or migration.' >&2; exit 2;; esac
+    [ -n "$wanted" ] && [ -n "$why" ] || { echo 'Usage: db-request DB --why PURPOSE [--scope read|dml|migration] | status ID | prepare ID | resume ID | wait ID [--timeout SECONDS]' >&2; exit 2; }
+    result="$(api POST /api/prod-db/requests "$(jq -nc --arg wanted "$wanted" --arg why "$why" --arg scope "$scope" '{wanted:$wanted,why:$why,scope:$scope}')")"
+    printf '%s\n' "$result"
+    actual="$(printf '%s' "$result" | jq -r '.requested_scope // "read"')"
+    case "$actual" in read|dml|migration) ;; *) echo 'Server returned an unsupported access scope.' >&2; exit 1;; esac
+    case "$scope:$actual" in dml:read|migration:read|migration:dml)
+      echo 'Server did not accept the requested access scope. Inspect the returned request ID; broader access is not prepared.' >&2; exit 1;;
+    esac;;
+esac

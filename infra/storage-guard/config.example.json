@@ -1,0 +1,23 @@
+{
+  "root": "/srv/dev",
+  "state_dir": "/var/lib/devbox-storage",
+  "disk_warn_percent": 70,
+  "disk_block_percent": 85,
+  "reserve_gib": 100,
+  "daily_growth_gib": 50,
+  "session_warn_gib": 40,
+  "session_block_gib": 80,
+  "session_limits": {},
+  "notify_enabled": true,
+  "inventory_max_age_seconds": 10800,
+  "history_local_days": 30,
+  "recovery_local_days": 30,
+  "offsite_keep_days": 180,
+  "notify_cooldown_seconds": 21600,
+  "borg_repo": "ssh://u000000@u000000.your-storagebox.de:23/./devbox-storage-guard",
+  "borg_passfile": "/etc/devd/borg-passphrase",
+  "borg_key": "/root/.ssh/id_ed25519_backup",
+  "notify_url": "http://127.0.0.1:4300/api/notify",
+  "sessions_url": "http://127.0.0.1:4300/api/sessions",
+  "bare_repo_worktree_globs": []
+}

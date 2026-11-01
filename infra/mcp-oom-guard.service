@@ -1,0 +1,6 @@
+[Unit]
+Description=Raise OOM score of agent children so a full session container kills MCP servers, not the agent
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mcp-oom-guard

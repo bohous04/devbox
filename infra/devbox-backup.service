@@ -1,0 +1,16 @@
+[Unit]
+Description=Devbox backup (borg → remote repo)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/devd/devd.env
+ExecStart=/usr/local/bin/devbox-backup.sh
+User=root
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target

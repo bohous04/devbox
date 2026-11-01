@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# srv — SSH to a server with a key from 1Password, with human approval.
+#
+#   srv                                    lists the available keys
+#   srv "<title>" --why "<reason>" [ssh options…] [user@host | server name] [command…]
+#
+# The key is NEVER loaded into the container: after approval devd loads it into the ssh-agent
+# ON THE HOST and lets only the socket in here. --why is required and you will see it on the Mac, in the app
+# and in the dashboard together with verified facts about the session.
+set -euo pipefail
+
+DEVD="${DEVD_URL:-http://host.docker.internal:4300}"
+# Override only for tests (fake unix socket) — the production default does not change.
+SOCK="${SRV_AGENT_SOCK:-/run/devd/ssh-agent.sock}"
+SESSION="${DEVD_SESSION_ID:-}"
+
+if [ "$#" -eq 0 ]; then
+  echo "SSH keys available from 1Password (via devd):"
+  # The header is required here too, not just for POST: listing key names is allowed only for a running
+  # devbox session, not any container on the host (devd `sessionGate`).
+  keys="$(curl -fsS -m 15 -H "x-devbox-session: $SESSION" "$DEVD/api/op/ssh-keys" 2>/dev/null || true)"
+  if ! printf '%s' "$keys" | jq -e '.keys' >/dev/null 2>&1; then
+    echo "  ⚠ devd/1Password unavailable (or not configured)." >&2; exit 1
+  fi
+  # Servers configured for the key (config, see devbox-guide): the alias name can be
+  # used instead of user@host (srv "<title>" --why "…" <name>), srv resolves it itself.
+  printf '%s' "$keys" | jq -r '
+    .keys[]? | "  • \(.title)   [\(.vault)]",
+    (.servers[]? | "      \(.name)  \(.user)@\(.host):\(.port)")'
+  echo
+  echo "Usage: srv \"<title>\" --why \"<reason>\" [user@host | server name]"
+  exit 0
+fi
+
+title="$1"; shift
+why=""
+if [ "${1:-}" = "--why" ]; then why="${2:-}"; shift 2; fi
+if [ -z "$why" ]; then
+  echo "✗ missing --why: say in one sentence why you need the key and what you will do with it." >&2
+  echo "  srv \"$title\" --why \"restarting hermes, which crashed\" root@host" >&2
+  exit 2
+fi
+
+# The remaining arguments are ssh(1) options, the target and (after the target) a command — same order as
+# `ssh [options] target [command]`. We look for the first non-option = the target; options with a value
+# we skip together with their value (not as a standalone "-x" flag), other "-x"
+# flags we skip without a value. "-p"/"-l" we also remember — port/user
+# for the target in the approval request (see below).
+args=("$@")
+n=${#args[@]}
+target=""; target_idx=-1; port_opt=""; user_opt=""
+# One ssh option at position $i: sets `step` (how far to advance) and for "-p"/"-l"
+# (separate and attached forms, "-p 2222" and "-p2222") remembers the port/user —
+# the first occurrence wins, same as ssh(1). Returns 1 when there is no option at $i.
+parse_opt() {
+  local cur="${args[$1]}" val=""
+  case "$cur" in
+    -o|-p|-i|-J|-l|-F|-b|-c|-D|-E|-L|-R|-W|-w|-B|-e|-m|-O|-Q|-S)
+      val="${args[$(($1+1))]:-}"; step=2 ;;
+    -p?*|-l?*) val="${cur:2}"; cur="${cur:0:2}"; step=1 ;;
+    -*) step=1; return 0 ;;
+    *) return 1 ;;
+  esac
+  case "$cur" in
+    -p) [ -z "$port_opt" ] && port_opt="$val" ;;
+    -l) [ -z "$user_opt" ] && user_opt="$val" ;;
+  esac
+  return 0
+}
+i=0
+while [ "$i" -lt "$n" ]; do
+  if parse_opt "$i"; then i=$((i+step)); else target="${args[$i]}"; target_idx=$i; break; fi
+done
+# ssh(1) also accepts options right AFTER the target ("ssh host -p 2222 command") — read them up to
+# the first word of the command, so the port/user also match in the approval request.
+if [ "$target_idx" -ge 0 ]; then
+  i=$((target_idx+1))
+  while [ "$i" -lt "$n" ] && parse_opt "$i"; do i=$((i+step)); done
+fi
+
+# An explicit user@host in the target always wins over a server alias (global-constraints).
+# Otherwise: a target without "@" whose name matches a server for this key (from
+# /api/op/ssh-keys) is sent as an alias ($server), and in the ssh arguments it is
+# replaced with "-p <port> <user>@<host>" from the config. An unknown word without "@" is
+# sent as a raw $target unchanged (devd normalizes it itself).
+server=""; target_body=""
+exec_args=("${args[@]}")
+if [ -n "$target" ]; then
+  case "$target" in
+    *@*)
+      target_body="$target"
+      [ -n "$port_opt" ] && target_body="$target_body:$port_opt"
+      ;;
+    *)
+      keys="$(curl -fsS -m 15 -H "x-devbox-session: $SESSION" "$DEVD/api/op/ssh-keys" 2>/dev/null || true)"
+      match="$(printf '%s' "$keys" | jq -c --arg t "$title" --arg n "$target" \
+        '[.keys[]? | select(.title==$t) | .servers[]? | select(.name==$n)][0] // empty' 2>/dev/null || true)"
+      if [ -n "$match" ]; then
+        server="$target"
+        s_user="$(printf '%s' "$match" | jq -r '.user')"
+        s_host="$(printf '%s' "$match" | jq -r '.host')"
+        s_port="$(printf '%s' "$match" | jq -r '.port')"
+        exec_args=("${args[@]:0:$target_idx}" -p "$s_port" "$s_user@$s_host" "${args[@]:$((target_idx+1))}")
+      else
+        # "-l user host" is the same as "user@host" — send it that way so devd normalizes it.
+        if [ -n "$user_opt" ]; then
+          target_body="$user_opt@$target"
+          [ -n "$port_opt" ] && target_body="$target_body:$port_opt"
+        else
+          target_body="$target"
+        fi
+      fi
+      ;;
+  esac
+fi
+
+req="$(jq -nc --arg t "$title" --arg s "$SESSION" --arg w "$why" --arg c "$PWD" \
+  --arg g "$target_body" --arg sv "$server" \
+  '{title:$t,session:$s,why:$w,cwd:$c}
+   + (if $sv != "" then {server:$sv} elif $g != "" then {target:$g} else {} end)')"
+
+# unique per-run file name (not a fixed /tmp/srv.body): two concurrent `srv`
+# in the same session could otherwise overwrite each other's response body and one of them would
+# then wait on/report someone else's approval id. The trap cleans up on the error/early path too.
+tmpfile="$(mktemp)"
+trap 'rm -f "$tmpfile"' EXIT
+
+resp="$(curl -sS -m 20 -o "$tmpfile" -w '%{http_code}' -X POST "$DEVD/api/ssh-approvals" \
+  -H 'content-type: application/json' -H "x-devbox-session: $SESSION" -d "$req" || echo 000)"
+body="$(cat "$tmpfile" 2>/dev/null || true)"; rm -f "$tmpfile"
+
+case "$resp" in
+  200) ;;                       # live grant or gate disabled — socket right away
+  202)
+    id="$(printf '%s' "$body" | jq -r '.id')"
+    echo "⏳ waiting for approval (key '$title') — confirm on the Mac, in the app or in the dashboard…"
+    status="pending"
+    for _ in $(seq 1 95); do
+      sleep 1
+      status="$(curl -fsS -m 10 "$DEVD/api/ssh-approvals/$id" | jq -r '.status' || echo pending)"
+      [ "$status" = "pending" ] || break
+    done
+    case "$status" in
+      approved) ;;
+      denied)  echo "✗ denied." >&2; exit 1 ;;
+      # "revoked" and "expired" (and any unexpected status) land here too — do not pretend a specific
+      # cause, only that the key is not available after 90 s of waiting.
+      *)       echo "✗ the key request is not (or no longer) approved — it expired, was revoked, or nobody decided within 90 s." >&2; exit 1 ;;
+    esac
+    # without -f: on an error status (403/502/…) we want the body with .error, not empty output
+    act="$(curl -sS -m 20 -X POST "$DEVD/api/ssh-approvals/$id/activate" \
+      -H 'content-type: application/json' -H "x-devbox-session: $SESSION" || true)"
+    if [ -z "$(printf '%s' "$act" | jq -r '.agentSock // empty')" ]; then
+      echo "✗ failed to activate the key: $(printf '%s' "$act" | jq -r '.error // "unknown error"')" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "✗ request failed (HTTP $resp): $(printf '%s' "$body" | jq -r '.error // empty')" >&2
+    exit 1 ;;
+esac
+
+export SSH_AUTH_SOCK="$SOCK"
+if [ ! -S "$SSH_AUTH_SOCK" ]; then
+  echo "✗ the ssh-agent socket ($SSH_AUTH_SOCK) is not here — the gate did not create it." >&2; exit 1
+fi
+echo "✓ key '$title' is available via the ssh-agent on the host (the key material is not in the container)."
+
+if [ "${#exec_args[@]}" -gt 0 ]; then exec ssh "${exec_args[@]}"; fi
+echo "Now connect: SSH_AUTH_SOCK=$SOCK ssh user@host"

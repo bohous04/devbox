@@ -1,0 +1,16 @@
+# gitleaks config: default rules plus a narrow allowlist of known false positives.
+# Add to it only with a comment saying why the match is not a secret.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Public OAuth client id of Claude Code (shipped in the public CLI, not a secret)"
+regexes = ['''9d1c250a-e61b-44d9-88ed-5944d1962f5e''']
+
+[[allowlists]]
+description = "Synthetic credentials in tests and fixtures"
+paths = [
+  '''(^|/)devd/test/pushApi\.test\.ts$''',
+  '''(^|/)devd/test/mariaDb\.integration\.test\.ts$''',
+  '''(^|/)ios/DevboxAppTests/Fixtures/range\.json$''',
+]

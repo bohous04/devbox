@@ -1,0 +1,2371 @@
+# base: rust-v0.160.0
+diff --git a/codex-rs/app-server-transport/src/transport/unix_socket.rs b/codex-rs/app-server-transport/src/transport/unix_socket.rs
+index 3f70bcc..667b6d9 100644
+--- a/codex-rs/app-server-transport/src/transport/unix_socket.rs
++++ b/codex-rs/app-server-transport/src/transport/unix_socket.rs
+@@ -104,10 +104,18 @@ pub async fn start_control_socket_acceptor(
+     };
+     set_control_socket_permissions(socket_guard.socket_path.as_path()).await?;
+     #[cfg(unix)]
+-    std::os::unix::fs::symlink(
+-        socket_guard.socket_path.as_path(),
+-        socket_guard.rendezvous_path.as_path(),
+-    )?;
++    {
++        let target = socket_guard.socket_path.as_path();
++        let link = socket_guard.rendezvous_path.as_path();
++        // A same-directory socket gets a relative link, so the volume resolves it
++        // identically on the host and in every container that mounts it.
++        let link_dir = link.parent().and_then(|dir| std::fs::canonicalize(dir).ok());
++        let target = match (target.parent(), target.file_name()) {
++            (Some(dir), Some(name)) if Some(dir) == link_dir.as_deref() => Path::new(name),
++            _ => target,
++        };
++        std::os::unix::fs::symlink(target, link)?;
++    }
+     info!(
+         socket_path = %socket_guard.socket_path.display(),
+         "app-server control socket listening"
+@@ -290,6 +298,12 @@ fn protected_socket_path(rendezvous_path: &Path) -> IoResult<std::path::PathBuf>
+     let name = rendezvous_path.file_name().ok_or_else(|| {
+         std::io::Error::new(ErrorKind::InvalidInput, "socket path must have a filename")
+     })?;
++    // Devbox: containers reach the daemon through the shared CODEX_HOME volume, not
++    // the host's /tmp, so the socket stays beside its rendezvous link.
++    if std::env::var_os("DEVD_CODEX_ROUTES_FILE").is_some() {
++        return Ok(std::fs::canonicalize(parent)?
++            .join(format!(".{}.daemon", name.to_string_lossy())));
++    }
+     let path = std::fs::canonicalize(parent)?.join(name);
+     let hash = Sha256::digest(path.as_os_str().as_bytes());
+     Ok(codex_uds::shared_daemon_socket_directory()?.join(format!("{hash:x}")))
+diff --git a/codex-rs/app-server/src/request_processors/persisted_resume_settings.rs b/codex-rs/app-server/src/request_processors/persisted_resume_settings.rs
+index 5e408b0..b980158 100644
+--- a/codex-rs/app-server/src/request_processors/persisted_resume_settings.rs
++++ b/codex-rs/app-server/src/request_processors/persisted_resume_settings.rs
+@@ -1,13 +1,17 @@
+ use codex_protocol::config_types::ApprovalsReviewer;
+ use codex_protocol::models::ActivePermissionProfile;
++use codex_protocol::models::PermissionProfile;
+ use codex_protocol::protocol::AskForApproval;
+ use codex_protocol::protocol::EventMsg;
+ use codex_rollout::RolloutItem;
++use std::path::PathBuf;
+ 
+ #[derive(Debug, PartialEq, Eq)]
+ pub(super) struct PersistedResumeSettings {
+     pub(super) approval_policy: AskForApproval,
+     pub(super) approvals_reviewer: Option<ApprovalsReviewer>,
++    pub(super) permission_profile: PermissionProfile,
++    pub(super) cwd: PathBuf,
+     pub(super) active_permission_profile: Option<ActivePermissionProfile>,
+ }
+ 
+@@ -30,12 +34,16 @@ pub(super) fn latest_persisted_resume_settings(
+                         _ => None,
+                     })
+                 }),
++                permission_profile: turn_context.permission_profile(),
++                cwd: turn_context.cwd.to_path_buf(),
+                 active_permission_profile: turn_context.active_permission_profile.clone(),
+             }),
+             RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+                 Some(PersistedResumeSettings {
+                     approval_policy: event.thread_settings.approval_policy,
+                     approvals_reviewer: Some(event.thread_settings.approvals_reviewer),
++                    permission_profile: event.thread_settings.permission_profile.clone(),
++                    cwd: event.thread_settings.cwd.to_path_buf(),
+                     active_permission_profile: event
+                         .thread_settings
+                         .active_permission_profile
+diff --git a/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs b/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
+index d6ce293..4c73dff 100644
+--- a/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
++++ b/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
+@@ -95,6 +95,8 @@ fn latest_settings_snapshot_wins() {
+     let expected = PersistedResumeSettings {
+         approval_policy: AskForApproval::OnRequest,
+         approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
++        permission_profile: PermissionProfile::read_only(),
++        cwd: cwd().to_path_buf(),
+         active_permission_profile: Some(ActivePermissionProfile::new("dev")),
+     };
+     let history = vec![
+@@ -118,6 +120,8 @@ fn latest_turn_context_wins_over_earlier_settings_update() {
+     let expected = PersistedResumeSettings {
+         approval_policy: AskForApproval::UnlessTrusted,
+         approvals_reviewer: Some(ApprovalsReviewer::User),
++        permission_profile: PermissionProfile::read_only(),
++        cwd: cwd().to_path_buf(),
+         active_permission_profile: Some(ActivePermissionProfile::read_only()),
+     };
+     let history = vec![
+@@ -159,6 +163,74 @@ fn older_reviewer_is_used_when_latest_turn_context_omits_it() {
+         Some(PersistedResumeSettings {
+             approval_policy: AskForApproval::OnRequest,
+             approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
++            permission_profile: PermissionProfile::read_only(),
++            cwd: cwd().to_path_buf(),
++            active_permission_profile: None,
++        })
++    );
++}
++
++#[test]
++fn unnamed_permission_profiles_are_preserved_from_turn_contexts_and_settings() {
++    for permission_profile in [
++        PermissionProfile::Disabled,
++        PermissionProfile::read_only(),
++        PermissionProfile::workspace_write(),
++    ] {
++        let mut context = turn_context_item(
++            "turn-permissions",
++            AskForApproval::Never,
++            Some(ApprovalsReviewer::User),
++            /*active_permission_profile*/ None,
++        );
++        let RolloutItem::TurnContext(turn_context) = &mut context else {
++            unreachable!();
++        };
++        turn_context.permission_profile = Some(permission_profile.clone());
++        let mut settings = settings_item(
++            AskForApproval::Never,
++            ApprovalsReviewer::User,
++            /*active_permission_profile*/ None,
++        );
++        let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &mut settings else {
++            unreachable!();
++        };
++        event.thread_settings.permission_profile = permission_profile.clone();
++        for item in [context, settings] {
++            assert_eq!(
++                latest_persisted_resume_settings(&[item]),
++                Some(PersistedResumeSettings {
++                    approval_policy: AskForApproval::Never,
++                    approvals_reviewer: Some(ApprovalsReviewer::User),
++                    permission_profile: permission_profile.clone(),
++                    cwd: cwd().to_path_buf(),
++                    active_permission_profile: None,
++                })
++            );
++        }
++    }
++}
++
++#[test]
++fn legacy_turn_context_recovers_permissions_from_its_sandbox_policy() {
++    let mut item = turn_context_item(
++        "legacy-yolo",
++        AskForApproval::Never,
++        Some(ApprovalsReviewer::User),
++        /*active_permission_profile*/ None,
++    );
++    let RolloutItem::TurnContext(turn_context) = &mut item else {
++        unreachable!();
++    };
++    turn_context.permission_profile = None;
++    turn_context.sandbox_policy = SandboxPolicy::DangerFullAccess;
++    assert_eq!(
++        latest_persisted_resume_settings(&[item]),
++        Some(PersistedResumeSettings {
++            approval_policy: AskForApproval::Never,
++            approvals_reviewer: Some(ApprovalsReviewer::User),
++            permission_profile: PermissionProfile::Disabled,
++            cwd: cwd().to_path_buf(),
+             active_permission_profile: None,
+         })
+     );
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index 289cb63..b17dd66 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -294,6 +294,23 @@ fn has_permission_override(
+         })
+ }
+ 
++fn is_devbox_permission_config_override(key: &str) -> bool {
++    matches!(key, "sandbox_mode" | "default_permissions")
++        || ["permissions", "sandbox_workspace_write", "network"]
++            .iter()
++            .any(|name| key == *name || key.starts_with(&format!("{name}.")))
++}
++
++fn has_split_permission_config_override(
++    request_overrides: Option<&HashMap<String, serde_json::Value>>,
++) -> bool {
++    request_overrides.is_some_and(|overrides| {
++        overrides
++            .keys()
++            .any(|key| is_devbox_permission_config_override(key))
++    })
++}
++
+ fn validate_dynamic_tools(tools: &[DynamicToolSpec]) -> Result<(), String> {
+     const DYNAMIC_TOOL_NAME_MAX_LEN: usize = 128;
+     const DYNAMIC_TOOL_NAMESPACE_MAX_LEN: usize = 64;
+@@ -1158,7 +1175,7 @@ impl ThreadRequestProcessor {
+             history_mode,
+             session_start_source,
+             thread_source,
+-            project_id,
++            mut project_id,
+             daybreak_enabled,
+             environments,
+         } = params;
+@@ -1176,6 +1193,14 @@ impl ThreadRequestProcessor {
+                 "`permissions` cannot be combined with `sandbox`",
+             ));
+         }
++        if project_id.is_none()
++            && let Some(cwd) = cwd.as_deref()
++        {
++            let cwd = AbsolutePathBuf::relative_to_current_dir(cwd)
++                .map_err(|err| invalid_request(format!("invalid devbox thread cwd: {err}")))?;
++            project_id = codex_core::resolve_devbox_list_project_id(&[cwd.into_path_buf()])
++                .map_err(|err| invalid_request(err.to_string()))?;
++        }
+         if let Some(project_id) = project_id.as_ref() {
+             if project_id.is_empty() {
+                 return Err(invalid_request("projectId must not be empty"));
+@@ -1442,11 +1467,13 @@ impl ThreadRequestProcessor {
+             }
+         }
+ 
+-        let environments = environment_selections.unwrap_or_else(|| {
+-            listener_task_context
++        let environments = match environment_selections {
++            Some(environments) => environments,
++            None => listener_task_context
+                 .thread_manager
+                 .default_environment_selections(&config.cwd, &config.workspace_roots)
+-        });
++                .map_err(|error| invalid_request(error.to_string()))?,
++        };
+         let dynamic_tools = dynamic_tools.unwrap_or_default();
+         if !dynamic_tools.is_empty() {
+             validate_dynamic_tools(&dynamic_tools).map_err(invalid_request)?;
+@@ -2535,7 +2562,7 @@ impl ThreadRequestProcessor {
+             originators,
+             archived,
+             section_id,
+-            project_id,
++            mut project_id,
+             cwd,
+             use_state_db_only,
+             search_term,
+@@ -2550,6 +2577,17 @@ impl ThreadRequestProcessor {
+                 "originator filtering is not supported by the local app-server",
+             ));
+         }
++        let mut cwd_filters = normalize_thread_list_cwd_filters(cwd)?;
++        if project_id.is_none()
++            && let Some(cwds) = cwd_filters.as_deref()
++            && let Some(mapped_project_id) = codex_core::resolve_devbox_list_project_id(cwds)
++                .map_err(|err| invalid_request(err.to_string()))?
++        {
++            // Legacy rollouts keep /workspace in their immutable metadata. Their
++            // assigned project is the authoritative canonical-root list filter.
++            project_id = Some(Some(mapped_project_id));
++            cwd_filters = None;
++        }
+         if project_id.is_some() && !self.thread_store.supports_projects() {
+             return Err(unsupported_thread_store_operation("projects"));
+         }
+@@ -2570,7 +2608,6 @@ impl ThreadRequestProcessor {
+                 }
+             }
+         }
+-        let cwd_filters = normalize_thread_list_cwd_filters(cwd)?;
+         let relation_filter = match (parent_thread_id, ancestor_thread_id) {
+             (Some(_), Some(_)) => {
+                 return Err(invalid_request(
+@@ -3843,9 +3880,17 @@ impl ThreadRequestProcessor {
+         } else {
+             None
+         };
+-        let history_cwd = history_settings
+-            .map(|settings| settings.cwd.to_path_buf())
+-            .or_else(|| thread_history.session_cwd());
++        let resume_route_id = match &thread_history {
++            InitialHistory::Resumed(resumed) => resumed.conversation_id.to_string(),
++            _ => thread_id.clone(),
++        };
++        let history_cwd = codex_core::resolve_devbox_resume_cwd(
++            &resume_route_id,
++            history_settings
++                .map(|settings| settings.cwd.to_path_buf())
++                .or_else(|| thread_history.session_cwd()),
++        )
++        .map_err(|error| invalid_request(error.to_string()))?;
+         let mut runtime_workspace_roots =
+             runtime_workspace_roots.map(resolve_runtime_workspace_roots);
+         if runtime_workspace_roots.is_none() {
+@@ -3925,11 +3970,16 @@ impl ThreadRequestProcessor {
+         let persisted_metadata = self
+             .load_and_apply_persisted_resume_metadata(
+                 &thread_history,
++                history_cwd.as_deref(),
+                 &mut request_overrides,
+                 &mut typesafe_overrides,
+             )
+             .await;
+ 
++        typesafe_overrides.cwd =
++            codex_core::resolve_devbox_resume_cwd(&resume_route_id, typesafe_overrides.cwd)
++                .map_err(|error| invalid_request(error.to_string()))?;
++
+         let clear_reasoning_effort = !has_explicit_model_resume_override
+             && persisted_metadata
+                 .as_ref()
+@@ -4231,6 +4281,7 @@ impl ThreadRequestProcessor {
+     async fn load_and_apply_persisted_resume_metadata(
+         &self,
+         thread_history: &InitialHistory,
++        history_cwd: Option<&std::path::Path>,
+         request_overrides: &mut Option<HashMap<String, serde_json::Value>>,
+         typesafe_overrides: &mut ConfigOverrides,
+     ) -> Option<ThreadMetadata> {
+@@ -4250,9 +4301,26 @@ impl ThreadRequestProcessor {
+                 typesafe_overrides.approvals_reviewer = persisted_settings.approvals_reviewer;
+             }
+             if !has_permission_override(request_overrides.as_ref(), typesafe_overrides) {
+-                typesafe_overrides.persisted_permission_profile_id = persisted_settings
+-                    .active_permission_profile
+-                    .map(|profile| profile.id);
++                if let Some(profile) = persisted_settings.active_permission_profile {
++                    typesafe_overrides.persisted_permission_profile_id = Some(profile.id);
++                } else if codex_core::is_registered_devbox_resume_cwd(
++                    &resumed_history.conversation_id.to_string(),
++                    Some(persisted_settings.cwd.as_path()),
++                    typesafe_overrides.cwd.as_deref().or(history_cwd),
++                )
++                .unwrap_or(false)
++                    && !has_split_permission_config_override(request_overrides.as_ref())
++                    && !self
++                        .config_manager
++                        .current_cli_overrides()
++                        .iter()
++                        .any(|(key, _)| is_devbox_permission_config_override(key))
++                {
++                    // Routed CLI selections have no profile ID. Preserve their saved
++                    // authority; ordinary native resume still uses current defaults.
++                    typesafe_overrides.permission_profile =
++                        Some(persisted_settings.permission_profile);
++                }
+             }
+         }
+         let state_db_ctx = self.state_db.clone()?;
+@@ -4980,7 +5048,11 @@ impl ThreadRequestProcessor {
+                     })?,
+             )
+         };
+-        let history_cwd = Some(source_thread.cwd.clone());
++        let history_cwd = codex_core::resolve_devbox_resume_cwd(
++            &source_thread_id.to_string(),
++            Some(source_thread.cwd.clone()),
++        )
++        .map_err(|error| invalid_request(error.to_string()))?;
+ 
+         // Persist Windows sandbox mode.
+         let mut cli_overrides = cli_overrides.unwrap_or_default();
+@@ -5019,6 +5091,11 @@ impl ThreadRequestProcessor {
+             /*personality*/ None,
+         );
+         typesafe_overrides.ephemeral = ephemeral.then_some(true);
++        typesafe_overrides.cwd = codex_core::resolve_devbox_resume_cwd(
++            &source_thread_id.to_string(),
++            typesafe_overrides.cwd,
++        )
++        .map_err(|error| invalid_request(error.to_string()))?;
+         let restore_approval_policy = typesafe_overrides.approval_policy.is_none();
+         let restore_approvals_reviewer = typesafe_overrides.approvals_reviewer.is_none()
+             && !request_overrides
+@@ -5035,6 +5112,8 @@ impl ThreadRequestProcessor {
+                 Some(PersistedResumeSettings {
+                     approval_policy: snapshot.approval_policy,
+                     approvals_reviewer: Some(snapshot.approvals_reviewer),
++                    permission_profile: snapshot.permission_profile,
++                    cwd: snapshot.cwd.to_path_buf(),
+                     active_permission_profile: snapshot.active_permission_profile,
+                 })
+             } else {
+@@ -5089,9 +5168,9 @@ impl ThreadRequestProcessor {
+                 typesafe_overrides.approvals_reviewer = persisted_settings.approvals_reviewer;
+             }
+             if restore_permission_profile {
+-                typesafe_overrides.persisted_permission_profile_id = persisted_settings
+-                    .active_permission_profile
+-                    .map(|profile| profile.id);
++                if let Some(profile) = persisted_settings.active_permission_profile {
++                    typesafe_overrides.persisted_permission_profile_id = Some(profile.id);
++                }
+             }
+         }
+         // Derive a Config using the same logic as new conversation, honoring overrides if provided.
+@@ -6055,6 +6134,17 @@ pub(crate) fn thread_from_stored_thread(
+     fallback_provider: &str,
+     fallback_cwd: &AbsolutePathBuf,
+ ) -> (Thread, Option<codex_thread_store::StoredThreadHistory>) {
++    let thread_id = thread.thread_id.to_string();
++    let stored_cwd = thread.cwd;
++    let visible_cwd =
++        match codex_core::resolve_devbox_resume_cwd(&thread_id, Some(stored_cwd.clone())) {
++            Ok(Some(cwd)) => cwd,
++            Ok(None) => stored_cwd,
++            Err(err) => {
++                warn!("failed to project devbox thread cwd: {err}");
++                stored_cwd
++            }
++        };
+     let path = thread.rollout_path;
+     let git_info = thread.git_info.map(|info| ApiGitInfo {
+         sha: info.commit_hash.map(|sha| sha.0),
+@@ -6062,7 +6152,7 @@ pub(crate) fn thread_from_stored_thread(
+         origin_url: info.repository_url.map(String::from),
+     });
+     let cwd = AbsolutePathBuf::relative_to_current_dir(path_utils::normalize_for_native_workdir(
+-        thread.cwd,
++        visible_cwd,
+     ))
+     .unwrap_or_else(|err| {
+         warn!("failed to normalize thread cwd while reading stored thread: {err}");
+@@ -6074,7 +6164,6 @@ pub(crate) fn thread_from_stored_thread(
+         thread.agent_role.clone(),
+     );
+     let history = thread.history;
+-    let thread_id = thread.thread_id.to_string();
+     let thread = Thread {
+         id: thread_id.clone(),
+         environments: None,
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
+index 237c58e..f8aeb3c 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
+@@ -1445,3 +1445,40 @@ mod thread_processor_behavior_tests {
+         Ok(())
+     }
+ }
++
++mod devbox_permission_config_override_tests {
++    use super::super::has_split_permission_config_override;
++    use pretty_assertions::assert_eq;
++    use serde_json::json;
++    use std::collections::HashMap;
++
++    #[test]
++    fn explicit_split_permission_tables_and_dotted_edits_block_saved_profile_restore() {
++        for key in [
++            "sandbox_mode",
++            "default_permissions",
++            "permissions",
++            "permissions.dev.filesystem",
++            "sandbox_workspace_write",
++            "sandbox_workspace_write.network_access",
++            "network",
++            "network.allowed_domains",
++        ] {
++            let overrides = HashMap::from([(key.to_string(), json!({}))]);
++            assert_eq!(has_split_permission_config_override(Some(&overrides)), true);
++        }
++        for key in [
++            "model",
++            "permissions_extra",
++            "networking",
++            "sandbox_workspace_write_extra",
++        ] {
++            let overrides = HashMap::from([(key.to_string(), json!({}))]);
++            assert_eq!(
++                has_split_permission_config_override(Some(&overrides)),
++                false
++            );
++        }
++        assert_eq!(has_split_permission_config_override(None), false);
++    }
++}
+diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
+index e42e53d..5c8dde4 100644
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -626,7 +626,7 @@ impl TurnRequestProcessor {
+                 runtime_workspace_roots,
+                 environment_selections,
+             )
+-            .await;
++            .await?;
+         let thread_settings = self
+             .build_thread_settings_overrides(
+                 thread.as_ref(),
+@@ -721,9 +721,9 @@ impl TurnRequestProcessor {
+         cwd: Option<AbsolutePathBuf>,
+         workspace_roots: Option<Vec<AbsolutePathBuf>>,
+         environment_selections: Option<Vec<TurnEnvironmentSelection>>,
+-    ) -> ThreadEnvironmentOverride {
++    ) -> Result<ThreadEnvironmentOverride, JSONRPCErrorError> {
+         if cwd.is_none() && workspace_roots.is_none() && environment_selections.is_none() {
+-            return ThreadEnvironmentOverride::default();
++            return Ok(ThreadEnvironmentOverride::default());
+         }
+ 
+         // Explicit environment selections own their roots and pass through unchanged. Top-level
+@@ -740,13 +740,13 @@ impl TurnRequestProcessor {
+                     None => thread.config_snapshot().await.cwd().clone(),
+                 },
+             };
+-            return ThreadEnvironmentOverride {
++            return Ok(ThreadEnvironmentOverride {
+                 environments: Some(TurnEnvironmentSelections::new(
+                     legacy_fallback_cwd,
+                     environment_selections,
+                 )),
+                 ..Default::default()
+-            };
++            });
+         }
+ 
+         // Default-environment updates retain the task's fallback roots, not its active roots.
+@@ -763,14 +763,15 @@ impl TurnRequestProcessor {
+         };
+         let environment_selections = self
+             .thread_manager
+-            .default_environment_selections(&legacy_fallback_cwd, &workspace_roots);
+-        ThreadEnvironmentOverride {
++            .default_environment_selections(&legacy_fallback_cwd, &workspace_roots)
++            .map_err(|error| invalid_request(error.to_string()))?;
++        Ok(ThreadEnvironmentOverride {
+             environments: Some(TurnEnvironmentSelections::new(
+                 legacy_fallback_cwd,
+                 environment_selections,
+             )),
+             runtime_workspace_roots: Some(workspace_roots),
+-        }
++        })
+     }
+ 
+     async fn build_thread_settings_overrides(
+@@ -933,7 +934,7 @@ impl TurnRequestProcessor {
+                 /*workspace_roots*/ None,
+                 /*environment_selections*/ None,
+             )
+-            .await;
++            .await?;
+         let thread_settings = self
+             .build_thread_settings_overrides(
+                 thread.as_ref(),
+diff --git a/codex-rs/app-server/tests/suite/v2/devbox_routes.rs b/codex-rs/app-server/tests/suite/v2/devbox_routes.rs
+new file mode 100644
+index 0000000..e3d1346
+--- /dev/null
++++ b/codex-rs/app-server/tests/suite/v2/devbox_routes.rs
+@@ -0,0 +1,423 @@
++use std::time::Duration;
++
++use anyhow::Result;
++use app_test_support::MockResponsesConfig;
++use app_test_support::TestAppServer;
++use app_test_support::create_fake_rollout;
++use app_test_support::create_mock_responses_server_repeating_assistant;
++use app_test_support::rollout_path;
++use codex_app_server_protocol::ActivePermissionProfile;
++use codex_app_server_protocol::AskForApproval;
++use codex_app_server_protocol::ClientRequest;
++use codex_app_server_protocol::ProjectCreateParams;
++use codex_app_server_protocol::ProjectCreateResponse;
++use codex_app_server_protocol::SandboxMode;
++use codex_app_server_protocol::SandboxPolicy as AppSandboxPolicy;
++use codex_app_server_protocol::ThreadHistoryMode;
++use codex_app_server_protocol::ThreadListResponse;
++use codex_app_server_protocol::ThreadMetadataUpdateParams;
++use codex_app_server_protocol::ThreadMetadataUpdateResponse;
++use codex_app_server_protocol::ThreadReadParams;
++use codex_app_server_protocol::ThreadReadResponse;
++use codex_app_server_protocol::ThreadResumeParams;
++use codex_app_server_protocol::ThreadResumeResponse;
++use codex_app_server_protocol::ThreadStartParams;
++use codex_app_server_protocol::ThreadStartResponse;
++use codex_app_server_protocol::TurnStartParams;
++use codex_app_server_protocol::UserInput;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++use tempfile::TempDir;
++use tokio::time::timeout;
++
++#[tokio::test]
++async fn legacy_devbox_resume_loads_canonical_project_config_without_rewriting_history()
++-> Result<()> {
++    let server = create_mock_responses_server_repeating_assistant("fixture complete").await;
++    let home = TempDir::new()?;
++    let project = TempDir::new()?;
++    let project_path = std::fs::canonicalize(project.path())?;
++    MockResponsesConfig::new(&server.uri())
++        .with_model("gpt-5.4")
++        .write(home.path())?;
++    let config_path = home.path().join("config.toml");
++    let config = std::fs::read_to_string(&config_path)?;
++    std::fs::write(
++        &config_path,
++        format!(
++            "{config}\n[projects.{}]\ntrust_level = \"trusted\"\n",
++            serde_json::to_string(&project_path.to_string_lossy())?,
++        ),
++    )?;
++    std::fs::create_dir(project_path.join(".codex"))?;
++    std::fs::write(
++        project_path.join(".codex/config.toml"),
++        "developer_instructions = 'DEVBOX_CANONICAL_CONFIG_FIXTURE'\n",
++    )?;
++    let id = create_fake_rollout(
++        home.path(),
++        "2025-01-05T12-00-00",
++        "2025-01-05T12:00:00Z",
++        "Legacy fixture",
++        Some("mock_provider"),
++        /*git_info*/ None,
++    )?;
++    let path = rollout_path(home.path(), "2025-01-05T12-00-00", &id);
++    // Construct an old container rollout before any app-server opens it.
++    let mut lines: Vec<serde_json::Value> = std::fs::read_to_string(&path)?
++        .lines()
++        .map(serde_json::from_str)
++        .collect::<std::result::Result<_, _>>()?;
++    lines[0]["payload"]["cwd"] = json!("/workspace");
++    let original = lines
++        .iter()
++        .map(serde_json::to_string)
++        .collect::<std::result::Result<Vec<_>, _>>()?
++        .join("\n")
++        + "\n";
++    std::fs::write(&path, &original)?;
++    let routes_path = home.path().join("devbox-routes.json");
++    std::fs::write(
++        &routes_path,
++        serde_json::to_vec(&json!({"routes":[{
++            "cwd": project_path, "environment_id":"remote", "thread_ids":[id]
++        }]}))?,
++    )?;
++    let routes_string = routes_path.to_string_lossy().to_string();
++    let mut app = TestAppServer::builder()
++        .with_codex_home(home.path())
++        .with_exec_server_delay(Duration::ZERO)
++        .with_env_overrides(&[("DEVD_CODEX_ROUTES_FILE", Some(&routes_string))])
++        .build_initialized()
++        .await?;
++    let created: ProjectCreateResponse = app
++        .request(|request_id| ClientRequest::ProjectCreate {
++            request_id,
++            params: ProjectCreateParams {
++                name: "Devbox fixture".to_string(),
++                roots: Vec::new(),
++                metadata: None,
++                idempotency_key: "devbox-fixture".to_string(),
++            },
++        })
++        .await?;
++    let _: ThreadMetadataUpdateResponse = app
++        .request(|request_id| ClientRequest::ThreadMetadataUpdate {
++            request_id,
++            params: ThreadMetadataUpdateParams {
++                thread_id: id.clone(),
++                project_id: Some(created.project.id.clone()),
++                git_info: None,
++                daybreak_enabled: None,
++            },
++        })
++        .await?;
++    std::fs::write(
++        &routes_path,
++        serde_json::to_vec(&json!({"routes":[{
++            "cwd": project_path, "environment_id":"remote", "thread_ids":[id],
++            "project_id": created.project.id
++        }]}))?,
++    )?;
++    for cwd in [json!(project_path), json!([project_path])] {
++        let listed: ThreadListResponse = app
++            .request(|request_id| ClientRequest::ThreadList {
++                request_id,
++                params: serde_json::from_value(json!({"cwd": cwd, "limit": 1}))
++                    .expect("list params"),
++            })
++            .await?;
++        assert_eq!(listed.data.len(), 1);
++        assert_eq!(listed.data[0].id, id);
++        assert_eq!(listed.data[0].cwd.as_path(), project_path.as_path());
++        assert_eq!(listed.next_cursor, None);
++    }
++    // Explicit project filters, title filters, and subdirectory queries retain
++    // their original meaning rather than being broadened by the route registry.
++    for params in [
++        json!({"cwd": project_path, "projectId": null}),
++        json!({"cwd": project_path, "projectId": created.project.id}),
++        json!({"cwd": project_path, "searchTerm": "not-the-fixture-title"}),
++        json!({"cwd": project_path.join("src")}),
++    ] {
++        let listed: ThreadListResponse = app
++            .request(|request_id| ClientRequest::ThreadList {
++                request_id,
++                params: serde_json::from_value(params).expect("list params"),
++            })
++            .await?;
++        assert!(listed.data.is_empty());
++    }
++    let read: ThreadReadResponse = app
++        .request(|request_id| ClientRequest::ThreadRead {
++            request_id,
++            params: ThreadReadParams {
++                thread_id: id.clone(),
++                include_turns: false,
++            },
++        })
++        .await?;
++    assert_eq!(read.thread.cwd.as_path(), project_path.as_path());
++    let request = app
++        .send_thread_resume_request(ThreadResumeParams {
++            thread_id: id.clone(),
++            ..Default::default()
++        })
++        .await?;
++    let response: ThreadResumeResponse =
++        timeout(Duration::from_secs(20), app.read_response(request)).await??;
++    assert_eq!(response.cwd.as_path(), project_path.as_path());
++    assert_eq!(response.thread.cwd.as_path(), project_path.as_path());
++    assert_eq!(response.thread.id, id);
++    timeout(
++        Duration::from_secs(20),
++        app.start_turn_and_wait_for_completion(TurnStartParams {
++            thread_id: id,
++            input: vec![UserInput::Text {
++                text: "fixture".to_string(),
++                text_elements: Vec::new(),
++            }],
++            ..Default::default()
++        }),
++    )
++    .await??;
++    let requests = server.received_requests().await.expect("fixture requests");
++    assert!(requests.iter().any(|request| {
++        String::from_utf8_lossy(&request.body).contains("DEVBOX_CANONICAL_CONFIG_FIXTURE")
++    }));
++    let fresh: ThreadStartResponse = app
++        .request(|request_id| ClientRequest::ThreadStart {
++            request_id,
++            params: ThreadStartParams {
++                cwd: Some(project_path.to_string_lossy().to_string()),
++                ..Default::default()
++            },
++        })
++        .await?;
++    assert_eq!(fresh.thread.project_id, Some(created.project.id));
++    app.shutdown_gracefully().await?;
++    assert!(std::fs::read(&path)?.starts_with(original.as_bytes()));
++    Ok(())
++}
++
++#[tokio::test]
++async fn devbox_cold_resume_preserves_unnamed_permissions_and_explicit_overrides() -> Result<()> {
++    let server = create_mock_responses_server_repeating_assistant("Done").await;
++    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
++        for original_policy in [
++            codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
++            codex_protocol::protocol::SandboxPolicy::new_read_only_policy(),
++            codex_protocol::protocol::SandboxPolicy::new_workspace_write_policy(),
++        ] {
++            let home = TempDir::new()?;
++            let project = TempDir::new()?;
++            let project_path = std::fs::canonicalize(project.path())?;
++            MockResponsesConfig::new(&server.uri())
++                .with_model("gpt-5.4")
++                .with_root_config("default_permissions = \":workspace\"")
++                .write(home.path())?;
++            let registry = home.path().join("devbox-routes.json");
++            std::fs::write(
++                &registry,
++                serde_json::to_vec(&json!({"routes": [{
++                    "cwd": project_path, "environment_id": "remote"
++                }]}))?,
++            )?;
++            let registry_string = registry.to_string_lossy().to_string();
++            let original_sandbox = AppSandboxPolicy::from(original_policy);
++            let thread_id = {
++                let mut app = TestAppServer::builder()
++                    .with_codex_home(home.path())
++                    .without_managed_config()
++                    .with_exec_server_delay(Duration::ZERO)
++                    .with_env_overrides(&[("DEVD_CODEX_ROUTES_FILE", Some(&registry_string))])
++                    .build_initialized()
++                    .await?;
++                let started: ThreadStartResponse = app
++                    .request(|request_id| ClientRequest::ThreadStart {
++                        request_id,
++                        params: ThreadStartParams {
++                            cwd: Some(project_path.to_string_lossy().to_string()),
++                            history_mode: Some(history_mode),
++                            ..Default::default()
++                        },
++                    })
++                    .await?;
++                timeout(
++                    Duration::from_secs(20),
++                    app.start_turn_and_wait_for_completion(TurnStartParams {
++                        thread_id: started.thread.id.clone(),
++                        input: vec![UserInput::Text {
++                            text: "persist explicit devbox permissions".to_string(),
++                            text_elements: Vec::new(),
++                        }],
++                        approval_policy: Some(AskForApproval::Never),
++                        sandbox_policy: Some(original_sandbox.clone()),
++                        ..Default::default()
++                    }),
++                )
++                .await??;
++                app.shutdown_gracefully().await?;
++                started.thread.id
++            };
++            for override_selection in [None, Some("sandbox"), Some("profile"), Some("config")] {
++                let mut app = TestAppServer::builder()
++                    .with_codex_home(home.path())
++                    .without_managed_config()
++                    .with_exec_server_delay(Duration::ZERO)
++                    .with_env_overrides(&[("DEVD_CODEX_ROUTES_FILE", Some(&registry_string))])
++                    .build_initialized()
++                    .await?;
++                let mut params = ThreadResumeParams {
++                    thread_id: thread_id.clone(),
++                    ..Default::default()
++                };
++                match override_selection {
++                    None => {}
++                    Some("sandbox") => params.sandbox = Some(SandboxMode::ReadOnly),
++                    Some("profile") => params.permissions = Some(":read-only".to_string()),
++                    Some("config") => {
++                        params.config = Some(std::collections::HashMap::from([(
++                            "sandbox_mode".to_string(),
++                            json!("read-only"),
++                        )]));
++                    }
++                    Some(_) => unreachable!(),
++                }
++                let request = app.send_thread_resume_request(params).await?;
++                let response: ThreadResumeResponse =
++                    timeout(Duration::from_secs(20), app.read_response(request)).await??;
++                if override_selection.is_some() {
++                    assert!(matches!(
++                        response.sandbox,
++                        AppSandboxPolicy::ReadOnly { .. }
++                    ));
++                } else {
++                    assert_eq!(response.sandbox, original_sandbox);
++                }
++                assert_eq!(response.approval_policy, AskForApproval::Never);
++                assert_eq!(
++                    response.active_permission_profile,
++                    (override_selection == Some("profile"))
++                        .then(ActivePermissionProfile::read_only)
++                );
++                app.shutdown_gracefully().await?;
++            }
++        }
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn devbox_saved_permissions_do_not_cross_executors_or_override_daemon_flags() -> Result<()> {
++    let server = create_mock_responses_server_repeating_assistant("Done").await;
++    for (scenario, daemon_flags) in [
++        ("same-executor", Vec::new()),
++        ("different-executor", Vec::new()),
++        ("daemon-sandbox", vec!["-c", "sandbox_mode=\"read-only\""]),
++        (
++            "daemon-profile",
++            vec!["-c", "default_permissions=\":read-only\""],
++        ),
++    ] {
++        let home = TempDir::new()?;
++        let source = TempDir::new()?;
++        let destination = TempDir::new()?;
++        let source_path = std::fs::canonicalize(source.path())?;
++        let destination_path = std::fs::canonicalize(destination.path())?;
++        let subdir = source_path.join("src");
++        std::fs::create_dir(&subdir)?;
++        MockResponsesConfig::new(&server.uri())
++            .with_model("gpt-5.4")
++            .with_root_config("default_permissions = \":workspace\"")
++            .write(home.path())?;
++        let registry = home.path().join("devbox-routes.json");
++        std::fs::write(
++            &registry,
++            serde_json::to_vec(&json!({"routes": [{
++                "cwd": source_path, "environment_id": "remote"
++            }]}))?,
++        )?;
++        let registry_string = registry.to_string_lossy().to_string();
++        let thread_id = {
++            let mut app = TestAppServer::builder()
++                .with_codex_home(home.path())
++                .without_managed_config()
++                .with_exec_server_delay(Duration::ZERO)
++                .with_env_overrides(&[("DEVD_CODEX_ROUTES_FILE", Some(&registry_string))])
++                .build_initialized()
++                .await?;
++            let started: ThreadStartResponse = app
++                .request(|request_id| ClientRequest::ThreadStart {
++                    request_id,
++                    params: ThreadStartParams {
++                        cwd: Some(source_path.to_string_lossy().to_string()),
++                        history_mode: Some(ThreadHistoryMode::Paginated),
++                        ..Default::default()
++                    },
++                })
++                .await?;
++            timeout(
++                Duration::from_secs(20),
++                app.start_turn_and_wait_for_completion(TurnStartParams {
++                    thread_id: started.thread.id.clone(),
++                    input: vec![UserInput::Text {
++                        text: "persist explicit full access in the source executor".to_string(),
++                        text_elements: Vec::new(),
++                    }],
++                    approval_policy: Some(AskForApproval::Never),
++                    sandbox_policy: Some(AppSandboxPolicy::DangerFullAccess),
++                    ..Default::default()
++                }),
++            )
++            .await??;
++            app.shutdown_gracefully().await?;
++            started.thread.id
++        };
++        let effective_cwd = if scenario == "different-executor" {
++            // The fixture exposes one live executor at a time. On the second
++            // daemon it belongs to the destination, distinct from the saved source.
++            std::fs::write(
++                &registry,
++                serde_json::to_vec(&json!({"routes": [
++                    {"cwd": source_path, "environment_id": "source-remote"},
++                    {"cwd": destination_path, "environment_id": "remote"}
++                ]}))?,
++            )?;
++            destination_path
++        } else {
++            subdir
++        };
++        let mut app = TestAppServer::builder()
++            .with_codex_home(home.path())
++            .without_managed_config()
++            .with_exec_server_delay(Duration::ZERO)
++            .with_env_overrides(&[("DEVD_CODEX_ROUTES_FILE", Some(&registry_string))])
++            .with_args(&daemon_flags)
++            .build_initialized()
++            .await?;
++        let request = app
++            .send_thread_resume_request(ThreadResumeParams {
++                thread_id: thread_id.clone(),
++                cwd: Some(effective_cwd.to_string_lossy().to_string()),
++                ..Default::default()
++            })
++            .await?;
++        let response: ThreadResumeResponse =
++            timeout(Duration::from_secs(20), app.read_response(request)).await??;
++        let (sandbox, cwd) = (response.sandbox, response.cwd);
++        assert_eq!(cwd.as_path(), effective_cwd.as_path());
++        match scenario {
++            "same-executor" => assert_eq!(sandbox, AppSandboxPolicy::DangerFullAccess),
++            "different-executor" => {
++                assert!(matches!(sandbox, AppSandboxPolicy::WorkspaceWrite { .. }))
++            }
++            "daemon-sandbox" | "daemon-profile" => {
++                assert!(matches!(sandbox, AppSandboxPolicy::ReadOnly { .. }))
++            }
++            _ => unreachable!(),
++        }
++        app.shutdown_gracefully().await?;
++    }
++    Ok(())
++}
+diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
+index d248969..bb5e496 100644
+--- a/codex-rs/app-server/tests/suite/v2/mod.rs
++++ b/codex-rs/app-server/tests/suite/v2/mod.rs
+@@ -39,6 +39,8 @@ mod current_time;
+ mod cyber_access_program;
+ mod daemon_update_recovery;
+ mod daybreak_access;
++#[cfg(unix)]
++mod devbox_routes;
+ mod dynamic_tools;
+ mod environment_add;
+ mod environment_info;
+diff --git a/codex-rs/core/src/devbox_routes.rs b/codex-rs/core/src/devbox_routes.rs
+new file mode 100644
+index 0000000..2c33e7c
+--- /dev/null
++++ b/codex-rs/core/src/devbox_routes.rs
+@@ -0,0 +1,361 @@
++//! Opt-in host routing for a centrally managed fleet of devbox executors.
++
++use std::collections::HashMap;
++use std::path::Component;
++use std::path::Path;
++use std::path::PathBuf;
++
++use codex_config::McpServerConfig;
++use codex_config::McpServerEnvVar;
++use codex_config::McpServerTransportConfig;
++use codex_exec_server::EnvironmentManager;
++use codex_protocol::protocol::TurnEnvironmentSelection;
++use serde::Deserialize;
++
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::Result as CodexResult;
++
++const ROUTES_FILE_ENV: &str = "DEVD_CODEX_ROUTES_FILE";
++
++/// Resolve legacy persisted cwd before an app-server client loads project configuration.
++pub fn resolve_devbox_resume_cwd(
++    thread_id: &str,
++    cwd: Option<PathBuf>,
++) -> CodexResult<Option<PathBuf>> {
++    let Some(routes) = DevboxRoutes::load()? else {
++        return Ok(cwd);
++    };
++    Ok(cwd.map(|cwd| routes.legacy_cwd(thread_id, &cwd).unwrap_or(cwd)))
++}
++
++/// Whether saved and resumed authority belong to the same registered executor.
++/// Unconfigured, unmapped, cross-executor, and ambiguous legacy paths never opt in.
++pub fn is_registered_devbox_resume_cwd(
++    thread_id: &str,
++    saved_cwd: Option<&Path>,
++    effective_cwd: Option<&Path>,
++) -> CodexResult<bool> {
++    let Some(routes) = DevboxRoutes::load()? else {
++        return Ok(false);
++    };
++    Ok(routes.resume_keeps_executor(thread_id, saved_cwd, effective_cwd))
++}
++
++/// Resolve an exact project-root list filter without broadening subdirectory queries.
++pub fn resolve_devbox_list_project_id(cwds: &[PathBuf]) -> CodexResult<Option<String>> {
++    let Some(routes) = DevboxRoutes::load()? else {
++        return Ok(None);
++    };
++    Ok(routes.list_project_id(cwds).map(str::to_string))
++}
++
++/// Prepare executors only for explicit thread startup or an actual turn.
++/// Registry discovery, status, and MCP prewarming must never call this function.
++pub(crate) async fn prepare_devbox_environments(
++    selections: &[TurnEnvironmentSelection],
++) -> CodexResult<bool> {
++    let Some(routes) = DevboxRoutes::load()? else {
++        return Ok(false);
++    };
++    let Some(dispatcher) = std::env::var_os("DEVD_CODEX_EXEC_DISPATCH") else {
++        return Ok(false);
++    };
++    routes
++        .prepare_with_dispatch(Path::new(&dispatcher), selections)
++        .await?;
++    Ok(true)
++}
++
++#[derive(Deserialize)]
++pub(crate) struct DevboxRoutes {
++    routes: Vec<DevboxRoute>,
++}
++
++#[derive(Deserialize)]
++struct DevboxRoute {
++    cwd: PathBuf,
++    environment_id: String,
++    #[serde(default)]
++    project_id: Option<String>,
++    #[serde(default)]
++    thread_ids: Vec<String>,
++}
++
++impl DevboxRoutes {
++    fn resume_keeps_executor(
++        &self,
++        thread_id: &str,
++        saved_cwd: Option<&Path>,
++        effective_cwd: Option<&Path>,
++    ) -> bool {
++        let resolve = |cwd: Option<&Path>| {
++            let cwd = cwd?;
++            if !cwd.is_absolute()
++                || cwd
++                    .components()
++                    .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
++            {
++                return None;
++            }
++            let canonical_cwd = self.legacy_cwd(thread_id, cwd);
++            if cwd.starts_with("/workspace") && canonical_cwd.is_none() {
++                return None;
++            }
++            self.environment_id(canonical_cwd.as_deref().unwrap_or(cwd))
++                .ok()
++        };
++        matches!((resolve(saved_cwd), resolve(effective_cwd)), (Some(saved), Some(effective)) if saved == effective)
++    }
++
++    fn list_project_id(&self, cwds: &[PathBuf]) -> Option<&str> {
++        let [cwd] = cwds else {
++            return None;
++        };
++        self.routes
++            .iter()
++            .find(|route| &route.cwd == cwd)
++            .and_then(|route| route.project_id.as_deref())
++    }
++
++    async fn prepare_with_dispatch(
++        &self,
++        dispatcher: &Path,
++        selections: &[TurnEnvironmentSelection],
++    ) -> CodexResult<()> {
++        if !dispatcher.is_absolute() || !dispatcher.is_file() {
++            return Err(CodexErr::InvalidRequest(
++                "DEVD_CODEX_EXEC_DISPATCH must name an existing absolute executable".to_string(),
++            ));
++        }
++        let mut prepared = std::collections::HashSet::new();
++        for selection in selections {
++            let cwd = selection.cwd.to_abs_path().map_err(|error| {
++                CodexErr::InvalidRequest(format!("invalid devbox working directory: {error}"))
++            })?;
++            let environment_id = self.environment_id(cwd.as_path())?;
++            if selection.environment_id != environment_id {
++                return Err(CodexErr::InvalidRequest(
++                    "devbox executor does not match its project".to_string(),
++                ));
++            }
++            if !prepared.insert(environment_id) {
++                continue;
++            }
++            let output = tokio::time::timeout(
++                std::time::Duration::from_secs(120),
++                tokio::process::Command::new(dispatcher)
++                    .args(["--prepare", "--environment-id", environment_id])
++                    .stdin(std::process::Stdio::null())
++                    .stdout(std::process::Stdio::null())
++                    .stderr(std::process::Stdio::piped())
++                    .kill_on_drop(true)
++                    .output(),
++            )
++            .await
++            .map_err(|_| {
++                CodexErr::InvalidRequest(format!(
++                    "preparing devbox executor `{environment_id}` timed out after 120 seconds"
++                ))
++            })?
++            .map_err(|error| {
++                CodexErr::InvalidRequest(format!(
++                    "cannot prepare devbox executor `{environment_id}`: {error}"
++                ))
++            })?;
++            if !output.status.success() {
++                let error = String::from_utf8_lossy(&output.stderr)
++                    .chars()
++                    .take(4096)
++                    .collect::<String>();
++                return Err(CodexErr::InvalidRequest(format!(
++                    "preparing devbox executor `{environment_id}` failed ({}): {}",
++                    output.status,
++                    error.trim()
++                )));
++            }
++        }
++        Ok(())
++    }
++
++    pub(crate) fn load() -> CodexResult<Option<Self>> {
++        let Some(path) = std::env::var_os(ROUTES_FILE_ENV) else {
++            return Ok(None);
++        };
++        let bytes = std::fs::read(path).map_err(|error| {
++            CodexErr::InvalidRequest(format!("cannot read devbox route registry: {error}"))
++        })?;
++        let routes: Self = serde_json::from_slice(&bytes).map_err(|error| {
++            CodexErr::InvalidRequest(format!("invalid devbox route registry: {error}"))
++        })?;
++        routes.validate()?;
++        Ok(Some(routes))
++    }
++
++    fn validate(&self) -> CodexResult<()> {
++        let mut paths = std::collections::HashSet::new();
++        let mut thread_ids = std::collections::HashSet::new();
++        for route in &self.routes {
++            if !route.cwd.is_absolute()
++                || route.cwd.parent().is_none()
++                || route
++                    .cwd
++                    .components()
++                    .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
++                || route.environment_id.is_empty()
++                || route.environment_id == "local"
++                || route.project_id.as_ref().is_some_and(String::is_empty)
++                || !paths.insert(&route.cwd)
++                || route
++                    .thread_ids
++                    .iter()
++                    .any(|id| id.is_empty() || !thread_ids.insert(id))
++            {
++                return Err(CodexErr::InvalidRequest(
++                    "devbox routes require unique absolute project paths and non-local environment ids"
++                        .to_string(),
++                ));
++            }
++        }
++        Ok(())
++    }
++
++    /// Restore a legacy container path using an authoritative history identity.
++    pub(crate) fn legacy_cwd(&self, thread_id: &str, cwd: &Path) -> Option<PathBuf> {
++        let relative = cwd.strip_prefix("/workspace").ok()?;
++        self.routes
++            .iter()
++            .find(|route| route.thread_ids.iter().any(|id| id == thread_id))
++            .map(|route| route.cwd.join(relative))
++    }
++
++    pub(crate) fn environment_id(&self, cwd: &Path) -> CodexResult<&str> {
++        self.routes
++            .iter()
++            .filter(|route| cwd.starts_with(&route.cwd))
++            .max_by_key(|route| route.cwd.components().count())
++            .map(|route| route.environment_id.as_str())
++            .ok_or_else(|| {
++                CodexErr::InvalidRequest(format!(
++                    "no devbox executor is registered for {}; select its canonical project directory",
++                    cwd.display()
++                ))
++            })
++    }
++
++    pub(crate) fn validate_selections(
++        &self,
++        manager: &EnvironmentManager,
++        selections: &[TurnEnvironmentSelection],
++    ) -> CodexResult<()> {
++        let dispatcher = std::env::var_os("DEVD_CODEX_EXEC_DISPATCH").map(PathBuf::from);
++        self.validate_selections_with_dispatch(manager, selections, dispatcher.as_deref())
++    }
++
++    fn validate_selections_with_dispatch(
++        &self,
++        manager: &EnvironmentManager,
++        selections: &[TurnEnvironmentSelection],
++        dispatcher: Option<&Path>,
++    ) -> CodexResult<()> {
++        if selections.is_empty() {
++            return Err(CodexErr::InvalidRequest(
++                "a devbox thread requires a registered executor".to_string(),
++            ));
++        }
++        for selection in selections {
++            let cwd = selection.cwd.to_abs_path().map_err(|error| {
++                CodexErr::InvalidRequest(format!("invalid devbox working directory: {error}"))
++            })?;
++            let expected = self.environment_id(cwd.as_path())?;
++            if selection.environment_id == expected && manager.get_environment(expected).is_none() {
++                let dispatcher = dispatcher.filter(|path| path.is_absolute() && path.is_file())
++                    .ok_or_else(|| CodexErr::InvalidRequest(format!(
++                        "devbox executor `{expected}` is not registered and no absolute DEVD_CODEX_EXEC_DISPATCH is configured"
++                    )))?;
++                manager
++                    .materialize_stdio_environment(
++                        expected.to_string(),
++                        dispatcher.to_path_buf(),
++                        vec!["--environment-id".to_string(), expected.to_string()],
++                    )
++                    .map_err(|error| {
++                        CodexErr::InvalidRequest(format!(
++                            "cannot register devbox executor: {error}"
++                        ))
++                    })?;
++            }
++            if selection.environment_id != expected
++                || manager
++                    .get_environment(expected)
++                    .is_none_or(|environment| !environment.is_remote())
++            {
++                return Err(CodexErr::InvalidRequest(format!(
++                    "devbox executor `{expected}` is unavailable or does not match the selected environment"
++                )));
++            }
++            for root in &selection.workspace_roots {
++                let root = root.to_abs_path().map_err(|error| {
++                    CodexErr::InvalidRequest(format!("invalid devbox workspace root: {error}"))
++                })?;
++                if self.environment_id(root.as_path())? != expected {
++                    return Err(CodexErr::InvalidRequest(
++                        "devbox workspace roots must belong to the selected executor".to_string(),
++                    ));
++                }
++            }
++        }
++        Ok(())
++    }
++}
++
++/// Project configured stdio servers into the thread's executor without copying host secrets.
++pub(crate) fn project_mcp_servers(
++    servers: &mut HashMap<String, McpServerConfig>,
++    selections: &[TurnEnvironmentSelection],
++) {
++    if std::env::var_os(ROUTES_FILE_ENV).is_none() {
++        return;
++    }
++    project_selected_mcp_servers(servers, selections);
++}
++
++fn project_selected_mcp_servers(
++    servers: &mut HashMap<String, McpServerConfig>,
++    selections: &[TurnEnvironmentSelection],
++) {
++    let primary = selections.first();
++    for server in servers.values_mut() {
++        if !server.is_local_environment() {
++            continue;
++        }
++        let McpServerTransportConfig::Stdio { env_vars, cwd, .. } = &mut server.transport else {
++            continue;
++        };
++        let Some(primary) = primary.filter(|selection| selection.environment_id != "local") else {
++            server.enabled = false;
++            continue;
++        };
++        server.environment_id = primary.environment_id.clone();
++        if cwd.is_none()
++            || cwd
++                .as_ref()
++                .is_some_and(|path| path.as_str() == "/workspace")
++        {
++            *cwd = Some(codex_utils_path_uri::LegacyAppPathString::from_string(
++                primary.cwd.inferred_native_path_string(),
++            ));
++        }
++        for variable in env_vars {
++            if variable.source().is_none() {
++                *variable = McpServerEnvVar::Config {
++                    name: variable.name().to_string(),
++                    source: Some("remote".to_string()),
++                };
++            }
++        }
++    }
++}
++
++#[cfg(all(test, unix))]
++#[path = "devbox_routes_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/devbox_routes_tests.rs b/codex-rs/core/src/devbox_routes_tests.rs
+new file mode 100644
+index 0000000..6402e3a
+--- /dev/null
++++ b/codex-rs/core/src/devbox_routes_tests.rs
+@@ -0,0 +1,276 @@
++use super::*;
++use codex_exec_server_test_support::environment_manager_without_environments;
++use codex_protocol::protocol::EnvironmentConfigState;
++use codex_utils_path_uri::PathUri;
++use pretty_assertions::assert_eq;
++
++fn registry() -> DevboxRoutes {
++    serde_json::from_value(serde_json::json!({"routes":[
++        {"cwd":"/srv/dev/one", "environment_id":"devbox_one", "project_id":"project_one", "thread_ids":["legacy-one", "child-one"]},
++        {"cwd":"/srv/dev/one/nested", "environment_id":"devbox_nested"},
++        {"cwd":"/srv/dev/two", "environment_id":"devbox_two"}
++    ]})).expect("routes")
++}
++
++#[test]
++fn saved_permissions_stay_with_the_same_registered_executor() {
++    let routes = registry();
++    for (saved, effective, expected) in [
++        ("/srv/dev/one", "/srv/dev/one/src", true),
++        ("/srv/dev/one/src", "/srv/dev/one", true),
++        ("/workspace", "/srv/dev/one/src", true),
++        ("/srv/dev/one", "/workspace/src", true),
++        ("/srv/dev/one", "/srv/dev/two", false),
++        ("/srv/dev/one", "/srv/dev/one/nested", false),
++        ("/srv/dev/one", "/outside", false),
++        ("/outside", "/srv/dev/one", false),
++        ("/srv/dev/one", "src", false),
++        ("/srv/dev/one", "/srv/dev/one/../two", false),
++    ] {
++        assert_eq!(
++            routes.resume_keeps_executor(
++                "legacy-one",
++                Some(Path::new(saved)),
++                Some(Path::new(effective)),
++            ),
++            expected
++        );
++    }
++    assert_eq!(
++        routes.resume_keeps_executor(
++            "unmapped",
++            Some(Path::new("/workspace")),
++            Some(Path::new("/srv/dev/one")),
++        ),
++        false
++    );
++    assert_eq!(
++        routes.resume_keeps_executor("legacy-one", None, Some(Path::new("/srv/dev/one"))),
++        false
++    );
++}
++
++#[test]
++fn list_project_mapping_requires_one_exact_registered_root() {
++    let routes = registry();
++    assert_eq!(
++        routes.list_project_id(&[PathBuf::from("/srv/dev/one")]),
++        Some("project_one")
++    );
++    for cwds in [
++        vec![],
++        vec![PathBuf::from("/srv/dev/one/src")],
++        vec![PathBuf::from("/workspace")],
++        vec![PathBuf::from("/srv/dev/two")],
++        vec![PathBuf::from("/srv/dev/one"), PathBuf::from("/srv/dev/two")],
++    ] {
++        assert_eq!(routes.list_project_id(&cwds), None);
++    }
++}
++
++#[test]
++fn legacy_resume_identity_restores_only_its_registered_project() {
++    let routes = registry();
++    for id in ["legacy-one", "child-one"] {
++        assert_eq!(
++            routes.legacy_cwd(id, Path::new("/workspace/src")),
++            Some(PathBuf::from("/srv/dev/one/src"))
++        );
++    }
++    assert_eq!(routes.legacy_cwd("unknown", Path::new("/workspace")), None);
++    assert_eq!(
++        routes.legacy_cwd("legacy-one", Path::new("/srv/dev/two")),
++        None
++    );
++}
++
++fn selection() -> TurnEnvironmentSelection {
++    TurnEnvironmentSelection {
++        environment_id: "devbox_one".to_string(),
++        cwd: PathUri::parse("file:///srv/dev/one").expect("cwd"),
++        workspace_roots: Vec::new(),
++        config: EnvironmentConfigState::FromThread,
++    }
++}
++
++#[test]
++fn canonical_start_and_resumed_subdirectory_select_the_same_executor() {
++    let routes = registry();
++    routes.validate().expect("valid routes");
++    assert_eq!(
++        ["/srv/dev/one", "/srv/dev/one/src"]
++            .map(|cwd| { routes.environment_id(Path::new(cwd)).expect("mapped cwd") }),
++        ["devbox_one", "devbox_one"]
++    );
++    assert_eq!(
++        routes
++            .environment_id(Path::new("/srv/dev/one/nested/src"))
++            .expect("nested"),
++        "devbox_nested"
++    );
++    assert_eq!(
++        routes
++            .environment_id(Path::new("/srv/dev/two"))
++            .expect("second"),
++        "devbox_two"
++    );
++}
++
++#[test]
++fn unmapped_and_legacy_paths_never_select_a_host_executor() {
++    let routes = registry();
++    for cwd in ["/workspace", "/srv/dev/one-other", "/tmp"] {
++        assert!(routes.environment_id(Path::new(cwd)).is_err(), "{cwd}");
++    }
++    assert!(
++        routes
++            .validate_selections(&environment_manager_without_environments(), &[selection()])
++            .is_err()
++    );
++    assert!(
++        routes
++            .validate_selections(&environment_manager_without_environments(), &[])
++            .is_err()
++    );
++}
++
++#[test]
++fn invalid_routes_are_rejected() {
++    for value in [
++        serde_json::json!({"routes":[{"cwd":"/workspace", "environment_id":"local"}]}),
++        serde_json::json!({"routes":[{"cwd":"relative", "environment_id":"devbox"}]}),
++        serde_json::json!({"routes":[{"cwd":"/srv/../workspace", "environment_id":"devbox"}]}),
++        serde_json::json!({"routes":[{"cwd":"/workspace", "environment_id":"a"},{"cwd":"/workspace", "environment_id":"b"}]}),
++    ] {
++        assert!(
++            serde_json::from_value::<DevboxRoutes>(value)
++                .expect("parse")
++                .validate()
++                .is_err()
++        );
++    }
++}
++
++#[test]
++fn stdio_projection_preserves_commands_explicit_values_and_remote_env_sources() {
++    let mut servers: HashMap<String, McpServerConfig> = toml::from_str(
++        r#"
++[stdio]
++command = "/opt/mcp/run"
++args = ["--flag"]
++cwd = "/workspace"
++env = { EXPLICIT = "fixture" }
++env_vars = ["CONTAINER_SECRET", { name = "HOST_OPT_IN", source = "local" }]
++[http]
++url = "https://example.invalid/mcp"
++[other]
++command = "other"
++environment_id = "devbox_two"
++"#,
++    )
++    .expect("MCP config");
++    let mut expected = servers.clone();
++    let server = expected.get_mut("stdio").expect("stdio");
++    server.environment_id = "devbox_one".to_string();
++    let McpServerTransportConfig::Stdio { cwd, env_vars, .. } = &mut server.transport else {
++        panic!("stdio");
++    };
++    *cwd = Some(codex_utils_path_uri::LegacyAppPathString::from_string(
++        "/srv/dev/one",
++    ));
++    env_vars[0] = McpServerEnvVar::Config {
++        name: "CONTAINER_SECRET".to_string(),
++        source: Some("remote".to_string()),
++    };
++    project_selected_mcp_servers(&mut servers, &[selection()]);
++    assert_eq!(servers, expected);
++}
++
++#[test]
++fn missing_selected_executor_disables_local_stdio_mcp() {
++    let mut servers: HashMap<String, McpServerConfig> =
++        toml::from_str("[stdio]\ncommand = 'echo'").expect("MCP");
++    project_selected_mcp_servers(&mut servers, &[]);
++    assert!(!servers["stdio"].enabled);
++}
++
++#[tokio::test]
++async fn a_new_route_materializes_one_lazy_executor_without_restarting_existing_connections() {
++    let routes = registry();
++    let manager = environment_manager_without_environments();
++    let directory = tempfile::tempdir().expect("dispatcher directory");
++    let dispatcher = directory.path().join("dispatch");
++    std::fs::write(&dispatcher, "fixture must not run during registration").expect("dispatcher");
++    routes
++        .validate_selections_with_dispatch(&manager, &[selection()], Some(&dispatcher))
++        .expect("materialize");
++    let first = manager.get_environment("devbox_one").expect("executor");
++    assert_eq!(
++        first.status().await,
++        codex_exec_server::EnvironmentObservedStatus::Pending
++    );
++    routes
++        .validate_selections_with_dispatch(&manager, &[selection()], /*dispatcher*/ None)
++        .expect("reuse");
++    let second = manager
++        .get_environment("devbox_one")
++        .expect("same executor");
++    assert!(std::sync::Arc::ptr_eq(&first, &second));
++    let mut unknown = selection();
++    unknown.environment_id = "unrelated".to_string();
++    assert!(
++        routes
++            .validate_selections_with_dispatch(&manager, &[unknown], Some(&dispatcher))
++            .is_err()
++    );
++    assert!(manager.get_environment("unrelated").is_none());
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn preparation_is_explicit_deduplicated_and_fails_closed() {
++    use std::os::unix::fs::PermissionsExt;
++    let routes = registry();
++    let directory = tempfile::tempdir().expect("fixture directory");
++    let dispatcher = directory.path().join("dispatch");
++    let calls = directory.path().join("calls");
++    std::fs::write(
++        &dispatcher,
++        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/calls\"\nexit 0\n",
++    )
++    .expect("dispatcher");
++    std::fs::set_permissions(&dispatcher, std::fs::Permissions::from_mode(0o700))
++        .expect("executable");
++    let manager = environment_manager_without_environments();
++    routes
++        .validate_selections_with_dispatch(&manager, &[selection()], Some(&dispatcher))
++        .expect("registration");
++    assert_eq!(
++        manager
++            .get_environment("devbox_one")
++            .expect("executor")
++            .status()
++            .await,
++        codex_exec_server::EnvironmentObservedStatus::Pending
++    );
++    assert!(!calls.exists());
++    routes
++        .prepare_with_dispatch(&dispatcher, &[selection(), selection()])
++        .await
++        .expect("prepare");
++    assert_eq!(
++        std::fs::read_to_string(&calls).expect("calls"),
++        "--prepare --environment-id devbox_one\n"
++    );
++    std::fs::write(
++        &dispatcher,
++        "#!/bin/sh\nprintf 'fixture unavailable' >&2\nexit 7\n",
++    )
++    .expect("failure fixture");
++    let error = routes
++        .prepare_with_dispatch(&dispatcher, &[selection()])
++        .await
++        .expect_err("prepare failure");
++    assert!(error.to_string().contains("fixture unavailable"));
++    assert!(error.to_string().contains("7"));
++}
+diff --git a/codex-rs/core/src/environment_selection.rs b/codex-rs/core/src/environment_selection.rs
+index a1b5098..45d4492 100644
+--- a/codex-rs/core/src/environment_selection.rs
++++ b/codex-rs/core/src/environment_selection.rs
+@@ -125,9 +125,13 @@ pub(crate) fn default_thread_environment_selections(
+     environment_manager: &EnvironmentManager,
+     cwd: &AbsolutePathBuf,
+     workspace_roots: &[AbsolutePathBuf],
+-) -> Vec<TurnEnvironmentSelection> {
+-    environment_manager
+-        .default_environment_ids()
++) -> codex_protocol::error::Result<Vec<TurnEnvironmentSelection>> {
++    let routes = crate::devbox_routes::DevboxRoutes::load()?;
++    let environment_ids = match routes.as_ref() {
++        Some(routes) => vec![routes.environment_id(cwd.as_path())?.to_string()],
++        None => environment_manager.default_environment_ids(),
++    };
++    let selections = environment_ids
+         .into_iter()
+         .map(|environment_id| TurnEnvironmentSelection {
+             environment_id,
+@@ -135,7 +139,11 @@ pub(crate) fn default_thread_environment_selections(
+             workspace_roots: workspace_roots.iter().map(PathUri::from_abs_path).collect(),
+             config: EnvironmentConfigState::FromThread,
+         })
+-        .collect()
++        .collect::<Vec<_>>();
++    if let Some(routes) = routes {
++        routes.validate_selections(environment_manager, &selections)?;
++    }
++    Ok(selections)
+ }
+ 
+ /// Checks that environment IDs are registered and unique and that working directories are not too long.
+@@ -143,6 +151,9 @@ pub fn validate_environment_ids_and_cwds(
+     environment_manager: &EnvironmentManager,
+     environments: &[TurnEnvironmentSelection],
+ ) -> CodexResult<()> {
++    if let Some(routes) = crate::devbox_routes::DevboxRoutes::load()? {
++        routes.validate_selections(environment_manager, environments)?;
++    }
+     let mut environment_ids = HashSet::with_capacity(environments.len());
+     for environment in environments {
+         if environment.cwd.inferred_native_path_string().len() > MAX_TURN_ENVIRONMENT_CWD_BYTES {
+@@ -1419,7 +1430,8 @@ mod tests {
+         .await;
+ 
+         assert_eq!(
+-            default_thread_environment_selections(&manager, &cwd, std::slice::from_ref(&cwd)),
++            default_thread_environment_selections(&manager, &cwd, std::slice::from_ref(&cwd))
++                .expect("default selections"),
+             vec![TurnEnvironmentSelection {
+                 environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+                 cwd: cwd_uri.clone(),
+@@ -1452,7 +1464,8 @@ url = "ws://127.0.0.1:8765"
+         .expect("environment manager");
+ 
+         assert_eq!(
+-            default_thread_environment_selections(&manager, &cwd, std::slice::from_ref(&cwd)),
++            default_thread_environment_selections(&manager, &cwd, std::slice::from_ref(&cwd))
++                .expect("default selections"),
+             vec![
+                 TurnEnvironmentSelection {
+                     environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+@@ -1476,7 +1489,8 @@ url = "ws://127.0.0.1:8765"
+         let manager = environment_manager_without_environments();
+ 
+         assert_eq!(
+-            default_thread_environment_selections(&manager, &cwd, std::slice::from_ref(&cwd)),
++            default_thread_environment_selections(&manager, &cwd, std::slice::from_ref(&cwd))
++                .expect("default selections"),
+             Vec::<TurnEnvironmentSelection>::new()
+         );
+     }
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 2595ce5..06f949b 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -84,7 +84,11 @@ pub mod context;
+ mod context_manager;
+ mod current_time;
+ mod cyber_access_program;
++mod devbox_routes;
+ mod elicitation;
++pub use devbox_routes::is_registered_devbox_resume_cwd;
++pub use devbox_routes::resolve_devbox_list_project_id;
++pub use devbox_routes::resolve_devbox_resume_cwd;
+ mod environment_selection;
+ pub mod exec;
+ pub mod exec_env;
+diff --git a/codex-rs/core/src/mcp.rs b/codex-rs/core/src/mcp.rs
+index 9b92194..4a630ad 100644
+--- a/codex-rs/core/src/mcp.rs
++++ b/codex-rs/core/src/mcp.rs
+@@ -395,6 +395,13 @@ impl McpManager {
+             );
+         }
+         mcp_config.mcp_server_catalog = catalog;
++        if let McpEnvironmentScope::Selected(selections) = environment_scope {
++            let mut servers = mcp_config.mcp_server_catalog.configured_servers();
++            crate::devbox_routes::project_mcp_servers(&mut servers, selections);
++            mcp_config.mcp_server_catalog = mcp_config
++                .mcp_server_catalog
++                .with_materialized_servers(servers);
++        }
+         mcp_config.connector_snapshot = connector_snapshot;
+         McpRuntimeProjection {
+             config: mcp_config,
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 5b335c2..8d8ada4 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -168,6 +168,12 @@ pub(crate) async fn run_turn(
+     prewarmed_client_session: Option<ModelClientSession>,
+     cancellation_token: CancellationToken,
+ ) -> CodexResult<Option<String>> {
++    if crate::devbox_routes::prepare_devbox_environments(&turn_context.initial_environments.all_selections())
++        .or_cancel(&cancellation_token)
++        .await??
++    {
++        sess.mark_mcp_runtime_dirty();
++    }
+     if crate::guardian::is_basic_session_source(&turn_context.session_source) {
+         crate::guardian::check_pending_guardian_input(&sess, &turn_context).await?;
+     }
+diff --git a/codex-rs/core/src/tasks/user_shell.rs b/codex-rs/core/src/tasks/user_shell.rs
+index e802122..2d1e24d 100644
+--- a/codex-rs/core/src/tasks/user_shell.rs
++++ b/codex-rs/core/src/tasks/user_shell.rs
+@@ -125,6 +125,16 @@ pub(crate) async fn execute_user_shell_command(
+         session.emit_turn_started(&turn_context).await;
+     }
+ 
++    if std::env::var_os("DEVD_CODEX_ROUTES_FILE").is_some() {
++        send_user_shell_error(
++            &session,
++            turn_context.as_ref(),
++            "direct shell commands are unavailable for devbox Remote; ask the agent to run the command in its executor",
++        )
++        .await;
++        return;
++    }
++
+     let Some((turn_environment, environment_shell)) = turn_context
+         .initial_environments
+         .local()
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+index ba195d8..ff3f2c9 100644
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -870,7 +870,7 @@ impl ThreadManager {
+         &self,
+         cwd: &AbsolutePathBuf,
+         workspace_roots: &[AbsolutePathBuf],
+-    ) -> Vec<TurnEnvironmentSelection> {
++    ) -> CodexResult<Vec<TurnEnvironmentSelection>> {
+         default_thread_environment_selections(
+             self.state.environment_manager.as_ref(),
+             cwd,
+@@ -2087,23 +2087,48 @@ impl ThreadManagerState {
+                 }
+             });
+         thread_extension_init.insert(isolation);
+-        let environments = environments
+-            .or_else(|| {
+-                let SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. }) = &session_source
+-                else {
+-                    return None;
+-                };
+-                inherited_environments
+-                    .as_ref()
+-                    .map(TurnEnvironmentSnapshot::inheritable_selections)
+-            })
+-            .unwrap_or_else(|| {
+-                default_thread_environment_selections(
+-                    self.environment_manager.as_ref(),
+-                    &config.cwd,
+-                    &config.workspace_roots,
+-                )
+-            });
++        if let Some(routes) = crate::devbox_routes::DevboxRoutes::load()? {
++            let history_id = match &initial_history {
++                InitialHistory::Resumed(resumed) => Some(resumed.conversation_id),
++                InitialHistory::Forked(_) => initial_history.forked_from_id(),
++                InitialHistory::New | InitialHistory::Cleared => None,
++            };
++            if let Some(history_id) = history_id {
++                let history_id = history_id.to_string();
++                if let Some(cwd) = routes.legacy_cwd(&history_id, config.cwd.as_path()) {
++                    config.cwd = AbsolutePathBuf::try_from(cwd).map_err(|error| {
++                        CodexErr::InvalidRequest(format!("invalid devbox project path: {error}"))
++                    })?;
++                    for root in &mut config.workspace_roots {
++                        if let Some(mapped) = routes.legacy_cwd(&history_id, root.as_path()) {
++                            *root = AbsolutePathBuf::try_from(mapped).map_err(|error| {
++                                CodexErr::InvalidRequest(format!(
++                                    "invalid devbox workspace root: {error}"
++                                ))
++                            })?;
++                        }
++                    }
++                }
++            }
++        }
++        let environments = match environments.or_else(|| {
++            let SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. }) = &session_source else {
++                return None;
++            };
++            inherited_environments
++                .as_ref()
++                .map(TurnEnvironmentSnapshot::inheritable_selections)
++        }) {
++            Some(environments) => environments,
++            None => default_thread_environment_selections(
++                self.environment_manager.as_ref(),
++                &config.cwd,
++                &config.workspace_roots,
++            )?,
++        };
++        if let Some(routes) = crate::devbox_routes::DevboxRoutes::load()? {
++            routes.validate_selections(self.environment_manager.as_ref(), &environments)?;
++        }
+         let is_resumed_thread = matches!(&initial_history, InitialHistory::Resumed(_));
+         if reserved_thread_id.is_some() && matches!(&initial_history, InitialHistory::Resumed(_)) {
+             return Err(CodexErr::InvalidRequest(
+@@ -2145,6 +2170,7 @@ impl ThreadManagerState {
+                 threads.remove(&resumed.conversation_id);
+             }
+         }
++        crate::devbox_routes::prepare_devbox_environments(&environments).await?;
+         let agent_control = match (&self.agent_control_factory, agent_control) {
+             (Some(factory), AgentControlInit::Local(local)) => {
+                 let thread_id = match &initial_history {
+diff --git a/codex-rs/exec-server/src/client.rs b/codex-rs/exec-server/src/client.rs
+index 538bb21..ff90df9 100644
+--- a/codex-rs/exec-server/src/client.rs
++++ b/codex-rs/exec-server/src/client.rs
+@@ -620,12 +620,15 @@ impl LazyRemoteExecServerClient {
+     }
+ 
+     fn can_reconnect(&self) -> bool {
++        // Stdio gets a fresh process on the next operation after disconnect; it deliberately
++        // has no inner session-recovery strategy that could restart an idle stopped executor.
+         matches!(
+             self.transport_params,
+             Some(
+                 ExecServerTransportParams::Deferred(_)
+                     | ExecServerTransportParams::WebSocketUrl { .. }
+                     | ExecServerTransportParams::NoiseRendezvous { .. }
++                    | ExecServerTransportParams::StdioCommand { .. }
+             )
+         )
+     }
+diff --git a/codex-rs/exec-server/src/environment.rs b/codex-rs/exec-server/src/environment.rs
+index 31a35e9..e6bcaca 100644
+--- a/codex-rs/exec-server/src/environment.rs
++++ b/codex-rs/exec-server/src/environment.rs
+@@ -500,6 +500,39 @@ impl EnvironmentManager {
+         self.insert_environment(environment_id, environment)
+     }
+ 
++    /// Materialize a lazy stdio executor, preserving any existing environment and connection.
++    /// Registration does not spawn the command; its first operation does.
++    pub fn materialize_stdio_environment(
++        &self,
++        environment_id: String,
++        program: std::path::PathBuf,
++        args: Vec<String>,
++    ) -> Result<Arc<Environment>, ExecServerError> {
++        validate_environment_id(&environment_id)?;
++        let mut environments = self
++            .environments
++            .write()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if let Some(environment) = environments.get(&environment_id) {
++            return Ok(Arc::clone(environment));
++        }
++        let environment = Arc::new(Environment::remote_with_transport(
++            ExecServerTransportParams::StdioCommand {
++                command: crate::client_api::StdioExecServerCommand {
++                    program: program.to_string_lossy().into_owned(),
++                    args,
++                    env: HashMap::new(),
++                    cwd: None,
++                },
++                initialize_timeout: std::time::Duration::from_secs(120),
++            },
++            self.local_runtime_paths.clone(),
++            self.http_client_factory.clone(),
++        ));
++        environments.insert(environment_id, Arc::clone(&environment));
++        Ok(environment)
++    }
++
+     /// Returns the stable environment for an ID, creating it as pending when absent.
+     pub fn materialize_pending_noise_environment(
+         &self,
+diff --git a/codex-rs/exec-server/tests/devbox_stdio_reconnect.rs b/codex-rs/exec-server/tests/devbox_stdio_reconnect.rs
+new file mode 100644
+index 0000000..d7da61e
+--- /dev/null
++++ b/codex-rs/exec-server/tests/devbox_stdio_reconnect.rs
+@@ -0,0 +1,84 @@
++#![cfg(unix)]
++
++mod common;
++
++use std::time::Duration;
++
++use codex_exec_server::EnvironmentManager;
++use codex_exec_server::EnvironmentObservedStatus;
++use codex_http_client::HttpClientFactory;
++use codex_http_client::OutboundProxyPolicy;
++use pretty_assertions::assert_eq;
++use tokio::time::sleep;
++use tokio::time::timeout;
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn stopped_stdio_executor_restarts_only_on_a_new_operation() -> anyhow::Result<()> {
++    let directory = tempfile::tempdir()?;
++    let script = directory.path().join("executor.sh");
++    let starts = directory.path().join("starts");
++    let pid = directory.path().join("pid");
++    let helpers = common::exec_server::test_codex_helper_paths()?;
++    std::fs::write(
++        &script,
++        "#!/bin/sh\nprintf x >> \"$2\"\nprintf '%s' \"$$\" > \"$3\"\nexec \"$1\" exec-server --listen stdio\n",
++    )?;
++    let args = [&script, &helpers.codex_exe, &starts, &pid];
++    let config = format!(
++        "default = \"devbox\"\ninclude_local = false\n[[environments]]\nid = \"devbox\"\nprogram = \"/bin/sh\"\nargs = {}\ninitialize_timeout_sec = 5\n[environments.env]\nCODEX_HOME = {}\n",
++        serde_json::to_string(&args)?,
++        serde_json::to_string(directory.path())?,
++    );
++    std::fs::write(directory.path().join("environments.toml"), config)?;
++    let manager = EnvironmentManager::from_codex_home(
++        directory.path(),
++        /*local_runtime_paths*/ None,
++        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
++    )
++    .await?;
++    let environment = manager
++        .get_environment("devbox")
++        .expect("registered executor");
++    assert_eq!(
++        environment.status().await,
++        EnvironmentObservedStatus::Pending
++    );
++    assert!(!starts.exists());
++
++    let first = timeout(Duration::from_secs(10), environment.info()).await??;
++    assert_eq!(std::fs::read(&starts)?, b"x");
++    let process_id: i32 = std::fs::read_to_string(&pid)?.parse()?;
++    // The PID belongs to the dedicated fixture process started above.
++    assert!(
++        std::process::Command::new("kill")
++            .args(["-TERM", &process_id.to_string()])
++            .status()?
++            .success()
++    );
++    timeout(Duration::from_secs(5), async {
++        loop {
++            if matches!(
++                environment.status().await,
++                EnvironmentObservedStatus::Disconnected { .. }
++            ) {
++                break;
++            }
++            sleep(Duration::from_millis(10)).await;
++        }
++    })
++    .await?;
++    for _ in 0..3 {
++        assert!(matches!(
++            environment.status().await,
++            EnvironmentObservedStatus::Disconnected { .. }
++        ));
++        sleep(Duration::from_millis(25)).await;
++    }
++    assert_eq!(std::fs::read(&starts)?, b"x");
++
++    let (second, concurrent) = tokio::join!(environment.info(), environment.info());
++    assert_eq!(second?, first);
++    assert_eq!(concurrent?, first);
++    assert_eq!(std::fs::read(&starts)?, b"xx");
++    Ok(())
++}
+diff --git a/codex-rs/hooks/src/engine/command_runner.rs b/codex-rs/hooks/src/engine/command_runner.rs
+index 674f5bd..50b4b8b 100644
+--- a/codex-rs/hooks/src/engine/command_runner.rs
++++ b/codex-rs/hooks/src/engine/command_runner.rs
+@@ -57,6 +57,10 @@ const MAX_CONCURRENT_ASYNC_HOOKS: usize = 8;
+ #[derive(Clone)]
+ pub(crate) struct CommandHookRuntime {
+     shell: CommandShell,
++    #[cfg(unix)]
++    hook_dispatcher: Option<OsString>,
++    #[cfg(unix)]
++    hook_dispatch_environment: Arc<Vec<(OsString, OsString)>>,
+     environment: Arc<Vec<(OsString, OsString)>>,
+     result_sender: Sender<HookCompletedEvent>,
+     state: Arc<Mutex<CommandHookRuntimeState>>,
+@@ -86,6 +90,12 @@ impl CommandHookRuntime {
+     ) -> Self {
+         Self {
+             shell,
++            // This opt-in is host process policy, never a hook/config override.
++            #[cfg(unix)]
++            hook_dispatcher: std::env::var_os("DEVD_CODEX_HOOK_DISPATCH")
++                .filter(|value| !value.is_empty()),
++            #[cfg(unix)]
++            hook_dispatch_environment: Arc::new(std::env::vars_os().collect()),
+             environment,
+             result_sender,
+             state: Arc::new(Mutex::new(CommandHookRuntimeState::default())),
+@@ -102,6 +112,10 @@ impl CommandHookRuntime {
+     pub(crate) fn reconfigured(&self, shell: CommandShell) -> Self {
+         Self {
+             shell,
++            #[cfg(unix)]
++            hook_dispatcher: self.hook_dispatcher.clone(),
++            #[cfg(unix)]
++            hook_dispatch_environment: Arc::clone(&self.hook_dispatch_environment),
+             environment: Arc::clone(&self.environment),
+             result_sender: self.result_sender.clone(),
+             state: Arc::clone(&self.state),
+@@ -222,6 +236,25 @@ pub(crate) async fn run_command(
+     let started_at = chrono::Utc::now().timestamp();
+     let started = Instant::now();
+ 
++    #[cfg(unix)]
++    let mut command = match runtime.hook_dispatcher.as_deref() {
++        Some(dispatcher) if !Path::new(dispatcher).is_absolute() => {
++            return finish_command_run(
++                started_at,
++                started,
++                CommandRunCompletion {
++                    exit_code: None,
++                    stdout: String::new(),
++                    stderr: String::new(),
++                    error: Some("DEVD_CODEX_HOOK_DISPATCH must be an absolute path".to_string()),
++                    outcome: "spawn_error",
++                },
++            );
++        }
++        Some(dispatcher) => build_dispatched_command(dispatcher, runtime, handler, command_line, env, cwd),
++        None => build_command(&runtime.shell, command_line, &runtime.environment, env),
++    };
++    #[cfg(not(unix))]
+     let mut command = build_command(&runtime.shell, command_line, &runtime.environment, env);
+     command.current_dir(cwd);
+ 
+@@ -436,6 +469,49 @@ fn build_command(
+     command
+ }
+ 
++/// Runs the hook through the devbox dispatcher, which executes it inside the project container.
++#[cfg(unix)]
++fn build_dispatched_command(
++    dispatcher: &OsStr,
++    runtime: &CommandHookRuntime,
++    handler: &ConfiguredHandler,
++    command_line: &str,
++    env: &HashMap<String, String>,
++    cwd: &Path,
++) -> Command {
++    let mut command = Command::new(dispatcher);
++    command
++        .arg("--cwd")
++        .arg(cwd)
++        .arg("--timeout-seconds")
++        .arg(handler.timeout_sec.to_string())
++        .arg("--");
++    if runtime.shell.program.is_empty() {
++        command
++            .arg(default_shell_program(&runtime.environment))
++            .arg("-lc");
++    } else {
++        command.arg(&runtime.shell.program).args(&runtime.shell.args);
++    }
++    command.arg(command_line);
++    command.process_mode(codex_utils_pty::ProcessMode::NewSession);
++    // Host policy and executable lookup must not be controlled by hook.env.
++    // The dispatcher applies only explicit hook overrides inside Docker.
++    command
++        .envs(
++            runtime
++                .hook_dispatch_environment
++                .iter()
++                .map(|(key, value)| (key.as_os_str(), value.as_os_str()))
++                .filter(|(key, _)| !key.to_str().is_some_and(is_non_inheritable_env_var)),
++        )
++        .env(
++            "DEVD_CODEX_HOOK_ENV",
++            serde_json::to_string(env).expect("serialize string hook environment"),
++        );
++    command
++}
++
+ fn default_shell_program(environment: &[(OsString, OsString)]) -> OsString {
+     #[cfg(windows)]
+     let (environment_variable, fallback_program) = ("COMSPEC", "cmd.exe");
+diff --git a/codex-rs/hooks/src/engine/command_runner_tests.rs b/codex-rs/hooks/src/engine/command_runner_tests.rs
+index a7b90a8..14bf729 100644
+--- a/codex-rs/hooks/src/engine/command_runner_tests.rs
++++ b/codex-rs/hooks/src/engine/command_runner_tests.rs
+@@ -4,6 +4,8 @@ use std::ffi::OsString;
+ use std::fs;
+ #[cfg(unix)]
+ use std::os::unix::ffi::OsStringExt;
++#[cfg(unix)]
++use std::os::unix::fs::PermissionsExt;
+ use std::path::Path;
+ use std::sync::Arc;
+ use std::time::Duration;
+@@ -464,6 +466,211 @@ fn fallback_shell_uses_snapshot() {
+     );
+ }
+ 
++#[cfg(unix)]
++fn write_hook_dispatcher(temp: &TempDir) -> std::path::PathBuf {
++    let path = temp.path().join("dispatcher with spaces.py");
++    std::fs::write(
++        &path,
++        r#"#!/usr/bin/env python3
++import json, os, sys
++hook_env=json.loads(os.environ["DEVD_CODEX_HOOK_ENV"])
++assert os.environ.get("DEVD_CODEX_ROUTES_FILE") != "/hook-controlled-registry"
++assert os.environ.get("DEVD_CODEX_RUNTIME_DIR") != "/hook-controlled-runtime"
++assert os.environ.get("DEVD_CODEX_MOUNT_IMAGE") != "hook-controlled-image"
++with open(hook_env["HOOK_DISPATCH_CAPTURE"], "w") as capture:
++    json.dump(sys.argv[1:], capture)
++assert sys.argv[1] == "--cwd"
++assert sys.argv[3] == "--timeout-seconds"
++assert sys.argv[5] == "--"
++os.environ.update(hook_env)
++os.execvpe(sys.argv[6], sys.argv[6:], os.environ)
++"#,
++    )
++    .expect("write hook dispatcher");
++    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
++        .expect("make hook dispatcher executable");
++    path
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn host_hook_dispatch_preserves_shell_arguments_input_environment_and_output() {
++    let temp = tempdir().expect("create test directory");
++    let capture = temp.path().join("dispatch.json");
++    let handler = write_handler(
++        &temp,
++        r#"import json, os, sys
++print(json.dumps({"cwd": os.getcwd(), "input": sys.stdin.read(), "args": sys.argv[1:], "env": os.environ["HOOK_VALUE"]}))
++print("hook-stderr", file=sys.stderr)
++"#,
++    );
++    let command = format!(
++        "python3 '{}' 'arg with spaces' '$HOME `literal`'; exit 7",
++        temp.path().join("async_hook.py").display()
++    );
++    let env = HashMap::from([
++        (
++            "HOOK_DISPATCH_CAPTURE".to_string(),
++            capture.to_string_lossy().into_owned(),
++        ),
++        ("HOOK_VALUE".to_string(), "configured $HOME".to_string()),
++        (
++            "DEVD_CODEX_ROUTES_FILE".to_string(),
++            "/hook-controlled-registry".to_string(),
++        ),
++        (
++            "DEVD_CODEX_RUNTIME_DIR".to_string(),
++            "/hook-controlled-runtime".to_string(),
++        ),
++        (
++            "DEVD_CODEX_MOUNT_IMAGE".to_string(),
++            "hook-controlled-image".to_string(),
++        ),
++        (
++            "DEVD_CODEX_HOOK_ENV".to_string(),
++            "must-not-replace-native-envelope".to_string(),
++        ),
++        (
++            "DEVD_CODEX_HOOK_DISPATCH".to_string(),
++            "/must-not-select-this-configured-path".to_string(),
++        ),
++    ]);
++    let input = r#"{"session_id":"fixture","prompt":"literal $HOME `text`"}"#;
++    let (mut runtime, _results) = runtime();
++    runtime.hook_dispatcher = Some(write_hook_dispatcher(&temp).into_os_string());
++    let runtime = runtime.reconfigured(CommandShell {
++        program: "/bin/sh".to_string(),
++        args: vec!["-c".to_string()],
++    });
++
++    let result = run_command(&runtime, &handler, &command, &env, input, temp.path()).await;
++
++    assert_eq!(
++        (
++            result.exit_code,
++            result.stderr.as_str(),
++            result.error.as_ref()
++        ),
++        (Some(7), "hook-stderr\n", None)
++    );
++    assert_eq!(
++        serde_json::from_str::<serde_json::Value>(&result.stdout).expect("parse hook stdout"),
++        serde_json::json!({
++            "cwd": temp.path().canonicalize().expect("canonical test directory"),
++            "input": input,
++            "args": ["arg with spaces", "$HOME `literal`"],
++            "env": "configured $HOME",
++        })
++    );
++    assert_eq!(
++        serde_json::from_slice::<serde_json::Value>(
++            &std::fs::read(capture).expect("read dispatcher capture")
++        )
++        .expect("parse dispatcher capture"),
++        serde_json::json!([
++            "--cwd",
++            temp.path(),
++            "--timeout-seconds",
++            "10",
++            "--",
++            "/bin/sh",
++            "-c",
++            command
++        ])
++    );
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn hook_configuration_cannot_enable_dispatch_and_invalid_host_dispatch_fails_closed() {
++    let temp = tempdir().expect("create test directory");
++    let handler = write_handler(&temp, "pass\n");
++    let env = HashMap::from([(
++        "DEVD_CODEX_HOOK_DISPATCH".to_string(),
++        "/configured-but-not-host-selected".to_string(),
++    )]);
++    let (mut runtime, _results) = runtime();
++    runtime.hook_dispatcher = None;
++
++    let local = run_command(
++        &runtime,
++        &handler,
++        "printf local-hook",
++        &env,
++        "{}",
++        temp.path(),
++    )
++    .await;
++    assert_eq!(
++        (local.exit_code, local.stdout, local.stderr, local.error),
++        (Some(0), "local-hook".to_string(), String::new(), None)
++    );
++
++    runtime.hook_dispatcher = Some(OsString::from("relative-dispatcher"));
++    let invalid = run_command(
++        &runtime,
++        &handler,
++        "printf local-hook",
++        &env,
++        "{}",
++        temp.path(),
++    )
++    .await;
++    assert_eq!(
++        (
++            invalid.exit_code,
++            invalid.stdout,
++            invalid.stderr,
++            invalid.error
++        ),
++        (
++            None,
++            String::new(),
++            String::new(),
++            Some("DEVD_CODEX_HOOK_DISPATCH must be an absolute path".to_string())
++        )
++    );
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn dispatched_hook_keeps_native_timeout_and_forwards_it_to_container_dispatcher() {
++    let temp = tempdir().expect("create test directory");
++    let capture = temp.path().join("dispatch.json");
++    let mut handler = write_handler(&temp, "pass\n");
++    handler.timeout_sec = 1;
++    let env = HashMap::from([(
++        "HOOK_DISPATCH_CAPTURE".to_string(),
++        capture.to_string_lossy().into_owned(),
++    )]);
++    let (mut runtime, _results) = runtime();
++    runtime.hook_dispatcher = Some(write_hook_dispatcher(&temp).into_os_string());
++    let runtime = runtime.reconfigured(CommandShell {
++        program: "/bin/sh".to_string(),
++        args: vec!["-c".to_string()],
++    });
++
++    let result = run_command(&runtime, &handler, "sleep 30", &env, "{}", temp.path()).await;
++
++    assert_eq!(
++        (result.exit_code, result.error),
++        (None, Some("hook timed out after 1s".to_string()))
++    );
++    let captured: Vec<String> =
++        serde_json::from_slice(&std::fs::read(capture).expect("read timeout dispatcher capture"))
++            .expect("parse timeout dispatcher capture");
++    assert_eq!(
++        &captured[..5],
++        [
++            "--cwd",
++            temp.path().to_str().unwrap(),
++            "--timeout-seconds",
++            "1",
++            "--"
++        ]
++    );
++}
++
+ const ASYNC_HOOK_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+ 
+ fn runtime() -> (CommandHookRuntime, Receiver<HookCompletedEvent>) {

@@ -1,0 +1,66 @@
+#!/bin/sh
+# Devbox xclip shim: cc reads the clipboard via xclip (TARGETS / image/png / text/plain).
+# Instead of X11 we ask the clipboard bridge — devd → mac listener → the mac clipboard.
+# Additionally: when there is a FILE on the clipboard (public.file-url), a text/plain paste downloads it
+# into /workspace/.inbox and inserts the container path.
+# See the internal design notes
+set -u
+[ -n "${DEVD_URL:-}" ] || exit 1
+
+kind=""
+has_o=0
+prev=""
+for a in "$@"; do
+  [ "$prev" = "-t" ] && kind="$a"
+  [ "$a" = "-o" ] && has_o=1
+  prev="$a"
+done
+[ "$has_o" = "1" ] || exit 1  # read only (-o); write invocations are not supported
+
+case "$kind" in
+  TARGETS)    path="targets" ;;
+  image/png)  path="image" ;;
+  text/plain) path="text" ;;
+  *)          exit 1 ;;
+esac
+
+base="$DEVD_URL/api/clipboard"
+q=""
+[ -n "${DEVD_SESSION_ID:-}" ] && q="?session=$DEVD_SESSION_ID"
+
+# text paste: when there is a file on the clipboard, switch to /file (stage + return the path).
+if [ "$kind" = "text/plain" ]; then
+  tg=$(curl -s --max-time 15 "$base/targets$q" 2>/dev/null || true)
+  case "$tg" in
+    *application/x-devbox-file*) path="file" ;;
+  esac
+fi
+
+max=15
+[ "$path" = "file" ] && max=60
+
+out=$(mktemp) || exit 1
+code=$(curl -s -o "$out" -w "%{http_code}" --max-time "$max" "$base/$path$q") || { rm -f "$out"; exit 1; }
+
+# 503 = clipboard unavailable (locked vault / sleeping mac). This used to be exit 1, so
+# cc stayed silent and it looked like the clipboard was empty. Now we insert the message into the prompt INSTEAD
+# of the image and at the same time flash it in the tmux status bar — both, so it cannot be missed.
+if [ "$code" = "503" ]; then
+  msg=$(cat "$out")
+  rm -f "$out"
+  if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+    tmux display-message -d 6000 "$msg" 2>/dev/null || true
+  fi
+  printf '%s' "$msg"
+  exit 0
+fi
+
+if [ "$path" = "file" ]; then
+  case "$code" in
+    200|413) cat "$out"; rm -f "$out"; exit 0 ;;   # 413 = the "too large" message is inserted as text
+    *)       rm -f "$out"; exit 1 ;;
+  esac
+fi
+# targets/image/text: only 200 is success, anything else (incl. 413) fails
+[ "$code" = "200" ] || { rm -f "$out"; exit 1; }
+cat "$out"; rm -f "$out"; exit 0

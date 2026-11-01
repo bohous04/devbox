@@ -1,0 +1,23 @@
+#!/usr/local/bin/bun
+// Devbox preview relay: 0.0.0.0:<listen> → 127.0.0.1:<target>.
+// We cannot bind 0.0.0.0:<target> when the server holds 127.0.0.1:<target>
+// (EADDRINUSE, 0.0.0.0 overlaps loopback) → the relay always runs on a different
+// published port (3000–3009), which Docker forwards to the tailnet.
+import net from "node:net";
+
+const listen = Number(process.argv[2]);
+const target = Number(process.argv[3]);
+if (!Number.isInteger(listen) || !Number.isInteger(target)) {
+  console.error("usage: preview-relay <listenPort> <targetPort>");
+  process.exit(2);
+}
+
+const server = net.createServer((client) => {
+  const upstream = net.connect(target, "127.0.0.1");
+  client.on("error", () => upstream.destroy());
+  upstream.on("error", () => client.destroy());
+  client.pipe(upstream);
+  upstream.pipe(client);
+});
+server.on("error", (e) => { console.error("preview-relay:", e.message); process.exit(1); });
+server.listen(listen, "0.0.0.0");

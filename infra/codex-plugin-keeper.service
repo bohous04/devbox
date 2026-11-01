@@ -1,0 +1,7 @@
+[Unit]
+Description=Keep stale Codex plugin cache paths alive for the long-running app-server
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/codex-plugin-keeper
+StateDirectory=codex-plugin-keeper

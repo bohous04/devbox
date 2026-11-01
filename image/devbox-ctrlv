@@ -1,0 +1,50 @@
+#!/bin/sh
+# devbox-ctrlv: tmux binding on Ctrl+V (no prefix). ⌘V with an image on the mac sends
+# Ctrl+V and relies on the CLI reading the clipboard via xclip — only Claude Code does that
+# (xclip shim → devd → mac). Codex and Grok Build use arboard (X11/Wayland
+# DIRECTLY, no exec of xclip) and there is no display server in the container → their Ctrl+V silently
+# failed. So here the decision is made by the processes on the pane's tty:
+#   claude on the tty     → forward C-v (native inline [Image #N] via the xclip shim)
+#   codex/grok on the tty → stage the image/file via devd into the shared /inbox
+#                          and insert the path with a bracketed paste — same as drag&drop,
+#                          which both TUIs attach as an image; text is inserted directly
+#   anything else (bash, vim…) → forward C-v (literal-next / visual block keep working)
+#
+# Detection goes through `ps -t <pane_tty>`, not pane_current_command: codex in the pane
+# reports as `node` (npm wrapper), but the native `codex` binary sits on the same tty.
+# Note: MCP servers of a claude session (node, python…) inherit the tty, so `claude`
+# takes precedence over `codex|grok` in the decision.
+set -u
+pane="${1:-}"
+[ -n "$pane" ] || exit 0
+
+fwd() { tmux send-keys -t "$pane" C-v; exit 0; }
+# bracketed paste via a named buffer — the content may carry anything, including quotes
+paste() { printf '%s' "$1" | tmux load-buffer -b devbox-ctrlv - && tmux paste-buffer -p -d -b devbox-ctrlv -t "$pane"; exit 0; }
+
+tty=$(tmux display-message -p -t "$pane" '#{pane_tty}') || fwd
+procs=$(ps -o comm= -t "${tty#/dev/}" 2>/dev/null | sed 's/^ *//;s/ *$//')
+printf '%s\n' "$procs" | grep -qx claude && fwd
+printf '%s\n' "$procs" | grep -qxE 'codex|grok|agy' || fwd
+[ -n "${DEVD_URL:-}" ] || fwd
+
+base="$DEVD_URL/api/clipboard"
+if [ -n "${DEVD_SESSION_ID:-}" ]; then tq="?session=$DEVD_SESSION_ID"; sq="&session=$DEVD_SESSION_ID"; else tq=""; sq=""; fi
+
+tg=$(curl -s --max-time 15 "$base/targets$tq") || fwd
+# priority as in the xclip shim: file > image > text — Finder attaches to a
+# copied file also a preview icon (image/png), which must not win.
+case "$tg" in
+  *application/x-devbox-file*) url="$base/file?target=shared$sq"; max=60 ;;
+  *image/png*)                 url="$base/image?target=shared$sq"; max=60 ;;
+  *)                           url="$base/text$tq"; max=15 ;;
+esac
+
+out=$(mktemp) || fwd
+code=$(curl -s -o "$out" -w "%{http_code}" --max-time "$max" "$url") || { rm -f "$out"; fwd; }
+body=$(cat "$out"); rm -f "$out"
+case "$code" in
+  200)     [ -n "$body" ] && paste "$body"; fwd ;;  # empty body → nothing to paste
+  413|503) paste "$body" ;;                         # message (too large / vault / sleeping mac) instead of a silent failure
+  *)       fwd ;;
+esac

@@ -1,0 +1,7 @@
+#!/bin/sh
+# Playwright MCP for devbox: headless everywhere except InstaBox sessions (DEVBOX_HEADED=1),
+# where the browser draws on the VM desktop ($DISPLAY=:1), which the user watches in the dashboard.
+if [ "${DEVBOX_HEADED:-}" = "1" ] && [ -n "${DISPLAY:-}" ]; then
+  exec playwright-mcp "$@"
+fi
+exec playwright-mcp --headless "$@"

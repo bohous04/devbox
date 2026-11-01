@@ -1,0 +1,4 @@
+# Tests and compiled bytecode have no runtime use in the image —
+# do not copy them into the session container.
+mac-mcp-bridge/__pycache__
+mac-mcp-bridge/test_*.py

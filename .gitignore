@@ -1,0 +1,13 @@
+node_modules
+*.sqlite
+.DS_Store
+.superpowers/
+claude-setup.json
+claude-mcp-secrets.json
+dashboard/dist
+# Local deployment snapshots, generated backups and interpreter/OS caches
+.local/
+dashboard/.dist-before-*/
+__pycache__/
+*.py[cod]
+._*

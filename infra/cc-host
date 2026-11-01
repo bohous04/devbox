@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# cc — instant Claude Code (bypass permissions) in a throwaway devbox container.
+# Shares the claude-home volume (login, plugins, skills, MCP). Runs as uid 1000
+# so --dangerously-skip-permissions is allowed (Claude Code refuses it as root).
+# Optional arg: a workspace dir to mount (default: a writable scratch dir).
+set -euo pipefail
+ws="${1:-/srv/dev/cc-scratch}"
+mkdir -p "$ws"; chown 1000:1000 "$ws" 2>/dev/null || true
+# No 1Password token in the container: `srv` reaches devd (DEVD_URL) for SSH keys, so the
+# token stays on the host and every key access is brokered + logged.
+exec docker run --rm -it \
+  --add-host=host.docker.internal:host-gateway \
+  -e DEVD_URL=http://host.docker.internal:4300 \
+  -v "$ws:/workspace" -w /workspace \
+  -v claude-home:/home/dev/.claude \
+  "${DEVD_IMAGE:-devbox:latest}" \
+  claude --dangerously-skip-permissions

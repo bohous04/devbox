@@ -1,0 +1,11 @@
+[Unit]
+Description=devd watchdog — detects an unreachable devd, reports to Pushover (+ Kuma heartbeat)
+# DELIBERATELY without After=devd.service and without Requires: the watchdog must run even
+# when devd is not running — that is exactly one of the things it watches.
+
+[Service]
+Type=oneshot
+# Pushover credentials outside the vault (root-only). Without this file the watchdog
+# exits with an error and systemd records it in the journal — it must not stay silent.
+EnvironmentFile=/etc/devd/watch.env
+ExecStart=/usr/local/bin/bun /opt/vps-dev-infra/infra/devd-watch.ts

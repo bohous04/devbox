@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""Attach interactive co to the one permanent host Codex server.
+
+The shared socket/history survive container stop/start. This launcher never
+starts a daemon, creates a private CODEX_HOME, or asks for another pairing.
+"""
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+import time
+
+YOLO_FLAGS = ("--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust")
+WORKSPACE = Path("/workspace")
+DIRECT_COMMANDS = {
+    "exec", "e", "review", "login", "logout", "mcp", "plugin", "mcp-server",
+    "app-server", "remote-control", "app", "completion", "update", "doctor",
+    "sandbox", "debug", "apply", "a", "queue", "archive", "delete",
+    "migrate-rollouts", "unarchive", "cloud", "exec-server", "features", "help",
+}
+VALUE_OPTIONS = {
+    "-c", "--config", "--enable", "--disable", "--remote", "--remote-auth-token-env",
+    "-i", "--image", "-m", "--model", "--local-provider", "-p", "--profile",
+    "-s", "--sandbox", "-C", "--cd", "--add-dir", "-a", "--ask-for-approval",
+}
+
+
+def command_name(args):
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            return None  # Everything after -- is the interactive prompt.
+        if arg in VALUE_OPTIONS:
+            index += 2
+            continue
+        if arg.startswith("-"):
+            # --option=value and attached short values (-mMODEL) consume no
+            # following positional. Boolean options also pass straight through.
+            index += 1
+            continue
+        return arg
+    return None
+
+
+def direct_invocation(args):
+    # Help/version and an explicit endpoint are never redirected by this wrapper.
+    if any(arg in {"-h", "--help", "-V", "--version", "--remote"}
+           or arg.startswith("--remote=") for arg in args):
+        return True
+    return command_name(args) in DIRECT_COMMANDS
+
+
+def remote_launch_flags(args):
+    # Codex (0.154–0.160) rejects permission overrides on a remote resume. Resumed
+    # threads get YOLO from the server's config.toml defaults instead
+    # (infra/setup.sh install_codex_yolo_defaults); fresh sessions get the flags.
+    if command_name(args) == "resume":
+        return ("--dangerously-bypass-hook-trust",)
+    return YOLO_FLAGS
+
+
+class ConfigurationError(Exception):
+    pass
+
+
+def canonical_cwd(route, requested):
+    base = Path(route["cwd"])
+    if not base.is_absolute() or base == Path("/") or ".." in base.parts:
+        raise ConfigurationError("Invalid canonical devbox directory")
+    path = Path(os.path.abspath(requested))
+    if path.is_relative_to(WORKSPACE):
+        return str(base / path.relative_to(WORKSPACE))
+    if path.is_relative_to(base):
+        return str(path)
+    raise ConfigurationError("co must run in this devbox's /workspace (or its canonical alias)")
+
+
+def remote_args(args, route, current_cwd):
+    # Translate -C before changing the real cwd. Images are read by the client,
+    # so their relative paths must keep referring to the original directory.
+    def images(value):
+        return ",".join(os.path.normpath(os.path.join(current_cwd, path)) for path in value.split(","))
+
+    result = []
+    requested = current_cwd
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            result.extend(args[index:])
+            break
+        if arg in ("-C", "--cd"):
+            index += 1
+            if index >= len(args):
+                raise ConfigurationError(arg + " requires a directory")
+            requested = os.path.join(current_cwd, args[index])
+        elif arg.startswith("--cd="):
+            requested = os.path.join(current_cwd, arg.split("=", 1)[1])
+        elif arg.startswith("-C") and len(arg) > 2:
+            requested = os.path.join(current_cwd, arg[2:])
+        elif arg in ("-i", "--image"):
+            index += 1
+            if index >= len(args):
+                raise ConfigurationError(arg + " requires an image path")
+            result.extend([arg, images(args[index])])
+        elif arg.startswith("--image="):
+            result.append("--image=" + images(arg.split("=", 1)[1]))
+        elif arg.startswith("-i") and len(arg) > 2:
+            prefix, value = ("-i=", arg[3:]) if arg.startswith("-i=") else ("-i", arg[2:])
+            result.append(prefix + images(value))
+        elif arg in VALUE_OPTIONS:
+            result.append(arg)
+            if index + 1 < len(args):
+                index += 1
+                result.append(args[index])
+        else:
+            result.append(arg)
+        index += 1
+    return ["-C", canonical_cwd(route, requested), *result]
+
+
+def enter_canonical_workspace(route, requested):
+    base, target = Path(route["cwd"]), Path(requested)
+    try:
+        if not base.is_dir() or not target.is_dir():
+            raise ConfigurationError(
+                f"Canonical devbox directory {target} is unavailable; its workspace mount must be prepared before starting co")
+        if base.resolve(strict=True) != base or not base.samefile(WORKSPACE):
+            raise ConfigurationError(
+                f"Canonical devbox directory {base} does not match /workspace; refusing to start Codex")
+        resolved = target.resolve(strict=True)
+        if not resolved.is_relative_to(base):
+            raise ConfigurationError("Canonical working directory escapes this devbox's workspace")
+        # Remote TUI sends local runtime_workspace_roots as well as its -C
+        # override. Both must use the canonical path; -C alone leaves /workspace
+        # in the local config and the host correctly rejects that ambiguous root.
+        os.chdir(resolved)
+        return str(resolved)
+    except OSError as error:
+        raise ConfigurationError(f"Cannot enter canonical devbox directory {target}: {error}") from None
+
+
+def find_route(home, identity, timeout=20):
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            registry = json.loads((home / "devbox-routes.json").read_text())
+            matches = [r for r in registry["routes"] if r.get("container") == identity]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise ConfigurationError("Duplicate devbox route")
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        if time.monotonic() >= deadline:
+            raise ConfigurationError("The host has not registered this devbox yet; check codex-devbox-catalog.service")
+        time.sleep(0.2)
+
+
+def main():
+    args = sys.argv[1:]
+    if args[:1] == ["co"]:
+        args = args[1:]
+    base = ["codex", "-c", "check_for_update_on_startup=false", *YOLO_FLAGS]
+    if direct_invocation(args):
+        os.execvp(base[0], [*base, *args])
+    base = ["codex", "-c", "check_for_update_on_startup=false", *remote_launch_flags(args)]
+    identity = os.environ.get("DEVD_SESSION_ID", "")
+    if not re.fullmatch(r"dev-[A-Za-z0-9_.-]+", identity):
+        raise ConfigurationError("Missing or invalid DEVD_SESSION_ID")
+    home = Path(os.environ.get("DEVD_CODEX_SHARED_HOME", "/home/dev/.codex"))
+    if not home.is_absolute():
+        raise ConfigurationError("Shared CODEX_HOME must be absolute")
+    route = find_route(home, identity)
+    socket = home / "app-server-control/app-server-control.sock"
+    if not socket.exists() or not stat.S_ISSOCK(socket.stat().st_mode):
+        raise ConfigurationError("The permanent host Codex server is unavailable; check codex-remote-control.service")
+    translated = remote_args(args, route, os.getcwd())
+    translated[1] = enter_canonical_workspace(route, translated[1])
+    os.environ["CODEX_HOME"] = str(home)
+    os.execvp(base[0], [*base, "--remote", "unix://" + str(socket),
+                       *translated])
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ConfigurationError, OSError, KeyError, TypeError) as error:
+        print("Codex Remote: " + str(error), file=sys.stderr)
+        sys.exit(1)

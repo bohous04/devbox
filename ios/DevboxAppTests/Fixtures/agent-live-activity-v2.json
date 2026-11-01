@@ -1,0 +1,88 @@
+{
+  "version": 2,
+  "counts": {
+    "waiting": 2,
+    "working": 2,
+    "done": 1,
+    "stalled": 2,
+    "unknown": 6
+  },
+  "dot": "waiting",
+  "sessions": [
+    {
+      "id": "dev-wait-old",
+      "title": "WAIT-OLD",
+      "agent": "codex",
+      "project": "portal/web",
+      "status": "waiting",
+      "reason": "Approve SSH key: infra-root · root@1.2.3.4:22",
+      "since": "2026-10-19T09:51:00.000Z"
+    },
+    {
+      "id": "dev-wait-new",
+      "title": "WAIT-NEW",
+      "agent": "claude",
+      "project": "portal/web",
+      "status": "waiting",
+      "reason": "Should I continue with the database migration?",
+      "since": "2026-10-19T09:59:00.000Z"
+    },
+    {
+      "id": "dev-stalled",
+      "title": "STALLED",
+      "agent": "claude",
+      "project": "portal/web",
+      "status": "stalled",
+      "reason": "May be stuck",
+      "since": "2026-10-19T09:54:00.000Z"
+    },
+    {
+      "id": "dev-failed",
+      "title": "FAILED",
+      "agent": "claude",
+      "project": "portal/web",
+      "status": "stalled",
+      "reason": "Failed with an error",
+      "since": "2026-10-19T09:56:00.000Z"
+    },
+    {
+      "id": "dev-work-long",
+      "title": "WORK-LONG",
+      "agent": "grok",
+      "project": "portal/web",
+      "status": "working",
+      "reason": null,
+      "since": "2026-10-19T09:20:00.000Z"
+    },
+    {
+      "id": "dev-work-x",
+      "title": "WORK-X",
+      "agent": "claude",
+      "project": "portal/web",
+      "status": "working",
+      "reason": null,
+      "since": "2026-10-19T09:53:00.000Z"
+    },
+    {
+      "id": "dev-done",
+      "title": "DONE",
+      "agent": "claude",
+      "project": "portal/web",
+      "status": "done",
+      "reason": null,
+      "since": "2026-10-19T09:57:00.000Z"
+    },
+    {
+      "id": "dev-unknown-a",
+      "title": "UNKNOWN-A",
+      "agent": "claude",
+      "project": "portal/web",
+      "status": "unknown",
+      "reason": null,
+      "since": "2026-10-19T09:30:00.000Z"
+    }
+  ],
+  "overflow": 5,
+  "changedAt": "2026-10-19T09:59:00.000Z",
+  "updatedAt": "2026-10-19T10:00:00.000Z"
+}

@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+# In-container PTY bridge for the devd web terminal.
+#
+# devd (on the host) runs under Bun, where node-pty does not work and `docker exec -it` wants
+# a real host TTY. This bridge allocates the PTY INSIDE the container (Linux, Python
+# stdlib `pty` — reliable), so the host only pipes bytes via `docker exec -i`
+# (without -t). It is thus independent of the host OS (Mac and VPS behave the same).
+#
+# Launch:  docker exec -i <ctr> devbox-pty <argv...>   (typically: bash -lc "tmux …")
+# Protocol on stdin (fd 0): frames [type:1B][len:4B big-endian][payload]
+#   'i' -> write payload to the PTY master (keys)
+#   'r' -> payload = "cols,rows" -> set the window size (TIOCSWINSZ)
+# stdout (fd 1): raw PTY output.
+import os, sys, pty, select, struct, fcntl, termios, signal
+
+argv = sys.argv[1:]
+if not argv:
+    sys.stderr.write("devbox-pty: missing command\n")
+    sys.exit(2)
+
+pid, master = pty.fork()
+if pid == 0:  # child: runs in the PTY as the controlling terminal
+    os.execvp(argv[0], argv)
+    os._exit(127)
+
+STDIN, STDOUT = 0, 1
+
+def set_winsize(cols, rows):
+    try:
+        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    except OSError:
+        pass
+
+buf = b""
+
+def drain_frames():
+    global buf
+    while len(buf) >= 5:
+        typ = buf[0:1]
+        ln = struct.unpack(">I", buf[1:5])[0]
+        if len(buf) < 5 + ln:
+            return
+        payload = buf[5:5 + ln]
+        buf = buf[5 + ln:]
+        if typ == b"i":
+            os.write(master, payload)
+        elif typ == b"r":
+            try:
+                c, r = payload.decode().split(",")
+                set_winsize(int(c), int(r))
+            except Exception:
+                pass
+
+try:
+    while True:
+        rlist, _, _ = select.select([master, STDIN], [], [])
+        if master in rlist:
+            try:
+                data = os.read(master, 65536)
+            except OSError:
+                data = b""
+            if not data:
+                break
+            os.write(STDOUT, data)
+        if STDIN in rlist:
+            chunk = os.read(STDIN, 65536)
+            if not chunk:
+                break
+            buf += chunk
+            drain_frames()
+finally:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except Exception:
+        pass

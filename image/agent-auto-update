@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Bounded, per-container updates for the co/gr launchers (no shared auth writes)."""
+import fcntl
+import gzip
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = Path("/opt/devbox-agent-updates")
+BIN_DIR = Path("/usr/local/bin")
+INTERVAL = 3600
+TIME_BUDGET = 45
+SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def version(value):
+    value = value.strip()
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value):
+        raise ValueError("invalid stable version")
+    return tuple(map(int, value.split(".")))
+
+
+def binary_version(tool, output):
+    match = re.match(r"^(?:codex-cli|grok) ([0-9]+\.[0-9]+\.[0-9]+)(?:\s|$)", output.strip())
+    if not match or not output.startswith("codex-cli " if tool == "codex" else "grok "):
+        raise ValueError(f"{tool} did not report a valid version")
+    return match[1]
+
+
+class Updater:
+    def __init__(self):
+        self.deadline = time.monotonic() + TIME_BUDGET
+
+    def run(self, argv, limit=TIME_BUDGET):
+        remaining = min(limit, self.deadline - time.monotonic())
+        if remaining <= 0:
+            raise TimeoutError("update time limit reached")
+        result = subprocess.run(
+            list(map(str, argv)), stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, timeout=remaining, check=False, cwd="/",
+            env={**os.environ, "PATH": SAFE_PATH},
+        )
+        if result.returncode:
+            # Keep upstream output out of the terminal (npm can include local config).
+            raise RuntimeError(f"{Path(str(argv[0])).name} failed ({result.returncode})")
+        return result.stdout.strip()
+
+    def latest(self, tool):
+        if tool == "codex":
+            value = self.run(["npm", "view", "@openai/codex@latest", "version",
+                              "--registry=https://registry.npmjs.org",
+                              "--fetch-retries=0", "--fetch-timeout=8000"], 10)
+        else:
+            value = self.run(["curl", "-fsSL", "--connect-timeout", "3", "--max-time", "8",
+                              "https://x.ai/cli/stable"], 10)
+        version(value)
+        return value
+
+    def stage(self, tool, latest, directory):
+        if tool == "codex":
+            self.run(["npm", "install", "--global", "--prefix", directory,
+                      "--registry=https://registry.npmjs.org", "--fetch-retries=0",
+                      "--fetch-timeout=20000", "--no-audit", "--no-fund",
+                      "--include=optional", "--ignore-scripts", f"@openai/codex@{latest}"])
+            return directory / "bin" / "codex"
+        arch = {"x86_64": "x86_64", "aarch64": "aarch64"}.get(platform.machine())
+        if platform.system() != "Linux" or arch is None:
+            raise RuntimeError("unsupported Grok platform")
+        archive = directory / "grok.gz"
+        # Same public artifact as x.ai/cli/install.sh, without changing profiles or auth.
+        self.run(["curl", "-fsSL", "--connect-timeout", "3", "--max-time", "30",
+                  "-o", archive, f"https://x.ai/cli/grok-{latest}-linux-{arch}.gz"])
+        binary = directory / "grok"
+        with gzip.open(archive, "rb") as source, binary.open("wb") as target:
+            shutil.copyfileobj(source, target)
+        archive.unlink()
+        binary.chmod(0o755)
+        return binary
+
+    def verify(self, tool, binary, expected):
+        # The image runs agents as dev: a root-only installation is not usable.
+        actual = binary_version(tool, self.run(["runuser", "-u", "dev", "--", binary, "--version"], 5))
+        if actual != expected:
+            raise RuntimeError(f"{tool} candidate version mismatch")
+
+    def update(self, tool):
+        ROOT.mkdir(mode=0o755, parents=True, exist_ok=True)
+        # State belongs to this container, never CODEX_HOME/GROK_HOME shared volumes.
+        with (ROOT / f"{tool}.lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            stamp = ROOT / f"{tool}.checked"
+            if stamp.exists() and 0 <= time.time() - stamp.stat().st_mtime < INTERVAL:
+                return
+            current = binary_version(tool, self.run([tool, "--version"], 5))
+            latest = self.latest(tool)
+            if version(latest) <= version(current):
+                stamp.touch()
+                return
+            print(f"[{tool}] Aktualizuji {current} → {latest}…", file=sys.stderr)
+            directory = Path(tempfile.mkdtemp(prefix=f"{tool}-{latest}-", dir=ROOT))
+            directory.chmod(0o755)
+            link = BIN_DIR / f".{tool}-update-{os.getpid()}"
+            try:
+                binary = self.stage(tool, latest, directory)
+                self.verify(tool, binary, latest)
+                # Same-filesystem atomic switch. Existing processes keep their binary;
+                # old bundles remain available until the container is recreated.
+                link.symlink_to(binary)
+                os.replace(link, BIN_DIR / tool)
+                stamp.touch()
+                print(f"[{tool}] Updated to {latest}.", file=sys.stderr)
+            finally:
+                link.unlink(missing_ok=True)
+                # A signal can arrive immediately after rename succeeds. Inspect the
+                # live link instead of a Python flag, or cleanup could delete its target.
+                if directory not in (BIN_DIR / tool).resolve().parents:
+                    shutil.rmtree(directory)
+
+
+def main():
+    if len(sys.argv) != 2 or sys.argv[1] not in ("codex", "grok"):
+        print("usage: agent-auto-update codex|grok", file=sys.stderr)
+        return 2
+    if os.geteuid() != 0:
+        # No password prompt. The installed helper is root-owned; do not run agents
+        # themselves as root or change ownership of the shared credential volumes.
+        os.execv("/usr/bin/sudo", ["sudo", "-n", "--", str(Path(__file__).resolve()), sys.argv[1]])
+    def interrupted(_signal, _frame):
+        # Let staging's finally run even when the launcher's outer timeout expires.
+        raise TimeoutError("update time limit reached")
+
+    previous_handler = signal.signal(signal.SIGTERM, interrupted)
+    try:
+        Updater().update(sys.argv[1])
+        return 0
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, EOFError) as error:
+        print(f"[{sys.argv[1]}] Update failed ({error}); keeping the current version.", file=sys.stderr)
+        return 1
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

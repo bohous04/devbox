@@ -1,0 +1,34 @@
+[
+  {
+    "id": "devbox",
+    "label": "devbox",
+    "beszelName": "devbox",
+    "host": "local",
+    "backup": {
+      "repo": "ssh://root@backup.example.com:22/var/backups/devbox-borg",
+      "passFile": "/etc/devd/borg-passphrase",
+      "rsh": "ssh -i /root/.ssh/id_ed25519_backup -p 22 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15",
+      "unit": "devbox-backup",
+      "statusFile": "/var/lib/devd/backup-status.json",
+      "pull": [
+        { "label": "Copy the repo to your Mac", "command": "rsync -aP root@backup.example.com:/var/backups/devbox-borg ~/devbox-borg" }
+      ]
+    }
+  },
+  {
+    "id": "backup",
+    "label": "backup host",
+    "beszelName": "backup",
+    "host": "remote",
+    "backup": {
+      "repo": "ssh://u000000@u000000.your-storagebox.de:23/./borg-repo",
+      "passFile": "/etc/borg/passphrase",
+      "rsh": "ssh -i /root/.ssh/id_ed25519_borg -p 23 -o StrictHostKeyChecking=accept-new",
+      "unit": "borg-backup",
+      "quotaBytes": 1099511627776,
+      "pull": [
+        { "label": "Pull it to your Mac", "command": "rsync -aP root@backup.example.com:/var/backups/borg-copy ~/backup-borg" }
+      ]
+    }
+  }
+]

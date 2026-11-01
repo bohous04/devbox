@@ -1,0 +1,156 @@
+#!/usr/local/bin/bun
+// Devbox preview: open a running local web app in the browser on the mac.
+// The container sends only the number of the PUBLISHED port (3000–3009); devd builds the URL from it + the tailnet
+// IP and opens it via the Mac listener. Task 5 = direct + autodetection;
+// relay (127.0.0.1 / port outside the range) is added by Task 6.
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+
+const SESSION = process.env.DEVD_SESSION_ID ?? "";
+const DEVD_URL = process.env.DEVD_URL || "http://host.docker.internal:4300";
+const START = Number(process.env.PREVIEW_PUBLISHED_START || 3000);
+const COUNT = Number(process.env.PREVIEW_PUBLISHED_COUNT || 10);
+
+function die(msg) { console.error(msg); process.exit(1); }
+if (!SESSION) die("preview: not in a devbox session (DEVD_SESSION_ID) — run it inside a session.");
+
+// ── args: first numeric = port, first starting with "/" = path ──────────────
+let explicitPort;
+let path = "";
+for (const a of process.argv.slice(2)) {
+  if (/^\d+$/.test(a) && explicitPort === undefined) explicitPort = Number(a);
+  else if (a.startsWith("/") && !path) path = a;
+}
+
+// ── scan listening sockets from /proc/net/tcp(+6) ─────────────────────
+function classify(hexIp) {
+  const zero4 = "00000000", loop4 = "0100007F";
+  const zero6 = "00000000000000000000000000000000";
+  const loop6 = "00000000000000000000000001000000";
+  if (hexIp === zero4 || hexIp === zero6) return "any";
+  if (hexIp === loop4 || hexIp === loop6) return "loopback";
+  return "other";
+}
+function parseProcnet(text) {
+  const out = [];
+  for (const line of text.split("\n").slice(1)) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 4 || parts[3] !== "0A") continue; // 0A = LISTEN
+    const [ip, hexPort] = parts[1].split(":");
+    out.push({ port: parseInt(hexPort, 16), bind: classify(ip) });
+  }
+  return out;
+}
+function scan() {
+  const fixture = process.env.PREVIEW_PROCNET;
+  const readOne = (p) => { try { return readFileSync(p, "utf8"); } catch { return ""; } };
+  const text = fixture ? readOne(fixture) : readOne("/proc/net/tcp") + readOne("/proc/net/tcp6");
+  // dedup by port (a server may listen on both v4 and v6); "any" wins
+  const byPort = new Map();
+  for (const s of parseProcnet(text)) {
+    const prev = byPort.get(s.port);
+    if (!prev || (prev.bind !== "any" && s.bind === "any")) byPort.set(s.port, s);
+  }
+  return [...byPort.values()];
+}
+
+const listening = scan();
+
+// ── relay management ──────────────────────────────────────────────────────────
+const RUN_DIR = process.env.PREVIEW_RUN_DIR || "/run/devd";
+const RELAY_BIN = process.env.PREVIEW_RELAY_BIN || "/usr/local/bin/preview-relay";
+const pidfile = (t) => join(RUN_DIR, `preview-relay-${t}.pid`);
+
+function readRelay(t) {
+  const f = pidfile(t);
+  if (!existsSync(f)) return null;
+  const [pidStr, listenStr] = readFileSync(f, "utf8").split("\n");
+  const pid = Number(pidStr), listen = Number(listenStr);
+  if (!Number.isInteger(pid) || !Number.isInteger(listen)) return null;
+  try { process.kill(pid, 0); } catch { return null; } // dead pid → ignore
+  return { pid, listen };
+}
+function relayListenPorts() {
+  if (!existsSync(RUN_DIR)) return new Set();
+  const ports = new Set();
+  for (const f of readdirSync(RUN_DIR)) {
+    const m = f.match(/^preview-relay-(\d+)\.pid$/);
+    if (!m) continue;
+    const r = readRelay(Number(m[1]));
+    if (r) ports.add(r.listen);
+  }
+  return ports;
+}
+function freePublishedPort(occupied) {
+  for (let p = START; p < START + COUNT; p++) if (!occupied.has(p)) return p;
+  return null;
+}
+function startRelay(listen, t) {
+  mkdirSync(RUN_DIR, { recursive: true });
+  const child = Bun.spawn([RELAY_BIN, String(listen), String(t)], { stdout: "ignore", stderr: "ignore", stdin: "ignore" });
+  child.unref();
+  writeFileSync(pidfile(t), `${child.pid}\n${listen}\n`);
+}
+
+// ── target selection ───────────────────────────────────────────────────────────
+let target = explicitPort;
+if (target === undefined) {
+  const relayPorts = relayListenPorts();
+  const candidates = listening.filter((s) => !relayPorts.has(s.port));
+  if (candidates.length === 0) die("preview: no server is listening. Start a dev server (port 3000–3009) and try again.");
+  if (candidates.length > 1) {
+    const list = candidates.sort((a, b) => a.port - b.port).map((s) => `  ${s.port} (${s.bind})`).join("\n");
+    die(`preview: several servers are running — pass a port, e.g. \`preview ${candidates[0].port}\`:\n${list}`);
+  }
+  target = candidates[0].port;
+}
+
+// for an explicit port wait briefly for the server to come up (race after launch);
+// without a running server we do not want to relay blindly to a dead port
+let entry = listening.find((s) => s.port === target);
+if (!entry && explicitPort !== undefined) {
+  const retries = Number(process.env.PREVIEW_RETRIES ?? 8);
+  for (let i = 0; i < retries && !entry; i++) {
+    await Bun.sleep(250);
+    entry = scan().find((s) => s.port === target);
+  }
+}
+if (!entry) die(`preview: nothing is listening on port ${target} — is the dev server running?`);
+const inRange = target >= START && target < START + COUNT;
+
+// ── direct vs relay ───────────────────────────────────────────────────────
+// the value is always the CONTAINER port (3000–3009) — devd translates it to the host port
+let containerPort;
+if (entry.bind === "any" && inRange) {
+  containerPort = target;                             // published directly, no relay
+} else {
+  const existing = readRelay(target);
+  if (existing) {
+    containerPort = existing.listen;                   // idempotence: reuse the live relay
+  } else {
+    const listeningPorts = new Set(listening.map((s) => s.port));
+    const occupied = new Set([...listeningPorts, ...relayListenPorts(), target]);
+    const free = freePublishedPort(occupied);
+    if (free === null) die("preview: no free published port (3000–3009 all taken).");
+    startRelay(free, target);
+    containerPort = free;
+  }
+}
+
+// ── POST do devd ──────────────────────────────────────────────────────────
+const res = await fetch(`${DEVD_URL}/api/preview`, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ sessionId: SESSION, containerPort, path }),
+}).catch(() => null);
+
+if (!res) die("preview: devd unavailable. The web app runs in the container; map the port via `dev ports`.");
+const data = await res.json().catch(() => ({}));
+if (!res.ok) {
+  if (data.url) die(`preview: mac listener unavailable. Open manually: ${data.url}`);
+  die(`preview: devd returned ${res.status}${data.error ? ` — ${data.error}` : ""}.`);
+}
+// Shared session: devd returns only the port, not the Tailscale URL — the guest opens the preview via the link
+// on the shared page (p<N>); the agent must not send them the tailnet address.
+if (data.publicPreview) console.log(`▸ the preview is shared — the guest opens it on the share page (port ${data.port})`);
+else console.log(`▸ preview: ${data.url} (opening on the Mac)`);

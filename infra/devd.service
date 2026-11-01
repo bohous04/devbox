@@ -1,0 +1,39 @@
+[Unit]
+Description=devbox control plane (devd)
+After=docker.service tailscaled.service
+Requires=docker.service
+
+[Service]
+WorkingDirectory=__REPO__
+# systemd doesn't give a root service a $HOME, so host-side `gh` (github.ts owners/repos,
+# tree.ghLister) can't find root's ~/.config/gh auth — set it so gh resolves its config dir.
+Environment=HOME=/root
+Environment=DEVD_HOST=0.0.0.0
+# Escape hatch for the approval gate (docs/mac.md, "SSH approvals"): loopback and the
+# tailnet are always allowed; this adds more sources for the approval routes, typically
+# the address of a cloudflared dashboard tunnel. Uncomment, fill in, then run
+# `systemctl daemon-reload && systemctl restart devd` — a restart alone keeps the old value.
+# Environment=DEVD_APPROVAL_ALLOW=
+Environment=DEVD_BIND_IP=__IP__
+Environment=DEVD_ROOT=/srv/dev
+Environment=DEVD_CONFIG_DIR=/etc/devd/config
+Environment=DEVD_SECRETS=/etc/devd/secrets.json
+# Vault: when the file exists, secrets.json is not read and devd starts LOCKED — sessions
+# run, but credentials are unavailable until you unlock it in the dashboard. Without the
+# file (fresh install) devd falls back to secrets.json.
+Environment=DEVD_VAULT=/etc/devd/vault.age
+Environment=DEVD_DB=/var/lib/devd/devd.sqlite
+Environment=DEVD_IMAGE=devbox:latest
+Environment=DEVD_GH_CONFIG_DIR=/root/.config/gh
+Environment=DEVD_GITEA_TOKENS=/etc/devd/gitea-tokens.json
+Environment=DEVD_LISTENER_URL=__LISTENER__
+# Install-specific values (dashboard URL, timezone, backup target, …).
+# The dash makes the file optional. Template: infra/devd.env.example.
+EnvironmentFile=-/etc/devd/devd.env
+ExecStart=/usr/local/bin/bun __REPO__/devd/src/index.ts
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

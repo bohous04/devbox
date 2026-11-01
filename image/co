@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# co — Codex with approvals and sandbox turned off (yolo mode), the counterpart of `cc`.
+# The container itself IS the sandbox — same argument as for cc and --dangerously-skip-permissions.
+#
+# --dangerously-bypass-hook-trust: Codex remembers trust for command hooks by their
+# hash, so our seeded devd hooks (~/.codex/hooks.json) would trigger a review via /hooks
+# after every change — exactly the interruption that yolo mode removes.
+. "$(dirname -- "${BASH_SOURCE[0]}")/codex-account-env.sh"
+codex_account_prepare "$@" || exit $?
+case "${1:-}" in
+  --help|-h|--version|-V) ;;
+  *) [ ! -x /usr/local/bin/devbox-recovery ] || /usr/local/bin/devbox-recovery record-launch codex -- "$@" 2>/dev/null || true ;;
+esac
+
+# Update the container CLI before attaching; preserve the existing updater.
+case "${1:-}" in
+  --help|-h|--version|-V) ;;
+  *) if [ "${DEVD_AGENT_AUTO_UPDATE:-1}" != 0 ] && [ -x /usr/local/bin/agent-auto-update ]; then
+       timeout -k 2s 45s /usr/local/bin/agent-auto-update codex </dev/null || true
+     fi ;;
+esac
+# The central Codex Remote server has been disabled since 2026-10-14 (it got stuck on memory.high and co
+# failed on a timeout). The default is local Codex in the container; DEVD_CODEX_REMOTE=1 = opt-in.
+if [ -n "${DEVD_SESSION_ID:-}" ] && [ "${DEVD_CODEX_REMOTE:-0}" = 1 ]; then
+  exec /usr/local/bin/codex-remote co "$@"
+fi
+# Threads from the Remote server have the host path as cwd in the state DB
+# (/srv/dev/_sessions/<container>), which does not exist in the container — resume would then run
+# hooks and commands in a nonexistent directory (os error 2). Without an explicit -C we redirect it
+# to /workspace.
+codex_resume_cwd_fix() {
+  [ "${1:-}" = resume ] || return 0
+  local a id="" skip=0
+  for a in "${@:2}"; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case "$a" in
+      -C|--cd|--cd=*|-C*) return 0 ;;
+      -c|--config|-m|--model|-p|--profile|-i|--image|-s|--sandbox|-a|--ask-for-approval|--add-dir|--enable|--disable|--remote|--remote-auth-token-env) skip=1 ;;
+      -*) ;;
+      *) [ -n "$id" ] || id=$a ;;
+    esac
+  done
+  [ -n "$id" ] && [ -d /workspace ] || return 0
+  local cwd
+  cwd=$(python3 - "$id" "${CODEX_HOME:-$HOME/.codex}" 2>/dev/null <<PY
+import glob, sqlite3, sys
+tid, home = sys.argv[1], sys.argv[2]
+for db in sorted(glob.glob(home + "/state_*.sqlite"), reverse=True):
+    c = sqlite3.connect("file:%s?mode=ro" % db, uri=True, timeout=2)
+    r = c.execute("select cwd from threads where id=? or name=? order by updated_at desc limit 1", (tid, tid)).fetchone()
+    if r:
+        print(r[0] or ""); break
+PY
+)
+  if [ -n "$cwd" ] && [ ! -d "$cwd" ]; then
+    echo "co: the saved thread directory $cwd does not exist here → -C /workspace" >&2
+    CODEX_RESUME_ARGS=(-C /workspace)
+  fi
+}
+CODEX_RESUME_ARGS=()
+codex_resume_cwd_fix "$@"
+exec codex -c check_for_update_on_startup=false --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust "${CODEX_ACCOUNT_ARGS[@]}" "$@" "${CODEX_RESUME_ARGS[@]}"

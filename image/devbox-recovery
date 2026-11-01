@@ -1,0 +1,698 @@
+#!/usr/bin/env python3
+"""Durable, exact tmux recovery. Journal contains identities, never prompts or credentials.
+
+Only the container entrypoint restores. devd restarts do not touch live panes.
+Hooks checkpoint accepted lifecycle state immediately; the monitor saves topology
+and the IDs of running containers in this session's own DinD daemon.
+"""
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = Path(os.environ.get("DEVD_RECOVERY_DIR", "/run/devd/recovery"))
+PROC = Path("/proc")
+SCRIPT = "/usr/local/bin/devbox-recovery"
+AGENT_LAUNCH = "/usr/local/bin/agent-launch"
+UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.I)
+PROFILES = {"claude", "claude-gpt", "claude-grok", "claude-gemini", "claude-openrouter", "codex", "grok", "antigravity"}
+# Profile = runtime, except claude-* (Claude Code) and antigravity (the agy binary).
+RUNTIME = {profile: "claude" if profile.startswith("claude") else ("agy" if profile == "antigravity" else profile) for profile in PROFILES}
+AGENT_RUNTIMES = {"claude", "codex", "grok", "agy"}
+# Fallback when the profile from the environment is missing or does not match the runtime: the canonical
+# profile for the given runtime (RUNTIME is keyed by profiles, not runtimes - "agy" is not in it).
+RUNTIME_PROFILE = {"agy": "antigravity"}
+EVENTS = {"session_start", "prompt_submit", "tool_complete", "permission_request", "stop", "stop_failure", "idle_prompt"}
+CONTINUE = "Continue the work interrupted by the devbox restart from its saved state. Check what already completed before repeating actions. Preserve all existing approval and user-input requirements."
+# agy accepts the initial prompt only via -i/--prompt-interactive, not as a bare positional argument;
+# the other runtimes get CONTINUE unchanged.
+CONTINUE_ARGS = {"agy": ["-i", CONTINUE]}
+ENV_KEYS = {"CLAUDE_CONFIG_DIR", "CODEX_HOME", "GROK_HOME", "DEVD_CODEX_ACCOUNT_ID", "DEVD_CODEX_REMOTE", "DEVD_CODEX_SHARED_HOME", "DEVD_AGENT_MODEL", "DEVD_AGENT_CTX"}
+
+
+def run(args, timeout=2, check=True):
+    p = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+    if check and p.returncode:
+        raise RuntimeError("Recovery command failed: " + args[0])
+    return p.stdout.strip()
+
+
+def tmux(*args):
+    return run(["tmux", *args])
+
+
+def generation():
+    # Container restart on the same host boot changes PID 1's start time.
+    return hashlib.sha256((Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+                           + ":" + Path("/proc/1/stat").read_text().split(") ", 1)[1].split()[19]).encode()).hexdigest()[:24]
+
+
+def atomic(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temp = tempfile.mkstemp(prefix=".write-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as out:
+            json.dump(data, out, separators=(",", ":"))
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
+def read(path, default=None):
+    try:
+        if path.is_symlink() or path.stat().st_size > 4 * 1024 * 1024:
+            raise ValueError("Invalid recovery file")
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        return default
+
+
+def lock(name, nonblocking=False):
+    ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(ROOT / name, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    f = os.fdopen(fd, "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | (fcntl.LOCK_NB if nonblocking else 0))
+    except BaseException:
+        f.close()
+        raise
+    return f
+
+
+def valid_state(state):
+    return (isinstance(state, dict) and state.get("agent") in AGENT_RUNTIMES
+            and isinstance(state.get("session_id"), str) and UUID.fullmatch(state["session_id"])
+            and state.get("event") in EVENTS)
+
+
+def clean_env(env):
+    result = {}
+    for key in ENV_KEYS:
+        value = env.get(key)
+        if isinstance(value, str) and len(value) <= 1024 and not re.search(r"[\x00-\x1f]", value):
+            result[key] = value
+    return result
+
+
+def interactive_launch(runtime, args):
+    if args[:1] == ["--"]:
+        args = args[1:]
+    for arg in args:
+        if arg == "--":
+            break
+        if arg in {"--help", "-h", "--version", "-V", "--print", "--output-format", "--input-format", "--single", "--prompt-file", "--prompt-json"} or (arg == "-p" and runtime != "codex") or arg.startswith(("--print=", "--output-format=", "--input-format=", "--prompt-file=", "--prompt-json=")):
+            return False
+    if runtime == "codex":
+        values = {"-c", "--config", "--enable", "--disable", "-i", "--image", "-m", "--model", "--local-provider", "-p", "--profile", "-s", "--sandbox", "-C", "--cd", "--add-dir", "-a", "--ask-for-approval"}
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg == "--":
+                break
+            if arg in values:
+                index += 2
+                continue
+            if not arg.startswith("-"):
+                return arg not in {"exec", "e", "review", "login", "logout", "mcp", "plugin", "mcp-server", "app-server", "remote-control", "app", "completion", "update", "doctor", "sandbox", "debug", "apply", "a", "queue", "archive", "delete", "migrate-rollouts", "unarchive", "cloud", "exec-server", "features", "help", "agents"}
+            index += 1
+    if runtime == "grok" and args and args[0] in {"agent", "login", "logout", "auth", "mcp", "update", "doctor", "completion", "config", "version"}:
+        return False
+    if runtime == "agy" and args and args[0] in {"mcp", "plugin", "plugins", "models", "update", "changelog", "agent", "agents", "install", "remote-control", "help", "mic-serve"}:
+        return False
+    return True
+
+
+def record_launch(runtime, args=()):
+    # Nested tools inherit TMUX_PANE; only the interactive CLI may replace its
+    # foreground identity. A pipe/headless helper must leave the parent intact.
+    if not os.isatty(0) or not os.isatty(1) or not interactive_launch(runtime, list(args)):
+        return
+    pane = os.environ.get("TMUX_PANE", "")
+    if not re.fullmatch(r"%[0-9]+", pane):
+        return
+    profile = os.environ.get("DEVD_LAUNCH_PROFILE", runtime)
+    if RUNTIME.get(profile) != runtime:
+        profile = RUNTIME_PROFILE.get(runtime, runtime)
+    context = {"profile": profile, "runtime": runtime, "env": clean_env(os.environ)}
+    if runtime == "claude":
+        context["env"].setdefault("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))
+    if runtime == "grok":
+        context["env"].setdefault("GROK_HOME", str(Path.home() / ".grok"))
+    if runtime == "codex":
+        account = tmux("show-options", "-pqv", "-t", pane, "@devd_codex_account")
+        if account:
+            context["env"]["DEVD_CODEX_ACCOUNT_ID"] = account
+        context["env"].setdefault("CODEX_HOME", str(Path.home() / ".codex"))
+    tmux("set-option", "-p", "-t", pane, "@devd_recovery_context", json.dumps(context))
+    # A new CLI must produce its own identity before it can be resumed.
+    tmux("set-option", "-pu", "-t", pane, "@devd_warp_state")
+    # Invalidate the old conversation immediately, including a crash before the
+    # first hook from this newly launched CLI.
+    snapshot(False)
+
+
+def checkpoint(pane, state):
+    if not re.fullmatch(r"%[0-9]+", pane) or not valid_state(state):
+        return
+    # No transcript or arbitrary hook fields enter the journal.
+    state = {k: state[k] for k in ("session_id", "agent", "event", "waiting_tool", "waiting_call", "prompt_id") if k in state}
+    with lock("journal.lock"):
+        atomic(ROOT / ("pane-" + pane[1:] + ".json"), {"generation": generation(), "state": state})
+    # Accepted hooks also checkpoint the exact current coordinates/context. This
+    # closes the interval between a conversation switch and the topology timer.
+    snapshot(False)
+
+
+def nearest_agent(pane, runtime=None):
+    processes = {}
+    for line in run(["ps", "-eo", "pid=,ppid=,comm="]).splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) == 3:
+            processes[int(parts[0])] = (int(parts[1]), Path(parts[2]).name)
+    candidates = []
+    root = int(pane["pane_pid"])
+    for pid, (_, command) in processes.items():
+        if command not in ({runtime} if runtime else AGENT_RUNTIMES):
+            continue
+        current, depth, seen = pid, 0, set()
+        while current in processes and current not in seen:
+            if current == root:
+                candidates.append((depth, pid, command))
+                break
+            seen.add(current)
+            current = processes[current][0]
+            depth += 1
+    if not candidates:
+        return None
+    candidates.sort()
+    if len(candidates) > 1 and candidates[0][0] == candidates[1][0]:
+        return None
+    return candidates[0][1:]
+
+
+def process_env(pid):
+    env = {}
+    for item in (PROC / str(pid) / "environ").read_bytes().split(b"\0"):
+        key, sep, value = item.partition(b"=")
+        name = key.decode(errors="replace")
+        if sep and name in ENV_KEYS | {"TMUX_PANE", "DEVBOX_PROXY_PROFILE", "DEVD_LAUNCH_PROFILE"}:
+            env[name] = value.decode(errors="replace")
+    return env
+
+
+def foreground_codex_identity(pane, pid):
+    """Legacy standalone Codex: exact open rollout + root metadata, never latest.
+    Read SQLite identity columns only; no conversation text or prompt is read.
+    """
+    try:
+        env = process_env(pid)
+        if env.get("TMUX_PANE") != pane["pane_id"]:
+            return None
+        home = Path(env.get("CODEX_HOME", "/home/dev/.codex")).resolve(strict=True)
+        identifiers = set()
+        for fd in (PROC / str(pid) / "fd").iterdir():
+            try:
+                target = fd.resolve(strict=True)
+                if not target.is_relative_to(home / "sessions") or not target.name.endswith('.jsonl'):
+                    continue
+                found = re.search(r"([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$", target.name, re.I)
+                if found:
+                    identifiers.add(found[1])
+            except OSError:
+                continue
+        databases = sorted(home.glob("state_*.sqlite"), reverse=True)
+        if not identifiers or not databases:
+            return None
+        candidates = []
+        with sqlite3.connect(databases[0].as_uri() + "?mode=ro", uri=True, timeout=.2) as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(threads)")}
+            selected = [key for key in ("id", "source", "thread_source", "agent_path") if key in columns]
+            if "source" not in selected:
+                return None
+            for identifier in identifiers:
+                row = db.execute("SELECT " + ",".join(selected) + " FROM threads WHERE id=?", (identifier,)).fetchone()
+                if not row:
+                    continue
+                meta = dict(zip(selected, row))
+                if meta.get("source") == "cli" and meta.get("thread_source") not in {"subagent"} and not meta.get("agent_path"):
+                    candidates.append(identifier)
+        return candidates[0] if len(candidates) == 1 else None
+    except (OSError, ValueError, sqlite3.Error):
+        return None
+
+
+def infer_context(pane):
+    """Bootstrap existing panes using allowlisted env from the nearest agent."""
+    state = pane.get("state", {})
+    if not valid_state(state):
+        return {}
+    runtime = state["agent"]
+    nearest = nearest_agent(pane, runtime)
+    if not nearest:
+        return {}
+    try:
+        env = process_env(nearest[0])
+        if env.get("TMUX_PANE") != pane["pane_id"]:
+            return {}
+        # DEVBOX_PROXY_PROFILE is a boolean sentinel, not a profile name.
+        profile = env.get("DEVD_LAUNCH_PROFILE") or pane.get("@devd_agent") or runtime
+        if RUNTIME.get(profile) != runtime:
+            profile = RUNTIME_PROFILE.get(runtime, runtime)
+        if runtime == "claude" and env.get("DEVBOX_PROXY_PROFILE") and profile == "claude":
+            return {}  # A proxy without its original model profile is ambiguous.
+        context = {"runtime": runtime, "profile": profile, "env": clean_env(env)}
+        # agy has no account home directory like claude/codex/grok; .get() simply leaves it out.
+        home_key = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME", "grok": "GROK_HOME"}.get(runtime)
+        if home_key:
+            context["env"].setdefault(home_key, "/home/dev/." + runtime)
+        if runtime == "codex":
+            argv = (PROC / str(nearest[0]) / "cmdline").read_bytes().split(b"\0")
+            # Preserve standalone clients that predate the central co wrapper.
+            context["env"]["DEVD_CODEX_REMOTE"] = "1" if any(a == b"--remote" or a.startswith(b"--remote=") for a in argv) else "0"
+            account = pane.get("@devd_codex_account")
+            # Default may be inferred only from the exact default home, never
+            # from automatic account preferences or another conversation.
+            if not account and context["env"][home_key] == "/home/dev/.codex":
+                account = "default"
+            if account:
+                context["env"]["DEVD_CODEX_ACCOUNT_ID"] = account
+        return context
+    except OSError:
+        return {}
+
+
+def topology():
+    fields = ["session_name", "window_index", "pane_index", "pane_id", "pane_current_path", "window_name", "window_layout",
+              "window_width", "window_height", "window_active", "pane_active", "@devd_label", "@devd_agent", "@devd_recovery_context", "@devd_warp_state", "pane_pid", "@devd_codex_account", "pane_current_command"]
+    # tmux 3.4 strips control delimiters such as ASCII unit separator. Tabs are
+    # supported; a final sentinel preserves empty fields when stdout is trimmed.
+    raw = tmux("list-panes", "-a", "-F", "\t".join("#{" + x + "}" for x in fields) + "\tEND")
+    panes = []
+    for line in raw.splitlines():
+        values = line.split("\t")
+        if len(values) != len(fields) + 1 or values.pop() != "END":
+            continue
+        p = dict(zip(fields, values))
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", p["session_name"]):
+            continue
+        for key in ("window_index", "pane_index", "window_width", "window_height", "window_active", "pane_active"):
+            p[key] = int(p[key])
+        try:
+            p["context"] = json.loads(p.pop("@devd_recovery_context") or "{}")
+            p["state"] = json.loads(p.pop("@devd_warp_state") or "{}")
+        except ValueError:
+            p["context"], p["state"] = {}, {}
+        if not valid_state(p["state"]):
+            nearest = nearest_agent(p)
+            if nearest and nearest[1] == "codex":
+                identifier = foreground_codex_identity(p, nearest[0])
+                if identifier:
+                    p["state"] = {"agent": "codex", "session_id": identifier, "event": "session_start"}
+        if not p["context"]:
+            p["context"] = infer_context(p)
+        # /exit returns to a shell while old hook options remain in tmux. Do
+        # not reopen an agent the user already exited. Nested agents are checked
+        # before treating a shell foreground process as an ordinary shell.
+        p["shell"] = False
+        if p["pane_current_command"] in {"zsh", "bash", "sh", "fish"} and not nearest_agent(p):
+            p["shell"] = True
+            p["state"], p["context"] = {}, {}
+        checkpointed = read(ROOT / ("pane-" + p["pane_id"][1:] + ".json"))
+        if checkpointed and checkpointed.get("generation") == generation():
+            # Pane options are authoritative after a new CLI launch clears state.
+            if p["state"].get("session_id") == checkpointed["state"].get("session_id"):
+                p["state"] = checkpointed["state"]
+        panes.append(p)
+    return panes[:128]
+
+
+def docker_snapshot():
+    # Host socket setups must not capture or restart other projects' containers.
+    host = os.environ.get("DOCKER_HOST", "")
+    sid = os.environ.get("DEVD_SESSION_ID", "")
+    if host != "tcp://dind-" + sid + ":2375":
+        return None
+    daemon = run(["docker", "info", "--format", "{{.ID}}"], timeout=3)
+    identifiers = run(["docker", "ps", "--no-trunc", "-q"], timeout=3).splitlines()
+    if not daemon or any(not re.fullmatch(r"[0-9a-f]{64}", i) for i in identifiers):
+        raise ValueError("Invalid Docker inventory")
+    return {"daemon": daemon, "ids": identifiers}
+
+
+def snapshot(include_docker=False):
+    if (ROOT / "restore-incomplete").exists():
+        return
+    panes = topology()
+    if not panes:
+        return  # Never replace recovery evidence while tmux is starting/stopping.
+    docker = None
+    if include_docker and not (ROOT / "pending-docker.json").exists():
+        try:
+            docker = docker_snapshot()
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            pass  # Preserve previous successful inventory on a daemon outage.
+    with lock("journal.lock"):
+        old = read(ROOT / "latest.json", {})
+        if old.get("generation") == generation() or (ROOT / "pending-docker.json").exists():
+            docker = docker if docker is not None else old.get("docker")
+        atomic(ROOT / "latest.json", {"version": 1, "session": os.environ.get("DEVD_SESSION_ID"), "agent": current_agent(),
+                                     "generation": generation(), "at": time.time(), "panes": panes, "docker": docker})
+
+
+def current_agent():
+    return os.environ.get("DEVD_AGENT") or "claude"  # same default as agent-launch
+
+
+def entry_pane(panes):
+    """The pane the entrypoint would start with the container's agent when there is no journal."""
+    return next((p for p in panes if p.get("session_name") == "main" and p.get("window_index") == 0 and p.get("pane_index") == 0), None)
+
+
+def journal_agent(saved):
+    # Older journals do not carry the agent; the main pane's profile is set by agent-launch.
+    return saved.get("agent") or (entry_pane(saved["panes"]) or {}).get("@devd_agent") or None
+
+
+def resume_plan(pane):
+    state, context = pane.get("state", {}), pane.get("context", {})
+    if not valid_state(state) or context.get("runtime") != state["agent"] or RUNTIME.get(context.get("profile")) != state["agent"]:
+        return None
+    env = clean_env(context.get("env", {}))
+    runtime, sid = state["agent"], state["session_id"]
+    if runtime == "codex":
+        account = env.get("DEVD_CODEX_ACCOUNT_ID")
+        if not account or (account != "default" and not UUID.fullmatch(account)):
+            return None
+        expected_home = "/home/dev/.codex" if account == "default" else "/home/dev/.codex-accounts/" + account
+        if env.get("CODEX_HOME") != expected_home:
+            return None
+        args = ["resume", sid]
+    elif runtime == "claude":
+        if not re.fullmatch(r"/home/dev/\.claude(?:-accounts/[A-Za-z0-9_-]+)?", env.get("CLAUDE_CONFIG_DIR", "")):
+            return None
+        args = ["--resume", sid]
+    elif runtime == "grok":
+        if env.get("GROK_HOME") != "/home/dev/.grok":
+            return None
+        args = ["--resume", sid]
+    elif runtime == "agy":
+        # agy has no home variable of its own to verify; the conversation is held by the conversation id.
+        args = ["--conversation=" + sid]
+    else:
+        return None
+    active = state["event"] in {"prompt_submit", "tool_complete"} and not state.get("waiting_tool")
+    return {"argv": ["/usr/local/bin/agent-launch", context["profile"], *args], "env": env,
+            "active": active, "runtime": runtime, "session_id": sid}
+
+
+def codex_remote_interrupted(plan):
+    sys.path.insert(0, "/usr/local/lib/devbox-recovery")
+    from rpc import Rpc
+    home = Path(plan["env"]["CODEX_HOME"])
+    registry = read(home / "devbox-routes.json", {})
+    owners = [route.get("container") for route in registry.get("routes", []) if plan["session_id"] in route.get("thread_ids", [])]
+    if owners != [os.environ.get("DEVD_SESSION_ID")]:
+        return False
+    client = Rpc(str(home / "app-server-control/app-server-control.sock"), timeout=3)
+    try:
+        result = client.call("thread/read", {"threadId": plan["session_id"], "includeTurns": True})
+        thread = result.get("thread", {})
+        status = thread.get("status", {})
+        turns = thread.get("turns", [])
+        # A live daemon may still own the running turn, or already have finished it.
+        # An unknown state never authorizes another prompt.
+        interrupted = (status.get("type") in {"idle", "notLoaded"} and thread.get("canAcceptDirectInput", True) is not False and bool(turns)
+                       and turns[-1].get("status") in {"interrupted", "inProgress"})
+        if not interrupted or not isinstance(turns[-1].get("id"), str) or not UUID.fullmatch(turns[-1]["id"]):
+            return False
+        # Shared across containers, keyed by the actual interrupted turn. A
+        # simultaneous cold restore cannot issue a second continue for it.
+        claims = home / "devbox-recovery-claims"
+        if claims.is_symlink():
+            return False
+        claims.mkdir(exist_ok=True, mode=0o700)
+        try:
+            os.close(os.open(claims / (plan["session_id"] + "-" + turns[-1]["id"]), os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600))
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        client.close()
+
+
+def launch(plan_file, index):
+    if not re.fullmatch(r"plan-[0-9a-f]{24}\.json", plan_file):
+        raise ValueError("Invalid recovery plan")
+    deadline = time.monotonic() + 90
+    while not (ROOT / (plan_file + ".ready")).exists():
+        if time.monotonic() >= deadline:
+            raise ValueError("Tmux recovery did not complete; original journal retained")
+        time.sleep(0.1)
+    saved = read(ROOT / plan_file)
+    if not saved or saved.get("session") != os.environ.get("DEVD_SESSION_ID"):
+        raise ValueError("Recovery session mismatch")
+    if index < 0 or index >= len(saved["panes"]):
+        raise ValueError("Invalid recovery pane index")
+    pane = saved["panes"][index]
+    plan = resume_plan(pane)
+    cwd = Path(pane["pane_current_path"])
+    if not cwd.is_absolute() or not cwd.is_dir():
+        print("devbox: the original working directory is missing; agent recovery was stopped.", flush=True)
+        os.execvp("zsh", ["zsh"])
+    os.chdir(cwd)
+    if pane.get("fresh_agent"):
+        switch = pane["fresh_agent"]
+        print("devbox: agent switched from " + switch["from"] + " to " + switch["to"] + ", starting a new conversation.", flush=True)
+        os.execvpe(AGENT_LAUNCH, [AGENT_LAUNCH], os.environ.copy())
+    if not plan or pane.get("duplicate"):
+        if not pane.get("shell"):
+            print("devbox: terminal restored. The agent has no unambiguous saved ID/account; resume its conversation manually.", flush=True)
+        os.execvp("zsh", ["zsh"])
+    for key in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "GROK_HOME"):
+        if key in plan["env"] and not Path(plan["env"][key]).is_dir():
+            raise ValueError("Saved agent account is unavailable")
+    # O_EXCL makes re-running the same launch plan incapable of sending continue twice.
+    claim = ROOT / (plan_file + "." + str(index) + ".claimed")
+    try:
+        os.close(os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600))
+    except FileExistsError:
+        # A failed exec may be retried explicitly, but never resend its prompt.
+        # Automatic entrypoint retries do not reach this path (live tmux guard).
+        plan["active"] = False
+    active = plan["active"] and not saved.get("manual_stop")
+    if (ROOT / "pending-docker.json").exists():
+        print("devbox: waiting for the original Docker containers to be restored before continuing.", flush=True)
+        deadline = time.monotonic() + 120
+        while (ROOT / "pending-docker.json").exists() and time.monotonic() < deadline:
+            time.sleep(.5)
+        if (ROOT / "pending-docker.json").exists():
+            active = False
+            print("devbox: Docker is not restored yet; opening the conversation without an automatic continue.", flush=True)
+    if plan["runtime"] == "codex" and plan["env"].get("DEVD_CODEX_REMOTE", "0") == "1":
+        try:
+            active = active and codex_remote_interrupted(plan)
+        except Exception:
+            active = False
+    env = os.environ.copy()
+    env.update(plan["env"])
+    env["DEVD_RECOVERY_LAUNCH"] = "1"
+    env["DEVD_AGENT_AUTO_UPDATE"] = "0"
+    args = plan["argv"] + (CONTINUE_ARGS.get(plan["runtime"], [CONTINUE]) if active else [])
+    print("devbox: restoring the original conversation" + (" and the interrupted work." if active else " without a new prompt."), flush=True)
+    os.execvpe(args[0], args, env)
+
+
+def restore_docker(saved):
+    previous = saved.get("docker")
+    if not previous:
+        return
+    current = docker_snapshot()
+    if not current or current["daemon"] != previous.get("daemon"):
+        raise ValueError("DinD identity changed; refusing to restore other containers")
+    for identifier in previous.get("ids", []):
+        if not re.fullmatch(r"[0-9a-f]{64}", identifier):
+            raise ValueError("Invalid saved Docker ID")
+        status = run(["docker", "inspect", "--format", "{{.State.Status}}", identifier], check=False)
+        if status in {"exited", "created"}:
+            run(["docker", "start", identifier], timeout=15)
+        elif status != "running":
+            raise ValueError("A previously running inner container is missing or unavailable: " + identifier[:12])
+
+
+def restore():
+    # A restarted control daemon and a second entrypoint must not adopt live tmux.
+    if run(["tmux", "list-sessions"], check=False):
+        return True
+    with lock("restore.lock"):
+        if run(["tmux", "list-sessions"], check=False):
+            return True
+        saved = read(ROOT / "latest.json")
+        if not saved:
+            return False
+        if (saved.get("version") != 1 or saved.get("session") != os.environ.get("DEVD_SESSION_ID")
+                or not isinstance(saved.get("panes"), list) or not 0 < len(saved["panes"]) <= 128):
+            raise ValueError("Invalid recovery journal; refusing fresh agent fallback")
+        if saved.get("generation") == generation():
+            # tmux was deliberately closed on this container lifetime.
+            return False
+        saved["manual_stop"] = (ROOT / "manual-stop").exists()
+        # Fold the last hook in even if a crash happened before the periodic snapshot.
+        for pane in saved["panes"]:
+            checkpointed = read(ROOT / ("pane-" + pane["pane_id"][1:] + ".json"))
+            if checkpointed and checkpointed.get("generation") == saved["generation"]:
+                if pane.get("state", {}).get("session_id") == checkpointed["state"].get("session_id"):
+                    pane["state"] = checkpointed["state"]
+                else:
+                    # A newer conversation was accepted but its full checkpoint
+                    # did not finish. Never reopen the previous conversation.
+                    pane["state"] = {}
+        # devd recreated the container with a different agent (dev --codex over a session where
+        # Claude was running): the main pane gets the new agent, not the old conversation nor
+        # a bare shell. The other panes are restored unchanged; the old conversation stays
+        # findable via resume.
+        previous = journal_agent(saved)
+        if previous and previous != current_agent():
+            entry = entry_pane(saved["panes"])
+            if entry:
+                entry["fresh_agent"] = {"from": previous, "to": current_agent()}
+                entry["state"], entry["context"] = {}, {}
+        owners = {}
+        for pane in saved["panes"]:
+            p = resume_plan(pane)
+            if p:
+                # UUID denotes the conversation even across account profile
+                # overlays. Model/context options cannot create a second owner.
+                key = (p["runtime"], p["session_id"])
+                if key in owners:
+                    pane["duplicate"] = True
+                    owners[key]["duplicate"] = True
+                owners[key] = pane
+        plan_name = "plan-" + generation() + ".json"
+        atomic(ROOT / plan_name, saved)
+        atomic(ROOT / "restore-incomplete", {"plan": plan_name})
+        try:
+            restore_docker(saved)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            print("devbox: the inner Docker cannot be restored yet: " + str(error), file=sys.stderr)
+            atomic(ROOT / "pending-docker.json", saved)
+        sessions, windows = set(), {}
+        for index, pane in enumerate(saved["panes"]):
+            session, window = pane["session_name"], pane["window_index"]
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", session) or not isinstance(window, int) or window < 0:
+                raise ValueError("Invalid saved tmux coordinates")
+            target = session + ":" + str(window)
+            cmd = shlex.join([SCRIPT, "launch", plan_name, str(index)])
+            cwd = pane["pane_current_path"] if Path(pane["pane_current_path"]).is_dir() else "/workspace"
+            if session not in sessions:
+                new = tmux("new-session", "-d", "-P", "-F", "#{pane_id}", "-s", session, "-x", str(max(80, pane["window_width"])), "-y", str(max(24, pane["window_height"])), "-c", cwd, cmd)
+                first = tmux("display-message", "-p", "-t", session, "#{window_index}")
+                if int(first) != window:
+                    tmux("move-window", "-s", session + ":" + first, "-t", target)
+                sessions.add(session)
+            elif target not in windows:
+                new = tmux("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", target, "-c", cwd, cmd)
+            else:
+                new = tmux("split-window", "-d", "-P", "-F", "#{pane_id}", "-t", target, "-c", cwd, cmd)
+            windows[target] = pane
+            tmux("set-option", "-t", session, "@devd_agent", pane.get("@devd_agent", ""))
+            if pane.get("@devd_label"):
+                tmux("set-option", "-t", session, "@devd_label", pane["@devd_label"])
+            if pane.get("pane_active"):
+                tmux("select-pane", "-t", new)
+        for target, pane in windows.items():
+            layout = pane.get("window_layout", "")
+            if re.fullmatch(r"[0-9a-f,x{}\[\]]+", layout):
+                try:
+                    tmux("select-layout", "-t", target, layout)
+                except RuntimeError:
+                    tmux("select-layout", "-t", target, "tiled")
+            tmux("rename-window", "-t", target, pane["window_name"])
+            if pane.get("window_active"):
+                tmux("select-window", "-t", target)
+        atomic(ROOT / (plan_name + ".ready"), {"ready": True})
+        (ROOT / "restore-incomplete").unlink(missing_ok=True)
+        (ROOT / "manual-stop").unlink(missing_ok=True)
+        return True
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("checkpoint")
+    p.add_argument("--pane", required=True)
+    p.add_argument("--state", required=True)
+    p = sub.add_parser("record-launch")
+    p.add_argument("runtime", choices=sorted(AGENT_RUNTIMES))
+    p.add_argument("argv", nargs=argparse.REMAINDER)
+    sub.add_parser("snapshot")
+    sub.add_parser("inspect")
+    sub.add_parser("check-ready")
+    sub.add_parser("monitor")
+    sub.add_parser("restore")
+    p = sub.add_parser("launch")
+    p.add_argument("plan")
+    p.add_argument("index", type=int)
+    args = parser.parse_args()
+    if args.command == "checkpoint":
+        checkpoint(args.pane, json.loads(args.state))
+    elif args.command == "record-launch":
+        record_launch(args.runtime, args.argv)
+    elif args.command == "snapshot":
+        snapshot(True)
+    elif args.command == "inspect":
+        panes = topology()
+        print(json.dumps({"panes": [{"session": p["session_name"], "window": p["window_index"], "pane": p["pane_index"],
+                         "ready": p.get("shell", False) or resume_plan(p) is not None, "kind": "shell" if p.get("shell") else "agent", "agent": p.get("state", {}).get("agent"),
+                         "event": p.get("state", {}).get("event")} for p in panes]}))
+    elif args.command == "check-ready":
+        latest = read(ROOT / "latest.json")
+        pending = ((ROOT / "restore-incomplete").exists() or (ROOT / "pending-docker.json").exists()
+                   or (latest and latest.get("generation") != generation()
+                       and not (ROOT / ("plan-" + generation() + ".json.ready")).exists()))
+        sys.exit(4 if pending else 0)
+    elif args.command == "restore":
+        sys.exit(0 if restore() else 3)
+    elif args.command == "launch":
+        launch(args.plan, args.index)
+    else:
+        # Only one monitor per container generation. Duplicate startup is harmless.
+        try:
+            monitor_lock = lock("monitor-" + generation() + ".lock", nonblocking=True)
+        except BlockingIOError:
+            return
+        with monitor_lock:
+            while True:
+                try:
+                    pending = read(ROOT / "pending-docker.json")
+                    if pending:
+                        try:
+                            restore_docker(pending)
+                            (ROOT / "pending-docker.json").unlink(missing_ok=True)
+                        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                            pass
+                    snapshot(True)
+                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                    pass
+                time.sleep(5)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
+        print("devbox: obnova zastavena: " + str(error), file=sys.stderr)
+        if len(sys.argv) > 1 and sys.argv[1] == "launch":
+            os.execvp("zsh", ["zsh"])
+        sys.exit(1)

@@ -1,0 +1,30 @@
+[Unit]
+Description=CLIProxyAPI — subscriptions (Codex, Grok) as an Anthropic-compatible API
+After=docker.service
+Requires=docker.service
+
+[Service]
+# The placeholder guard MUST be here too, not only in `setup.sh`: `enable` (setup.sh
+# install_cliproxy) writes the symlink into multi-user.target regardless of the content of
+# config.yaml, so after a reboot this unit would happily start with a key that is publicly
+# readable in this repo (config.yaml is only copied into the repo as example.yaml,
+# but the real file with the placeholder exists until the operator replaces it by hand).
+# `!` negates grep: placeholder found → grep 0 → `!` 1 → ExecStartPre fails → the start
+# does not even try to run the container.
+ExecStartPre=/bin/sh -c '! grep -q __CHANGE_ME__ /etc/devd/cliproxy/config.yaml'
+# We publish ONLY on loopback and the docker0 gateway. Without an address docker would bind
+# 0.0.0.0 and the subscription proxy would sit on the public IP as an open relay —
+# and docker bypasses ufw on top of that (see infra/docker-user-firewall.service).
+ExecStartPre=-/usr/bin/docker rm -f cli-proxy-api
+ExecStart=/usr/bin/docker run --rm --name cli-proxy-api \
+  -p 127.0.0.1:8317:8317 \
+  -p __DOCKER_GW__:8317:8317 \
+  -v /etc/devd/cliproxy/config.yaml:/CLIProxyAPI/config.yaml \
+  -v cliproxy-auths:/root/.cli-proxy-api \
+  eceasy/cli-proxy-api:latest
+ExecStop=/usr/bin/docker stop cli-proxy-api
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

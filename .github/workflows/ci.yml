@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: System tools used by tests
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends tmux jq sqlite3 shellcheck
+          git config --global user.name "CI"
+          git config --global user.email "ci@example.com"
+          git config --global init.defaultBranch main
+
+      - run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: devd
+        working-directory: devd
+        run: bun test
+
+      - name: dashboard
+        working-directory: dashboard
+        run: bun test
+
+      - name: cli
+        working-directory: cli
+        run: bun test
+
+      - name: listener
+        working-directory: listener
+        run: bun test
+
+      - name: Python tests
+        run: |
+          python3 -m unittest discover -s devd/test -p '*_test.py'
+          python3 -m unittest discover -s infra/storage-guard -p 'test_*.py'
+          python3 -m unittest discover -s image/mac-mcp-bridge -p 'test_*.py'
+          cmp infra/storage-guard/client.py image/storage-guard-client.py  # image copy must stay in sync
+
+      - name: setup.sh
+        run: bash infra/test-setup.sh
+
+      - name: Dashboard build
+        run: bun run build:dashboard
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The working tree must be clean of secrets. History is checked for the commits a PR
+      # adds; older history of this repository is not scanned here (the public repository
+      # starts from a single clean commit, where tree and history are the same thing).
+      - name: gitleaks (working tree)
+        run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            dir /repo --no-banner --redact --verbose --config /repo/.gitleaks.toml
+      - name: gitleaks (commits in this pull request)
+        if: github.event_name == 'pull_request'
+        run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            git /repo --no-banner --redact --verbose --config /repo/.gitleaks.toml \
+            --log-opts="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
