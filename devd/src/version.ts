@@ -1,13 +1,22 @@
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+
 export const VERSION = "0.1.0";
 
-/** Git commit devd runs from, read once at startup (null outside a git checkout). The
- *  updater (infra/devbox-update.ts) compares it after a restart to prove the new code runs. */
+/** Commit of the checkout devd runs from (read from .git, no subprocess); null outside a git checkout. */
 export const COMMIT: string | null = (() => {
   try {
-    const r = Bun.spawnSync(["git", "-C", import.meta.dir, "rev-parse", "HEAD"], { stderr: "ignore" });
-    const sha = r.exitCode === 0 ? r.stdout.toString().trim() : "";
-    return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
-  } catch {
-    return null;
-  }
+    let dir = import.meta.dir;
+    while (!existsSync(join(dir, ".git"))) {
+      if (dirname(dir) === dir) return null;
+      dir = dirname(dir);
+    }
+    const git = join(dir, ".git");
+    const head = readFileSync(join(git, "HEAD"), "utf8").trim();
+    if (!head.startsWith("ref: ")) return /^[0-9a-f]{40}$/.test(head) ? head : null;
+    const ref = head.slice(5);
+    if (existsSync(join(git, ref))) return readFileSync(join(git, ref), "utf8").trim();
+    const packed = readFileSync(join(git, "packed-refs"), "utf8").split("\n").find((l) => l.endsWith(` ${ref}`));
+    return packed?.split(" ")[0] ?? null;
+  } catch { return null; }
 })();
