@@ -474,6 +474,37 @@ export function transcriptFreshCmd(configDir: string, id: string, maxAgeMin: num
 
 export const TRANSCRIPT_FRESH_MIN = 5;
 
+// The CURRENT source: cc keeps `<config dir>/sessions/<pid>.json` with the conversation the
+// process is on RIGHT NOW — it follows an in-app `/resume` (verified live 1 Nov 2026: a pane
+// started with `--resume 072160c6…` and switched by `/resume` showed `6a51bd44…` there while
+// argv still said 072160c6). `procStart` (field 22 of /proc/<pid>/stat) rules out a file of
+// ANOTHER process with the same pid: `sessions/` lives in the claude-home volume shared by all
+// containers, each container has its own pid namespace, so the same pid recurs (verified live:
+// two containers both ran claude as pid 295 and the file belonged to the other one) — and
+// a stale file of an earlier process. Prints the id or fails; failure falls back to the banner.
+export const CLAUDE_LIVE_SESSION = `# CLAUDE_LIVE_SESSION
+import json, sys
+pid, config = sys.argv[1:]
+s = json.load(open(config + "/sessions/" + pid + ".json"))
+start = open("/proc/" + pid + "/stat").read().rsplit(")", 1)[1].split()[19]
+assert s["pid"] == int(pid) and str(s["procStart"]) == start
+print(s["sessionId"])
+`;
+
+async function liveSessionId(deps: RestartDeps, container: string, claudePid: number, configDir: string): Promise<string | null> {
+  try {
+    const r = await deps.exec(container, ["python3", "-c", CLAUDE_LIVE_SESSION, String(claudePid), configDir], 10_000);
+    const id = r.stdout.trim();
+    return r.code === 0 && !r.timedOut && new RegExp(`^${UUID}$`).test(id) ? id : null;
+  } catch { return null; }
+}
+
+// Does a transcript for that id exist at all (any age)? `null` = could not be determined.
+async function transcriptExists(deps: RestartDeps, container: string, configDir: string, id: string): Promise<boolean | null> {
+  const r = await deps.exec(container, ["find", "-L", `${configDir}/projects`, "-name", `${id}.jsonl`, "-print", "-quit"], 15_000);
+  return r.code !== 0 || r.timedOut ? null : r.stdout.trim() !== "";
+}
+
 // Without an id a bare `cc` is launched — a conversation cc has nothing to restore from is
 // empty, so nothing is lost. NEVER `--continue`.
 export const ccResumeCmd = (id: string | null): string => (id === null ? "cc" : `cc --resume ${id}`);
@@ -646,7 +677,12 @@ function exactExitBannerId(before: string, after: string): string | null {
 // otherwise a bare restart from the nightly ccUpkeep would, in the next round, silently inherit
 // the old value from the shell (exactly how the pane kept returning to the original account).
 //
-// The id is determined from two sources, in this order:
+// The id is determined from three sources, in this order:
+//   0. cc's own `sessions/<pid>.json` of the live claude (see CLAUDE_LIVE_SESSION) — current
+//      even after `/resume`, read before `/exit`. With a transcript behind it, it wins; without
+//      one the conversation is empty and a bare `cc` loses nothing. On 30 Oct 2026 a pane on a
+//      35 MB conversation started without `--resume` showed no banner after `/exit`, so the
+//      old "no banner = empty" rule started a NEW conversation and the next night resumed that,
 //   1. the exit banner cc prints on exit, verified against the transcript — it is
 //      CURRENT: it says what the pane was on RIGHT NOW,
 //   2. the argv of the live claude (`--resume`/`--session-id`), read before `/exit`
@@ -672,6 +708,8 @@ export async function restartPane(
     deps.exec(container, ["cat", `/proc/${claudePid}/cmdline`], 10_000).then((r) => parseSessionIdFromCmdline(r.stdout)),
     paneConfigDir(deps, container, claudePid),
   ]);
+  const fromSessionFile = claudePid === null || configDir === null || plan.exactClaudeAccount
+    ? null : await liveSessionId(deps, container, claudePid, configDir);
 
   const exact = plan.exactClaudeAccount;
   let boundaryNs: string | null = null;
@@ -733,13 +771,19 @@ export async function restartPane(
       if (transcript.code !== 0 || transcript.timedOut || transcript.stdout.trim() !== "ok") return "unknown-session";
     } catch { return "unknown-session"; }
   } else if (harvest) {
-    const banner = await bannerSessionId(deps, container, pane, configDir);
-    // The banner could not be verified → no guessing; only what we are sure of from argv
-    // is used, otherwise (with requireId) the pane is left at the shell.
-    if (banner === "unverifiable" && fromCmdline === null && (plan.requireId ?? true)) return "unknown-session";
-    // No banner = cc had nothing to restore (empty conversation). `fromCmdline` is then
-    // at most the same id, so it does no harm, and when absent a bare `cc` is launched.
-    id = banner === "unverifiable" || banner === null ? fromCmdline : banner;
+    // A session file without a transcript = an empty conversation → bare `cc` (id stays null).
+    const written = fromSessionFile === null ? null : await transcriptExists(deps, container, configDir!, fromSessionFile);
+    if (written !== null) {
+      if (written) id = fromSessionFile;
+    } else {
+      const banner = await bannerSessionId(deps, container, pane, configDir);
+      // The banner could not be verified → no guessing; only what we are sure of from argv
+      // is used, otherwise (with requireId) the pane is left at the shell.
+      if (banner === "unverifiable" && fromCmdline === null && (plan.requireId ?? true)) return "unknown-session";
+      // No banner = cc had nothing to restore (empty conversation). `fromCmdline` is then
+      // at most the same id, so it does no harm, and when absent a bare `cc` is launched.
+      id = banner === "unverifiable" || banner === null ? fromCmdline : banner;
+    }
   }
 
   const startCmd = `${plan.cmdPrefix ?? ""}${(plan.launch ?? ccResumeCmd)(id)}`;
