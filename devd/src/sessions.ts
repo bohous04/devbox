@@ -584,10 +584,14 @@ export class SessionManager {
   // in `<bare>/worktrees/<id>` — but it was created by root (devd). A guard "does the top already belong
   // to the dev user?" would be BROKEN here: after the first session `app.git` belongs to the dev user,
   // but the second session's directory under it is freshly root-owned and the second session could not
-  // commit. Hence unconditionally — and only when the worktree is created, not on every open.
+  // commit. Hence the whole tree — and only when the worktree is created, not on every open.
+  // Only entries NOT yet owned by uid 1000 are changed: `chown -R` touched every inode of a
+  // 54 GB / 620k-entry clone (2.9 s), a `find` that only stats them takes half of that.
   private async ownBare(bare: string): Promise<void> {
-    try { await sh(bare, "chown", "-R", "1000:1000", bare); }
-    catch (e) { console.error(`chown bare ${bare} failed:`, e); }
+    try {
+      const r = await sh(bare, "find", bare, "!", "-uid", "1000", "-exec", "chown", "-h", "1000:1000", "{}", "+");
+      if (r.code !== 0) console.error(`chown bare ${bare} failed: ${r.stderr.trim()}`);
+    } catch (e) { console.error(`chown bare ${bare} failed:`, e); }
   }
 
   // `project` uses non-colliding resource-attribute keys: Claude Code's own OTel
@@ -730,14 +734,31 @@ export class SessionManager {
         ? nextSessionId(this.d.db, t.project, t.repo, leftover)
         : (existingSessionId(this.d.db, t.project, t.repo, accept) ?? nextSessionId(this.d.db, t.project, t.repo, leftover)));
       try {
-        return await this.locked([id], "open", () => this.openUnlocked(t, id));
+        return await this.locked([id], "open", () => this.openWithEarlyDind(t, id));
       } finally {
         this.openProgress.delete(openKey(t));
       }
     });
   }
 
-  private async openUnlocked(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; fresh?: boolean; sessionId?: string }, id: string) {
+  // A NEW session starts its dind sidecar right away, in parallel with the worktree checkout,
+  // pull and chown — the sidecar does not depend on the workspace, and network create + daemon
+  // start + the readiness wait took ~3 s on the critical path (measured 1 Nov 2026 on a 54 GB
+  // repo: 14 s → the sidecar alone ~3 s of it). openUnlocked still awaits it before the session
+  // container runs, so "docker works from the first command" holds. When the open fails before
+  // the container exists, the sidecar would be an orphaned privileged container — removed here.
+  private async openWithEarlyDind(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; fresh?: boolean; sessionId?: string }, id: string) {
+    const fresh = !t.sessionId && !getSession(this.d.db, id);   // sessionId never creates (see open)
+    const dind = fresh && this.d.dind ? this.ensureDind(id).catch((e) => { console.error(`dind for ${id} failed:`, e); }) : undefined;
+    try {
+      return await this.openUnlocked(t, id, dind);
+    } catch (e) {
+      if (dind && !getSession(this.d.db, id)) { await dind; await this.cleanupDind(id, false); }
+      throw e;
+    }
+  }
+
+  private async openUnlocked(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; fresh?: boolean; sessionId?: string }, id: string, earlyDind?: Promise<void>) {
     const ws = workspacePath(this.d.root, t.folder, t.project, t.repo);
     const existing = getSession(this.d.db, id);
     // The session ended in the meantime (or belongs to another repo) → an error, not a silent new session with the same id.
@@ -882,8 +903,9 @@ export class SessionManager {
       logEvent(this.d.db, id, "pull-error", { message: pull.message });
     }
 
-    await this.ensureOwned(dir); // after root git ops, before the container starts (uid 1000)
-    if (bornWorktree) await this.ownBare(bare); // same reason, just for the shared bare clone
+    // After root git ops, before the container starts (uid 1000); the bare clone for the same
+    // reason. Independent trees, so in parallel.
+    await Promise.all([this.ensureOwned(dir), bornWorktree ? this.ownBare(bare) : undefined]);
 
     if (existing) {
       // Reality, not the DB: after a live agent swap (agentSwitch.ts) the container has a different
@@ -921,8 +943,11 @@ export class SessionManager {
     };
     insertSession(this.d.db, row);
     try {
-      await this.ensureDind(id);
-      await runContainer(await this.runOpts(id, dir, port_base, t.project, t.repo, agent, worktree ? bare : null));
+      const [opts] = await Promise.all([
+        this.runOpts(id, dir, port_base, t.project, t.repo, agent, worktree ? bare : null),
+        earlyDind ?? this.ensureDind(id),
+      ]);
+      await runContainer(opts);
     } catch (e) {
       deleteSession(this.d.db, id);
       throw e;
