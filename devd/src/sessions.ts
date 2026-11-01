@@ -368,7 +368,14 @@ export const openLockKey = openKey;
 
 /** What a running open() of the repo is doing right now — the CLI shows it in the spinner, so the initial
  *  clone of a large repo (minutes) does not look like a hang. In memory only, lives for the duration of open(). */
-export interface OpenProgress { step: "clone" | "worktree" | "pull" | "container"; clone?: CloneProgress }
+export interface OpenProgress {
+  step: "clone" | "fetch" | "worktree" | "pull" | "container";
+  /** git's own progress: `clone` while cloning, `git` while checking out the worktree. */
+  clone?: CloneProgress;
+  git?: CloneProgress;
+  /** What the step is doing inside (container: ownership, docker sidecar, start). */
+  detail?: string;
+}
 
 export class SessionManager {
   constructor(private d: SessionDeps) {}
@@ -830,7 +837,7 @@ export class SessionManager {
     if (worktree) {
       if (existsSync(bare) && !existsSync(worktree)) {
         // A new worktree is cut from origin/<default> (addWorktree) — make that fresh first.
-        progress({ step: "pull" });
+        progress({ step: "fetch" });
         await fetchBare(bare, authEnv);
       }
       if (!existsSync(bare)) {
@@ -868,7 +875,7 @@ export class SessionManager {
       // unregister a live session whose `gitdir` points into the container.
       const siblings = sameRepo.map((r) => r.worktree).filter((w): w is string => !!w);
       progress({ step: "worktree" });
-      const state = await ensureWorktree(bare, worktree, branch, await defaultBranch(bare), siblings);
+      const state = await ensureWorktree(bare, worktree, branch, await defaultBranch(bare), siblings, (git) => progress({ step: "worktree", git }));
       if (state !== "ok") {
         // The worktree metadata (registration in the bare clone, `.git` in the worktree, the computed index)
         // was written by root; the container runs as uid 1000. Without the chown git could not commit in it.
@@ -897,7 +904,7 @@ export class SessionManager {
     // back to a shared repo directory — the sessions would step on each other's files again.
     progress({ step: "pull" });
     const pull = await pullWithRebase(dir, authEnv);
-    progress({ step: "container" });
+    progress({ step: "container", detail: "setting file ownership" });
     const claudePrompt = this.syncPromptFile(id, pull, t.prompt);
     if (pull.status === "conflict") {
       logEvent(this.d.db, id, "pull-conflict", { files: pull.files });
@@ -948,10 +955,12 @@ export class SessionManager {
     };
     insertSession(this.d.db, row);
     try {
+      progress({ step: "container", detail: "waiting for the docker sidecar" });
       const [opts] = await Promise.all([
         this.runOpts(id, dir, port_base, t.project, t.repo, agent, worktree ? bare : null),
         earlyDind ?? this.ensureDind(id),
       ]);
+      progress({ step: "container", detail: "starting the container" });
       await runContainer(opts);
     } catch (e) {
       deleteSession(this.d.db, id);

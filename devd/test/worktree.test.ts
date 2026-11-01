@@ -498,3 +498,18 @@ test("ensureWorktree locks the registration, so even a blind prune leaves a live
   expect(existsSync(wt)).toBe(false);
   expect(existsSync(admin)).toBe(false);
 });
+
+// `worktree add` has no --progress; the checkout runs separately so the CLI can show a percentage.
+test("creating a worktree reports checkout progress and still checks out every file", async () => {
+  const { root, url } = makeOrigin();
+  const bare = join(root, "app.git");
+  await cloneBare(url, bare);
+  await trackRemote(bare);
+  const seen: number[] = [];
+  const wt = join(root, "_sessions", "dev-p-app-2");
+  await ensureWorktree(bare, wt, "session/app-2", await defaultBranch(bare), [], (p) => seen.push(p.percent));
+  expect(seen.at(-1)).toBe(100);
+  expect(existsSync(join(wt, "f.txt"))).toBe(true);
+  expect(sh(wt, "git", "status", "--porcelain").stdout.trim()).toBe("");
+  expect(branchOf(wt)).toBe("session/app-2");
+});

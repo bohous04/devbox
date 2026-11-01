@@ -114,3 +114,12 @@ test("formatOpenProgress describes the open() step for the spinner", () => {
   expect(formatOpenProgress({ step: "worktree" })).toBe("checking out");
   expect(formatOpenProgress({ step: "container" })).toBe("starting container");
 });
+
+test("formatOpenProgress: checkout percent, container substep, elapsed time, unknown step", () => {
+  expect(formatOpenProgress({ step: "worktree", git: { phase: "Updating files", percent: 37 } }, 12_400)).toBe("checking out · 37% · 12 s");
+  expect(formatOpenProgress({ step: "fetch" })).toBe("fetching");
+  expect(formatOpenProgress({ step: "container", detail: "waiting for the docker sidecar" }, 25_000))
+    .toBe("starting container · waiting for the docker sidecar · 25 s");
+  // A newer devd may report a step this CLI does not know — the raw name, never "undefined".
+  expect(formatOpenProgress({ step: "warmup" } as never)).toBe("warmup");
+});
