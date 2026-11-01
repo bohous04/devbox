@@ -332,17 +332,19 @@ export type WorktreeState = "ok" | "created" | "repaired";
  *  uid): "ok" = nothing happened. */
 export async function ensureWorktree(
   bare: string, dest: string, branch: string | null, from: string, siblings: string[] = [],
+  onProgress?: (p: CloneProgress) => void,
 ): Promise<WorktreeState> {
-  const state = await ensureWorktreeUnlocked(bare, dest, branch, from, siblings);
+  const state = await ensureWorktreeUnlocked(bare, dest, branch, from, siblings, onProgress);
   lockWorktree(bare, dest);
   return state;
 }
 
 async function ensureWorktreeUnlocked(
   bare: string, dest: string, branch: string | null, from: string, siblings: string[],
+  onProgress?: (p: CloneProgress) => void,
 ): Promise<WorktreeState> {
   const born = async (): Promise<WorktreeState> => {
-    await addWorktree(bare, dest, branch, from, siblings);
+    await addWorktree(bare, dest, branch, from, siblings, onProgress);
     return "created";
   };
   if (!existsSync(join(dest, ".git"))) return await born();
@@ -390,7 +392,7 @@ export async function archiveBranch(bare: string, branch: string, at: Date): Pro
   return target;
 }
 
-export async function addWorktree(bare: string, dest: string, branch: string | null, from: string, siblings: string[] = []): Promise<void> {
+export async function addWorktree(bare: string, dest: string, branch: string | null, from: string, siblings: string[] = [], onProgress?: (p: CloneProgress) => void): Promise<void> {
   const safe = ["-c", `safe.directory=${bare}`];
   // An orphaned registration (someone deleted the worktree directory outside devd) keeps the branch occupied and
   // `worktree add` on it then fails with "already used by worktree" — i.e. a session that
@@ -421,7 +423,10 @@ export async function addWorktree(bare: string, dest: string, branch: string | n
   // weeks old on the biggest repo — the session checked out that tree and the first pull then
   // rebased it onto origin through ~100k changed files. The caller fetches right before this.
   const start = branch && await has(`refs/remotes/origin/${from}^{commit}`) ? `origin/${from}` : from;
-  const add = ["-C", bare, ...safe, ...PARALLEL_CHECKOUT, "worktree", "add"];
+  // `worktree add` has no --progress, so the files are checked out by a separate `checkout
+  // --progress` — on a 9.6 GB tree that is ~20 s the CLI would otherwise show as a frozen spinner.
+  // An unborn branch has nothing to check out.
+  const add = ["-C", bare, ...safe, "worktree", "add", ...(unborn ? [] : ["--no-checkout"])];
   const args = branch && await has(`refs/heads/${branch}`)
     ? [...add, dest, branch]
     : unborn
@@ -431,6 +436,15 @@ export async function addWorktree(bare: string, dest: string, branch: string | n
         : [...add, dest, from];
   const r = await sh(bare, "git", ...args);
   if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr.trim()}`);
+  if (!unborn) {
+    const co = await run(["git", "-C", dest, "-c", `safe.directory=${dest}`, ...PARALLEL_CHECKOUT, "checkout", "--progress", "--force"], {
+      cwd: dest, timeoutMs: timeoutFor("GIT_CLONE"),
+      // Without it git starts reporting only after 2 s and short checkouts show nothing at all.
+      env: { GIT_PROGRESS_DELAY: "0" },
+      onStderr: onProgress ? cloneProgressSink(onProgress) : undefined,
+    });
+    if (co.code !== 0 || co.timedOut) throw new Error(`git checkout in ${dest} failed: ${co.timedOut ? "timed out" : withoutProgress(co.stderr)}`);
+  }
   // The session branch's upstream is the DEFAULT branch, not the remote of the same name (that one does not exist):
   // `pull --rebase` should rebase the session onto a fresh upstream, exactly as today in the
   // shared workspace. Without this, pull would end with "no tracking information" as soon as

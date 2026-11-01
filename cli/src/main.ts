@@ -640,11 +640,12 @@ async function openAndAttach(deps: Deps, t: Target, opts: { ask: boolean; agent?
   // The initial clone of a big repo takes minutes — without progress it looks like a hang.
   // claudeSolo clones nothing, no polling there.
   let polling = t.repo !== "claudeSolo";
+  const started = Date.now();
   const poll = async () => {
     while (polling) {
-      await new Promise((r) => setTimeout(r, 1000));
+      await new Promise((r) => setTimeout(r, 500));
       const p = polling ? await deps.api.openProgress?.({ folder: t.folder, project: t.project, repo: t.repo }) : null;
-      if (polling && p) s.message(`${opening} — ${formatOpenProgress(p)}`);
+      if (polling) s.message(p ? `${opening} — ${formatOpenProgress(p, Date.now() - started)}` : `${opening}… ${Math.round((Date.now() - started) / 1000)} s`);
     }
   };
   void poll();

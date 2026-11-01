@@ -91,8 +91,18 @@ export function formatDoctor(checks: { name: string; ok: boolean; hint?: string 
 }
 
 // Line for the `dev` spinner during open(): "cloning · Receiving objects 45% · 3.21 GiB | 30.12 MiB/s".
-export function formatOpenProgress(p: OpenProgress): string {
-  if (p.step !== "clone") return { worktree: "checking out", pull: "pulling", container: "starting container" }[p.step];
-  if (!p.clone) return "cloning";
-  return ["cloning", `${p.clone.phase} ${p.clone.percent}%`, p.clone.detail].filter(Boolean).join(" · ");
+const OPEN_STEP: Record<string, string> = {
+  clone: "cloning", fetch: "fetching", worktree: "checking out", pull: "pulling", container: "starting container",
+};
+
+/** One spinner line for a running open. A step this CLI does not know yet (newer devd) is shown by
+ *  its raw name rather than as "undefined". `elapsedMs` is the CLI's own clock since the open began. */
+export function formatOpenProgress(p: OpenProgress, elapsedMs?: number): string {
+  const git = p.step === "clone" ? p.clone : p.git;
+  const parts: (string | undefined)[] = [OPEN_STEP[p.step] ?? p.step];
+  // Clone phases differ (receiving, resolving deltas); a checkout only ever says "Updating files".
+  if (git) parts.push(p.step === "clone" ? `${git.phase} ${git.percent}%` : `${git.percent}%`, git.detail);
+  if (p.detail) parts.push(p.detail);
+  if (elapsedMs !== undefined) parts.push(`${Math.round(elapsedMs / 1000)} s`);
+  return parts.filter(Boolean).join(" · ");
 }
