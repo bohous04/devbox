@@ -101,7 +101,7 @@ test("isQuiet: an unreachable container is considered not quiet", async () => {
   expect(await isQuiet(deps({ exec: async () => fail() }), session("a"))).toBe(false);
 });
 
-import { hasClaudeUnder, parsePanes, parseProcTree, restartClaudePane, stalePanes } from "../src/ccUpkeep";
+import { CLAUDE_LIVE_SESSION, hasClaudeUnder, parsePanes, parseProcTree, restartClaudePane, stalePanes } from "../src/ccUpkeep";
 
 test("parsePanes reads `session:window.pane<TAB>pid` and skips garbage", () => {
   const raw = "main:0.0\t62\nmain-2:0.0\t120\n\nbroken-line\nmain-3:0.0\tnotanumber\n";
@@ -199,7 +199,7 @@ const CMDLINE = (id: string) => `claude\0--dangerously-skip-permissions\0--resum
 const ENVIRON = "CLAUDE_CONFIG_DIR=/home/dev/.claude-accounts/max20\0";
 
 /** Container mock for a pane restart. `cmdline`/`pane`/`fresh` control where the id can be found. */
-function restartEnv(over: { cmdline?: string; pane?: string; fresh?: string } = {}) {
+function restartEnv(over: { cmdline?: string; pane?: string; fresh?: string; session?: string; written?: string } = {}) {
   const sent: string[][] = [];
   let started = false;
   const d = deps({
@@ -213,6 +213,9 @@ function restartEnv(over: { cmdline?: string; pane?: string; fresh?: string } = 
       if (cmd[0] === "cat" && cmd[1] === "/proc/64/cmdline") return ok(over.cmdline ?? "");
       if (cmd[0] === "cat" && cmd[1] === "/proc/64/environ") return ok(ENVIRON);
       if (cmd[0] === "tmux" && cmd[1] === "capture-pane") return ok(over.pane ?? "");
+      if (cmd[0] === "python3" && cmd[2]?.startsWith("# CLAUDE_LIVE_SESSION"))
+        return over.session === undefined ? { ...ok(), code: 1 } : ok(`${over.session}\n`);
+      if (cmd[0] === "find" && !cmd.includes("-newermt")) return ok(over.written ?? "");
       if (cmd[0] === "find") return ok(over.fresh ?? "");
       return ok();
     },
@@ -295,6 +298,49 @@ test("restartClaudePane: without a banner a bare `cc` is started", async () => {
   const { d, cmds } = restartDeps({ pane: "78c1814a78f1%\n" });
   expect(await restartClaudePane(d, "dev-a", PANE)).toBe("restarted");
   expect(cmds()).toEqual(["/exit", "cc"]);
+});
+
+// 30 Oct 2026: a pane on a 35 MB conversation, started without `--resume`, printed no banner
+// after `/exit` — the old "no banner = empty" rule started a NEW conversation. cc's own
+// sessions/<pid>.json knew the id all along.
+test("restartClaudePane: cc's live session file gives the id when there is no banner and no argv id", async () => {
+  const { d, cmds } = restartDeps({ pane: "78c1814a78f1%\n", session: SID, written: `/x/${SID}.jsonl\n` });
+  expect(await restartClaudePane(d, "dev-a", PANE)).toBe("restarted");
+  expect(cmds()).toEqual(["/exit", `cc --resume ${SID}`]);
+});
+
+// After an in-app `/resume` argv still names the conversation cc was STARTED with; following it
+// takes the pane back to that one (the next night after the incident above: argv held the
+// empty conversation, the pane was on the real one again).
+test("restartClaudePane: the live session file overrides a stale argv id (after /resume)", async () => {
+  const { d, cmds } = restartDeps({ cmdline: CMDLINE(OTHER), session: SID, written: `/x/${SID}.jsonl\n` });
+  expect(await restartClaudePane(d, "dev-a", PANE)).toBe("restarted");
+  expect(cmds()).toEqual(["/exit", `cc --resume ${SID}`]);
+});
+
+test("restartClaudePane: a live session that was never written is empty → bare `cc`, not the stale argv id", async () => {
+  const { d, cmds } = restartDeps({ cmdline: CMDLINE(OTHER), session: SID, written: "" });
+  expect(await restartClaudePane(d, "dev-a", PANE)).toBe("restarted");
+  expect(cmds()).toEqual(["/exit", "cc"]);
+});
+
+test("restartClaudePane: an unreadable session file falls back to banner and argv", async () => {
+  const { d, cmds } = restartDeps({ cmdline: CMDLINE(SID), session: "not-a-uuid" });
+  expect(await restartClaudePane(d, "dev-a", PANE)).toBe("restarted");
+  expect(cmds()).toEqual(["/exit", `cc --resume ${SID}`]);
+});
+
+// /proc exists only on Linux (CI, the VPS); the probe runs inside Linux containers.
+test.skipIf(process.platform !== "linux")("CLAUDE_LIVE_SESSION: reads the id only for the same process (pid + procStart)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cc-live-"));
+  mkdirSync(join(dir, "sessions"));
+  const stat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+  const start = stat.slice(stat.lastIndexOf(")") + 1).trim().split(" ")[19];
+  const run = () => Bun.spawnSync(["python3", "-c", CLAUDE_LIVE_SESSION, String(process.pid), dir]);
+  writeFileSync(join(dir, "sessions", `${process.pid}.json`), JSON.stringify({ pid: process.pid, procStart: start, sessionId: SID }));
+  expect(run().stdout.toString().trim()).toBe(SID);
+  writeFileSync(join(dir, "sessions", `${process.pid}.json`), JSON.stringify({ pid: process.pid, procStart: "1", sessionId: SID }));
+  expect(run().exitCode).not.toBe(0);
 });
 
 // `dev switch` (accountSwitch.ts) prepends a profile export — the conversation id does not
@@ -639,7 +685,7 @@ test("restartClaudePane: cc stays hanging on the dialog → \"stuck-on-dialog\",
 // The nightly upkeep restarted six panes in a row and four of them ended up on the SAME foreign
 // conversation (live: dev-websites-car-dealer and dev-websites-conference-web had bit-identical
 // pane content). That is why the restart goes exclusively through `cc --resume <id>`.
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
