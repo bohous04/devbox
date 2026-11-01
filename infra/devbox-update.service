@@ -8,5 +8,8 @@ Type=oneshot
 EnvironmentFile=-/etc/devd/devd.env
 ExecStart=/usr/local/bin/bun __REPO__/infra/devbox-update.ts
 Environment=DEVBOX_REPO_DIR=__REPO__
+# git (credential helper) and gh (CI status) read their config from the home directory;
+# systemd services get no HOME, so a private repo would fail at `git fetch`.
+Environment=HOME=/root
 Nice=10
 TimeoutStartSec=2h
