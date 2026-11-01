@@ -12,7 +12,7 @@ import { agentLabel, altCfg, buildExecArgv, probeArgv, runInteractive, sessionPi
 import { parseProbe } from "../../devd/src/tmux";
 import { loadCliConfig, type CliConfig } from "./config";
 import { runDoctor } from "./doctor";
-import { clearScreen, endEffect, formatDoctor, formatOpenProgress, formatPorts, formatSessions, sessionLabel } from "./format";
+import { clearScreen, endEffect, formatDoctor, formatOpenProgress, formatPorts, formatSessions, openProgressPercent, progressBar, sessionLabel } from "./format";
 import { runLocal } from "./local";
 import { promptName, sessionManager } from "./manager";
 import { agentSwitchSummary, exitMenuOptions, type ExitAction } from "./manager-view";
@@ -641,11 +641,15 @@ async function openAndAttach(deps: Deps, t: Target, opts: { ask: boolean; agent?
   // claudeSolo clones nothing, no polling there.
   let polling = t.repo !== "claudeSolo";
   const started = Date.now();
+  let shown = 0;   // never move the bar backwards (a clone's band overlaps the later steps)
   const poll = async () => {
     while (polling) {
       await new Promise((r) => setTimeout(r, 500));
       const p = polling ? await deps.api.openProgress?.({ folder: t.folder, project: t.project, repo: t.repo }) : null;
-      if (polling) s.message(p ? `${opening} — ${formatOpenProgress(p, Date.now() - started)}` : `${opening}… ${Math.round((Date.now() - started) / 1000)} s`);
+      if (!polling) break;
+      if (p) shown = Math.max(shown, openProgressPercent(p));
+      const text = p ? formatOpenProgress(p, Date.now() - started, { withPercent: false }) : `${Math.round((Date.now() - started) / 1000)} s`;
+      s.message(`${opening} ${progressBar(shown)} ${String(shown).padStart(3)}% · ${text}`);
     }
   };
   void poll();
