@@ -97,12 +97,57 @@ const OPEN_STEP: Record<string, string> = {
 
 /** One spinner line for a running open. A step this CLI does not know yet (newer devd) is shown by
  *  its raw name rather than as "undefined". `elapsedMs` is the CLI's own clock since the open began. */
-export function formatOpenProgress(p: OpenProgress, elapsedMs?: number): string {
+// Short labels for devd's container substeps, so the line fits next to the bar.
+const CONTAINER_LABEL: Record<string, string> = {
+  "setting file ownership": "file ownership", "waiting for the docker sidecar": "docker sidecar", "starting the container": "starting",
+};
+
+/** `withPercent: false` = the caller draws a bar with the overall percentage; a second, per-step
+ *  percentage next to it would only confuse. */
+export function formatOpenProgress(p: OpenProgress, elapsedMs?: number, o: { withPercent?: boolean } = {}): string {
   const git = p.step === "clone" ? p.clone : p.git;
   const parts: (string | undefined)[] = [OPEN_STEP[p.step] ?? p.step];
   // Clone phases differ (receiving, resolving deltas); a checkout only ever says "Updating files".
-  if (git) parts.push(p.step === "clone" ? `${git.phase} ${git.percent}%` : `${git.percent}%`, git.detail);
-  if (p.detail) parts.push(p.detail);
+  if (git && o.withPercent !== false) parts.push(p.step === "clone" ? `${git.phase} ${git.percent}%` : `${git.percent}%`, git.detail);
+  else if (git && p.step === "clone") parts.push(git.phase, git.detail);
+  if (p.detail) parts.push(o.withPercent === false ? CONTAINER_LABEL[p.detail] ?? p.detail : p.detail);
   if (elapsedMs !== undefined) parts.push(`${Math.round(elapsedMs / 1000)} s`);
   return parts.filter(Boolean).join(" · ");
+}
+
+// Where each step sits on the one bar for the whole open. The checkout of a large repo is by far
+// the longest part (~20 s of ~35 s on the biggest repo), hence the widest band. A clone only happens on the
+// very first open of a repo; its band overlaps fetch/worktree, the caller keeps the bar monotonic.
+const OPEN_BANDS: Record<string, [number, number]> = {
+  fetch: [0, 5], worktree: [5, 75], pull: [75, 85], container: [85, 100],
+};
+const CLONE_PHASES: Record<string, [number, number]> = {
+  "Receiving objects": [2, 30], "Resolving deltas": [30, 40], "Checking out files": [40, 45], "Updating files": [40, 45],
+};
+const CONTAINER_STEPS: Record<string, number> = {
+  "setting file ownership": 86, "waiting for the docker sidecar": 90, "starting the container": 96,
+};
+
+/** Overall 0–100 for the whole open, from the current step and git's own percentage. */
+export function openProgressPercent(p: OpenProgress): number {
+  if (p.step === "clone") {
+    const [lo, hi] = (p.clone && CLONE_PHASES[p.clone.phase]) || [0, 2];
+    return Math.round(lo + ((hi - lo) * (p.clone?.percent ?? 0)) / 100);
+  }
+  if (p.step === "container") return CONTAINER_STEPS[p.detail ?? ""] ?? 85;
+  const band = OPEN_BANDS[p.step];
+  if (!band) return 0;
+  const [lo, hi] = band;
+  return Math.round(lo + ((hi - lo) * (p.git?.percent ?? 0)) / 100);
+}
+
+const EIGHTHS = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+
+/** `▕██████▌░░░░░░░░▏` — eighth-blocks so a slow checkout visibly moves. */
+export function progressBar(percent: number, width = 24): string {
+  const cells = (Math.min(100, Math.max(0, percent)) / 100) * width;
+  const full = Math.floor(cells);
+  const part = EIGHTHS[Math.floor((cells - full) * 8)] ?? "";
+  const rest = width - full - (part ? 1 : 0);
+  return `▕${"█".repeat(full)}${part}${"░".repeat(Math.max(0, rest))}▏`;
 }

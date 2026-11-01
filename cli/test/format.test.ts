@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { SessionInfo } from "../src/api";
-import { endEffect, endPrompt, formatDoctor, formatOpenProgress, formatPorts, formatSessions, sessionLabel, uptime } from "../src/format";
+import { endEffect, endPrompt, formatDoctor, formatOpenProgress, formatPorts, formatSessions, openProgressPercent, progressBar, sessionLabel, uptime } from "../src/format";
 
 const row: SessionInfo = {
   id: "dev-shop-cms", folder: "acme", project: "shop", repo: "cms", container: "dev-shop-cms",
@@ -122,4 +122,30 @@ test("formatOpenProgress: checkout percent, container substep, elapsed time, unk
     .toBe("starting container · waiting for the docker sidecar · 25 s");
   // A newer devd may report a step this CLI does not know — the raw name, never "undefined".
   expect(formatOpenProgress({ step: "warmup" } as never)).toBe("warmup");
+});
+
+test("progressBar: fixed width, eighth blocks, clamped", () => {
+  expect(progressBar(0, 8)).toBe("▕░░░░░░░░▏");
+  expect(progressBar(100, 8)).toBe("▕████████▏");
+  expect(progressBar(50, 8)).toBe("▕████░░░░▏");
+  expect(progressBar(56.25, 8)).toBe("▕████▌░░░▏");
+  expect(progressBar(150, 8)).toBe("▕████████▏");
+  for (const pct of [0, 13, 37, 64, 99, 100]) expect([...progressBar(pct)].length).toBe(26);
+});
+
+test("openProgressPercent: one bar across all steps, checkout takes the widest band", () => {
+  expect(openProgressPercent({ step: "fetch" })).toBe(0);
+  expect(openProgressPercent({ step: "worktree", git: { phase: "Updating files", percent: 50 } })).toBe(40);
+  expect(openProgressPercent({ step: "worktree", git: { phase: "Updating files", percent: 100 } })).toBe(75);
+  expect(openProgressPercent({ step: "pull" })).toBe(75);
+  expect(openProgressPercent({ step: "container", detail: "waiting for the docker sidecar" })).toBe(90);
+  expect(openProgressPercent({ step: "container" })).toBe(85);
+  expect(openProgressPercent({ step: "clone", clone: { phase: "Receiving objects", percent: 50 } })).toBe(16);
+  expect(openProgressPercent({ step: "warmup" } as never)).toBe(0);
+});
+
+test("formatOpenProgress next to a bar: no second percentage, short container labels", () => {
+  expect(formatOpenProgress({ step: "worktree", git: { phase: "Updating files", percent: 63 } }, 14_000, { withPercent: false })).toBe("checking out · 14 s");
+  expect(formatOpenProgress({ step: "container", detail: "waiting for the docker sidecar" }, 26_000, { withPercent: false })).toBe("starting container · docker sidecar · 26 s");
+  expect(formatOpenProgress({ step: "clone", clone: { phase: "Receiving objects", percent: 45, detail: "30 MiB/s" } }, 5_000, { withPercent: false })).toBe("cloning · Receiving objects · 30 MiB/s · 5 s");
 });
