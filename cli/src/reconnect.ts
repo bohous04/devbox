@@ -36,6 +36,15 @@ export function dialFor(attempt: number, argv: string[], argvAlt?: string[]): st
   return attempt % 2 === 0 ? argv : argvAlt;
 }
 
+// When ssh dies mid-attach, tmux never gets to undo what it switched on in the local terminal:
+// mouse reporting (every move then prints `^[[<35;44;50M` garbage over the retry message —
+// seen live 1 Nov 2026), bracketed paste, a hidden cursor, the alternate screen. Turned off here.
+export const TERMINAL_RESET =
+  "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l" + // mouse reporting
+  "\x1b[?2004l" +                                                     // bracketed paste
+  "\x1b[?1049l" +                                                     // leave the alternate screen
+  "\x1b[?25h";                                                        // show the cursor
+
 export interface AttachLoopDeps {
   retryRemoteErrors?: boolean; // cold recovery: docker/tmux may be starting while the row is running
   argv: string[];
@@ -47,6 +56,7 @@ export interface AttachLoopDeps {
   health: () => Promise<"running" | "gone" | "unknown">;
   out?: (line: string) => void;
   now?: () => number; // injectable clock for tests; default Date.now
+  resetTerminal?: () => void; // undo tmux's terminal modes after a dropped connection
 }
 
 // Self-healing attach to a session: repeats `run(argv)` while the connection drops due to the network
@@ -63,6 +73,7 @@ export async function attachLoop(deps: AttachLoopDeps): Promise<number> {
     const attachedMs = now() - started;
     const decision = retryDecision(code);
     if (decision === "done") return 0;
+    deps.resetTerminal?.();   // every other outcome may have left tmux's modes on
     if (decision === "exit-menu") return 42;
     if (decision === "error" && !(deps.retryRemoteErrors && [1, 44, 125, 126, 137, 143].includes(code))) {
       out(`Connection failed (code ${code}) — container is probably not running. Try \`dev\`.`);

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { attachLoop, backoffMs, dialFor, retryDecision } from "../src/reconnect";
+import { attachLoop, backoffMs, dialFor, retryDecision, TERMINAL_RESET } from "../src/reconnect";
 
 test("cold recovery retries missing Docker/tmux while desired session is running", async () => {
   const codes = [137, 143, 125, 44, 1, 0];
@@ -170,4 +170,18 @@ test("attachLoop: a long run (≥30s) before a drop resets the counter — the n
   expect(lines[0]).toContain("attempt 1");
   expect(lines[1]).toContain("attempt 2");
   expect(lines[2]).toContain("attempt 1"); // reset after a long attach, not "attempt 3"
+});
+
+// 1 Nov 2026: after a network drop every mouse move printed `^[[<35;44;50M` over the retry
+// message — tmux's mouse reporting stayed on in the local terminal because ssh died first.
+test("attachLoop: a dropped connection resets the terminal before the retry message, a clean detach does not", async () => {
+  const events: string[] = [];
+  const { deps } = fakeDeps([255, 0], ["running"]);
+  await attachLoop({ ...deps, out: (l) => events.push(`out:${l.slice(0, 14)}`), resetTerminal: () => events.push("reset") });
+  expect(events).toEqual(["reset", "out:⏳ Disconnected"]);
+});
+
+test("TERMINAL_RESET turns off every mouse mode and shows the cursor", () => {
+  for (const mode of ["1000", "1002", "1003", "1006", "2004", "1049"]) expect(TERMINAL_RESET).toContain(`\x1b[?${mode}l`);
+  expect(TERMINAL_RESET).toContain("\x1b[?25h");
 });

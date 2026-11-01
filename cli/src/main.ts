@@ -19,7 +19,7 @@ import { agentSwitchSummary, exitMenuOptions, type ExitAction } from "./manager-
 import { agentFlag, agentOptions, folderOptions, freshLabel, gistOutcome, hostFlag, NEW_SOLO, projectOptions, repoOptions, runningSolosIn, shouldAskAgent, soloActionOptions, soloMenuOptions, stripAgentFlags, stripHostFlags } from "./picker";
 import type { IbxStatus } from "../../devd/src/instabox/reconcile";
 import type { BaseStep } from "../../devd/src/instabox/base";
-import { attachLoop } from "./reconnect";
+import { attachLoop, TERMINAL_RESET } from "./reconnect";
 import { fileLastAttached, fileRecents, flattenTree, matchSessions, resolveQuery, sortByRecent, type Target } from "./resolve";
 import { newestRecoveryRecords, ownerAlive, recoveryLaunchConfig, safeTmuxSession, sameRecoveryServer, sameRecoveryTarget, terminalRecoveryStore, waitForSavedSession, warpPaneId } from "./recovery";
 import { detectedWarpGrokSupport } from "./warp";
@@ -815,6 +815,7 @@ async function runExitAware(deps: Deps, container: string, tmuxSession: string, 
           withSessionName(tmuxCommand(tmuxSession, grokSupport, existingOnly || connectionAttempt++ > 0), name)));
       },
       retryRemoteErrors: true,
+      resetTerminal: () => { if (process.stdout.isTTY) process.stdout.write(TERMINAL_RESET); },
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
       health: async () => {
         try {
