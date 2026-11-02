@@ -429,6 +429,9 @@ export const api = {
   grokLoginStatus: () => j<{ status: "pending" | "done" | "error" }>("/api/auth/grok/login/status"),
   // Google OAuth without a browser on the server: devd opens a login container, the user
   // pastes the authorization code that agy waits for on stdin.
+  claudeLoginStart: () => j<{ url: string }>("/api/auth/claude/login/start", post({})),
+  claudeLoginCode: (code: string) => j<void>("/api/auth/claude/login/code", post({ code })),
+  claudeLoginStatus: () => j<{ status: "pending" | "done" | "error" }>("/api/auth/claude/login/status"),
   agyLoginStart: () => j<{ url: string }>("/api/auth/antigravity/login/start", post({})),
   agyLoginCode: (code: string) => j<void>("/api/auth/antigravity/login/code", post({ code })),
   agyLoginStatus: () => j<{ status: "pending" | "done" | "error" }>("/api/auth/antigravity/login/status"),

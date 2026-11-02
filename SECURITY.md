@@ -25,7 +25,7 @@ before you give it real credentials.
 
 | Boundary | Mechanism | Limits |
 |---|---|---|
-| internet → devd, dashboard, SMB | ufw: devd `:4300` and the DB proxies only from the tailnet and container ranges; `DOCKER-USER` DROP on `eth0` for published container ports | if your public interface is not `eth0`, adjust the rules ([install.md](docs/install.md#firewall)) |
+| internet → devd, dashboard, SMB | ufw: devd `:4300` and the DB proxies only from the tailnet and container ranges; `DOCKER-USER` DROP on detected public interfaces for published container ports | devd binds `0.0.0.0`; firewall rules enforce isolation. Set `PUBLIC_IFACE` for custom routing ([install.md](docs/install.md#firewall)) |
 | session → host | Docker container, non-root user | **without `DEVD_DIND=1` sessions get the host Docker socket, which is root on the host.** Turn on `DEVD_DIND=1` (a Docker-in-Docker sidecar per session) for real isolation |
 | session → other sessions | separate containers and worktrees | logins and agent config are **shared volumes** (`claude-home`, `codex-home`, `grok-home`), so any session can read the others' tokens and conversation history. The devd API identifies sessions with a header that a container can set to any value |
 | session → secrets | the vault and most secrets stay in devd memory on the host; SSH keys are exposed only as an ssh-agent socket after a human approves (`srv`); prod DB passwords stay in the host proxy | an approved key or grant can be used for anything during its lifetime |

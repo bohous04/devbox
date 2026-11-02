@@ -58,7 +58,7 @@ tailnet IPv4 (`tailscale ip -4`, column `sessions.instabox_ts_ip`) and the appro
 let nothing through from such an address, even if the ACL broke. devd keeps the addresses of ended sessions
 in memory until restart; it forgets them only for machines that reconcile reports as lost.
 
-ufw: `infra/setup.sh` allows 4301 only on `tailscale0` (deny from `eth0`).
+ufw: `infra/setup.sh` allows 4301 only on `tailscale0` (deny from detected public interfaces).
 
 ### Residual risk of the auth key
 

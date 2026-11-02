@@ -102,7 +102,7 @@ function GiteaTokenControl({ name, info, onSaved }: {
   return (
     <div className="flex flex-wrap items-center gap-2">
       <Badge variant="outline">{info ? (info.hasToken ? "Token saved" : "No token") : "Not saved"}</Badge>
-      <Button variant="outline" size="sm" disabled={!info} title={info ? undefined : "Save the configuration first (Save + push)"} onClick={() => { setOpen(true); setMsg(null); }}>{info?.hasToken ? "Replace token" : "Add token"}</Button>
+      <Button variant="outline" size="sm" disabled={!info} title={info ? undefined : "Save the configuration first (Save)"} onClick={() => { setOpen(true); setMsg(null); }}>{info?.hasToken ? "Replace token" : "Add token"}</Button>
       <FormDialog open={open} onOpenChange={(next) => { if (!next) close(); }} busy={busy} title={`Gitea token · ${name}`} description="Create an access token in Gitea → Settings → Applications with read:repository and read:user permissions.">
         <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); void saveToken(); }}>
           <label className="grid gap-1.5 text-sm font-medium">Access token<SecretInput required value={token} onChange={(e) => setToken(e.target.value)} /></label>
@@ -218,13 +218,20 @@ function UrlLoginRow({ label, loginLabel, status, start, pollStatus, onDone, onE
   );
 }
 
-/** Google OAuth without a browser on the server: the user opens the link, Google shows them
- *  an authorization code and it is pasted here (agy waits for it in the login container). */
-function CodeLoginRow({ label, loginLabel, status, start, submitCode, pollStatus, onDone, onError, onLogout }: {
+/** OAuth without a browser on the server: the user opens the link, the provider shows them
+ *  an authorization code and it is pasted here (the CLI waits for it in the login container).
+ *  Used for Antigravity (Google) and Claude Code (claude.ai). */
+function CodeLoginRow({ label, loginLabel, status, start, submitCode, pollStatus, onDone, onError, onLogout,
+  provider = "Google", account = "the Google account that has your subscription", note = `Already running ${label} sessions keep their previous sign-in until they restart.`,
+  relogin = false }: {
   label: string; loginLabel: string; status: AuthProvider;
   start: () => Promise<{ url: string }>; submitCode: (code: string) => Promise<void>;
   pollStatus: () => Promise<LoginPollStatus>; onDone: () => Promise<void>;
-  onError: (msg: string) => void; onLogout: () => Promise<void>;
+  onError: (msg: string) => void; onLogout?: () => Promise<void>;
+  /** Shown in "Open <provider> sign-in" and "the code <provider> shows you". */
+  provider?: string; account?: string; note?: string;
+  /** Offer signing in again while signed in (switching accounts) — for providers without a logout here. */
+  relogin?: boolean;
 }) {
   const login = useLoginDialog(start, pollStatus, onDone, onError);
   const [code, setCode] = useState("");
@@ -252,13 +259,14 @@ function CodeLoginRow({ label, loginLabel, status, start, submitCode, pollStatus
       <Badge variant={b.tone === "ok" ? "default" : "secondary"}>{b.text}</Badge>
       <span className="min-w-0 break-words text-sm text-muted-foreground">{status.detail}</span><span className="flex-1" />
       {!status.loggedIn && <Button size="sm" onClick={() => { reset(); void login.begin(); }}>{loginLabel}</Button>}
-      {status.loggedIn && <ActionButton size="sm" variant="ghost" onError={onError} onAction={async () => { await onLogout(); await onDone(); }}>Log out</ActionButton>}
-      <FormDialog open={login.open} onOpenChange={(next) => { if (!next) close(); }} title={loginLabel} description={`Connect ${label} with the Google account that has your subscription.`}>
+      {status.loggedIn && relogin && <Button size="sm" variant="ghost" onClick={() => { reset(); void login.begin(); }}>Sign in again</Button>}
+      {status.loggedIn && onLogout && <ActionButton size="sm" variant="ghost" onError={onError} onAction={async () => { await onLogout(); await onDone(); }}>Log out</ActionButton>}
+      <FormDialog open={login.open} onOpenChange={(next) => { if (!next) close(); }} title={loginLabel} description={`Connect ${label} with ${account}.`}>
         <div className="space-y-4">
           {!login.data && !login.error && <p role="status" className="text-sm text-muted-foreground">Preparing sign-in…</p>}
           {login.data && <>
-            <p className="text-sm">1. <a className="underline" href={login.data.url} target="_blank" rel="noreferrer">Open Google sign-in ↗</a></p>
-            <p className="text-sm">2. Paste the authorization code Google shows you:</p>
+            <p className="text-sm">1. <a className="underline" href={login.data.url} target="_blank" rel="noreferrer">Open {provider} sign-in ↗</a></p>
+            <p className="text-sm">2. Paste the authorization code {provider} shows you:</p>
             <form className="flex gap-2" onSubmit={handleSubmit}>
               <input className="min-w-0 flex-1 rounded-md border bg-background px-3 py-2 font-mono text-sm" value={code} onChange={(e) => setCode(e.target.value)} disabled={submit.phase !== "idle"} autoComplete="off" spellCheck={false} aria-label="Authorization code" />
               <Button type="submit" size="sm" disabled={!canSubmitCode(submit, code)}>{submit.phase === "submitting" ? "Submitting…" : "Submit"}</Button>
@@ -267,7 +275,7 @@ function CodeLoginRow({ label, loginLabel, status, start, submitCode, pollStatus
           </>}
           {submit.error && <p role="alert" className="text-sm text-destructive">{submit.error}</p>}
           {login.error && <p role="alert" className="text-sm text-destructive">{login.error}</p>}
-          <p className="text-xs text-muted-foreground">Already running Antigravity sessions keep their previous sign-in until they restart.</p>
+          <p className="text-xs text-muted-foreground">{note}</p>
           <div className="flex justify-end"><Button variant="outline" onClick={close}>Close</Button></div>
         </div>
       </FormDialog>
@@ -292,17 +300,16 @@ export function Accounts() {
   async function refresh() { try { setStatus(await api.auth()); } catch (e) { setErr((e as Error).message); } }
   useEffect(() => { refresh(); }, []);
 
-  const claudeB = providerBadge(status?.claude ?? { loggedIn: false });
-
   return (
     <div className="flex flex-col gap-4">
       <Card><CardContent className="flex flex-col gap-2 p-4">
-        {/* Claude has no action: it logs in outside the dashboard (account pool), only the status is here. */}
-        <div className="flex flex-wrap items-center gap-3 border-b pb-3">
-          <span className="w-40 shrink-0 text-sm font-medium">Claude</span>
-          <Badge variant={claudeB.tone === "ok" ? "default" : "secondary"}>{claudeB.text}</Badge>
-          <span className="text-sm text-muted-foreground">{status?.claude.detail ?? "…"}</span>
-        </div>
+        {/* Claude: `claude auth login` into the shared claude-home (the default account). Extra
+            accounts for automatic selection are added in the account pool above. */}
+        <CodeLoginRow label="Claude" loginLabel="Sign in with Claude" status={status?.claude ?? NOT_LOGGED_IN}
+          start={api.claudeLoginStart} submitCode={api.claudeLoginCode} pollStatus={api.claudeLoginStatus}
+          onDone={refresh} onError={setErr} provider="Claude" account="the Claude account that has your subscription"
+          note="Use a browser signed in to the right Claude account (or a private window). Running Claude sessions pick up the new sign-in on their next start."
+          relogin />
 
         <DeviceLoginRow label="Codex CLI" loginLabel="Log in with ChatGPT" status={status?.codex ?? NOT_LOGGED_IN}
           start={api.codexLoginStart} pollStatus={api.codexLoginStatus} onDone={refresh} onError={setErr}
@@ -546,7 +553,7 @@ export function Settings() {
                   </div>
                 ))}
                 <Button size="sm" variant="outline" onClick={() => setPinOpen(true)}>Add project pin</Button>
-                <FormDialog open={pinOpen} onOpenChange={setPinOpen} title="Add project pin" description="Assign a project to an account. Apply this to the editor, then Save + push to activate it.">
+                <FormDialog open={pinOpen} onOpenChange={setPinOpen} title="Add project pin" description="Assign a project to an account. Apply this to the editor, then Save to activate it.">
                   <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); if (!pinProject.trim() || !pinAccount) return; mutate(setProjectPin(draft, pinProject.trim(), pinAccount)); setPinProject(""); setPinAccount(""); setPinOpen(false); }}>
                     <label className="grid gap-1.5 text-sm font-medium">Project<Input required value={pinProject} onChange={(e) => setPinProject(e.target.value)} /></label>
                     <label className="grid gap-1.5 text-sm font-medium">Account<select required className="h-11 rounded-md border bg-background px-3 text-sm" value={pinAccount} onChange={(e) => setPinAccount(e.target.value)}><option value="">Choose account</option>{poolAccountIds.map((id) => <option key={id} value={id}>{id}</option>)}</select></label>
@@ -587,7 +594,7 @@ export function Settings() {
         </CardContent></Card>
       </Section>
 
-      <FormDialog open={instanceEdit !== null} onOpenChange={(next) => { if (!next) setInstanceEdit(null); }} title={instanceEdit === "new" ? "Add Gitea instance" : "Edit Gitea instance"} description="Apply these changes to the editor, then Save + push before adding a token.">
+      <FormDialog open={instanceEdit !== null} onOpenChange={(next) => { if (!next) setInstanceEdit(null); }} title={instanceEdit === "new" ? "Add Gitea instance" : "Edit Gitea instance"} description="Apply these changes to the editor, then Save before adding a token.">
         <form className="space-y-4" onSubmit={(e) => {
           e.preventDefault(); if (!draft || instanceEdit === null) return;
           const base = instanceEdit === "new" ? addGiteaInstance(draft) : draft;
@@ -609,7 +616,7 @@ export function Settings() {
           <p className="text-sm text-muted-foreground">Edit the configuration directly for settings outside these controls.</p>
           <Button variant="outline" disabled={!draft} onClick={() => { if (draft) setJsonText(JSON.stringify(draft, null, 2)); setJsonOpen(true); }}>Edit JSON</Button>
         </CardContent></Card>
-        <FormDialog open={jsonOpen} onOpenChange={setJsonOpen} title="Configuration JSON" description="Apply valid JSON to the editor. Save + push commits your settings; folders are managed separately.">
+        <FormDialog open={jsonOpen} onOpenChange={setJsonOpen} title="Configuration JSON" description="Apply valid JSON to the editor. Save persists your settings; folders are managed separately.">
           <div className="space-y-4">
             <textarea className="min-h-[320px] w-full resize-y rounded-md border bg-transparent p-3 font-mono text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" value={jsonText} spellCheck={false} onChange={(e) => setJsonText(e.target.value)} aria-label="Configuration editor (JSON)" />
             {jsonError && <p role="alert" className="text-sm text-destructive">{jsonError}</p>}
@@ -633,13 +640,13 @@ export function Settings() {
 
       <Card>
         <CardContent className="flex flex-wrap items-center gap-3 p-4">
-          <ActionButton disabled={!draft || !dirty || issues.length > 0} onAction={save} onError={setSaveErr}>Save + push</ActionButton>
+          <ActionButton disabled={!draft || !dirty || issues.length > 0} onAction={save} onError={setSaveErr}>Save</ActionButton>
           <Button variant="outline" disabled={!draft} onClick={load}>Reload from server</Button>
           {issues.length > 0 && (
             <span className="text-xs font-medium text-destructive">{issues[0]}{issues.length > 1 ? ` (+ ${issues.length - 1} more)` : ""}</span>
           )}
           {issues.length === 0 && dirty && <span className="text-xs font-medium text-amber-600 dark:text-amber-400">● unsaved changes</span>}
-          {saved && !dirty && <span className="text-xs font-medium text-emerald-600 dark:text-emerald-400">Saved and pushed</span>}
+          {saved && !dirty && <span className="text-xs font-medium text-emerald-600 dark:text-emerald-400">Saved</span>}
           {saveErr && <span className="text-xs font-medium text-destructive">Error: {saveErr}</span>}
         </CardContent>
       </Card>

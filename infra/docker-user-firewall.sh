@@ -12,10 +12,17 @@
 # outgoing container traffic are ESTABLISHED, traffic between containers goes over
 # docker0 and tailnet access over tailscale0, so the rule catches none of that.
 set -eu
-IFACE="${PUBLIC_IFACE:-eth0}"
-for cmd in iptables ip6tables; do
-  # The chain may not exist yet when we are faster than docker after boot.
-  "$cmd" -N DOCKER-USER 2>/dev/null || true
-  "$cmd" -C DOCKER-USER -i "$IFACE" -m conntrack --ctstate NEW -j DROP 2>/dev/null \
-    || "$cmd" -I DOCKER-USER -i "$IFACE" -m conntrack --ctstate NEW -j DROP
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=public-interfaces.sh
+. "$(dirname "$0")/public-interfaces.sh"
+interfaces=$(public_interfaces) || exit 1
+for IFACE in $interfaces; do
+  for cmd in iptables ip6tables; do
+    # The chain may not exist yet when we are faster than docker after boot.
+    "$cmd" -N DOCKER-USER 2>/dev/null || true
+    "$cmd" -C DOCKER-USER -i "$IFACE" -m conntrack --ctstate NEW -j DROP 2>/dev/null \
+      || "$cmd" -I DOCKER-USER -i "$IFACE" -m conntrack --ctstate NEW -j DROP
+    # Docker may not have created the IPv6 jump (e.g. before its first IPv6 bridge).
+    "$cmd" -C FORWARD -j DOCKER-USER 2>/dev/null || "$cmd" -I FORWARD -j DOCKER-USER
+  done
 done

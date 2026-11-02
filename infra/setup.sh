@@ -22,6 +22,10 @@ has_feature() { [[ " $DEVBOX_FEATURES " == *" all "* || " $DEVBOX_FEATURES " == 
 
 log() { echo "▶ $*"; }
 
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=public-interfaces.sh
+source "$(dirname "${BASH_SOURCE[0]}")/public-interfaces.sh"
+
 install_packages() {
   local pkgs=(ca-certificates curl gnupg jq ufw unzip git openssl)
   has_feature samba && pkgs+=(samba)
@@ -83,10 +87,18 @@ install_tailscale() {
 
 configure_ufw() {
   # Allow the port sshd actually listens on, not a hardcoded 22 — otherwise a re-run
-  # (the runbook asks for one after `tailscale up`) resets ufw and drops a hardened
+  # (the runbook asks for one after `tailscale up`) must preserve a hardened
   # non-standard SSH port (e.g. 2222 from the hardening role), locking you out.
   local ssh_port; ssh_port="$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}' || true)"; ssh_port="${ssh_port:-22}"
-  ufw --force reset
+  local public_ifaces iface port
+  public_ifaces=$(public_interfaces) || return 1
+  PUBLIC_IFACE="$public_ifaces"  # reuse the same validated selection for the Docker service
+  # Preserve operator rules. Public denies must precede even existing allow rules.
+  for iface in $public_ifaces; do
+    for port in 4300 4301 15432 15433; do
+      ufw insert 1 deny in on "$iface" to any port "$port" proto tcp comment 'devbox: never from internet'
+    done
+  done
   ufw default deny incoming
   ufw default allow outgoing
   ufw allow 41641/udp comment 'tailscale'
@@ -96,28 +108,24 @@ configure_ufw() {
   # silently drop container SYNs: hooks hang on curl timeouts, notifications and the
   # srv/open/preview/db-request shims stop working. ufw has no interface wildcards, hence
   # the rules match the SOURCE range — both default docker address pools (172.16.0.0/12 for
-  # the first 15 networks, then 192.168.0.0/16). The deny on eth0 comes FIRST on purpose:
-  # eth0 has rp_filter=2 (loose), so a spoofed private source from the internet would
+  # the first 15 networks, then 192.168.0.0/16). The public-interface denies come FIRST on purpose:
+  # Public interfaces can have rp_filter=2 (loose), so a spoofed private source from the internet would
   # otherwise match the allow. Rule order = evaluation order in ufw.
-  ufw deny in on eth0 to any port 4300 proto tcp comment 'devd api: never from internet'
   ufw allow from 172.16.0.0/12 to any port 4300 proto tcp comment 'containers (all docker bridges) → devd api'
   ufw allow from 192.168.0.0/16 to any port 4300 proto tcp comment 'containers (docker 2nd default pool) → devd api'
   # dind session networks get their own /24 from 10.213.0.0/16 (dind.ts dindSubnetCandidates).
   ufw allow from 10.213.0.0/16 to any port 4300 proto tcp comment 'containers (dind networks 10.213/16) -> devd api'
   # Same for the prod-db DB proxy (DEVD_DB_PROXY_PORT): psql in a container connects to the
   # host address and ufw would otherwise drop the SYN from the dind network.
-  ufw deny in on eth0 to any port 15432 proto tcp comment 'devd db proxy: never from internet'
   ufw allow from 172.16.0.0/12 to any port 15432 proto tcp comment 'containers (all docker bridges) → devd db proxy'
   ufw allow from 192.168.0.0/16 to any port 15432 proto tcp comment 'containers (docker 2nd default pool) → devd db proxy'
   ufw allow from 10.213.0.0/16 to any port 15432 proto tcp comment 'containers (dind networks 10.213/16) -> devd db proxy'
   # MariaDB speaks a server-first protocol, so it has its own bridge listener.
-  ufw deny in on eth0 to any port 15433 proto tcp comment 'devd MariaDB proxy: never from internet'
   ufw allow from 172.16.0.0/12 to any port 15433 proto tcp comment 'containers -> devd MariaDB proxy'
   ufw allow from 192.168.0.0/16 to any port 15433 proto tcp comment 'containers second pool -> devd MariaDB proxy'
   ufw allow from 10.213.0.0/16 to any port 15433 proto tcp comment 'containers (dind networks 10.213/16) -> devd MariaDB proxy'
   # devd VM listener for InstaBox machines (DEVD_VM_PORT, default 4301): only hooks, OTel, git
   # proxy, health and lease (devd/src/vmListener.ts). Only from the tailnet; not from containers on the VPS.
-  ufw deny in on eth0 to any port 4301 proto tcp comment 'devd VM listener: nikdy z internetu'
   ufw allow in on tailscale0 to any port 4301 proto tcp comment 'devd VM listener (InstaBox, tailnet)'
   if has_feature samba; then
     ufw allow in on tailscale0 to any port 445 proto tcp comment 'samba (tailnet)'
@@ -133,8 +141,14 @@ configure_docker_firewall() {
   # after a docker restart too, not just after boot.
   install -m 755 "$REPO_DIR/infra/docker-user-firewall.sh" /usr/local/sbin/docker-user-firewall.sh
   cp "$REPO_DIR/infra/docker-user-firewall.service" /etc/systemd/system/docker-user-firewall.service
+  install -m 644 "$REPO_DIR/infra/public-interfaces.sh" /usr/local/sbin/public-interfaces.sh
+  local public_ifaces
+  public_ifaces=$(public_interfaces) || return 1
+  mkdir -p /etc/systemd/system/docker-user-firewall.service.d
+  printf '[Service]\nEnvironment="PUBLIC_IFACE=%s"\n' "$(echo "$public_ifaces" | tr '\n' ' ')" > /etc/systemd/system/docker-user-firewall.service.d/public-iface.conf
   systemctl daemon-reload
-  systemctl enable --now docker-user-firewall.service
+  systemctl enable docker-user-firewall.service
+  systemctl restart docker-user-firewall.service
 }
 
 configure_samba() {
@@ -187,7 +201,7 @@ install_devd_service() {
   systemctl enable devd
   systemctl restart devd
   if [ "$ip" = "127.0.0.1" ]; then
-    log "⚠️ No Tailscale IP yet — devd listens on 127.0.0.1. After 'tailscale up --ssh' run again: sudo REPO_DIR=$REPO_DIR bash $REPO_DIR/infra/setup.sh"
+    log "⚠️ No Tailscale IP yet — DEVD_BIND_IP uses 127.0.0.1 for published session ports; the API listens on 0.0.0.0 behind ufw. After 'tailscale up --ssh' run again: sudo REPO_DIR=$REPO_DIR bash $REPO_DIR/infra/setup.sh"
   fi
 }
 
@@ -367,7 +381,7 @@ install_storage_guard() {
 }
 
 provision_claude() {
-  (cd "$REPO_DIR" && DEVD_CONFIG_DIR="$CONFIG_DIR" bun tools/agent-sync.ts) || log "agent-sync failed — run it again after claude/codex login"
+  (cd "$REPO_DIR" && DEVD_CONFIG_DIR="$CONFIG_DIR" bun tools/agent-sync.ts) || log "agent-sync failed — inspect the error above, fix the configuration or login, then rerun tools/agent-sync.ts"
 }
 
 main() {
@@ -377,7 +391,7 @@ main() {
   log "Done (features: ${DEVBOX_FEATURES:-core only}). Remaining: tailscale up --ssh · gh auth login · claude login (in the first session)"
   has_feature samba && log "Samba: smbpasswd -a root"
   log "Security: once tailscale ssh works, consider closing public SSH: ufw delete allow <ssh-port>/tcp"
-  log "After 'tailscale up --ssh' run again (rebinds devd to the tailnet): sudo REPO_DIR=$REPO_DIR bash $REPO_DIR/infra/setup.sh"
+  log "After 'tailscale up --ssh' run again (sets session port binding to the tailnet): sudo REPO_DIR=$REPO_DIR bash $REPO_DIR/infra/setup.sh"
 }
 
 # only run main when executed, not when sourced (so tests can source helpers)

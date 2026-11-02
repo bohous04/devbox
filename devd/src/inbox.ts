@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 
 const SAFE = /[^A-Za-z0-9._-]/g;
@@ -42,7 +42,7 @@ export function stageFile(workspace: string, rawName: string, bytes: Uint8Array)
   if (!name) throw new Error("invalid file name");
   const dir = ensureInbox(workspace);
   const target = uniquePath(dir, name);
-  writeFileSync(target, bytes);
+  writeFileSync(target, bytes, { flag: "wx" });
   return "/workspace/.inbox/" + basename(target);
 }
 
@@ -53,7 +53,8 @@ export function stageShared(sharedDir: string, rawName: string, bytes: Uint8Arra
   const name = sanitizeName(rawName);
   if (!name) throw new Error("invalid file name");
   mkdirSync(sharedDir, { recursive: true });
+  if (!lstatSync(sharedDir).isDirectory()) throw new Error("inbox must be a directory, not a symlink");
   const target = uniquePath(sharedDir, name);
-  writeFileSync(target, bytes);
+  writeFileSync(target, bytes, { flag: "wx" });
   return "/inbox/" + basename(target);
 }

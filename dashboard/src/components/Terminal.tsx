@@ -3,6 +3,8 @@ import { Terminal as Xterm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { encodeBottom, encodeInput, encodeResize, encodeScroll, encodeUnlock, KEY_BAR, KEY_SEQ, terminalWsUrl, wheelSteps } from "../terminalProto";
+import { decodeOsc52, isPasteShortcut } from "../terminalClipboard";
+import { TerminalClipboard } from "./TerminalClipboard";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -26,6 +28,7 @@ export interface TerminalProps {
 }
 
 export function Terminal({ id, tmux, wsUrl, startUnlocked = false, title, onClose, headerExtra, onSocketClose, statusLabels }: TerminalProps) {
+  const [copyOffer, setCopyOffer] = useState<string | null>(null);
   const host = useRef<HTMLDivElement | null>(null);
   const [granted, setGranted] = useState(startUnlocked);
   const [status, setStatus] = useState<"connecting" | "open" | "closed">("connecting");
@@ -44,6 +47,15 @@ export function Terminal({ id, tmux, wsUrl, startUnlocked = false, title, onClos
     term.open(host.current);
     fit.fit();
     termRef.current = term;
+    setCopyOffer(null);
+    term.attachCustomKeyEventHandler((event) => !isPasteShortcut(event));
+    // Never answer clipboard queries or let a session overwrite the user's clipboard.
+    // OSC 52 text is offered for an explicit Copy click, including tmux copy-mode.
+    const osc = term.parser.registerOscHandler(52, (data) => {
+      const text = decodeOsc52(data);
+      if (text !== null) setCopyOffer(text);
+      return true;
+    });
 
     const ws = new WebSocket(wsUrl ?? terminalWsUrl(id ?? "", tmux));
     wsRef.current = ws;
@@ -75,8 +87,11 @@ export function Terminal({ id, tmux, wsUrl, startUnlocked = false, title, onClos
     });
     const onResize = () => { fit.fit(); if (ws.readyState === ws.OPEN) ws.send(encodeResize(term.cols, term.rows)); };
     window.addEventListener("resize", onResize);
+    // Clipboard controls and upload/status messages can change the available height.
+    const observer = new ResizeObserver(onResize);
+    observer.observe(host.current);
 
-    return () => { disposed = true; window.removeEventListener("resize", onResize); dataSub.dispose(); ws.close(); term.dispose(); };
+    return () => { disposed = true; observer.disconnect(); window.removeEventListener("resize", onResize); osc.dispose(); dataSub.dispose(); ws.close(); term.dispose(); };
   }, [id, tmux, wsUrl]);
 
   function takeControl() {
@@ -123,6 +138,7 @@ export function Terminal({ id, tmux, wsUrl, startUnlocked = false, title, onClos
         )}
         {onClose && <Button variant="ghost" size="sm" className="text-[#9fb0c3] hover:bg-[#1c2230] hover:text-[#e6edf3]" onClick={onClose}>Close</Button>}
       </div>
+      <TerminalClipboard offeredText={copyOffer} onDismiss={() => setCopyOffer(null)} id={wsUrl ? undefined : id} host={host} terminal={termRef} canPaste={granted && status === "open"} />
       <div className="relative min-h-0 flex-1">
         <div className="h-full p-1.5" ref={host} />
         {scrolledUp && (
