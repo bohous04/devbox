@@ -8,7 +8,7 @@ Server-side setup and systemd units. Start with [docs/install.md](../docs/instal
 | `setup.sh` | idempotent host setup; optional parts via `DEVBOX_FEATURES` |
 | `devd.service`, `devd.env.example` | devd unit and the optional install-specific environment |
 | `hardware.example.json` | machine registry template for the Hardware tab |
-| `docker-user-firewall.*` | DROP new connections from `eth0` to published container ports |
+| `docker-user-firewall.*` | DROP new connections from detected public interfaces to published container ports |
 | `devbox-backup.*` | nightly borg backup (installed by hand, see docs) |
 | `devd-watch.*` | external watchdog: devd alive, vault unlocked, heartbeat |
 | `cliproxy.service`, `cliproxy-config.example.yaml` | local proxy for proxy profiles (`cliproxy` feature) |

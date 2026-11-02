@@ -2,6 +2,9 @@
 
 Get any file from the mac into Claude Code running in a devbox container.
 
+For Windows/Linux or browser-only clients, use screenshot/file paste, drop or **Upload files**
+in the web terminal — see [browser.md](browser.md).
+
 ## How to
 
 1. In Finder, press **⌘C** on the file (normal copy).

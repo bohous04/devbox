@@ -398,3 +398,64 @@ export async function agyLogout(d: CodexAuthDeps): Promise<void> {
   if (r.code !== 0) throw new Error(`antigravity logout failed: ${r.stderr.trim().slice(0, 300)}`);
 }
 
+
+/** Claude Code — `claude auth login` (Claude subscription) from the dashboard, for operators
+ *  without a Mac. Same shape as Antigravity: Claude prints an OAuth URL and waits for the
+ *  authorization code to be PASTED at "Paste code here if prompted >", so the login runs in a tmux
+ *  pane of a disposable container over the shared `claude-home` volume (mounted where sessions
+ *  mount it, CLAUDE_CONFIG_DIR=/home/dev/.claude in the image), and devd types the code in.
+ *  The pane is 1000 columns wide so the ~600-character URL stays on one line.
+ *  `claude auth login` exits by itself; its exit code goes to a marker file the status reads,
+ *  so a re-login over an existing .credentials.json is not reported done before it finished. */
+const CLAUDE_LOGIN_CONTAINER = "devbox-claude-login";
+const CLAUDE_LOGIN_EXIT = "/tmp/devbox-claude-login.exit";
+// claude.ai / claude.com and their subdomains (the host has changed between Claude Code versions).
+const CLAUDE_URL_RE = /https:\/\/(?:[a-z0-9-]+\.)*claude\.(?:ai|com)\/[^\s]*oauth\/authorize\?[^\s]+/;
+
+export function parseClaudeLoginUrl(pane: string): string | null {
+  return pane.match(CLAUDE_URL_RE)?.[0] ?? null;
+}
+
+/** The code goes into the terminal as keystrokes (it contains `#` between code and state). */
+export function isValidClaudeCode(code: unknown): code is string {
+  return typeof code === "string" && code.length > 0 && code.length <= 1024 && /^[\x21-\x7e]+$/.test(code);
+}
+
+const claudeCapture = (d: CodexAuthDeps) => d.run(["exec", CLAUDE_LOGIN_CONTAINER, "tmux", "capture-pane", "-pJ", "-S", "-"]);
+
+export async function claudeLoginStart(d: CodexAuthDeps): Promise<{ url: string }> {
+  await d.run(["rm", "-f", CLAUDE_LOGIN_CONTAINER]);
+  // BROWSER=true: there is no browser in the container, and the image's `open` shim would ask the
+  // mac listener to open the URL — the operator opens the link from the dashboard instead.
+  const run = await d.run(["run", "-d", "--name", CLAUDE_LOGIN_CONTAINER, "-v", `${CLAUDE_VOLUME}:/home/dev/.claude`,
+    "-e", "TERM=xterm-256color", "-e", "BROWSER=true", img(d), "sh", "-c",
+    `tmux new-session -d -x 1000 -y 50 'claude auth login --claudeai; echo $? > ${CLAUDE_LOGIN_EXIT}'; exec sleep 900`]);
+  if (run.code !== 0) throw new Error(`claude login start failed: ${run.stderr.trim().slice(0, 300)}`);
+  for (let i = 0; i < 30; i++) {
+    await d.sleep(500);
+    const url = parseClaudeLoginUrl((await claudeCapture(d)).stdout);
+    if (url) return { url };
+  }
+  await d.run(["rm", "-f", CLAUDE_LOGIN_CONTAINER]);
+  throw new Error("could not read the Claude login URL from the pane");
+}
+
+export async function claudeLoginCode(d: CodexAuthDeps, code: string): Promise<void> {
+  if (!isValidClaudeCode(code)) throw new Error("invalid authorization code");
+  const r = await d.run(["exec", "-i", CLAUDE_LOGIN_CONTAINER, "sh", "-c", 'tmux send-keys -l -- "$(cat)"; tmux send-keys Enter'], code);
+  if (r.code !== 0) throw new Error("login container is not running — start the login again");
+}
+
+export async function claudeLoginStatus(d: CodexAuthDeps): Promise<"pending" | "done" | "error"> {
+  const exit = await d.run(["exec", CLAUDE_LOGIN_CONTAINER, "cat", CLAUDE_LOGIN_EXIT]);
+  if (exit.code === 0 && exit.stdout.trim() !== "") {
+    await d.run(["rm", "-f", CLAUDE_LOGIN_CONTAINER]);
+    if (exit.stdout.trim() !== "0") return "error";
+    // Exit 0 must also have left credentials on the volume — otherwise it is not a usable login.
+    const creds = await d.run(["run", "--rm", "-v", `${CLAUDE_VOLUME}:/h`, img(d), "test", "-s", "/h/.credentials.json"]);
+    return creds.code === 0 ? "done" : "error";
+  }
+  const inspect = await d.run(["inspect", "-f", "{{.State.Status}}", CLAUDE_LOGIN_CONTAINER]);
+  if (inspect.code !== 0 || inspect.stdout.trim() !== "running") { await d.run(["rm", "-f", CLAUDE_LOGIN_CONTAINER]); return "error"; }
+  return "pending";
+}

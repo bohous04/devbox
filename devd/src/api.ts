@@ -49,6 +49,7 @@ import { memoAsync } from "./cache";
 import { GithubError, listOwners, listRepos, validOwner, type GithubOwner, type GithubRepo } from "./github";
 import { GiteaAuthError, GiteaError, GiteaUnknownInstanceError, type GiteaApi } from "./gitea";
 import { join } from "node:path";
+import { readUpload, UploadError } from "./uploads";
 import { stageFile, stageShared } from "./inbox";
 import type { SshKeyRef } from "./op";
 import { resolveSshTarget, type SshServer } from "./sshServers";
@@ -69,6 +70,7 @@ import {
   authStatus, codexLoginStart, codexLoginStatus, codexLogout, CLIPROXY_CALLBACK_PORT,
   grokLoginStart, grokLoginStatus, proxyLoginStart, proxyLoginStatus, isProxyProvider,
   agyLoginStart, agyLoginCode, agyLoginStatus, agyLogout, isValidAgyCode,
+  claudeLoginStart, claudeLoginCode, claudeLoginStatus, isValidClaudeCode,
   type CodexAuthDeps,
 } from "./agentAuth";
 import type { CodexView } from "./codexPoller";
@@ -302,11 +304,12 @@ export function createApp(d: ApiDeps): Hono {
   // of raw JSON every minute (gzip ~100 kB).
   app.use("/api/*", compress());
   // CSRF from previews (p0…p9.<DEVD_PREVIEW_DOMAIN>): foreign Origin on mutations and WS → 403, body from a browser
-  // only JSON (415). Exceptions to the body-type rule: backup upload and passthrough to CLIProxyAPI.
+  // only JSON (415). Raw file uploads, backup restore and CLIProxyAPI passthrough are exempt
+  // from the media-type check only; their Origin is still checked.
   // Like compress, MUST come before the first /api route.
   const allowedOrigins = d.dashboardOrigins ?? dashboardOrigins();
   app.use("/api/*", originGuard(allowedOrigins,
-    (path) => path === "/api/restore" || path.startsWith("/api/cliproxy/")));
+    (path) => path === "/api/restore" || path.startsWith("/api/cliproxy/") || /^\/api\/sessions\/[A-Za-z0-9._-]+\/inbox$/.test(path)));
   // OTel (/v1/metrics): exporters send no Origin, they pass; forged metrics from a preview do not.
   // The body type is not checked — OTLP may also be protobuf.
   app.use("/v1/*", originGuard(allowedOrigins, () => true));
@@ -1322,6 +1325,36 @@ export function createApp(d: ApiDeps): Hono {
     catch (e) { return c.json({ error: (e as Error).message }, 502); }
   });
 
+  // Claude Code: `claude auth login` with code paste (browser-only operators, no Mac — see
+  // claudeLoginStart). Operator addresses only: a session container could otherwise start a
+  // login and finish it with its own code, replacing the credentials every session shares.
+  const claudeLoginGate = (c: Context): Response | null => {
+    const addr = d.remoteAddr?.(c);
+    if (isApprovalAllowed(addr, d.sshApprovalAllowExtra ?? [])) return null;
+    console.warn(`claude login: denied (${c.req.method} ${c.req.path}) — address ${addr ?? "unknown"} is not in the allowlist`);
+    return c.json({ error: "this network address cannot sign in Claude" }, 403);
+  };
+  app.post("/api/auth/claude/login/start", async (c) => {
+    const denied = claudeLoginGate(c); if (denied) return denied;
+    const ca = needAuth(); if (!ca) return authMissing(c, "claude auth");
+    try { return c.json(await claudeLoginStart(ca)); }
+    catch (e) { return c.json({ error: (e as Error).message }, 502); }
+  });
+  app.post("/api/auth/claude/login/code", async (c) => {
+    const denied = claudeLoginGate(c); if (denied) return denied;
+    const body = (await c.req.json().catch(() => null)) as { code?: unknown } | null;
+    if (!isValidClaudeCode(body?.code)) return c.json({ error: "invalid authorization code" }, 400);
+    const ca = needAuth(); if (!ca) return authMissing(c, "claude auth");
+    try { await claudeLoginCode(ca, body.code); return c.body(null, 204); }
+    catch (e) { return c.json({ error: (e as Error).message }, 502); }
+  });
+  app.get("/api/auth/claude/login/status", async (c) => {
+    const denied = claudeLoginGate(c); if (denied) return denied;
+    const ca = needAuth(); if (!ca) return authMissing(c, "claude auth");
+    try { return c.json({ status: await claudeLoginStatus(ca) }); }
+    catch (e) { return c.json({ error: (e as Error).message }, 502); }
+  });
+
   // Web terminal: WS bridge to a tmux session (target via ?tmux=, default main). Read-only until the client sends
   // {t:"unlock"}. Behind CF Access + Tailscale (same origin) — no new token.
   const terminalCounts = new Map<string, number>();
@@ -1355,6 +1388,29 @@ export function createApp(d: ApiDeps): Hono {
       },
     };
   }));
+
+  // Browser uploads bypass the optional desktop listener. Only operator networks may
+  // write the shared inbox; guest terminals and containers cannot upload via this API.
+  app.post("/api/sessions/:id/inbox", async (c) => {
+    const denied = approvalGate(c); if (denied) return denied;
+    const session = getSession(d.db, c.req.param("id"));
+    if (!session) return c.json({ error: "unknown session" }, 404);
+    const vm = ibxOnly(c, session, "File inbox"); if (vm) return vm;
+    if (session.status !== "running") return c.json({ error: "session is not running" }, 409);
+    if (c.req.header("content-type") !== "application/octet-stream")
+      return c.json({ error: "Content-Type must be application/octet-stream" }, 415);
+    const name = c.req.query("name");
+    if (!name || name.length > 240) return c.json({ error: "A file name of at most 240 characters is required" }, 400);
+    try {
+      const bytes = await readUpload(c.req.raw);
+      const path = stageShared(join(d.root, "_inbox"), name, bytes);
+      logEvent(d.db, session.id, "file_inbox", { name: path.split("/").pop(), size: bytes.length, source: "browser", shared: true });
+      return c.json({ path, size: bytes.length }, 201);
+    } catch (e) {
+      if (e instanceof UploadError) return c.json({ error: e.message }, e.status);
+      return c.json({ error: "Could not save the file in the inbox" }, 400);
+    }
+  });
 
   app.post("/api/open", async (c) => {
     const body = (await c.req.json().catch(() => null)) as { sessionId?: string; path?: string } | null;

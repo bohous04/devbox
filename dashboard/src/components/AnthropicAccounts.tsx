@@ -127,15 +127,17 @@ export function AnthropicAccounts() {
       <FormDialog open={addOpen} onOpenChange={(open) => { if (!open) closeAdd(); }} busy={busy} title="Add Anthropic account" description="Add a separate account to the automatic selection pool.">
         <div className="space-y-4">
           <p className="text-sm text-muted-foreground">
-            On your Mac, log in to a throwaway profile and paste its credentials here:
+            On the VPS (SSH from Windows/Linux works too), log in to a temporary profile and copy its credentials here:
           </p>
           <pre className="overflow-x-auto rounded-md border bg-muted px-3 py-2 text-xs">
 {`profile_dir=$(mktemp -d)
-CLAUDE_CONFIG_DIR="$profile_dir" claude auth login
-pbcopy < "$profile_dir/.credentials.json"   # paste below, then delete the temp dir`}
+docker run --rm -it --user "$(id -u):$(id -g)" \\
+  -e HOME=/tmp -e CLAUDE_CONFIG_DIR=/profile \\
+  -v "$profile_dir:/profile" --entrypoint claude devbox:latest auth login
+cat "$profile_dir/.credentials.json"   # copy the JSON below, then delete the temp dir`}
           </pre>
           <p className="text-xs text-muted-foreground">
-            This grant belongs to the devbox alone — the Mac gets its own login, so the two
+            This grant belongs to the devbox alone — your local computer gets its own login, so the two
             never rotate each other's refresh token.
           </p>
           <div className="grid gap-3">
@@ -264,7 +266,9 @@ pbcopy < "$profile_dir/.credentials.json"   # paste below, then delete the temp 
                     </p>
                     <pre className="overflow-x-auto rounded-md border bg-background px-2 py-1.5 text-[11px]">
 {`profile_dir=$(mktemp -d)
-CLAUDE_CONFIG_DIR="$profile_dir" claude auth login
+docker run --rm -it --user "$(id -u):$(id -g)" \\
+  -e HOME=/tmp -e CLAUDE_CONFIG_DIR=/profile \\
+  -v "$profile_dir:/profile" --entrypoint claude devbox:latest auth login
 pbcopy < "$profile_dir/.credentials.json"`}
                     </pre>
                     <div className="grid gap-3">

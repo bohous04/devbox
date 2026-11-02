@@ -6,7 +6,7 @@ setting is listed in [configuration.md](configuration.md).
 
 ## 1. Install
 
-Start from Ubuntu 24.04 (Debian works too) and log in as root.
+Start from Ubuntu 24.04 (Debian works too; Ubuntu 26.04 was also reported working by an operator) and log in as root.
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/bohous04/devbox/main/infra/bootstrap.sh)
@@ -19,7 +19,8 @@ something below. It reads these environment variables:
 | Variable | Default | Meaning |
 |---|---|---|
 | `DEVBOX_FEATURES` | *(empty = core only)* | optional components, space separated, or `all` (see below) |
-| `CONFIG_REPO` | — | git URL of a private repo holding `config.json`; without it a default config is written and you edit it in the dashboard |
+| `CONFIG_REPO` | — | git URL of a private repo holding `config.json`; without it a default config is written and dashboard edits are saved locally (no Git identity or remote needed) |
+| `PUBLIC_IFACE` | auto-detected from IPv4/IPv6 default routes | public NIC name, or space-separated names; setup fails if a selected NIC does not exist |
 | `LISTENER_URL` | — | `http://<mac-tailnet-ip>:7777` for Mac notifications and `open`; can be added later |
 | `DEVD_FOLDERS` | `apps websites` | top-level folders created under `/srv/dev` |
 
@@ -41,11 +42,12 @@ Example: `DEVBOX_FEATURES="samba op" bash /opt/vps-dev-infra/infra/setup.sh`.
 
 ```bash
 tailscale up --ssh
-bash /opt/vps-dev-infra/infra/setup.sh       # rebinds devd from 127.0.0.1 to the tailnet IP
+bash /opt/vps-dev-infra/infra/setup.sh       # sets DEVD_BIND_IP for session ports to the tailnet IP
 ```
 
-The first setup run happens before the tailnet exists, so devd listens on loopback until
-you run setup again. Once Tailscale SSH works you can close public SSH:
+The API listens on `0.0.0.0:4300` so containers can reach it; ufw restricts access.
+Before Tailscale is connected, `DEVD_BIND_IP` uses loopback for published session ports.
+Run setup again after connecting to use the tailnet IP for those ports. Once Tailscale SSH works you can close public SSH:
 `ufw delete allow <port>/tcp`.
 
 ## 3. GitHub
@@ -64,12 +66,27 @@ devd reads credentials from `/etc/devd/secrets.json` (mode 0600). The keys are l
 [configuration.md](configuration.md#secretsjson). Start with an empty `{}` and add what
 you use.
 
-For a long-running box, seal the file into an encrypted vault:
+Create `/etc/devd/secrets.json` first if it does not exist:
 
 ```bash
-printf '%s\n' '<passphrase>' | bun /opt/vps-dev-infra/tools/vault-migrate.ts \
-  --in /etc/devd/secrets.json --out /etc/devd/vault.age
-systemctl restart devd      # then unlock in the dashboard and delete secrets.json
+if [ ! -e /etc/devd/secrets.json ]; then
+  (umask 077; printf '{}\n' > /etc/devd/secrets.json)
+fi
+```
+
+For a long-running box, seal the file into an encrypted vault. Paste the complete block
+first, then enter the passphrase separately when prompted.
+Do not paste the passphrase together with subsequent commands: a terminal prompt can
+consume those as input. The hidden prompt keeps the passphrase out of shell history:
+
+```bash
+(
+  read -rsp 'Vault passphrase: ' vault_phrase </dev/tty || exit 1
+  echo
+  printf '%s\n' "$vault_phrase" | bun /opt/vps-dev-infra/tools/vault-migrate.ts \
+    --in /etc/devd/secrets.json --out /etc/devd/vault.age || exit 1
+  systemctl restart devd    # then unlock in the dashboard and delete secrets.json
+)
 ```
 
 When `/etc/devd/vault.age` exists, devd ignores `secrets.json` and starts **locked**. Secrets
@@ -111,27 +128,53 @@ If plugins or MCP servers were provisioned before the login, run the sync again:
 cd /opt/vps-dev-infra && DEVD_CONFIG_DIR=/etc/devd/config bun tools/agent-sync.ts
 ```
 
-Check everything with `dev doctor` on the Mac.
+### Windows/Linux or dashboard-only operators
+
+See [browser.md](browser.md) for text copy/paste, screenshots, file uploads and Claude
+sign-in directly in the dashboard. No Mac is required. Use the dashboard for sessions. For the first Claude login, open an
+SSH terminal from PowerShell, Windows Terminal or a Linux terminal:
+
+```bash
+ssh root@<host>
+docker ps --format 'table {{.Names}}\t{{.Image}}'
+docker exec -it -u dev <session-container> claude auth login
+```
+
+Copy the complete OAuth URL into your local browser, finish authorization and paste the
+code back into that terminal. This uses the same shared login volume as the dashboard
+session. The dashboard also provides **Copy selection**, **Paste**, file paste/drop and
+**Upload files**, including fallbacks for plain HTTP on the tailnet. These controls do
+not use the optional desktop listener.
+For a separate account in **AI limits → Add Anthropic account**, run the temporary-profile
+commands shown there on the VPS over SSH and copy the JSON into the form. Treat that JSON
+as a password, and remove the temporary profile after importing it.
+
+`claude-setup.json` is optional: without it, agent-sync installs no extra marketplaces or
+plugins but still syncs MCP servers. Invalid JSON remains an error.
+
+Check everything with `dev doctor` if you have a Mac.
 
 ## Firewall
 
 `setup.sh` configures ufw: deny incoming by default, allow Tailscale and SSH, and let
 containers reach devd (`:4300`) and the DB proxies (`:15432`, `:15433`) by source range,
-with an explicit deny on `eth0` first.
+with explicit denies on the detected public interfaces first. Existing operator rules
+are preserved on reruns; setup still enforces the default policy and Devbox rules.
 
 ufw does **not** protect published container ports, because Docker writes its own NAT rules.
 Anything an agent starts inside a session (`docker compose up` with Postgres, Redis, a mail
 catcher…) would be reachable from the internet. `docker-user-firewall.service` closes this by
-inserting a DROP for new connections from `eth0` into the `DOCKER-USER` chain (IPv4 and
+inserting a DROP for new connections from the public interfaces into the `DOCKER-USER` chain (IPv4 and
 IPv6), and re-applies it after every docker restart. Check it:
 
 ```bash
-iptables -S DOCKER-USER && ip6tables -S DOCKER-USER     # must contain a DROP on eth0
+iptables -S DOCKER-USER && ip6tables -S DOCKER-USER     # must contain a DROP on each public NIC
 nc -z -G 5 <public-ip> <some-published-port>             # from outside: must fail
 ```
 
-If your public interface is not `eth0`, adjust `infra/docker-user-firewall.sh` and the ufw
-rules in `setup.sh`.
+Default-route interfaces are detected for both address families and validated. For custom
+routing, set `PUBLIC_IFACE="ens3"` (or multiple names) when running setup. Setup persists
+the selection in a systemd drop-in for the Docker firewall; rerun setup if NIC names change.
 
 A second layer is `"ip": "<tailnet-ip>"` in `/etc/docker/daemon.json`, so that `-p` binds
 to the tailnet by default. It needs a docker restart, which stops every running session.

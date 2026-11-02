@@ -92,7 +92,7 @@ export function RepoBrowser({ target, github, giteaInstances = [], gitea, onClos
           )}
         </div>
         <div className="flex items-center gap-3 border-t bg-muted/40 px-4 py-2.5">
-          <span className="flex-1 font-mono text-[10.5px] text-muted-foreground">Click a repo to add / remove it. Changes save with the "Save + push" button.</span>
+          <span className="flex-1 font-mono text-[10.5px] text-muted-foreground">Click a repo to add / remove it. Changes save with the "Save" button.</span>
           <Button size="sm" onClick={onClose}>Done</Button>
         </div>
       </motion.div>

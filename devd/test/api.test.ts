@@ -1272,3 +1272,37 @@ test("GET /api/usage: the response is compressed (compress middleware sits befor
   expect(r.status).toBe(200);
   expect(r.headers.get("content-encoding")).toBe("gzip");
 });
+
+test("browser inbox upload: owner can upload while the vault/listener is unavailable; names are sanitized and unique", async () => {
+  const { a, db, root } = app(undefined, undefined, undefined, {
+    remoteAddr: () => "127.0.0.1", dashboardOrigins: ["https://dev.example.com"],
+  });
+  insertSession(db, { id: "dev-acme-web", folder: "apps", project: "acme", repo: "web", container: "dev-acme-web", port_base: 40000,
+    status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0 });
+  const upload = (name: string) => a.request(`/api/sessions/dev-acme-web/inbox?name=${encodeURIComponent(name)}`, {
+    method: "POST", headers: { "content-type": "application/octet-stream", origin: "https://dev.example.com" }, body: "photo bytes",
+  });
+  const first = await upload("../../photo one.png");
+  expect(first.status).toBe(201);
+  expect(await first.json()).toEqual({ path: "/inbox/photo_one.png", size: 11 });
+  expect(readFileSync(join(root, "_inbox", "photo_one.png"), "utf8")).toBe("photo bytes");
+  expect(((await (await upload("photo one.png")).json()) as { path: string }).path).toBe("/inbox/photo_one-1.png");
+});
+
+test("browser inbox upload rejects foreign origins, container callers, bad media types, absent sessions, and oversized files", async () => {
+  for (const address of ["127.0.0.1", "172.18.0.2"]) {
+    const { a, db } = app(undefined, undefined, undefined, {
+      remoteAddr: () => address, dashboardOrigins: ["https://dev.example.com"],
+    });
+    insertSession(db, { id: "dev-acme-web", folder: "apps", project: "acme", repo: "web", container: "dev-acme-web", port_base: 40000,
+      status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0 });
+    const send = (headers: Record<string, string>, id = "dev-acme-web") => a.request(`/api/sessions/${id}/inbox?name=x.png`, {
+      method: "POST", headers: { "content-type": "application/octet-stream", ...headers }, body: "x",
+    });
+    expect((await send({ origin: "https://evil.example.com" })).status).toBe(403);
+    if (address === "172.18.0.2") { expect((await send({})).status).toBe(403); continue; }
+    expect((await send({ "content-type": "text/plain" })).status).toBe(415);
+    expect((await send({}, "missing")).status).toBe(404);
+    expect((await send({ "content-length": String(26 * 1024 * 1024) })).status).toBe(413);
+  }
+});

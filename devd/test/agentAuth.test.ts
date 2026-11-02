@@ -4,6 +4,7 @@ import {
   grokLoginStart, grokLoginStatus, parseGrokDeviceAuth, parseOauthUrl,
   proxyLoginStart, proxyLoginStatus, isProxyProvider,
   agyLoginStart, agyLoginCode, agyLoginStatus, agyLogout, isValidAgyCode, parseAgyLoginUrl,
+  claudeLoginStart, claudeLoginCode, claudeLoginStatus, isValidClaudeCode, parseClaudeLoginUrl,
   type CodexAuthDeps,
 } from "../src/agentAuth";
 
@@ -487,4 +488,87 @@ test("agyLogout deletes the token and the onboarding marker, reads nothing", asy
   expect(s).toContain("antigravity-home:/home/dev/.gemini");
   expect(s).toContain("rm -f /home/dev/.gemini/antigravity-cli/antigravity-oauth-token /home/dev/.gemini/antigravity-cli/.devbox-onboarded");
   expect(s).not.toMatch(/\bcat\b/);
+});
+
+
+/* ============================== Claude Code (claude auth login) ============================== */
+
+// Pane captured from `claude auth login --claudeai` (Claude Code 2.1.316) in a 1000-column tmux
+// pane; client_id / challenge / state replaced.
+const CLAUDE_PANE = [
+  "Opening browser to sign in…",
+  "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=00000000-0000-4000-8000-000000000000&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference&code_challenge=abc_DEF-123&code_challenge_method=S256&state=st4te_XYZ",
+  "Paste code here if prompted >",
+].join("\n");
+
+test("parseClaudeLoginUrl: whole URL from the pane, claude.com and claude.ai hosts", () => {
+  expect(parseClaudeLoginUrl(CLAUDE_PANE)).toStartWith("https://claude.com/cai/oauth/authorize?code=true&client_id=");
+  expect(parseClaudeLoginUrl(CLAUDE_PANE)).toEndWith("state=st4te_XYZ");
+  expect(parseClaudeLoginUrl("visit: https://claude.ai/oauth/authorize?code=true&state=s")).toBe("https://claude.ai/oauth/authorize?code=true&state=s");
+  expect(parseClaudeLoginUrl("Opening browser to sign in…")).toBeNull();
+  expect(parseClaudeLoginUrl("https://evil.example.com/claude.com/oauth/authorize?x=1")).toBeNull();
+});
+
+test("isValidClaudeCode: printable without spaces (the code contains #), ≤ 1024", () => {
+  expect(isValidClaudeCode("AbC-123_xyz#st4te_XYZ")).toBe(true);
+  for (const bad of ["", "a b", "abc\r", "abc\n", "\x1b[A", "x".repeat(1025), 42, null]) expect(isValidClaudeCode(bad)).toBe(false);
+});
+
+test("claudeLoginStart: container on claude-home, login in a wide tmux pane with an exit marker, URL from the pane", async () => {
+  let captures = 0;
+  const deps = fakeDeps((cmd) => {
+    const s = cmd.join(" ");
+    if (s.includes("capture-pane")) { captures++; return { code: 0, stdout: captures < 2 ? "Opening browser to sign in…" : CLAUDE_PANE, stderr: "" }; }
+    if (s.includes("run -d")) return { code: 0, stdout: "cid", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const r = await claudeLoginStart(deps);
+  expect(r.url).toEndWith("state=st4te_XYZ");
+  const calls = (deps as unknown as { calls: { cmd: string[] }[] }).calls.map((c) => c.cmd.join(" "));
+  expect(calls[0]).toBe("rm -f devbox-claude-login");
+  const runCmd = calls.find((c) => c.includes("run -d"))!;
+  expect(runCmd).toContain("claude-home:/home/dev/.claude");
+  expect(runCmd).toContain("BROWSER=true");
+  expect(runCmd).toContain("tmux new-session -d -x 1000 -y 50 'claude auth login --claudeai; echo $? > /tmp/devbox-claude-login.exit'; exec sleep 900");
+});
+
+test("claudeLoginStart: URL never appears → container removed and an error", async () => {
+  const deps = fakeDeps((cmd) => cmd.join(" ").includes("run -d") ? { code: 0, stdout: "cid", stderr: "" } : { code: 0, stdout: "", stderr: "" });
+  await expect(claudeLoginStart(deps)).rejects.toThrow(/URL/);
+  const calls = (deps as unknown as { calls: { cmd: string[] }[] }).calls.map((c) => c.cmd.join(" "));
+  expect(calls.at(-1)).toBe("rm -f devbox-claude-login");
+});
+
+test("claudeLoginCode: code only on docker exec -i stdin, never in argv; invalid code never reaches docker", async () => {
+  const deps = fakeDeps(() => ({ code: 0, stdout: "", stderr: "" }));
+  await claudeLoginCode(deps, "SECRETCODE#state");
+  const calls = (deps as unknown as { calls: { cmd: string[]; input?: string }[] }).calls;
+  const exec = calls.find((c) => c.cmd[0] === "exec")!;
+  expect(exec.cmd.slice(0, 3)).toEqual(["exec", "-i", "devbox-claude-login"]);
+  expect(exec.input).toBe("SECRETCODE#state");
+  for (const c of calls) expect(c.cmd.join(" ")).not.toContain("SECRETCODE");
+
+  const bad = fakeDeps(() => ({ code: 0, stdout: "", stderr: "" }));
+  await expect(claudeLoginCode(bad, "bad code\r")).rejects.toThrow(/invalid/);
+  expect((bad as unknown as { calls: unknown[] }).calls).toHaveLength(0);
+
+  const gone = fakeDeps(() => ({ code: 1, stdout: "", stderr: "No such container" }));
+  await expect(claudeLoginCode(gone, "abc")).rejects.toThrow(/start the login again/);
+});
+
+test("claudeLoginStatus: exit 0 + credentials = done; exit≠0 or no credentials = error; running = pending; vanished = error", async () => {
+  const mk = (exit: string | null, creds: boolean, state: string) => fakeDeps((cmd) => {
+    const s = cmd.join(" ");
+    if (s.includes("devbox-claude-login.exit")) return exit === null ? { code: 1, stdout: "", stderr: "No such file" } : { code: 0, stdout: exit, stderr: "" };
+    if (s.includes(".credentials.json")) return { code: creds ? 0 : 1, stdout: "", stderr: "" };
+    if (s.startsWith("inspect")) return state ? { code: 0, stdout: state, stderr: "" } : { code: 1, stdout: "", stderr: "No such container" };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const done = mk("0\n", true, "running");
+  expect(await claudeLoginStatus(done)).toBe("done");
+  expect((done as unknown as { calls: { cmd: string[] }[] }).calls.some((c) => c.cmd.join(" ") === "rm -f devbox-claude-login")).toBe(true);
+  expect(await claudeLoginStatus(mk("1\n", true, "running"))).toBe("error");   // wrong code — old creds must not count
+  expect(await claudeLoginStatus(mk("0\n", false, "running"))).toBe("error");
+  expect(await claudeLoginStatus(mk(null, true, "running"))).toBe("pending");   // still waiting for the code
+  expect(await claudeLoginStatus(mk(null, false, ""))).toBe("error");
 });

@@ -5,7 +5,7 @@
 // The original secrets.json is DELIBERATELY not deleted: deleting it is a conscious manual step after
 // you verify that devd starts with the vault and unlocks it.
 //
-// Usage:  printf 'my phrase\n' | bun tools/vault-migrate.ts --in /etc/devd/secrets.json --out /etc/devd/vault.age
+// Usage: see docs/install.md for a hidden prompt that keeps the passphrase out of shell history.
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { sealVault } from "../devd/src/vaultCrypto";
 

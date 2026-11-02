@@ -17,7 +17,14 @@ const ghConfigDir = process.env.DEVD_GH_CONFIG_DIR ?? "/root/.config/gh";
 // at buildPruneCommands in claudeSetup.ts.
 const prune = process.argv.includes("--prune");
 
-const setup = JSON.parse(readFileSync(join(configDir, "claude-setup.json"), "utf8")) as ClaudeSetup;
+const setupPath = join(configDir, "claude-setup.json");
+let setup: ClaudeSetup;
+try { setup = JSON.parse(readFileSync(setupPath, "utf8")) as ClaudeSetup; }
+catch (e) {
+  if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  setup = { marketplaces: [], plugins: [] };
+  console.log("No claude-setup.json defined — syncing MCP servers without additional plugins or marketplaces.");
+}
 
 // MCP servers: primarily from the bridge devd writes after the vault is unlocked (see
 // materializeMcpServers). This tool runs as a separate process and cannot see into the
