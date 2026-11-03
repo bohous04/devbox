@@ -42,6 +42,13 @@ test("not-running → 409", async () => {
   expect(r.status).toBe(409);
 });
 
+test("unavailable target profile → 409 with an explanation that the current pane was preserved", async () => {
+  const a = app(async () => ({ status: "profile-unavailable" }));
+  const r = await a.request("/api/sessions/dev-x-y/switch-account", { method: "POST" });
+  expect(r.status).toBe(409);
+  expect(((await r.json()) as { error: string }).error).toContain("No Claude pane was stopped");
+});
+
 // Review round 2: concurrent call on the same session (the lock is in accountSwitch.ts).
 test("in-progress (concurrent call on the same session) → 409", async () => {
   const a = app(async () => ({ status: "in-progress" }));

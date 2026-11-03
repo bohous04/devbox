@@ -222,3 +222,20 @@ test("subSessionOptions: agent label shown when known, silent when null (mix Cod
   expect(opts[1].label).toBe("main-2 · Claude Code · SHOP-58");
   expect(opts[2].label).toBe("main-3"); // agent unknown (old image) → name only, as before
 });
+
+test("ending sessions remain visible with a clear ending hint even after container stop", () => {
+  const ending = s({ id: "ending", status: "stopped", ending: true, claudeState: "working" });
+  const visible = runningSessions([ending, s({ id: "stopped", status: "stopped" })]);
+  expect(visible.map(row => row.id)).toEqual(["ending"]);
+  const row = browseOptions(visible, Date.now())[1];
+  expect(row.label).toContain("⏳");
+  expect(row.hint).toContain("Ukončuje se");
+  expect(row.hint).not.toContain("working");
+});
+
+test("ending sessions are grouped below active sessions under a visible divider", () => {
+  const opts = browseOptions([s({ id: "ending", ending: true }), s({ id: "active" })], Date.now());
+  expect(opts.map(row => row.value)).toEqual(["active", "__ending_heading__", "ending", MANAGER_BACK]);
+  expect(opts[1].label).toContain("────────");
+  expect(opts[1].label).toContain("Ukončují se (1)");
+});

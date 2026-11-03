@@ -11,6 +11,7 @@ mkdir -p "$ws"; chown 1000:1000 "$ws" 2>/dev/null || true
 exec docker run --rm -it \
   --add-host=host.docker.internal:host-gateway \
   -e DEVD_URL=http://host.docker.internal:4300 \
+  -e CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS="${CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS:-1}" \
   -v "$ws:/workspace" -w /workspace \
   -v claude-home:/home/dev/.claude \
   "${DEVD_IMAGE:-devbox:latest}" \

@@ -401,6 +401,8 @@ export class SessionManager {
   private readonly ownInFlight = new Set<string>();
   private readonly opNames = new Map<string, string>();
 
+  isEnding(id: string): boolean { return this.opNames.get(id) === "end"; }
+
   /** Lock on the keys for the duration of `fn`. It rejects, it does not queue: a second click should get
    *  "already running", not a fourth recreate in a row (decision in the spec §3.4). A key
    *  taken elsewhere (shared Set without a name) reports op "switch". `opNames` is

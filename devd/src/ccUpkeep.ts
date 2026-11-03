@@ -319,7 +319,7 @@ export type ResumeDialogState =
   | { kind: "unparsed" }               // there is one, but we do not understand the options → do not press blindly
   | { kind: "ready"; steps: number };  // how far to move the cursor (negative = up)
 
-export const CAPTURE_CMD = (target: string) => ["tmux", "capture-pane", "-p", "-t", target];
+export const CAPTURE_CMD = (target: string) => ["tmux", "capture-pane", "-p", "-J", "-t", target];
 
 // Option line: "  ❯ 2. Resume full session as-is" / "    1. Resume from summary…".
 const OPTION_LINE = /^\s*(❯\s*)?(\d+)\.\s+(.*\S)\s*$/;
@@ -431,6 +431,9 @@ async function waitForDialogGone(
 // conversation and also fought over Remote Control (code 4090). So the restart always
 // targets a SPECIFIC id.
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+// Native exit banners include launch flags such as --remote-control before
+// --resume. Stay on the command's line; never consume a later chat message.
+const CLAUDE_RESUME_COMMAND = `claude(?:[ \\t]+[^\\r\\n]*?)?[ \\t]+--resume[ \\t]+(${UUID})(?:\\s|$)`;
 
 // The most reliable source: the argv of the live claude. A pane restarted by this code has
 // `--resume <id>`, and `--resume` KEEPS the id (verified live — after the restart it keeps
@@ -452,7 +455,7 @@ export function parseSessionIdFromCmdline(raw: string): string | null {
 // OLD banners from past restarts, so the LAST one counts — it was just printed by the cc
 // we have now terminated. That it is not stale is additionally checked by transcriptFreshCmd.
 export function parseExitBannerId(paneText: string): string | null {
-  const all = [...paneText.matchAll(new RegExp(`claude --resume (${UUID})`, "g"))];
+  const all = [...paneText.matchAll(new RegExp(CLAUDE_RESUME_COMMAND, "g"))];
   return all.length ? all[all.length - 1]![1]! : null;
 }
 
@@ -654,7 +657,7 @@ print("ok")
 
 function exactExitBannerId(before: string, after: string): string | null {
   if (before === after) return null;
-  const pattern = `Resume this session with:\\s*\\n\\s*claude --resume (${UUID})(?:\\s|$)`;
+  const pattern = `Resume this session with:[ \\t]*\\r?\\n[ \\t]*${CLAUDE_RESUME_COMMAND}`;
   // Capture contains only the viewport: scrolling can discard an old copy of
   // the same banner as the new one arrives. Prefer the appended tail when the
   // end of the old viewport still anchors the start of the new viewport.

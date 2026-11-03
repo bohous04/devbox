@@ -256,17 +256,17 @@ right away.
   new pin into the config does not affect a running session at all — the acme session keeps
   running on the old account until someone manually switches it (`dev switch` / the
   "Switch account" button) or restarts it. The new pin applies only to the NEXT lease.
-- **Before enabling a pin for the first time, verify the target profile's mount in the container.**
-  `switchAccount` (nor the lease endpoint) does not check whether the container has the
-  profile of the given account MOUNTED at all — `accountMountList` mounts all
-  accounts into EVERY session container, but only those that existed at the time the
-  container was created (see "The account id is not just a label" above). A container created
-  BEFORE the pinned account existed thus gets `/exit` (killing the
-  in-progress turn) and claude starts with `CLAUDE_CONFIG_DIR` pointing into a
-  nonexistent directory — logged out, without history. Verification:
-  `docker inspect <container> | grep claude-acct-<id>`. When the mount is missing,
-  the session must be **recreated, not switched** (`dev switch` has no
-  protection for this; it would silently try and fail).
+- **Accounts added after session creation can be switched into existing local sessions.**
+  Before stopping Claude, `dev switch` attaches the target's original account volume
+  to the running container and verifies access to the shared conversation history.
+  Credentials are not copied: refresh and removal still affect the canonical volume.
+  This needs root on the local Linux Docker host and the `open_tree`/`move_mount`
+  syscalls (Linux 5.2+, x86-64 or arm64). A missing remote mount or unavailable host
+  capability returns an error before sending `/exit`; the current Claude stays alive.
+  The extra mount belongs to that running container namespace. It survives a devd
+  restart, but not a Docker container restart; another switch reattaches it, and
+  reopening a stopped container rebuilds stale account mounts through the normal
+  session lifecycle. `docker inspect` lists only the original Docker mounts.
 - **A project pin on a small pool disables spillover for everyone else.** It reserves
   the whole account, so unpinned projects share the rest — on two accounts that is
   a SINGLE candidate, and once it is exhausted everyone runs on the exhausted account

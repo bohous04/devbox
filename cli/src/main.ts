@@ -831,6 +831,13 @@ async function runExitAware(deps: Deps, container: string, tmuxSession: string, 
       if (code === 0) forget();
       return code;
     }
+    // Another client may have changed the agent while this terminal was attached.
+    // Refresh before building F9's actions; cached Codex metadata must not route a
+    // running Claude session to the Codex account endpoint.
+    try {
+      const live = (await deps.api.sessions({ timeoutMs: 10_000 })).find(x => x.container === container);
+      if (live) { s = live; name = live.name ?? null; }
+    } catch { /* Keep Back/Detach usable during a temporary API outage. */ }
     const r = await handleExit(deps, s, name);
     if (typeof r === "number") { forget(); return r; }
     name = r.name;
@@ -1062,5 +1069,5 @@ export function requireTty(): boolean {
 
 if (import.meta.main) {
   const cfg = loadCliConfig();
-  process.exit(await run(process.argv.slice(2), { cfg, api: new ApiClient(cfg.devdUrl) }));
+  process.exit(await run(process.argv.slice(2), { cfg, api: new ApiClient(cfg.devdUrl, cfg.sshHost) }));
 }

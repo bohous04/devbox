@@ -889,6 +889,7 @@ export function createApp(d: ApiDeps): Hono {
     if (taints.size) await identity.refreshIfStale().catch(() => {});
     const rows = listSessions(d.db).map((s) => ({
       ...s,
+      ending: d.mgr.isEnding(s.id),
       // The container was shared and has not been rebuilt yet → still restricted (UI offers a rebuild).
       tainted: taints.has(s.id) && isTainted(d.db, s.id, identity.containerIdFor(s.id)),
       ports: Array.from({ length: n }, (_, i) => ({ host: s.port_base + i, container: 3000 + i })),
@@ -2469,6 +2470,7 @@ export function createApp(d: ApiDeps): Hono {
       case "wrong-agent": return c.json({ error: "the session profile does not run on an Anthropic account — the pool does not apply to it" }, 400);
       case "in-progress": return c.json({ error: "a switch for this session is already running" }, 409);
       case "no-account": return c.json({ ok: false, accountId: null, label: null, unchanged: false, exhausted: false, panes: [] });
+      case "profile-unavailable": return c.json({ error: "The target Claude account could not be attached to this session. No Claude pane was stopped." }, 409);
       case "unchanged": return c.json({ ok: true, accountId: r.accountId, label: r.label, unchanged: true, exhausted: false, panes: [] });
       case "failed": return c.json({ ok: false, accountId: r.accountId, label: r.label, unchanged: false, exhausted: r.exhausted, panes: r.panes });
       case "switched": return c.json({ ok: true, accountId: r.accountId, label: r.label, unchanged: false, exhausted: r.exhausted, panes: r.panes });

@@ -17,7 +17,7 @@ export type DetailAction = "attach" | "rename" | "agent" | "end" | "back";
 // Running sessions, most recent (last_active_at) on top.
 export function runningSessions(sessions: SessionInfo[]): SessionInfo[] {
   return sessions
-    .filter((s) => s.status === "running")
+    .filter((s) => s.status === "running" || s.ending)
     .sort((a, b) => b.last_active_at - a.last_active_at);
 }
 
@@ -36,7 +36,8 @@ export function landingOptions(runningCount: number): { value: string; label: st
 // look idle even while it is busy. When claudeState = "working" (metrics < 30 s,
 // stats.ts), show "🟢 working" instead. waiting/idle keep "active X ago" (idle 💤,
 // waiting 🟡). Without claudeState (older devd) fall back to the original text.
-export function activityHint(s: { claudeState?: ClaudeState; last_active_at: number }, now: number): string {
+export function activityHint(s: { claudeState?: ClaudeState; last_active_at: number; ending?: boolean }, now: number): string {
+  if (s.ending) return "⏳ Ukončuje se · záloha nebo úklid";
   if (s.claudeState === "working") return "🟢 working";
   const ago = `active ${uptime(now - s.last_active_at)} ago`;
   if (s.claudeState === "idle") return `💤 ${ago}`;
@@ -47,13 +48,19 @@ export function activityHint(s: { claudeState?: ClaudeState; last_active_at: num
 // List of running sessions: one row per session (most recent on top, 🔔 for important)
 // + "← Back". Back also via Backspace/Esc (mapped to clack cancel in manager.ts).
 export function browseOptions(running: SessionInfo[], now: number): { value: string; label: string; hint?: string }[] {
+  const active = running.filter(s => !s.ending);
+  const ending = running.filter(s => s.ending);
+  const row = (s: SessionInfo) => ({
+    value: s.id,
+    label: `${s.ending ? "⏳" : "▶"} ${sessionLabel(s)}`,
+    hint: `${s.name && s.name.trim() ? `${s.project}/${s.repo} · ` : ""}${activityHint(s, now)}${s.important ? " 🔔" : ""}`,
+  });
   return [
-    ...running.map((s) => ({
-      value: s.id,
-      label: `▶ ${sessionLabel(s)}`,
-      // When it has a nickname, show project/repo in the hint too (otherwise you would lose which repo it is).
-      hint: `${s.name && s.name.trim() ? `${s.project}/${s.repo} · ` : ""}${activityHint(s, now)}${s.important ? " 🔔" : ""}`,
-    })),
+    ...active.map(row),
+    ...(ending.length ? [
+      { value: "__ending_heading__", label: `──────── ⏳ Ukončují se (${ending.length}) ────────`, hint: "Záloha nebo úklid již běží" },
+      ...ending.map(row),
+    ] : []),
     { value: MANAGER_BACK, label: "← Back" },
   ];
 }

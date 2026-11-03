@@ -1,3 +1,4 @@
+import { endingFromHost, markEnding } from "./ending";
 import type { AgentName, SessionRow } from "../../devd/src/db";
 import type { PaneAgentResult } from "../../devd/src/agentSwitch";
 import type { PullResult } from "../../devd/src/git";
@@ -19,6 +20,7 @@ export type { WriteRow, CodexSessionAccountView, CodexSessionAccountSwitchResult
 // tmux: list of Claude sessions in the container — only when asked for (`?tmux=1`);
 // an older devd does not return it at all.
 export interface SessionInfo extends SessionRow {
+  ending?: boolean;
   ports: { host: number; container: number }[];
   claudeState?: ClaudeState;
   tmux?: TmuxSession[];
@@ -63,7 +65,7 @@ export interface SwitchAccountResponse {
 }
 
 export class ApiClient {
-  constructor(private baseUrl: string) {}
+  constructor(private baseUrl: string, private sshHost?: string) {}
 
   private async req<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     let res: Response;
@@ -102,7 +104,8 @@ export class ApiClient {
     const rows = await this.req<SessionInfo[]>("GET", `/api/sessions${opts?.tmux ? "?tmux=1" : ""}`, undefined,
       opts?.timeoutMs ? AbortSignal.timeout(opts.timeoutMs) : undefined);
     rememberDockerHosts(rows);   // attach to an InstaBox session needs `docker -H ssh://…`
-    return rows;
+    return this.sshHost && rows.some(row => row.ending === undefined)
+      ? markEnding(rows, endingFromHost(this.sshHost)) : rows;
   }
   // `fresh` = the user explicitly wanted ANOTHER session on this repo, not to join the
   // existing one. It always gets its own container, id and ports; its own worktree and branch
