@@ -77,6 +77,20 @@ as `(Max Nx)`. The dashboard shows it from the label as a badge next to the name
 
 ## Adding an account
 
+Dashboard → **Anthropic accounts → Add Anthropic account → Sign in with Claude**.
+Open the sign-in link, choose the new account (use a private browser window if needed),
+and paste the authorization code into the dialog. The account ID is optional.
+
+Devd runs `claude auth login --claudeai` in an isolated temporary container, reads the
+credentials server-side, provisions an account-pool profile, and removes the login container.
+Credentials never pass through the dashboard. A server-side timer finishes the operation
+even after the page closes; an unfinished container expires after 15 minutes. Cancel removes it.
+Existing account-selection settings still apply. This adds an account to the pool; it does not
+force running agents to switch accounts.
+
+Manual JSON import is available under **Import credentials manually**. For a separate local
+Mac profile, use a separate login grant:
+
 An account is set up by **logging in twice with the same account** — once into the profile on the mac,
 once into a temporary directory whose blob is uploaded to the devbox. The separate grants
 are intentional, so that the mac and the VPS do not rotate each other's refresh token.

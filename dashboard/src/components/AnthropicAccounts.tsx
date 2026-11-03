@@ -23,6 +23,9 @@ export function AnthropicAccounts() {
   const [pool, setPool] = useState<AccountPoolView | null>(null);
   const [poolOff, setPoolOff] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [login, setLogin] = useState<{ id: string; url: string } | null>(null);
+  const [loginCode, setLoginCode] = useState("");
+  const [manual, setManual] = useState(false);
   const [newId, setNewId] = useState("");
   const [newCreds, setNewCreds] = useState("");
   // Credentials replacement: id of the expanded account + the blob being typed. The blob is a SECRET, so
@@ -54,7 +57,47 @@ export function AnthropicAccounts() {
 
   // Closing the form without submitting also clears the typed credentials — a secret has no
   // business staying in component state a second longer than necessary (see GiteaTokenControl).
-  function closeAdd() { setAddOpen(false); setNewId(""); setNewCreds(""); }
+  function closeAdd() {
+    if (login) void api.accountLoginCancel(login.id).catch((e) => setErr((e as Error).message));
+    setLogin(null); setLoginCode(""); setAddOpen(false); setNewId(""); setNewCreds(""); setManual(false);
+  }
+
+  useEffect(() => {
+    if (!login) return;
+    let stopped = false;
+    let polling = false;
+    const timer = setInterval(async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const r = await api.accountLoginStatus(login.id);
+        if (stopped || r.status === "pending") return;
+        setLogin(null); setLoginCode("");
+        if (r.status === "done") {
+          setAddOpen(false); setNewId(""); setNotice("Account added. It is now available across Devbox.");
+          await refreshAccounts();
+        } else setErr("Sign-in failed or expired. Start again.");
+      } catch (e) { if (!stopped) setErr((e as Error).message); }
+      finally { polling = false; }
+    }, 2000);
+    return () => { stopped = true; clearInterval(timer); };
+  }, [login]);
+
+  async function startLogin() {
+    setBusy(true); setErr(null);
+    const id = newId.trim() || `cc-${Date.now().toString(36)}`;
+    try { const r = await api.accountLoginStart(id); setLogin({ id, url: r.url }); }
+    catch (e) { setErr((e as Error).message); }
+    finally { setBusy(false); }
+  }
+
+  async function submitLoginCode() {
+    if (!login) return;
+    setBusy(true); setErr(null);
+    try { await api.accountLoginCode(login.id, loginCode.trim()); }
+    catch (e) { setErr((e as Error).message); }
+    finally { setLoginCode(""); setBusy(false); }
+  }
 
   async function addAccount() {
     setErr(null); setBusy(true);
@@ -115,7 +158,7 @@ export function AnthropicAccounts() {
 
   return (
     <Section label="Anthropic accounts" meta={
-      <Button variant="outline" size="sm" onClick={() => (addOpen ? closeAdd() : setAddOpen(true))}>
+      <Button variant="outline" size="sm" disabled={busy} onClick={() => (addOpen ? closeAdd() : setAddOpen(true))}>
         {addOpen ? "Cancel" : "Add Anthropic account"}
       </Button>
     }>
@@ -126,28 +169,30 @@ export function AnthropicAccounts() {
       </div>}
       <FormDialog open={addOpen} onOpenChange={(open) => { if (!open) closeAdd(); }} busy={busy} title="Add Anthropic account" description="Add a separate account to the automatic selection pool.">
         <div className="space-y-4">
-          <p className="text-sm text-muted-foreground">
-            On the VPS (SSH from Windows/Linux works too), log in to a temporary profile and copy its credentials here:
-          </p>
-          <pre className="overflow-x-auto rounded-md border bg-muted px-3 py-2 text-xs">
-{`profile_dir=$(mktemp -d)
-docker run --rm -it --user "$(id -u):$(id -g)" \\
-  -e HOME=/tmp -e CLAUDE_CONFIG_DIR=/profile \\
-  -v "$profile_dir:/profile" --entrypoint claude devbox:latest auth login
-cat "$profile_dir/.credentials.json"   # copy the JSON below, then delete the temp dir`}
-          </pre>
-          <p className="text-xs text-muted-foreground">
-            This grant belongs to the devbox alone — your local computer gets its own login, so the two
-            never rotate each other's refresh token.
-          </p>
-          <div className="grid gap-3">
-            <Input aria-label="Account ID" placeholder="Account ID (A-Z, a-z, 0-9, -)" value={newId} onChange={(e) => setNewId(e.target.value)} className="w-full" />
-            <SecretInput placeholder='{"claudeAiOauth":{…}}' value={newCreds}
-              onChange={(e) => setNewCreds(e.target.value)} className="flex-1" aria-label="Account credentials JSON" />
-            <Button size="sm" disabled={busy || !newId.trim() || !newCreds.trim()} onClick={addAccount}>
-              {busy ? "Adding…" : "Add"}
-            </Button>
-          </div>
+          {!manual ? login ? (
+            <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); void submitLoginCode(); }}>
+              <p className="text-sm text-muted-foreground">Open the sign-in link and choose the Claude account you want to add. Use a private window if your browser is signed in to another account.</p>
+              <Button asChild className="min-h-11"><a href={login.url} target="_blank" rel="noopener noreferrer">Open Claude sign-in</a></Button>
+              <SecretInput aria-label="Claude authorization code" placeholder="Paste the authorization code" value={loginCode} onChange={(e) => setLoginCode(e.target.value)} />
+              <Button type="submit" className="min-h-11" disabled={busy || !loginCode.trim()}>{busy ? "Signing in…" : "Finish sign-in"}</Button>
+              <p role="status" className="text-sm text-muted-foreground">Waiting for sign-in. Devbox will save the account and close the temporary session automatically.</p>
+            </form>
+          ) : (
+            <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); void startLogin(); }}>
+              <p className="text-sm text-muted-foreground">Sign in to Claude once. Devbox saves the account for automatic selection across sessions.</p>
+              <Input aria-label="Account ID (optional)" placeholder="Account ID (optional)" value={newId} onChange={(e) => setNewId(e.target.value)} />
+              <Button type="submit" className="min-h-11" disabled={busy}>{busy ? "Starting sign-in…" : "Sign in with Claude"}</Button>
+              <Button type="button" variant="ghost" className="min-h-11" disabled={busy} onClick={() => setManual(true)}>Import credentials manually</Button>
+            </form>
+          ) : (
+            <form className="grid gap-3" onSubmit={(e) => { e.preventDefault(); void addAccount(); }}>
+              <p className="text-sm text-muted-foreground">Paste credentials from a separate Claude login created for Devbox.</p>
+              <Input aria-label="Account ID" placeholder="Account ID (A-Z, a-z, 0-9, -)" value={newId} onChange={(e) => setNewId(e.target.value)} />
+              <SecretInput placeholder='{"claudeAiOauth":{…}}' value={newCreds} onChange={(e) => setNewCreds(e.target.value)} aria-label="Account credentials JSON" />
+              <Button type="submit" className="min-h-11" disabled={busy || !newId.trim() || !newCreds.trim()}>{busy ? "Adding…" : "Add"}</Button>
+              <Button type="button" variant="ghost" disabled={busy} onClick={() => { setManual(false); setNewCreds(""); }}>Back to sign-in</Button>
+            </form>
+          )}
           {err && <p role="alert" className="text-sm text-destructive">{err}</p>}
         </div>
       </FormDialog>
