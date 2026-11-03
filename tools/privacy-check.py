@@ -76,6 +76,14 @@ def scan_tree(deny, allow) -> list[str]:
 
 def scan_commits(rev_range: str, deny, allow) -> list[str]:
     problems = []
+    # A force-push can remove the previous tip from every advertised ref. Even a
+    # full Actions checkout then lacks github.event.before. Fetch that exact object
+    # before comparing; a fetch failure must still fail the check, never skip it.
+    base = rev_range.split("..", 1)[0]
+    if re.fullmatch(r"[0-9a-fA-F]{40}", base):
+        present = subprocess.run(["git", "cat-file", "-e", f"{base}^{{commit}}"], capture_output=True)
+        if present.returncode != 0:
+            git("fetch", "--no-tags", "origin", base)
     fmt = "%H%x1f%an <%ae>%x1f%cn <%ce>%x1f%B%x1e"
     for record in git("log", f"--format={fmt}", rev_range).decode("utf-8", "replace").split("\x1e"):
         record = record.strip("\n")
