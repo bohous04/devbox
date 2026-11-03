@@ -77,7 +77,7 @@ def scan_tree(deny, allow) -> list[str]:
 
 
 def github_commit(repository: str, sha: str) -> dict:
-    headers = {"Accept": "application/vnd.github+json"}
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "devbox-privacy-check"}
     token = os.environ.get("GH_TOKEN")
     if token:
         headers["Authorization"] = "Bearer " + token
@@ -109,8 +109,9 @@ def public_merge_author(sha: str, author: str, committer: str, parents: str) -> 
                 and f'{identity["name"]} <{identity["email"]}>' == author
                 and [p["sha"] for p in data["parents"]] == parents.split()):
             return f"{owner} <{email[1]}>"
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
+        print("::notice::GitHub merge metadata did not meet the verified-public-identity requirements")
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(f"::notice::GitHub merge verification unavailable ({type(error).__name__}, status {getattr(error, 'code', 'unknown')})")
     return author
 
 
@@ -131,7 +132,9 @@ def scan_commits(rev_range: str, deny, allow) -> list[str]:
             continue
         sha, author, committer, parents, message = record.split("\x1f", 4)
         if offending(author, deny, allow) is not None:
+            original = author
             author = public_merge_author(sha, author, committer, parents)
+            print(f"::notice::Merge identity check: normalized={author != original}, email_denied={offending(author.rsplit('<', 1)[-1], deny, allow) is not None}")
         for what, value in (("author", author), ("committer", committer), ("message", message)):
             if (n := offending(value, deny, allow)) is not None:
                 problems.append(f"commit {sha[:12]}: {what} matches pattern #{n}")
