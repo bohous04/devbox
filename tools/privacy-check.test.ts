@@ -116,12 +116,12 @@ fixture = {'sha': sha, 'author': {'login': 'maintainer'}, 'committer': {'login':
  'commit': {'author': {'name': 'SecretClient', 'email': '123+maintainer@users.noreply.github.com'},
  'verification': {'verified': True, 'reason': 'valid'}}, 'parents': [{'sha': p} for p in parents.split()]}
 scope['github_commit'] = lambda *args: fixture
-expected = 'maintainer <123+maintainer@users.noreply.github.com>'
+expected = 'GitHub <noreply@github.com>'
 assert normalize(sha, author, committer, parents) == expected
 deny, allow = m['load_patterns']('SecretClient')
 assert m['offending'](expected, deny, allow) is None
-deny, allow = m['load_patterns']('users\\\\.noreply')
-assert m['offending'](expected, deny, allow) == 1 # Email is never exempted.
+deny, allow = m['load_patterns']('123\\\\+maintainer')
+assert m['offending'](expected, deny, allow) is None # Verified public account IDs can also be deny-listed.
 assert normalize(sha, author, committer, 'b' * 40) == author
 assert normalize(sha, author, 'Local <local@example.com>', parents) == author
 private = 'SecretClient <maintainer@example.com>'

@@ -87,10 +87,11 @@ def github_commit(repository: str, sha: str) -> dict:
 
 
 def public_merge_author(sha: str, author: str, committer: str, parents: str) -> str:
-    """Only normalize the owner's public display name on a verified GitHub merge.
+    """Only normalize the owner's public identity on a verified GitHub merge.
 
-    The noreply email is still scanned. Local/spoofed merges and private emails
-    retain the ordinary full identity check; API failure also fails closed.
+    The deny-list may also contain the owner's numeric GitHub account ID. Only
+    the API-verified public noreply identity is exempt; local/spoofed merges and
+    private emails retain the full check. API failure also fails closed.
     """
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
@@ -108,7 +109,7 @@ def public_merge_author(sha: str, author: str, committer: str, parents: str) -> 
                 and identity["email"] == email[1]
                 and f'{identity["name"]} <{identity["email"]}>' == author
                 and [p["sha"] for p in data["parents"]] == parents.split()):
-            return f"{owner} <{email[1]}>"
+            return "GitHub <noreply@github.com>"
         print("::notice::GitHub merge metadata did not meet the verified-public-identity requirements")
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"::notice::GitHub merge verification unavailable ({type(error).__name__}, status {getattr(error, 'code', 'unknown')})")
