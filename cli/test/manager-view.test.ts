@@ -227,8 +227,15 @@ test("ending sessions remain visible with a clear ending hint even after contain
   const ending = s({ id: "ending", status: "stopped", ending: true, claudeState: "working" });
   const visible = runningSessions([ending, s({ id: "stopped", status: "stopped" })]);
   expect(visible.map(row => row.id)).toEqual(["ending"]);
-  const row = browseOptions(visible, Date.now())[0];
+  const row = browseOptions(visible, Date.now())[1];
   expect(row.label).toContain("⏳");
   expect(row.hint).toContain("Ukončuje se");
   expect(row.hint).not.toContain("working");
+});
+
+test("ending sessions are grouped below active sessions under a visible divider", () => {
+  const opts = browseOptions([s({ id: "ending", ending: true }), s({ id: "active" })], Date.now());
+  expect(opts.map(row => row.value)).toEqual(["active", "__ending_heading__", "ending", MANAGER_BACK]);
+  expect(opts[1].label).toContain("────────");
+  expect(opts[1].label).toContain("Ukončují se (1)");
 });
