@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import stat
@@ -429,12 +430,53 @@ class Guard:
         owned, shared = self.managed_sources(c)
         return owned + shared
 
+    def retained_workspace(self, c):
+        """Only omit a bind mount that native Remote end explicitly retains on disk.
+        Any unreadable, untrusted or inconsistent registry falls back to full backup.
+        Docker rm cannot delete a bind source; SessionManager uses the same trusted
+        route to retain this exact directory, including dirty/untracked files.
+        """
+        registry = Path(self.c.get('remote_registry', '/etc/codex-devbox/routes.json'))
+        try:
+            st = registry.lstat()
+            if (not stat.S_ISREG(st.st_mode) or st.st_uid != self.c.get('remote_registry_uid', 0)
+                    or st.st_mode & 0o022 or st.st_size > 16 * 1024 * 1024):
+                return None
+            routes = read(registry)['routes']
+            name = c['Name'].lstrip('/')
+            matches = [r for r in routes if r.get('container') == name]
+            if len(matches) != 1:
+                return None
+            r = matches[0]; d = r.get('restore', {})
+            if (r.get('restore_error') or not isinstance(r.get('thread_ids'), list) or not r['thread_ids']
+                    or any(not isinstance(t, str) or not re.fullmatch(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}', t) for t in r['thread_ids'])
+                    or r.get('environment_id') != 'devbox_' + name or d.get('solo') != 0):
+                return None
+            if any(not isinstance(d.get(k), str) or not re.fullmatch(r'[A-Za-z0-9_.-]+', d[k])
+                   or d[k] in ('.', '..') for k in ('folder', 'project', 'repo')):
+                return None
+            base = 'dev-' + d['project'] + '-' + d['repo']
+            if name != base and not re.fullmatch(re.escape(base) + r'-(?:[2-9]|[1-9][0-9]+)', name):
+                return None
+            expected = self.root / '_sessions' / name
+            if (r.get('cwd') != str(expected) or d.get('worktree') != str(expected)
+                    or not expected.is_dir() or expected.resolve() != expected):
+                return None
+            parts = (d['folder'], d['repo']) if d['folder'] == d['project'] else (d['folder'], d['project'], d['repo'])
+            if d.get('bare') != str(self.root.joinpath(*parts)) + '.git' or not d.get('branch'):
+                return None
+            mounts = [m for m in c['Mounts'] if m['Destination'] == '/workspace']
+            return expected if len(mounts) == 1 and Path(mounts[0]['Source']).resolve() == expected else None
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
     def managed_sources(self, c):
         """(owned, shared): data removed with the session vs. the Git common store."""
         paths = []
+        retained = self.retained_workspace(c)
         for m in c['Mounts']:
             src = Path(m['Source'])
-            if m['Destination'] == '/workspace' and beneath(src, self.root):
+            if m['Destination'] == '/workspace' and beneath(src, self.root) and src.resolve() != retained:
                 paths.append(src)
         extra = self.root / '_claude-projects' / c['Name'].lstrip('/')
         if extra.exists():
@@ -443,7 +485,7 @@ class Guard:
         commons=set()
         for m in c['Mounts']:
             src=Path(m['Source'])
-            if beneath(src,self.root) and src.name.endswith('.git'):
+            if retained is None and beneath(src,self.root) and src.name.endswith('.git'):
                 commons.add(src.resolve())
         for src in list(paths):
             if (src / '.git').exists():
@@ -517,7 +559,7 @@ class Guard:
         paths, shared = self.managed_sources(c)
         if sidecar:
             paths += [Path(m['Source']) for m in sidecar['Mounts'] if m['Destination'] == '/var/lib/docker']
-        path_archive, source_signatures = self.archive(paths, 'end-data', shared)
+        path_archive, source_signatures = self.archive(paths, 'end-data', shared) if paths else (None, {})
         # Export streams directly to encrypted offsite Borg, never to the local disk.
         name_archive = 'storage-guard-end-rootfs-' + time.strftime('%Y%m%dT%H%M%S') + '-' + c['Id'][:12]
         dest = self.c['borg_repo'] + '::' + name_archive
@@ -555,7 +597,8 @@ class Guard:
             raise RuntimeError('Mounted data changed; removal denied')
         result = dict(container_id=c['Id'], name=name, verified_at=time.time(), data_archive=path_archive,
                       rootfs_archive=name_archive, signatures=source_signatures,
-                      sidecar_id=sidecar['Id'] if sidecar else None, repository=self.c['borg_repo'])
+                      sidecar_id=sidecar['Id'] if sidecar else None, repository=self.c['borg_repo'],
+                      retained_workspace=str(self.retained_workspace(c)) if self.retained_workspace(c) else None)
         atomic(destfile,result)
         self.audit('end-preserved',name=name,data_archive=path_archive,rootfs_archive=name_archive)
         return result

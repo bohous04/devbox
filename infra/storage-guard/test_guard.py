@@ -75,6 +75,52 @@ class Safety(unittest.TestCase):
         self.assertFalse(guard.beneath(managed/'link'/'passwd',managed))
         self.assertFalse(guard.beneath(managed,managed))
 
+    def retained_fixture(self):
+        name = 'dev-apps-web-2'
+        workspace = self.root / '_sessions' / name
+        workspace.mkdir(parents=True)
+        (workspace / 'dirty.txt').write_text('keep this')
+        bare = self.root / 'apps/web.git'; bare.mkdir(parents=True)
+        registry = self.root / 'routes.json'
+        route = dict(container=name, cwd=str(workspace), environment_id='devbox_' + name,
+                     thread_ids=['11111111-1111-4111-8111-111111111111'],
+                     restore=dict(folder='apps', project='apps', repo='web', solo=0,
+                                  worktree=str(workspace), bare=str(bare), branch='main'))
+        registry.write_text(json.dumps(dict(routes=[route])));registry.chmod(0o600)
+        self.g.c.update(remote_registry=str(registry), remote_registry_uid=os.getuid())
+        container = dict(Name='/' + name, Mounts=[dict(Source=str(workspace), Destination='/workspace'),
+                                                dict(Source=str(bare), Destination=str(bare))])
+        return workspace, registry, route, container
+
+    def test_retained_native_workspace_is_not_part_of_deletion_backup(self):
+        workspace, registry, route, container = self.retained_fixture()
+        extra = self.root / '_claude-projects' / container['Name'].lstrip('/')
+        extra.mkdir(parents=True);(extra / 'transcript.jsonl').write_text('archive me')
+        self.assertEqual(self.g.retained_workspace(container), workspace)
+        paths, shared = self.g.managed_sources(container)
+        self.assertEqual(paths, [extra]);self.assertEqual(shared, [])
+        self.assertEqual((workspace / 'dirty.txt').read_text(), 'keep this')
+
+    def test_untrusted_or_inconsistent_retention_never_skips_workspace_backup(self):
+        workspace, registry, route, container = self.retained_fixture()
+        import copy
+        variants = []
+        for key, value in [('restore_error', 'stale'), ('thread_ids', []), ('thread_ids', ['bad']),
+                           ('cwd', str(self.root)), ('environment_id', 'other')]:
+            invalid = copy.deepcopy(route);invalid[key] = value;variants.append([invalid])
+        invalid = copy.deepcopy(route);invalid['restore']['worktree'] = str(self.root);variants.append([invalid])
+        variants.append([route, route])
+        for routes in variants:
+            registry.write_text(json.dumps(dict(routes=routes)))
+            self.assertIsNone(self.g.retained_workspace(container))
+            paths, _ = self.g.managed_sources(container)
+            self.assertIn(workspace, paths)
+        registry.write_text(json.dumps(dict(routes=[route])));registry.chmod(0o666)
+        self.assertIsNone(self.g.retained_workspace(container))
+        registry.chmod(0o600)
+        self.g.c['remote_registry_uid'] = os.getuid() + 1
+        self.assertIsNone(self.g.retained_workspace(container))
+
     def test_archive_warning_never_authorizes_deletion(self):
         p=self.root/'work';p.mkdir();(p/'unique').write_text('important')
         with patch.object(self.g,'borg',side_effect=RuntimeError('rc=1')):
