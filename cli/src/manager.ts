@@ -24,6 +24,11 @@ function safeCapture(deps: Deps, container: string, session = "main"): string {
 // Detail of a running session: a container with several Claudes expands into a list of sub-sessions,
 // otherwise (0/1 tmux session) today's flat behavior (containerDetail).
 async function sessionDetail(deps: Deps, s: SessionInfo): Promise<void> {
+  if (s.ending) {
+    log.info(`${sessionLabel(s)} · ⏳ Ukončuje se — čeká na zálohu nebo dokončuje úklid.`);
+    await selectVal("Ukončení už běží. Po dokončení session zmizí ze seznamu.", [{ value: "back", label: "← Back" }]);
+    return;
+  }
   const sessions = parseProbe(safeProbe(deps, s.container));
   if (sessions.length > 1) return subSessionList(deps, s);
   return containerDetail(deps, s, false);

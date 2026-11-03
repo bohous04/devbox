@@ -73,8 +73,8 @@ function tmuxLines(rows: TmuxSession[] | undefined): string[] {
 export function formatSessions(rows: SessionInfo[], now = Date.now()): string {
   if (rows.length === 0) return "No sessions.";
   return rows.map((r) => {
-    const dot = r.status === "running" ? "●" : "○";
-    const state = r.status === "running" ? `running ${uptime(now - r.created_at)}` : "stopped";
+    const dot = r.ending ? "⏳" : r.status === "running" ? "●" : "○";
+    const state = r.ending ? "Ukončuje se (záloha nebo úklid)" : r.status === "running" ? `running ${uptime(now - r.created_at)}` : "stopped";
     const ports = `ports ${r.ports[0]?.host}–${r.ports.at(-1)?.host}`;
     const solo = r.solo ? " · claudeSolo" : "";
     const nick = r.name && r.name.trim() ? ` "${r.name.trim()}"` : "";

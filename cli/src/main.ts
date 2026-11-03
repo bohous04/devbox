@@ -1062,5 +1062,5 @@ export function requireTty(): boolean {
 
 if (import.meta.main) {
   const cfg = loadCliConfig();
-  process.exit(await run(process.argv.slice(2), { cfg, api: new ApiClient(cfg.devdUrl) }));
+  process.exit(await run(process.argv.slice(2), { cfg, api: new ApiClient(cfg.devdUrl, cfg.sshHost) }));
 }

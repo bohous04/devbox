@@ -889,6 +889,7 @@ export function createApp(d: ApiDeps): Hono {
     if (taints.size) await identity.refreshIfStale().catch(() => {});
     const rows = listSessions(d.db).map((s) => ({
       ...s,
+      ending: d.mgr.isEnding(s.id),
       // The container was shared and has not been rebuilt yet → still restricted (UI offers a rebuild).
       tainted: taints.has(s.id) && isTainted(d.db, s.id, identity.containerIdFor(s.id)),
       ports: Array.from({ length: n }, (_, i) => ({ host: s.port_base + i, container: 3000 + i })),
