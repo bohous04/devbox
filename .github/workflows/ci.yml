@@ -81,6 +81,7 @@ jobs:
       - name: deny-list (tree, paths, binary strings, commits)
         env:
           DENYLIST: ${{ secrets.OSS_DENYLIST }}
+          GH_TOKEN: ${{ github.token }}
           RANGE: ${{ github.event_name == 'pull_request' && format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) || format('{0}..{1}', github.event.before, github.sha) }}
         run: python3 tools/privacy-check.py "$RANGE"
 
