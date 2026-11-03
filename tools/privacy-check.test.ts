@@ -66,3 +66,38 @@ test("without a deny-list (fork pull request) the check is skipped, not failed",
   expect(r.code).toBe(0);
   expect(r.out).toContain("skipped");
 });
+
+test("a rewritten push fetches its missing before-SHA and still scans the new commit's metadata", () => {
+  const { dir } = repo({ "README.md": "hello\n" }, "Prior <prior@secretclient.example>");
+  const run = (cwd: string, ...args: string[]) => {
+    const r = Bun.spawnSync(["git", ...args], { cwd, stderr: "pipe" });
+    if (r.exitCode !== 0) throw new Error(r.stderr.toString());
+    return r.stdout.toString().trim();
+  };
+  const old = run(dir, "rev-parse", "HEAD");
+  const parent = run(dir, "rev-parse", "HEAD^");
+  const tree = run(dir, "rev-parse", "HEAD^{tree}");
+  const clean = run(dir, "-c", "user.name=Clean", "-c", "user.email=clean@example.com", "commit-tree", tree, "-p", parent, "-m", "clean metadata");
+  const root = mkdtempSync(join(tmpdir(), "privacy-force-push-"));
+  const origin = join(root, "origin.git");
+  run(dir, "clone", "--bare", "-q", dir, origin);
+  // GitHub permits fetching an existing commit by SHA even after its ref was rewritten.
+  run(origin, "config", "uploadpack.allowAnySHA1InWant", "true");
+  run(origin, "update-ref", "refs/heads/main", clean, old);
+  const checkout = join(root, "checkout");
+  run(root, "clone", "--no-local", "-q", origin, checkout);
+  expect(Bun.spawnSync(["git", "cat-file", "-e", old], { cwd: checkout, stderr: "ignore" }).exitCode).not.toBe(0);
+  expect(check(checkout, `${old}..${clean}`).code).toBe(0);
+  expect(run(checkout, "cat-file", "-t", old)).toBe("commit");
+
+  run(checkout, "-c", "user.name=New", "-c", "user.email=new@secretclient.example", "commit", "--allow-empty", "-q", "-m", "new metadata");
+  const rejected = check(checkout, `${old}..HEAD`);
+  expect(rejected.code).toBe(1);
+  expect(rejected.out).toMatch(/author matches pattern #1/);
+  expect(rejected.out.toLowerCase()).not.toContain("secretclient");
+});
+
+test("an unavailable before-SHA fails closed instead of skipping commit checks", () => {
+  const { dir } = repo({ "README.md": "hello\n" });
+  expect(check(dir, `${"a".repeat(40)}..HEAD`).code).not.toBe(0);
+});
