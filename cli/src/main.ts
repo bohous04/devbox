@@ -891,7 +891,9 @@ async function handleExit(deps: Deps, s: SessionInfo | undefined, name?: string 
   if (action === "back") { clearScreen(); return { reattach: true, name: current }; }
   if (action === undefined || action === "detach") return 0;
   try {
-    await deps.api.end(sess.id); console.log(`Ended — ${endEffect(worktree)}.`);
+    const result = await deps.api.end(sess.id);
+    if (result?.pending) console.log(`Ending: ${sess.id} — backup queued or in progress; cleanup finishes in the background. You'll get a notification.`);
+    else console.log(`Ended — ${endEffect(worktree)}.`);
   } catch (e) {
     console.error(`Error: ${(e as Error).message}`);
     return 1;

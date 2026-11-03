@@ -114,7 +114,11 @@ async function containerDetail(deps: Deps, s: SessionInfo, whole: boolean): Prom
   // workspace it is not. The confirmation and the message after it must say the same, otherwise one of them lies.
   const ok = await confirm({ message: endPrompt(s.id, { whole, worktree: !!s.worktree }) });
   if (isCancel(ok) || !ok) return;
-  await deps.api.end(s.id);
+  const result = await deps.api.end(s.id);
+  if (result?.pending) {
+    log.info(`Ending: ${s.id} — backup queued or in progress; cleanup finishes in the background. You'll get a notification.`);
+    return;
+  }
   // Id, not repo: with several sessions on one repo, "Ended: shop/cms" would not tell
   // which one disappeared (same reason as for `dev end` in main.ts).
   log.success(`Ended: ${s.id} — ${endEffect(!!s.worktree)}.`);
