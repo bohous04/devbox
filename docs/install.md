@@ -327,7 +327,9 @@ Automatic upkeep:
   new `@anthropic-ai/claude-code`, rebuilds the image with `--build-arg CC_VERSION=…`,
   installs it into idle containers, and restarts stale panes with `/exit` +
   `cc --resume <id>` so conversations continue. Only a failed build sends a notification.
-  Disable it with `{ "ccUpkeep": { "enabled": false } }` in `config.json`.
+  The resumed conversation ID is checked before the restart is reported successful. If
+  the conversation cannot be identified, upkeep reports the failure instead of starting a
+  new blank chat. Disable it with `{ "ccUpkeep": { "enabled": false } }` in `config.json`.
 - **Codex and Grok**: the `co` and `gr` launchers check for a stable release at most once
   an hour per container, with a 45 s limit. A failed update starts the installed version.
   Disable it for one run with `DEVD_AGENT_AUTO_UPDATE=0 co`.

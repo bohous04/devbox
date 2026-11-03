@@ -505,8 +505,8 @@ async function transcriptExists(deps: RestartDeps, container: string, configDir:
   return r.code !== 0 || r.timedOut ? null : r.stdout.trim() !== "";
 }
 
-// Without an id a bare `cc` is launched — a conversation cc has nothing to restore from is
-// empty, so nothing is lost. NEVER `--continue`.
+// A bare `cc` is reserved for an explicitly requested clean agent start.
+// Automatic upkeep requires a verified conversation id. NEVER `--continue`.
 export const ccResumeCmd = (id: string | null): string => (id === null ? "cc" : `cc --resume ${id}`);
 
 // The real CLAUDE_CONFIG_DIR of the running claude process (not the pane/shell above it) —
@@ -556,15 +556,16 @@ export type RestartOutcome =
 
 // Conversation id from the exit banner, verified against the transcript. `"unverifiable"` =
 // a banner is on screen, but it cannot be confirmed that it belongs to THIS exit →
-// the caller must not guess. `null` = no banner, so there was nothing to restore.
+// the caller must not guess. `null` = no banner visible; it does not prove an empty chat.
 // Exported for agentSwitch.ts (profile swap with best-effort --resume).
 export async function bannerSessionId(
-  deps: RestartDeps, container: string, pane: Pane, configDir: string | null,
+  deps: RestartDeps, container: string, pane: Pane, configDir: string | null, beforeExit?: string,
 ): Promise<string | null | "unverifiable"> {
   const text = await paneText(deps, container, pane.target);
   if (text === null) return "unverifiable";
   const id = parseExitBannerId(text);
   if (id === null) return null;
+  if (beforeExit !== undefined && exactExitBannerId(beforeExit, text) !== id) return "unverifiable";
   if (configDir === null) return "unverifiable";
   const r = await deps.exec(container, transcriptFreshCmd(configDir, id, TRANSCRIPT_FRESH_MIN), 15_000);
   if (r.code !== 0 || r.timedOut) return "unverifiable";
@@ -678,17 +679,13 @@ function exactExitBannerId(before: string, after: string): string | null {
 // the old value from the shell (exactly how the pane kept returning to the original account).
 //
 // The id is determined from three sources, in this order:
-//   0. cc's own `sessions/<pid>.json` of the live claude (see CLAUDE_LIVE_SESSION) — current
-//      even after `/resume`, read before `/exit`. With a transcript behind it, it wins; without
-//      one the conversation is empty and a bare `cc` loses nothing. On 30 Oct 2026 a pane on a
-//      35 MB conversation started without `--resume` showed no banner after `/exit`, so the
-//      old "no banner = empty" rule started a NEW conversation and the next night resumed that,
-//   1. the exit banner cc prints on exit, verified against the transcript — it is
-//      CURRENT: it says what the pane was on RIGHT NOW,
+//   0. a NEW exit banner, verified against the transcript — it says what actually exited,
+//   1. cc's own `sessions/<pid>.json` (see CLAUDE_LIVE_SESSION), read before `/exit`,
+//      with a transcript behind it. A missing transcript is uncertainty, not proof of emptiness,
 //   2. the argv of the live claude (`--resume`/`--session-id`), read before `/exit`
 //      — a safety net in case the banner cannot be verified. On its own it goes stale: after
 //      `/clear` the pane runs on a NEW conversation, but argv still carries the original id,
-//      which is why it comes second.
+//      which is why it comes last.
 // When neither works and a banner is on screen, it returns (with requireId)
 // "unknown-session" and the pane stays at the shell — see RestartOutcome.
 //
@@ -726,6 +723,11 @@ export async function restartPane(
       beforeExit = await paneText(deps, container, pane.target);
       if (beforeExit === null || await paneClaudePid(deps, container, pane) !== claudePid) return "unknown-session";
     } catch { return "unknown-session"; }
+  }
+
+  if (!exact && harvest) {
+    beforeExit = await paneText(deps, container, pane.target);
+    if (beforeExit === null && (plan.requireId ?? true)) return "unknown-session";
   }
 
   if (exitMode === "slash-exit") {
@@ -771,19 +773,21 @@ export async function restartPane(
       if (transcript.code !== 0 || transcript.timedOut || transcript.stdout.trim() !== "ok") return "unknown-session";
     } catch { return "unknown-session"; }
   } else if (harvest) {
-    // A session file without a transcript = an empty conversation → bare `cc` (id stays null).
-    const written = fromSessionFile === null ? null : await transcriptExists(deps, container, configDir!, fromSessionFile);
-    if (written !== null) {
-      if (written) id = fromSessionFile;
-    } else {
-      const banner = await bannerSessionId(deps, container, pane, configDir);
-      // The banner could not be verified → no guessing; only what we are sure of from argv
-      // is used, otherwise (with requireId) the pane is left at the shell.
-      if (banner === "unverifiable" && fromCmdline === null && (plan.requireId ?? true)) return "unknown-session";
-      // No banner = cc had nothing to restore (empty conversation). `fromCmdline` is then
-      // at most the same id, so it does no harm, and when absent a bare `cc` is launched.
-      id = banner === "unverifiable" || banner === null ? fromCmdline : banner;
+    // A fresh, verified exit banner describes the conversation that actually exited.
+    // A metadata id without a transcript is not proof of an empty chat: preferring
+    // it used to discard this banner and launch a new, blank conversation overnight.
+    const banner = await bannerSessionId(deps, container, pane, configDir, beforeExit ?? undefined);
+    if (banner !== null && banner !== "unverifiable") id = banner;
+    else {
+      const written = fromSessionFile === null ? null : await transcriptExists(deps, container, configDir!, fromSessionFile);
+      if (written === true) id = fromSessionFile;
+      else if (fromSessionFile !== null) {
+        if (plan.requireId ?? true) return "unknown-session";
+      } else id = fromCmdline;
     }
+    // Upkeep must preserve a known conversation; only an explicit agent swap may
+    // opt into a clean start with requireId:false. Missing evidence is not success.
+    if (id === null && (plan.requireId ?? true)) return "unknown-session";
   }
 
   const startCmd = `${plan.cmdPrefix ?? ""}${(plan.launch ?? ccResumeCmd)(id)}`;
@@ -807,6 +811,19 @@ export async function restartPane(
         ]);
         if (accountDir !== exact.targetConfigDir || argv.code !== 0 || argv.timedOut || parseSessionIdFromCmdline(argv.stdout) !== id)
           return "unknown-session";
+      } catch { return "unknown-session"; }
+    } else if (id !== null) {
+      try {
+        const returnedPid = await paneClaudePid(deps, container, pane);
+        if (returnedPid === null) return "did-not-return";
+        const returnedConfig = await paneConfigDir(deps, container, returnedPid);
+        const returnedId = returnedConfig === null ? null : await liveSessionId(deps, container, returnedPid, returnedConfig);
+        if (returnedId !== null) {
+          if (returnedId !== id) return "unknown-session";
+        } else {
+          const argv = await deps.exec(container, ["cat", `/proc/${returnedPid}/cmdline`], 10_000);
+          if (argv.code !== 0 || argv.timedOut || parseSessionIdFromCmdline(argv.stdout) !== id) return "unknown-session";
+        }
       } catch { return "unknown-session"; }
     }
     return "restarted";

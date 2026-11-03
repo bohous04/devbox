@@ -51,6 +51,17 @@ function ps(...withClaude: number[]): string {
 // Telling the two `sh -c` calls apart: the quiet probe vs. the binary age query.
 const isBinAge = (cmd: string[]) => cmd[0] === "sh" && (cmd[2] ?? "").includes("stat -c");
 
+// Orchestration fixtures represent an existing, identifiable chat. Missing ids and
+// mismatched resumed conversations are covered by the restart protocol tests.
+const CONVERSATION = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+function conversationProbe(cmd: string[]): ExecResult | null {
+  if (cmd[0] === "cat" && /^\/proc\/\d+\/cmdline$/.test(cmd[1] ?? ""))
+    return ok(`claude\0--resume\0${CONVERSATION}\0`);
+  if (cmd[0] === "cat" && /^\/proc\/\d+\/environ$/.test(cmd[1] ?? ""))
+    return ok("CLAUDE_CONFIG_DIR=/home/dev/.claude\0");
+  return null;
+}
+
 // Exec runner: version in the container, quiet, panes, npm i, tmux.
 // `npm i -g` bumps `versions[container]` — an install after which `claude --version`
 // still reports the old version is exactly the failure the job must catch (see
@@ -61,12 +72,12 @@ function containerRunner(
 ) {
   const calls: { container: string; cmd: string[] }[] = [];
   const exited = new Set<string>();   // after `/exit` the pane's subtree has no claude, after launching cc it has one again
-  // After a restart the pane starts `cc` (without an id, when the mock has nowhere to take it from) or
-  // `cc --resume <id>`; `dev switch` also prepends a profile export to it.
+  // A successful restart must resume an identifiable conversation.
   const isStart = (keys: string) => /(^|;\s*)cc(\s|$)/.test(keys);
   const broken = new Set<string>();   // containers where the install left a dummy binary
   const exec = async (container: string, cmd: string[]): Promise<ExecResult> => {
     calls.push({ container, cmd });
+    const conversation = conversationProbe(cmd); if (conversation) return conversation;
     if (isBinAge(cmd)) return ok(BIN_AGE);
     if (cmd[0] === "claude") {
       // The dummy `bin/claude.exe` writes to stderr and exits with one — no version.
@@ -188,6 +199,7 @@ test("the second quiet probe fails → the install stays, the restart is cancell
   // the operator came back in the meantime.
   const exec = async (container: string, cmd: string[]): Promise<ExecResult> => {
     calls.push({ container, cmd });
+    const conversation = conversationProbe(cmd); if (conversation) return conversation;
     if (isBinAge(cmd)) return ok(BIN_AGE);
     if (cmd[0] === "claude") return cc.read();
     // 1st sample = the probe before the install (quiet), the next = per-pane probe (claude 1062 is grinding)
@@ -221,6 +233,7 @@ test("multiple panes: the operator comes back between restarts → the next pane
   // the operator managed to get back into main-2 while main was restarting (~90 s per pane).
   const exec = async (container: string, cmd: string[]): Promise<ExecResult> => {
     calls.push({ container, cmd });
+    const conversation = conversationProbe(cmd); if (conversation) return conversation;
     if (isBinAge(cmd)) return ok(BIN_AGE);
     if (cmd[0] === "claude") return cc.read();
     // Per pane: the first pane's claude (1062) is quiet, the second's (1072) is grinding —
@@ -257,6 +270,7 @@ test("send-keys for launching cc fails → the pane stays stuck, events record i
   let exited = false;
   const cc = ccVersion("2.1.202");
   const exec = async (_container: string, cmd: string[]): Promise<ExecResult> => {
+    const conversation = conversationProbe(cmd); if (conversation) return conversation;
     if (isBinAge(cmd)) return ok(BIN_AGE);
     if (cmd[0] === "claude") return cc.read();
     if (cmd[0] === "sh") return ok("");
@@ -293,6 +307,7 @@ test("cc refuses to exit → cc_skipped { reason: \"did-not-exit\" }, stuck stay
   const sent: string[][] = [];
   const cc = ccVersion("2.1.202");
   const exec = async (_container: string, cmd: string[]): Promise<ExecResult> => {
+    const conversation = conversationProbe(cmd); if (conversation) return conversation;
     if (isBinAge(cmd)) return ok(BIN_AGE);
     if (cmd[0] === "claude") return cc.read();
     if (cmd[0] === "sh") return ok("");
@@ -469,6 +484,7 @@ test("a pane hanging on the resume dialog → cc_restart_failed { reason: \"stuc
   let continued = false;
   const cc = ccVersion("2.1.202");
   const exec = async (_container: string, cmd: string[]): Promise<ExecResult> => {
+    const conversation = conversationProbe(cmd); if (conversation) return conversation;
     if (isBinAge(cmd)) return ok(BIN_AGE);
     if (cmd[0] === "claude") return cc.read();
     if (cmd[0] === "sh") return ok("");

@@ -199,22 +199,30 @@ const CMDLINE = (id: string) => `claude\0--dangerously-skip-permissions\0--resum
 const ENVIRON = "CLAUDE_CONFIG_DIR=/home/dev/.claude-accounts/max20\0";
 
 /** Container mock for a pane restart. `cmdline`/`pane`/`fresh` control where the id can be found. */
-function restartEnv(over: { cmdline?: string; pane?: string; fresh?: string; session?: string; written?: string } = {}) {
+function restartEnv(over: { cmdline?: string; pane?: string; fresh?: string; session?: string; written?: string; beforePane?: string; returnedSession?: string; returnedCmdline?: string } = {}) {
   const sent: string[][] = [];
   let started = false;
+  let exited = false;
+  let launchedId: string | null = null;
   const d = deps({
     exec: async (_c, cmd) => {
       if (cmd[0] === "tmux" && cmd[1] === "send-keys") {
         sent.push(cmd);
-        if (cmd[4] !== "/exit" && cmd[4] !== "C-u") started = true;
+        if (cmd[4] === "/exit") exited = true;
+        if (cmd[4] !== "/exit" && cmd[4] !== "C-u") {
+          started = true;
+          launchedId = cmd[4]?.match(/--resume ([0-9a-f-]{36})/)?.[1] ?? null;
+        }
         return ok();
       }
       if (cmd[0] === "ps") return ok(started ? PS_WITH_CLAUDE : PS_WITHOUT_CLAUDE);
-      if (cmd[0] === "cat" && cmd[1] === "/proc/64/cmdline") return ok(over.cmdline ?? "");
+      if (cmd[0] === "cat" && cmd[1] === "/proc/64/cmdline") return ok(started ? over.returnedCmdline ?? (launchedId ? CMDLINE(launchedId) : "claude\0") : over.cmdline ?? "");
       if (cmd[0] === "cat" && cmd[1] === "/proc/64/environ") return ok(ENVIRON);
-      if (cmd[0] === "tmux" && cmd[1] === "capture-pane") return ok(over.pane ?? "");
+      if (cmd[0] === "tmux" && cmd[1] === "capture-pane") return ok(exited ? over.pane ?? "" : over.beforePane ?? "pane before exit");
       if (cmd[0] === "python3" && cmd[2]?.startsWith("# CLAUDE_LIVE_SESSION"))
-        return over.session === undefined ? { ...ok(), code: 1 } : ok(`${over.session}\n`);
+        return started
+          ? ok(`${over.returnedSession ?? launchedId ?? ""}\n`)
+          : over.session === undefined ? { ...ok(), code: 1 } : ok(`${over.session}\n`);
       if (cmd[0] === "find" && !cmd.includes("-newermt")) return ok(over.written ?? "");
       if (cmd[0] === "find") return ok(over.fresh ?? "");
       return ok();
@@ -292,12 +300,11 @@ test("restartClaudePane: an old banner (transcript not fresh) → \"unknown-sess
   expect(cmds()).toEqual(["/exit"]);
 });
 
-// No banner = cc had nothing to offer → the conversation is empty and a bare `cc` loses
-// nothing. This is the only path through which a NEW conversation may be created.
-test("restartClaudePane: without a banner a bare `cc` is started", async () => {
+// Missing identity must never be reported as a successful blank restart.
+test("restartClaudePane: no conversation evidence never starts a blank chat", async () => {
   const { d, cmds } = restartDeps({ pane: "78c1814a78f1%\n" });
-  expect(await restartClaudePane(d, "dev-a", PANE)).toBe("restarted");
-  expect(cmds()).toEqual(["/exit", "cc"]);
+  expect(await restartClaudePane(d, "dev-a", PANE)).toBe("unknown-session");
+  expect(cmds()).toEqual(["/exit"]);
 });
 
 // 30 Oct 2026: a pane on a 35 MB conversation, started without `--resume`, printed no banner
@@ -318,15 +325,46 @@ test("restartClaudePane: the live session file overrides a stale argv id (after 
   expect(cmds()).toEqual(["/exit", `cc --resume ${SID}`]);
 });
 
-test("restartClaudePane: a live session that was never written is empty → bare `cc`, not the stale argv id", async () => {
+test("restartClaudePane: missing current transcript never falls back to a potentially stale argv id", async () => {
   const { d, cmds } = restartDeps({ cmdline: CMDLINE(OTHER), session: SID, written: "" });
-  expect(await restartClaudePane(d, "dev-a", PANE)).toBe("restarted");
-  expect(cmds()).toEqual(["/exit", "cc"]);
+  expect(await restartClaudePane(d, "dev-a", PANE)).toBe("unknown-session");
+  expect(cmds()).toEqual(["/exit"]);
 });
 
 test("restartClaudePane: an unreadable session file falls back to banner and argv", async () => {
   const { d, cmds } = restartDeps({ cmdline: CMDLINE(SID), session: "not-a-uuid" });
   expect(await restartClaudePane(d, "dev-a", PANE)).toBe("restarted");
+  expect(cmds()).toEqual(["/exit", `cc --resume ${SID}`]);
+});
+
+test("restartClaudePane: a fresh exit banner wins over metadata for an unwritten chat", async () => {
+  const { d, cmds } = restartDeps({
+    session: OTHER, written: "",
+    pane: `Resume this session with:\nclaude --resume ${SID}\n`, fresh: `/x/${SID}.jsonl\n`,
+  });
+  expect(await restartClaudePane(d, "dev-a", PANE)).toBe("restarted");
+  expect(cmds()).toEqual(["/exit", `cc --resume ${SID}`]);
+});
+
+test("restartClaudePane: the new exit banner also wins over a different existing metadata transcript", async () => {
+  const { d, cmds } = restartDeps({
+    session: OTHER, written: `/x/${OTHER}.jsonl\n`,
+    pane: `Resume this session with:\nclaude --resume ${SID}\n`, fresh: `/x/${SID}.jsonl\n`,
+  });
+  expect(await restartClaudePane(d, "dev-a", PANE)).toBe("restarted");
+  expect(cmds()).toEqual(["/exit", `cc --resume ${SID}`]);
+});
+
+test("restartClaudePane: a pre-existing banner cannot select a chat even if its transcript is recent", async () => {
+  const banner = `Resume this session with:\nclaude --resume ${SID}\n`;
+  const { d, cmds } = restartDeps({ beforePane: banner, pane: banner, fresh: `/x/${SID}.jsonl\n` });
+  expect(await restartClaudePane(d, "dev-a", PANE)).toBe("unknown-session");
+  expect(cmds()).toEqual(["/exit"]);
+});
+
+test("restartClaudePane: a live process on a different chat is not a successful resume", async () => {
+  const { d, cmds } = restartDeps({ cmdline: CMDLINE(SID), returnedSession: OTHER });
+  expect(await restartClaudePane(d, "dev-a", PANE)).toBe("unknown-session");
   expect(cmds()).toEqual(["/exit", `cc --resume ${SID}`]);
 });
 
@@ -461,15 +499,20 @@ test("restartClaudePane: `/exit` is not delivered (send-keys fails) → \"did-no
 // a bare shell without a live cc and needs a human's attention.
 test("restartClaudePane: cc does not come back after launch → \"did-not-return\"", async () => {
   const sent: string[][] = [];
+  let probed = false;
   const d = deps({
     exec: async (_c, cmd) => {
       if (cmd[0] === "tmux" && cmd[1] === "send-keys") { sent.push(cmd); return ok(); }
-      if (cmd[0] === "ps") return ok(PS_WITHOUT_CLAUDE);   // claude does not come back even after --continue
+      if (cmd[0] === "ps") { if (!probed) { probed = true; return ok(PS_WITH_CLAUDE); } return ok(PS_WITHOUT_CLAUDE); }   // claude does not come back even after --resume
+      if (cmd[1] === "capture-pane") return ok(sent.length ? `Resume this session with:\nclaude --resume ${SID}\n` : "before exit");
+      if (cmd[0] === "find") return ok(`/x/${SID}.jsonl\n`);
+      if (cmd[0] === "cat" && cmd[1]?.endsWith("/cmdline")) return ok(CMDLINE(SID));
+      if (cmd[0] === "cat" && cmd[1]?.endsWith("/environ")) return ok(ENVIRON);
       return ok();
     },
   });
   expect(await restartClaudePane(d, "dev-a", PANE)).toBe("did-not-return");
-  expect(sent.map((c) => c[4])).toEqual(["/exit", "cc"]);
+  expect(sent.map((c) => c[4])).toEqual(["/exit", `cc --resume ${SID}`]);
 });
 
 test("restartClaudePane: sending the launch command fails → \"did-not-return\" immediately, no waiting for the timeout", async () => {
@@ -482,7 +525,11 @@ test("restartClaudePane: sending the launch command fails → \"did-not-return\"
         if (cmd[4] === "/exit") return ok();
         return { code: 1, stdout: "", stderr: "no such pane", timedOut: false };
       }
-      if (cmd[0] === "ps") { psCalls++; return ok(PS_WITHOUT_CLAUDE); }
+      if (cmd[0] === "ps") { psCalls++; return ok(psCalls === 1 ? PS_WITH_CLAUDE : PS_WITHOUT_CLAUDE); }
+      if (cmd[1] === "capture-pane") return ok(sent.length ? `Resume this session with:\nclaude --resume ${SID}\n` : "before exit");
+      if (cmd[0] === "find") return ok(`/x/${SID}.jsonl\n`);
+      if (cmd[0] === "cat" && cmd[1]?.endsWith("/cmdline")) return ok(CMDLINE(SID));
+      if (cmd[0] === "cat" && cmd[1]?.endsWith("/environ")) return ok(ENVIRON);
       return ok();
     },
   });
@@ -642,36 +689,44 @@ test("restartClaudePane: after launching cc answers the resume dialog → \"rest
   const keys: string[] = [];
   let continued = false;
   let answered = false;
+  let probing = true;
   const d = deps({
     exec: async (_c, cmd) => {
       if (cmd[1] === "send-keys") {
         keys.push(cmd[4]!);
-        if (cmd[4] === "cc") continued = true;
+        if (cmd[4] === `cc --resume ${SID}`) continued = true;
         if (cmd[4] === "Enter" && continued) answered = true;
         return ok();
       }
-      if (cmd[0] === "ps") return ok(continued ? PS_WITH_CLAUDE : PS_WITHOUT_CLAUDE);
+      if (cmd[0] === "ps") { if (probing) { probing = false; return ok(PS_WITH_CLAUDE); } return ok(continued ? PS_WITH_CLAUDE : PS_WITHOUT_CLAUDE); }
       if (cmd[1] === "capture-pane") {
-        if (!continued) return ok(PROMPT);
+        if (!continued) return ok(keys.includes("/exit") ? `Resume this session with:\nclaude --resume ${SID}\n` : PROMPT);
         return ok(answered ? PROMPT : cursorAt(1 + keys.filter((k) => k === "Down").length));
       }
+      if (cmd[0] === "find") return ok(`/x/${SID}.jsonl\n`);
+      if (cmd[0] === "cat" && cmd[1]?.endsWith("/environ")) return ok(ENVIRON);
+      if (cmd[0] === "cat" && cmd[1]?.endsWith("/cmdline")) return ok(CMDLINE(SID));
       return ok();
     },
   });
   expect(await restartClaudePane(d, "dev-a", PANE)).toBe("restarted");
-  expect(keys).toEqual(["/exit", "cc", "Down", "Enter"]);
+  expect(keys).toEqual(["/exit", `cc --resume ${SID}`, "Down", "Enter"]);
 });
 
 test("restartClaudePane: cc stays hanging on the dialog → \"stuck-on-dialog\", not \"restarted\"", async () => {
   let continued = false;
+  let probing = true;
   const d = deps({
     exec: async (_c, cmd) => {
       if (cmd[1] === "send-keys") {
-        if (cmd[4] === "cc") continued = true;
+        if (cmd[4] === `cc --resume ${SID}`) continued = true;
         return ok();
       }
-      if (cmd[0] === "ps") return ok(continued ? PS_WITH_CLAUDE : PS_WITHOUT_CLAUDE);
+      if (cmd[0] === "ps") { if (probing) { probing = false; return ok(PS_WITH_CLAUDE); } return ok(continued ? PS_WITH_CLAUDE : PS_WITHOUT_CLAUDE); }
       if (cmd[1] === "capture-pane") return ok(continued ? cursorAt(1) : PROMPT);
+      if (cmd[0] === "find") return ok(`/x/${SID}.jsonl\n`);
+      if (cmd[0] === "cat" && cmd[1]?.endsWith("/environ")) return ok(ENVIRON);
+      if (cmd[0] === "cat" && cmd[1]?.endsWith("/cmdline")) return ok(CMDLINE(SID));
       return ok();
     },
   });
@@ -734,7 +789,7 @@ test("parseExitBannerId: of several banners the last one counts", () => {
   expect(parseExitBannerId(PANE_AFTER_EXIT)).toBe(OTHER);
 });
 
-test("parseExitBannerId: no banner → null (an empty conversation has nothing to resume)", () => {
+test("parseExitBannerId: no banner → null (no identity can be inferred)", () => {
   expect(parseExitBannerId("78c1814a78f1%\n")).toBeNull();
   expect(parseExitBannerId("")).toBeNull();
   expect(parseExitBannerId("claude --resume nesmysl\n")).toBeNull();

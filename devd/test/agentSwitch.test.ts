@@ -126,6 +126,7 @@ function fakeContainer(opts: {
 }) {
   const sent: string[] = [];
   let phase: "running" | "gone" | "relaunched" = "running";
+  let launchedId: string | null = null;
   const exec = async (_c: string, cmd: string[]): Promise<ExecResult> => {
     if (cmd[0] === "tmux" && cmd[1] === "list-panes") return ok("main:0.0\t62\n");
     if (cmd[0] === "ps") {
@@ -135,12 +136,16 @@ function fakeContainer(opts: {
     }
     if (cmd[0] === "cat" && cmd[1] === "/proc/64/cmdline") return ok(opts.cmdline ?? "claude");
     if (cmd[0] === "cat" && cmd[1] === "/proc/64/environ") return ok("CLAUDE_CONFIG_DIR=/home/dev/.claude\0");
+    if (cmd[0] === "cat" && cmd[1] === "/proc/70/cmdline") return ok(launchedId ? `claude\0--resume\0${launchedId}\0` : "claude\0");
     if (cmd[0] === "kill") { phase = "gone"; return ok(); }
     if (cmd[0] === "tmux" && cmd[1] === "send-keys") {
       const keys = cmd.slice(3).join(" ");
       sent.push(keys);
       if (keys.includes("/exit")) phase = "gone";
-      if (keys.includes("agent-launch")) phase = "relaunched";
+      if (keys.includes("agent-launch")) {
+        phase = "relaunched";
+        launchedId = keys.match(/--resume ([0-9a-f-]{36})/)?.[1] ?? null;
+      }
       return ok();
     }
     if (cmd[0] === "tmux" && cmd[1] === "capture-pane") {
