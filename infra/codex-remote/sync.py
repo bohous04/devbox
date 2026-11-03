@@ -253,10 +253,22 @@ def retained_branch(route, descriptor, *, recorded=None):
             raise SyncError("Retained worktree is not a canonical directory")
         common = git_read(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
         actual = git_read(cwd, "symbolic-ref", "--quiet", "--short", "HEAD")
-        if common is None or Path(common).resolve() != bare or actual not in heads:
+        if common is None or Path(common).resolve() != bare:
+            raise SyncError("Retained worktree does not identify a branch in the expected bare repository")
+        if actual is None:
+            commit = git_read(cwd, "rev-parse", "--verify", "HEAD^{commit}")
+            if commit and re.fullmatch(r"[0-9a-f]{40}", commit):
+                return "detached:" + commit
+        if actual not in heads:
             raise SyncError("Retained worktree does not identify a branch in the expected bare repository")
         return actual
     if recorded:
+        if recorded.startswith("detached:"):
+            commit = recorded.removeprefix("detached:")
+            if (not re.fullmatch(r"[0-9a-f]{40}", commit)
+                    or git_read(bare, "rev-parse", "--verify", commit + "^{commit}", bare=True) != commit):
+                raise SyncError("Recorded detached worktree commit no longer exists")
+            return recorded
         if recorded not in heads:
             raise SyncError("Recorded worktree branch no longer exists")
         return recorded

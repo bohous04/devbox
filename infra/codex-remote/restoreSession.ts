@@ -16,6 +16,7 @@ export class RemoteRestoreError extends Error {
 }
 export interface RestoreDescriptor {
   folder: string; project: string; repo: string; solo: 0 | 1;
+  // Detached HEAD is encoded as detached:<full commit SHA>, never an inferred branch.
   worktree: string | null; bare: string | null; branch: string | null;
 }
 export interface RemoteRoute {
@@ -150,13 +151,23 @@ export async function prepareRemoteWorkspace(route: RemoteRoute): Promise<boolea
   if (!d.worktree || !d.bare || !d.branch || !existsSync(d.bare)) {
     throw new RemoteRestoreError("Retained workspace is missing; refusing to create an empty replacement");
   }
+  const detached = d.branch.startsWith("detached:");
+  const commit = detached ? d.branch.slice("detached:".length) : null;
+  if (detached) {
+    try {
+      if (!/^[0-9a-f]{40}$/.test(commit!)) throw new Error("invalid commit");
+      const observed = (await git(d.bare, ["rev-parse", "--verify", `${commit}^{commit}`])).stdout.trim();
+      if (observed !== commit) throw new Error("wrong commit");
+    } catch { throw new RemoteRestoreError("Recorded detached Remote commit is missing; refusing another revision"); }
+  } else {
+    try {
+      await git(d.bare, ["check-ref-format", `refs/heads/${d.branch}`]);
+      await git(d.bare, ["rev-parse", "--verify", `refs/heads/${d.branch}^{commit}`]);
+    } catch { throw new RemoteRestoreError("Recorded Remote branch is missing; refusing to restore from a different branch"); }
+  }
   try {
-    await git(d.bare, ["check-ref-format", `refs/heads/${d.branch}`]);
-    await git(d.bare, ["rev-parse", "--verify", `refs/heads/${d.branch}^{commit}`]);
-  } catch { throw new RemoteRestoreError("Recorded Remote branch is missing; refusing to restore from a different branch"); }
-  try {
-    // No prune or force: another live worktree holding this branch must prevent reuse.
-    await git(d.bare, ["worktree", "add", "--", route.cwd, d.branch]);
+    // No prune or force: preserve exact branch ownership, or the exact detached commit.
+    await git(d.bare, ["worktree", "add", ...(detached ? ["--detach"] : []), "--", route.cwd, commit ?? d.branch]);
   } catch { throw new RemoteRestoreError("Cannot restore the exact recorded worktree; no alternate branch was used"); }
   return true;
 }

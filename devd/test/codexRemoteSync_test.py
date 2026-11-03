@@ -127,6 +127,27 @@ class CodexRemoteSyncTests(unittest.TestCase):
             self.assertEqual(report["restore_errors"], [])
             self.assertNotIn("restore_error", recovered["routes"][0])
 
+    def test_detached_head_records_exact_commit_and_survives_missing_worktree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            bare, git = self.bare_repository(root)
+            cwd = root / "_sessions/dev-apps-example"
+            cwd.parent.mkdir()
+            commit = git("rev-parse", "main")
+            git("worktree", "add", "--detach", str(cwd), commit)
+            row = {"id": "dev-apps-example", "container": "dev-apps-example", "folder": "apps", "project": "apps",
+                   "repo": "example", "solo": 0, "worktree": str(cwd)}
+            registry, report = sync.capture_restore_routes({"routes": [route(cwd=str(cwd), ids=[ROOT])]}, {row["id"]: row}, root)
+            self.assertEqual(report["restore_errors"], [])
+            self.assertEqual(registry["routes"][0]["restore"]["branch"], "detached:" + commit)
+            git("worktree", "remove", str(cwd))
+            restored, report = sync.capture_restore_routes(registry, {}, root)
+            self.assertEqual(report["restore_errors"], [])
+            self.assertEqual(restored["routes"][0]["restore"]["branch"], "detached:" + commit)
+            restored["routes"][0]["restore"]["branch"] = "detached:" + "f" * 40
+            failed, report = sync.capture_restore_routes(restored, {}, root)
+            self.assertIn("commit no longer exists", report["restore_errors"][0]["error"])
+
     def test_live_branch_switch_updates_recorded_descriptor_before_end(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

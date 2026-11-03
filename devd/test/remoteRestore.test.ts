@@ -134,3 +134,25 @@ test("real offline Git restore keeps recorded branch commit and preserves dirty 
   expect(readFileSync(join(f.route.cwd, "kept.txt"), "utf8")).toBe("unstaged\n"); expect(cwdGit("status", "--porcelain")).toBe(before);
   expect(cwdGit("show", ":kept.txt")).toBe("staged"); expect(cwdGit("rev-parse", "HEAD")).toBe(expected);
 });
+
+test("detached Remote restore recreates the exact commit and end retains its workspace", async () => {
+  const f = fixture(), seed = join(f.root, "seed"); mkdirSync(seed);
+  const git = (...args: string[]) => execFileSync("git", ["-C", seed, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git("init", "-b", "main"); git("config", "user.email", "fixture@example.invalid"); git("config", "user.name", "Fixture");
+  writeFileSync(join(seed, "kept.txt"), "original\n"); git("add", "."); git("commit", "-m", "fixture");
+  const expected = git("rev-parse", "HEAD");
+  git("clone", "--bare", seed, f.route.restore.bare!);
+  f.route.restore.branch = `detached:${expected}`;
+  f.write([f.route]);
+  expect(retainRemoteWorkspace(f.row, f.root, f.registry, process.getuid!())).toBe(true);
+  expect(await prepareRemoteWorkspace(f.route)).toBe(true);
+  const cwdGit = (...args: string[]) => execFileSync("git", ["-C", f.route.cwd, ...args], { encoding: "utf8" }).trim();
+  expect(cwdGit("rev-parse", "HEAD")).toBe(expected);
+  expect(cwdGit("branch", "--show-current")).toBe("");
+  writeFileSync(join(f.route.cwd, "kept.txt"), "dirty\n");
+  expect(await prepareRemoteWorkspace(f.route)).toBe(false);
+  expect(readFileSync(join(f.route.cwd, "kept.txt"), "utf8")).toBe("dirty\n");
+  rmSync(f.route.cwd, { recursive: true });
+  f.route.restore.branch = `detached:${"f".repeat(40)}`;
+  await expect(prepareRemoteWorkspace(f.route)).rejects.toThrow("Recorded detached Remote commit is missing");
+});
