@@ -437,6 +437,10 @@ export const api = {
   agyLoginStatus: () => j<{ status: "pending" | "done" | "error" }>("/api/auth/antigravity/login/status"),
   agyLogout: () => j<void>("/api/auth/antigravity/logout", post({})),
   accounts: () => j<{ accounts: AccountView[]; pool: AccountPoolView }>("/api/accounts"),
+  accountLoginStart: (id: string) => j<{ url: string }>(`/api/accounts/${encodeURIComponent(id)}/login/start`, post({})),
+  accountLoginCode: (id: string, code: string) => j<void>(`/api/accounts/${encodeURIComponent(id)}/login/code`, post({ code })),
+  accountLoginStatus: (id: string) => j<{ status: "pending" | "done" | "error" }>(`/api/accounts/${encodeURIComponent(id)}/login/status`),
+  accountLoginCancel: (id: string) => j<void>(`/api/accounts/${encodeURIComponent(id)}/login`, { method: "DELETE" }),
   addAccount: (id: string, credentials: string, label?: string) =>
     j<{ id: string; label: string }>("/api/accounts", post({ id, credentials, label })),
   setAccountDisabled: (id: string, disabled: boolean) =>

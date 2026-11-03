@@ -37,6 +37,7 @@ import { isValidAccountId, profileIdentity, profileVolume, provisionProfile, rem
 import { credentialsInputError, normalizeCredentialsInput, parseTierWeight, withTierLabel } from "./accountTokens";
 import type { CloneQueue } from "./clone";
 import { validateConfig, type AccountPoolSettings, type DevConfig, type InstaboxSettings } from "./config";
+import { AccountLogin } from "./accountLogin";
 import { remoteDockerAlias } from "./dockerTarget";
 import { IbxPreconditionError, type InstaboxSessions } from "./instabox/sessions";
 import type { IbxStatus } from "./instabox/reconcile";
@@ -2502,9 +2503,44 @@ export function createApp(d: ApiDeps): Hono {
     }
   });
 
-  // Adding an account: the profile is set up by UPLOADING a blob. `claude auth login` waits for an OAuth
-  // callback on localhost, which does not work on a headless VPS, and Claude has no device-auth —
-  // so the sign-in happens on the mac and finished credentials arrive here.
+  const poolLogin = d.codexAuth ? new AccountLogin(d.codexAuth, async (id, credentials, label) => {
+    const result = await app.request("/api/accounts", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id, credentials, label }),
+    });
+    if (!result.ok) throw new Error("Could not register the signed-in account.");
+    await d.accounts?.refresh(id).catch(() => {});
+  }) : null;
+  app.post("/api/accounts/:id/login/start", async (c) => {
+    const denied = claudeLoginGate(c); if (denied) return denied;
+    if (!needAccounts() || !poolLogin) return c.json({ error: "account login is not configured" }, 503);
+    const id = c.req.param("id");
+    if (!isValidAccountId(id)) return c.json({ error: "id must be [A-Za-z0-9-], max 31 characters" }, 400);
+    if (getAccount(d.db, id)) return c.json({ error: "account already exists" }, 409);
+    try { return c.json(await poolLogin.start(id)); }
+    catch (e) { return c.json({ error: (e as Error).message }, 409); }
+  });
+  app.post("/api/accounts/:id/login/code", async (c) => {
+    const denied = claudeLoginGate(c); if (denied) return denied;
+    if (!poolLogin) return c.json({ error: "account login is not configured" }, 503);
+    const body = await c.req.json().catch(() => null);
+    if (!isValidClaudeCode(body?.code)) return c.json({ error: "invalid authorization code" }, 400);
+    try { await poolLogin.code(c.req.param("id"), body.code); return c.body(null, 204); }
+    catch (e) { return c.json({ error: (e as Error).message }, 409); }
+  });
+  app.get("/api/accounts/:id/login/status", async (c) => {
+    const denied = claudeLoginGate(c); if (denied) return denied;
+    if (!poolLogin) return c.json({ error: "account login is not configured" }, 503);
+    return c.json({ status: await poolLogin.status(c.req.param("id")) });
+  });
+  app.delete("/api/accounts/:id/login", async (c) => {
+    const denied = claudeLoginGate(c); if (denied) return denied;
+    if (!poolLogin) return c.json({ error: "account login is not configured" }, 503);
+    try { await poolLogin.cancel(c.req.param("id")); return c.body(null, 204); }
+    catch (e) { return c.json({ error: (e as Error).message }, 409); }
+  });
+
+  // Manual credential import remains available as a fallback.
   app.post("/api/accounts", async (c) => {
     const acc = needAccounts(); if (!acc) return c.json({ error: "account pool is not configured" }, 503);
     const b = (await c.req.json().catch(() => null)) as { id?: string; credentials?: string; label?: string } | null;
