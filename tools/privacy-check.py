@@ -19,9 +19,11 @@ Usage: DENYLIST="$(cat denylist)" tools/privacy-check.py [<base>..<head>]
 from __future__ import annotations
 
 import os
+import json
 import re
 import subprocess
 import sys
+import urllib.request
 
 BINARY_STRINGS = re.compile(rb"[\x20-\x7e]{4,}")
 
@@ -74,6 +76,44 @@ def scan_tree(deny, allow) -> list[str]:
     return problems
 
 
+def github_commit(repository: str, sha: str) -> dict:
+    headers = {"Accept": "application/vnd.github+json"}
+    token = os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    request = urllib.request.Request(f"https://api.github.com/repos/{repository}/commits/{sha}", headers=headers)
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.load(response)
+
+
+def public_merge_author(sha: str, author: str, committer: str, parents: str) -> str:
+    """Only normalize the owner's public display name on a verified GitHub merge.
+
+    The noreply email is still scanned. Local/spoofed merges and private emails
+    retain the ordinary full identity check; API failure also fails closed.
+    """
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        return author
+    owner = repository.split("/")[0]
+    email = re.fullmatch(r".+ <([0-9]+\+" + re.escape(owner) + r"@users\.noreply\.github\.com)>", author)
+    if not email or committer != "GitHub <noreply@github.com>" or len(parents.split()) != 2:
+        return author
+    try:
+        data = github_commit(repository, sha)
+        identity = data["commit"]["author"]
+        verified = data["commit"]["verification"]
+        if (data["sha"] == sha and verified["verified"] is True and verified["reason"] == "valid"
+                and data["author"]["login"] == owner and data["committer"]["login"] == "web-flow"
+                and identity["email"] == email[1]
+                and f'{identity["name"]} <{identity["email"]}>' == author
+                and [p["sha"] for p in data["parents"]] == parents.split()):
+            return f"{owner} <{email[1]}>"
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return author
+
+
 def scan_commits(rev_range: str, deny, allow) -> list[str]:
     problems = []
     # A force-push can remove the previous tip from every advertised ref. Even a
@@ -84,12 +124,14 @@ def scan_commits(rev_range: str, deny, allow) -> list[str]:
         present = subprocess.run(["git", "cat-file", "-e", f"{base}^{{commit}}"], capture_output=True)
         if present.returncode != 0:
             git("fetch", "--no-tags", "origin", base)
-    fmt = "%H%x1f%an <%ae>%x1f%cn <%ce>%x1f%B%x1e"
+    fmt = "%H%x1f%an <%ae>%x1f%cn <%ce>%x1f%P%x1f%B%x1e"
     for record in git("log", f"--format={fmt}", rev_range).decode("utf-8", "replace").split("\x1e"):
         record = record.strip("\n")
         if not record:
             continue
-        sha, author, committer, message = record.split("\x1f", 3)
+        sha, author, committer, parents, message = record.split("\x1f", 4)
+        if offending(author, deny, allow) is not None:
+            author = public_merge_author(sha, author, committer, parents)
         for what, value in (("author", author), ("committer", committer), ("message", message)):
             if (n := offending(value, deny, allow)) is not None:
                 problems.append(f"commit {sha[:12]}: {what} matches pattern #{n}")

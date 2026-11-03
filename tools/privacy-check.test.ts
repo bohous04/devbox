@@ -101,3 +101,45 @@ test("an unavailable before-SHA fails closed instead of skipping commit checks",
   const { dir } = repo({ "README.md": "hello\n" });
   expect(check(dir, `${"a".repeat(40)}..HEAD`).code).not.toBe(0);
 });
+
+test("only a GitHub-verified owner noreply merge can normalize its public display name", () => {
+  const code = `
+import copy, os, runpy, sys
+m = runpy.run_path(sys.argv[1])
+normalize = m['public_merge_author']
+scope = normalize.__globals__
+os.environ['GITHUB_REPOSITORY'] = 'maintainer/project'
+sha, parents = 'a' * 40, 'b' * 40 + ' ' + 'c' * 40
+author = 'SecretClient <123+maintainer@users.noreply.github.com>'
+committer = 'GitHub <noreply@github.com>'
+fixture = {'sha': sha, 'author': {'login': 'maintainer'}, 'committer': {'login': 'web-flow'},
+ 'commit': {'author': {'name': 'SecretClient', 'email': '123+maintainer@users.noreply.github.com'},
+ 'verification': {'verified': True, 'reason': 'valid'}}, 'parents': [{'sha': p} for p in parents.split()]}
+scope['github_commit'] = lambda *args: fixture
+expected = 'maintainer <123+maintainer@users.noreply.github.com>'
+assert normalize(sha, author, committer, parents) == expected
+deny, allow = m['load_patterns']('SecretClient')
+assert m['offending'](expected, deny, allow) is None
+deny, allow = m['load_patterns']('users\\\\.noreply')
+assert m['offending'](expected, deny, allow) == 1 # Email is never exempted.
+assert normalize(sha, author, committer, 'b' * 40) == author
+assert normalize(sha, author, 'Local <local@example.com>', parents) == author
+private = 'SecretClient <maintainer@example.com>'
+assert normalize(sha, private, committer, parents) == private
+for field in ['signature', 'sha', 'parents', 'identity', 'webflow']:
+ data = copy.deepcopy(fixture)
+ if field == 'signature': data['commit']['verification']['verified'] = False
+ if field == 'sha': data['sha'] = 'd' * 40
+ if field == 'parents': data['parents'].reverse()
+ if field == 'identity': data['commit']['author']['name'] = 'Someone else'
+ if field == 'webflow': data['committer']['login'] = 'maintainer'
+ scope['github_commit'] = lambda *args: data
+ assert normalize(sha, author, committer, parents) == author
+def unavailable(*args): raise OSError('offline')
+scope['github_commit'] = unavailable
+assert normalize(sha, author, committer, parents) == author
+`;
+  const r = Bun.spawnSync(["python3", "-c", code, SCRIPT], { stderr: "pipe" });
+  expect(r.stderr.toString()).toBe("");
+  expect(r.exitCode).toBe(0);
+});
