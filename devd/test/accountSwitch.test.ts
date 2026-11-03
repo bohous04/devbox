@@ -85,6 +85,20 @@ test("unknown session → unknown-session, no exec", async () => {
   expect(calls).toBe(0);
 });
 
+test("prepare a newly added account before touching Claude; failure keeps the old lease and process", async () => {
+  const db = baseDb(); insertSession(db, ROW);
+  insertLease(db, { account_id: "primary", client: "devbox", session_id: ROW.id, label: "fixture", created_at: NOW - 1000, released_at: null });
+  const before = leaseHistory(db, "devbox", ROW.id);
+  let prepared = false, execs = 0;
+  const d = deps({ db, exec: async () => { execs++; return ok(); }, ensureProfile: async (container, account) => {
+    expect(container).toBe(ROW.container); expect(account).toBe("backup"); prepared = true; throw new Error("mount failed");
+  } });
+  expect(await switchAccount(d, ROW.id)).toEqual({ status: "profile-unavailable" });
+  expect(prepared).toBe(true); expect(execs).toBe(0);
+  expect(leaseHistory(db, "devbox", ROW.id)).toEqual(before);
+  expect(d.inFlight.size).toBe(0);
+});
+
 test("stopped session → not-running, no exec", async () => {
   const db = baseDb();
   insertSession(db, { ...ROW, status: "stopped" });

@@ -32,6 +32,7 @@ import { alertNotifyExtra, pinAlerts, switchAlerts } from "./accountAlerts";
 import { accountsBySession } from "./accountLease";
 import { buildAccountViews } from "./accounts";
 import { switchAccount } from "./accountSwitch";
+import { ensureLiveAccountProfile } from "./liveAccountProfile";
 import { switchAgent, type SwitchAgentDeps } from "./agentSwitch";
 import { giteaTokensByHost, loadConfig, loadSecrets, materializeGiteaTokens, materializeMcpServers, readKeyFile, resolveAccountPool, resolveInstaboxSettings, saveGiteaTokens, writeKeyFile, type Secrets } from "./config";
 import { createConfigRepo } from "./configrepo";
@@ -739,6 +740,11 @@ const agentUpkeep = {
 
 const accountSwitchDeps = () => ({
   db, exec: dockerExec, sleep: realSleep,
+  ensureProfile: (container: string, account: string) => ensureLiveAccountProfile({
+    docker: (id, args) => runDocker(id, args, { timeoutMs: 15_000 }),
+    host: args => run(args, { timeoutMs: 15_000 }),
+    isRemote: id => remoteDockerAlias(id) !== null,
+  }, container, account),
   settings: () => resolveAccountPool(freshCfg().settings),
   now: () => Date.now(),
   inFlight: accountSwitchInFlight,

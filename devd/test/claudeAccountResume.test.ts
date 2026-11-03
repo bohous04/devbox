@@ -48,6 +48,24 @@ test("strict account switch resumes the fresh native exit ID, not stale argv aft
   expect(h.commands.some(c => c[1] === "/proc/65/cmdline")).toBe(true);
 });
 
+test("strict switch recognizes the native remote-control exit banner including permission flags", async () => {
+  const h = fixture();
+  h.state.after = `Resume this session with:\nclaude --dangerously-skip-permissions --remote-control dev-fixture --resume ${SID}\n$ `;
+  expect(await h.run()).toBe("restarted");
+  expect(h.sends()).toEqual(["/exit", `export CLAUDE_CONFIG_DIR=${target}; cc --resume ${SID}`]);
+  expect(h.commands.filter(c => c[1] === "capture-pane").every(c => c.includes("-J"))).toBe(true);
+});
+
+test("flagged banners still reject unchanged history and resume commands on a different line", async () => {
+  const h = fixture();
+  h.state.before = `Resume this session with:\nclaude --remote-control dev-fixture --resume ${OLD}\n$ `;
+  h.state.after = h.state.before + "\n$ ";
+  expect(await h.run()).toBe("unknown-session");
+  const other = fixture();
+  other.state.after = `Resume this session with:\nclaude --remote-control dev-fixture\nunrelated --resume ${SID}\n$ `;
+  expect(await other.run()).toBe("unknown-session");
+});
+
 test("strict account switch never launches bare cc when there is no native exit banner", async () => {
   for (const oldArgv of ["", argv(OLD)]) {
     const h = fixture(); h.state.oldArgv = oldArgv; h.state.after = "$ ";

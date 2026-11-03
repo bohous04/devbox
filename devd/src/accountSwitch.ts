@@ -38,6 +38,7 @@ export type SwitchAccountResult =
   // below) — a concurrent call on a different session never hits this status.
   | { status: "in-progress" }
   | { status: "no-account" }
+  | { status: "profile-unavailable" }
   // Best account == the account on which ALL panes of this session ALREADY VERIFIABLY run
   // (the actual CLAUDE_CONFIG_DIR, not a guess from leases) — nothing is restarted.
   | { status: "unchanged"; accountId: string; label: string }
@@ -56,6 +57,7 @@ export interface SwitchAccountDeps extends RestartDeps {
   // returned to a live conversation, and throws away what the first has just restored).
   // A concurrent call on a DIFFERENT session (another container) does no harm.
   inFlight: Set<string>;
+  ensureProfile?: (container: string, accountId: string) => Promise<void>;
 }
 
 // Restarts only panes where claude really lives in their process tree — a pane
@@ -155,6 +157,8 @@ export async function switchAccount(deps: SwitchAccountDeps, sessionId: string):
     // `dev switch`, because reality is read again — previously a lease written once
     // masked it forever, now at most until the next call.
     const configDir = `/home/dev/.claude-accounts/${decision.accountId}`;
+    try { await deps.ensureProfile?.(s.container, decision.accountId); }
+    catch { return { status: "profile-unavailable" }; }
     const panes = await restartPanes(deps, s.container, configDir);
 
     if (panes.length === 0) {

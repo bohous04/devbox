@@ -2470,6 +2470,7 @@ export function createApp(d: ApiDeps): Hono {
       case "wrong-agent": return c.json({ error: "the session profile does not run on an Anthropic account — the pool does not apply to it" }, 400);
       case "in-progress": return c.json({ error: "a switch for this session is already running" }, 409);
       case "no-account": return c.json({ ok: false, accountId: null, label: null, unchanged: false, exhausted: false, panes: [] });
+      case "profile-unavailable": return c.json({ error: "The target Claude account could not be attached to this session. No Claude pane was stopped." }, 409);
       case "unchanged": return c.json({ ok: true, accountId: r.accountId, label: r.label, unchanged: true, exhausted: false, panes: [] });
       case "failed": return c.json({ ok: false, accountId: r.accountId, label: r.label, unchanged: false, exhausted: r.exhausted, panes: r.panes });
       case "switched": return c.json({ ok: true, accountId: r.accountId, label: r.label, unchanged: false, exhausted: r.exhausted, panes: r.panes });
