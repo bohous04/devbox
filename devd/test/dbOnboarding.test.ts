@@ -68,7 +68,7 @@ test("a selection-blocked request without a plan retries discovery and completes
   const f = fixture();
   try {
     const discover = f.deps.discover; let available = false, probes = 0;
-    f.deps.discover = async row => { probes++; return available ? discover(row) : { candidates: [], blocks: [] }; };
+    f.deps.discover = async row => { probes++; return available ? discover(row) : { candidates: [], blocks: [{ code: "coolify_missing", category: "configuration", message: "Vault is locked", action: "Unlock the vault" }] }; };
     f.deps.autoApprove = true; f.setBlocks([]);
     const id = f.request();
     const blocked = await f.on.prepare(id);
