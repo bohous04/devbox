@@ -63,3 +63,19 @@ test("an unavailable service list does not break discovery of standalone databas
   expect(result.candidates).toHaveLength(1);
   expect(result.blocks.map((b) => b.code)).toEqual(["server_mapping"]);
 });
+
+test("environment IDs are verified metadata and a known server scope disambiguates identical service names", async () => {
+  const second = { ...inst, name: "other" };
+  const scopedCatalog = { ...catalog, servers: { ...catalog.servers, other: { ...catalog.servers.infra, host: "192.0.2.8" } } };
+  const read = async (req: Request) => {
+    if (new URL(req.url).pathname === `/api/v1/services/${umami.uuid}`) return Response.json({ ...umami, environment: undefined });
+    return fixture([])(req);
+  };
+  const result = await discoverDatabaseTargets({ catalog: scopedCatalog, instances: { infra: inst, other: second }, wanted: "umami", server: "infra" }, read);
+  expect(result.candidates.filter(x => x.matched)).toHaveLength(1);
+  expect(result.candidates.find(x => x.matched)).toMatchObject({ server: "infra", environment: "environment #2", verified: true });
+  expect(result.blocks.some(x => x.code === "target_choice")).toBe(false);
+  const unscoped = await discoverDatabaseTargets({ catalog: scopedCatalog, instances: { infra: inst, other: second }, wanted: "umami" }, read);
+  expect(unscoped.candidates.filter(x => x.matched)).toHaveLength(2);
+  expect(unscoped.blocks.some(x => x.code === "target_choice")).toBe(true);
+});

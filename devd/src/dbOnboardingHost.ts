@@ -15,16 +15,47 @@ import { createOpRunner, OpRateLimited, runOp } from "./opRateLimit";
 import { createSerial } from "./sshAgent";
 import { isAddressInCidr } from "./network";
 import { isDirect, type Catalog, type ServerRef } from "./prodDb";
-import type { Block, OnboardingPlan } from "./dbOnboarding";
+import type { Block, Candidate, OnboardingPlan } from "./dbOnboarding";
 import { onboardingInspectionScript, onboardingInstallScript, onboardingRoleSql, onboardingVerifySql, onboardingWriteVerifySql, type TargetInspection } from "./dbOnboardingScripts";
 
 export interface DbOnboardingHost {
+  inspectCandidate(candidate: Candidate): Promise<{ db: string }>;
   preflight(plan: OnboardingPlan): Promise<Block[]>;
   execute(plan: OnboardingPlan, onProgress?: (step: string) => void): Promise<void>;
   verify(plan: OnboardingPlan): Promise<void>;
 }
 type Run = (cmd: string[], options: RunOpts) => Promise<RunResult>;
 interface Item { id: string; title: string; category: string; vault: { id: string; name: string }; sshUser?: string }
+type AdminTarget = { server: ServerRef; trustedServer: ServerRef; entry: { server: string }; input: { opVault?: string } };
+
+/** Only the database identifier crosses SSH: inspect credentials stay on the host. */
+export function databaseCandidateInspectionScript(container: string, engine: Candidate["engine"]): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(container) || !["postgres", "mysql", "mariadb"].includes(engine))
+    throw new Error("Invalid database inspection target");
+  return `set -eu
+python3 - <<'DEVD_DB_METADATA'
+import json, re, subprocess
+container, engine = ${JSON.stringify(container)}, ${JSON.stringify(engine)}
+try:
+    result = subprocess.run(["docker", "inspect", "--", container], capture_output=True, text=True, timeout=15, check=True)
+    data = json.loads(result.stdout)
+    if len(data) != 1: raise ValueError()
+    item = data[0]
+    if item.get("Name", "").lstrip("/") != container or item.get("State", {}).get("Running") is not True: raise ValueError()
+    image = item.get("Config", {}).get("Image", "")
+    expected = {"postgres": r"(^|/)(postgres|postgis|timescaledb)([:/@]|$)", "mysql": r"(^|/)mysql([:/@]|$)", "mariadb": r"(^|/)mariadb([:/@]|$)"}[engine]
+    if not re.search(expected, image, re.I): raise ValueError()
+    env = dict(value.split("=", 1) for value in item.get("Config", {}).get("Env", []) if "=" in value)
+    keys = {"postgres": ["POSTGRES_DB"], "mysql": ["MYSQL_DATABASE"], "mariadb": ["MARIADB_DATABASE", "MYSQL_DATABASE"]}[engine]
+    names = {env[key] for key in keys if env.get(key)}
+    if len(names) != 1: raise ValueError()
+    name = names.pop()
+    if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", name): raise ValueError()
+    print(json.dumps({"db": name}))
+except Exception:
+    raise SystemExit("Database metadata could not be verified")
+DEVD_DB_METADATA`;
+}
 export interface HostDeps {
   token(): string;
   catalog(): Catalog;
@@ -180,7 +211,7 @@ export function createDbOnboardingHost(d: HostDeps): DbOnboardingHost {
       return await fn(path);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }
-  function sshArgs(plan: OnboardingPlan, path: string, admin: boolean, adminUser?: string): string[] {
+  function sshArgs(plan: Pick<OnboardingPlan, "server">, path: string, admin: boolean, adminUser?: string): string[] {
     const s = plan.server;
     return ["ssh", "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "ForwardAgent=no", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=12", "-i", path, "-p", String(s.port), `${admin ? adminUser ?? s.adminUser ?? "root" : s.user}@${s.host}`];
   }
@@ -188,7 +219,7 @@ export function createDbOnboardingHost(d: HostDeps): DbOnboardingHost {
   // runs several admin steps and preflight repeats before execution, so every
   // admin step shares one authenticated connection that idles out on its own.
   const masters = new Map<string, { dir: string; sock: string }>();
-  async function adminConnection(plan: OnboardingPlan, path: string, adminUser: string): Promise<string | undefined> {
+  async function adminConnection(plan: Pick<OnboardingPlan, "server">, path: string, adminUser: string): Promise<string | undefined> {
     const key = `${adminUser}@${plan.server.host}:${plan.server.port}`;
     const known = masters.get(key);
     if (known) {
@@ -203,7 +234,7 @@ export function createDbOnboardingHost(d: HostDeps): DbOnboardingHost {
     masters.set(key, { dir, sock });
     return sock;
   }
-  async function remote(plan: OnboardingPlan, item: Item, script: string): Promise<string> {
+  async function remote(plan: Pick<OnboardingPlan, "server">, item: Item, script: string): Promise<string> {
     return withKey(item, async path => {
       const adminUser = item.sshUser ?? plan.server.adminUser ?? "root";
       const sock = await adminConnection(plan, path, adminUser);
@@ -232,7 +263,7 @@ export function createDbOnboardingHost(d: HostDeps): DbOnboardingHost {
       return { missingTools: (values.MISSING_TOOLS ?? "").split(",").filter(Boolean), running: values.RUNNING === "true", image: JSON.parse(values.IMAGE ?? '""'), networks: JSON.parse(values.NETWORKS ?? "{}"), ports: JSON.parse(values.PORTS ?? "{}"), remotePortBusy: values.PORT_BUSY === "yes", relayManaged: values.RELAY_MANAGED === "yes", systemd: values.SYSTEMD === "yes", proxyBinary: values.PROXY_BINARY || "", sshd: values.SSHD === "yes", tunnelUserConflict: values.USER_CONFLICT === "yes", sshEffective: Buffer.from(values.SSH_EFFECTIVE ?? "", "base64").toString("utf8"), sshInclude: values.SSH_INCLUDE === "yes", sshScopedAllow: values.SSH_SCOPED_ALLOW === "yes", clientAddress: values.CLIENT_ADDRESS ?? "", database: JSON.parse(values.DATABASE ?? "null") };
     } catch { return fail("target_inspection_failed", "connection", "The target did not return a valid Docker/SQL check result.", "Check that the database is running and a database client is available in the target container."); }
   }
-  async function context(plan: OnboardingPlan, suppliedItems?: Item[]) {
+  async function context(plan: AdminTarget, suppliedItems?: Item[]) {
     const items = suppliedItems ?? await inventory();
     // srv exposes only 1P titles. This exact conventional title is a candidate
     // tied to an actual catalog server, and read-only SSH verifies the mapping.
@@ -457,6 +488,20 @@ export function createDbOnboardingHost(d: HostDeps): DbOnboardingHost {
     });
   }
   return {
+    inspectCandidate: async (candidate) => {
+      const server = d.catalog().servers[candidate.server];
+      if (!server || isDirect(server) || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(candidate.container)
+        || !["postgres", "mysql", "mariadb"].includes(candidate.engine))
+        return fail("target_mapping_invalid", "configuration", "The discovery target is not a mapped Docker database.", "Select a verified host and container.");
+      const target: AdminTarget = { server, trustedServer: server, entry: { server: candidate.server }, input: {} };
+      const ctx = await context(target);
+      const script = databaseCandidateInspectionScript(candidate.container, candidate.engine);
+      try {
+        const observed = JSON.parse(await remote(target, ctx.admin, script));
+        if (typeof observed.db === "string" && /^[a-z_][a-z0-9_]{0,62}$/.test(observed.db)) return { db: observed.db };
+      } catch { /* Raw Docker/SSH output must never become an API response. */ }
+      return fail("target_inspection_failed", "connection", "The mapped container did not return a verified database name.", "Restore host access and retry discovery.");
+    },
     preflight, verify,
     execute: (plan, onProgress = () => {}) => serial.run(plan.entry.server, async () => {
       if (isDirect(plan.trustedServer)) return directExecute(plan, onProgress);

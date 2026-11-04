@@ -10,6 +10,7 @@ import { loadCatalog, readAccessFile } from "../src/prodDb";
 import { getDbRequest } from "../src/dbRequests";
 import { getOperation } from "../src/operationStore";
 import { createDbOnboarding, type Block, type OnboardingHost, type RequestView } from "../src/dbOnboarding";
+import type { DatabaseTarget } from "../src/coolify";
 
 const session = "dev-apps-invoice-creator";
 const headers = { "content-type": "application/json", "x-devbox-session": session };
@@ -20,7 +21,7 @@ export function onboardingHarness(host?: OnboardingHost, autoApprove = false) {
   const catalog = loadCatalog(path), accessPath = join(root, "access.json");
   let blocks: Block[] = [], discoveryBlocks: Block[] = [], executed = 0, verified = 0;
   const candidate = { id: "acme:db123", instance: "acme", uuid: "db123", server: "acme", container: "db123", engine: "postgres" as const, name: "billing-db", db: "billing", environment: "production", matched: true, verified: true, status: "running" };
-  let candidates = [candidate];
+  let candidates: DatabaseTarget[] = [candidate];
   const d = fakeDeps({ prodCatalog: catalog, prodCatalogPath: path, prodAccessPath: accessPath, prodDbAccess: {}, dbTargets: createDbTargets({ entries: () => catalog.databases }), dbProxyHost: "127.0.0.1:15432",
     discoverDbTargets: async () => ({ candidates, blocks: discoveryBlocks }),
     dbOnboardingHost: host ?? { preflight: async () => blocks, execute: async () => { executed++; }, verify: async () => { verified++; } },
@@ -328,6 +329,38 @@ test("automatic verified onboarding reaches ready without approving pending SQL"
   expect(h.counts()).toEqual({ executed: 1, verified: 1 });
   const proposal = await (await h.app.request(`/api/prod-db/writes/${write.id}`, { headers })).json() as { status: string };
   expect(proposal.status).toBe("pending");
+});
+
+test("request creation automatically verifies a redacted service on the session's actual project server", async () => {
+  const h = onboardingHarness(undefined, true);
+  insertSession(h.d.db, { id: session, folder: "apps", project: "acme", repo: "scratch", container: session, port_base: 45100, status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0 });
+  let inspected = 0;
+  h.d.dbOnboardingHost!.inspectCandidate = async c => { inspected++; expect(c.server).toBe("acme"); return { db: "billing" }; };
+  h.d.discoverDbTargets = async opts => {
+    expect(opts.server).toBe("acme");
+    return { candidates: [{ ...h.candidate, db: undefined, environment: "environment #7", verified: false }], blocks: [] };
+  };
+  const row = await h.create();
+  await until(async () => (await h.view(row.id)).state === "ready");
+  expect(inspected).toBe(1); expect(h.counts()).toEqual({ executed: 1, verified: 1 });
+  expect(readAccessFile(h.accessPath)["acme-scratch"]!.read).toEqual(["billing"]);
+});
+
+test("automatic requests never inspect or provision an ambiguous set of redacted targets", async () => {
+  const h = onboardingHarness(undefined, true); let inspected = 0;
+  h.d.dbOnboardingHost!.inspectCandidate = async () => { inspected++; return { db: "billing" }; };
+  h.candidates([{ ...h.candidate, db: undefined, verified: false }, { ...h.candidate, id: "acme:db456", container: "db456", db: undefined, verified: false }]);
+  const row = await h.create();
+  await until(async () => (await h.view(row.id)).state === "blocked");
+  expect(inspected).toBe(0); expect(h.counts()).toEqual({ executed: 0, verified: 0 });
+});
+
+test("an unverified second match still blocks automatic selection of a verified namesake", async () => {
+  const h = onboardingHarness(undefined, true);
+  h.candidates([h.candidate, { ...h.candidate, id: "acme:db456", container: "db456", db: undefined, verified: false }]);
+  const row = await h.create();
+  await until(async () => (await h.view(row.id)).state === "blocked");
+  expect(h.counts()).toEqual({ executed: 0, verified: 0 });
 });
 
 // Final review I4: a database request from a shared/tainted session carries a label

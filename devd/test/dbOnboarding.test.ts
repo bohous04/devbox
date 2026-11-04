@@ -64,6 +64,32 @@ test("automatic connection rechecks run once per 15 minutes and cooldown survive
   } finally { f.cleanup(); }
 });
 
+test("a selection-blocked request without a plan retries discovery and completes automatically once unique", async () => {
+  const f = fixture();
+  try {
+    const discover = f.deps.discover; let available = false, probes = 0;
+    f.deps.discover = async row => { probes++; return available ? discover(row) : { candidates: [], blocks: [] }; };
+    f.deps.autoApprove = true; f.setBlocks([]);
+    const id = f.request();
+    const blocked = await f.on.prepare(id);
+    expect(blocked.plan).toBeNull(); expect(blocked.blocks[0]?.code).toBe("target_selection");
+    f.setTime(T0 + BLOCKED_RECHECK_INTERVAL_MS - 1); await f.on.tick(); expect(probes).toBe(1);
+    available = true; f.setTime(T0 + BLOCKED_RECHECK_INTERVAL_MS); await f.on.tick(); await f.on.settled(id);
+    expect(probes).toBe(2); expect(f.on.view(id)?.state).toBe("ready"); expect(f.executions).toBe(1);
+  } finally { f.cleanup(); }
+});
+
+test("a catalog name on another known project server cannot silently grant the wrong database", async () => {
+  const f = fixture();
+  try {
+    f.deps.catalog!.databases.push({ name: "alpha", server: "test", container: "pg123", engine: "postgres", db: "alpha", hostPort: 15500, roUser: "alpha_ro", opItem: "fixture" });
+    f.deps.serverForRequest = () => "other";
+    const id = f.request(); const result = await f.on.prepare(id);
+    expect(result.state).toBe("blocked"); expect(result.blocks[0]?.code).toBe("catalog_target_mismatch");
+    expect(f.preflights).toBe(0); expect(f.executions).toBe(0);
+  } finally { f.cleanup(); }
+});
+
 test("configuration, permission, decision, unsupported engine and mixed blocks require manual recheck", async () => {
   for (const blocks of [
     [config], [{ ...config, category: "permission" as const }], [{ ...config, category: "decision" as const }],

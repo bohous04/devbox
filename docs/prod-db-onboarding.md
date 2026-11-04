@@ -31,6 +31,28 @@ the commit snapshot and deduplication are documented by the [queue implementatio
 
 ## New flow
 
+With automatic onboarding enabled (the default), creating a request starts
+discovery and verified host setup without a separate Prepare click. A session's
+stored project may narrow the search to an existing catalog server; it never
+creates a server mapping. An environment ID returned by Coolify is sufficient
+metadata even when its display name is omitted.
+
+If a restricted Coolify token hides Compose/env values, the host can inspect the
+single matched running SQL container through its existing administrator-key
+broker. It returns only the validated database identifier, never the container's
+passwords or environment. Every ordinary host preflight and verification still
+runs before access is granted. Multiple matching targets, including unverified
+ones, require selection rather than choosing an arbitrary namesake.
+
+Blocked discovery and earlier-request dependencies are re-evaluated every 15
+minutes with a persistent cooldown, including requests that have no plan yet.
+Configuration and permission blocks still require resolution. A catalog name
+already tied to another known project server cannot be silently reused there.
+Each concrete application SQL write retains its separate approval.
+
+The numbered flow below also describes manual mode (`dbOnboardingAutoApprove:
+false`), in which the operator prepares and approves the host setup explicitly.
+
 1. `prod-db connect/write` for an unknown DB creates or returns a stable access
    request. The SQL is kept under its own ID as `blocked`.
 2. `db-request prepare ID` or Operations determines the target and prepares a concrete plan.

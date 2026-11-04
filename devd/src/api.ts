@@ -458,9 +458,31 @@ export function createApp(d: ApiDeps): Hono {
     // Onboarding can only install isolated tunnels and scoped roles after full
     // preflight. Concrete DML/DDL stays in the separate human approval queue.
     autoApprove: d.dbOnboardingAutoApprove ?? true,
+    serverForRequest: row => {
+      const project = row.session_id ? getSession(d.db, row.session_id)?.project : undefined;
+      return project && d.prodCatalog?.servers[project] ? project : undefined;
+    },
     discover: async (row) => {
       if (!d.prodCatalog) return { candidates: [], blocks: [{ code: "catalog_unconfigured", category: "configuration" as const, message: "Server catalog is unavailable.", action: "Configure the host database catalog." }] };
-      try { return await (d.discoverDbTargets ?? discoverDatabaseTargets)({ catalog: d.prodCatalog, instances: d.coolifyInstances?.() ?? {}, wanted: row.wanted, project: row.project ?? undefined }); }
+      try {
+        const project = row.session_id ? getSession(d.db, row.session_id)?.project : undefined;
+        const server = project && d.prodCatalog.servers[project] ? project : undefined;
+        const result = await (d.discoverDbTargets ?? discoverDatabaseTargets)({ catalog: d.prodCatalog, instances: d.coolifyInstances?.() ?? {}, wanted: row.wanted, project: row.project ?? undefined, server });
+        const matches = result.candidates.filter(c => c.matched);
+        // A read-only Coolify token redacts Compose and env values. Only inspect
+        // one already mapped target, using the host's existing SSH broker.
+        if (matches.length === 1 && !matches[0]!.db && matches[0]!.server && matches[0]!.environment
+          && matches[0]!.status.startsWith("running") && d.dbOnboardingHost?.inspectCandidate) {
+          const candidate = matches[0]!;
+          try {
+            const observed = await d.dbOnboardingHost.inspectCandidate(candidate);
+            if (/^[a-z_][a-z0-9_]{0,62}$/.test(observed.db)) { candidate.db = observed.db; candidate.verified = true; }
+          } catch {
+            result.blocks.push({ code: "target_inspection_unavailable", category: "connection", message: "The database name could not be verified on its mapped host.", action: "Restore host SSH/1Password access; discovery will retry automatically.", candidateId: candidate.id, instance: candidate.instance });
+          }
+        }
+        return result;
+      }
       catch { return { candidates: [], blocks: [{ code: "discovery_unavailable", category: "connection" as const, message: "Coolify discovery is unavailable.", action: "Unlock the vault and check the Coolify connection." }] }; }
     },
   });
@@ -480,6 +502,9 @@ export function createApp(d: ApiDeps): Hono {
       void d.listener.dbRequest({ id, wanted: name, why, project: session ? prodDbKey(session) : null, session, ...(fromShared(session) ? { shared: true } : {}) }, () => { try { onboarding.reject(id); } catch {} });
     }
     const result = onboarding.view(id)!;
+    if ((d.dbOnboardingAutoApprove ?? true) && d.dbOnboardingHost && d.prodCatalog && result.state === "pending") {
+      void onboarding.prepare(id).catch(() => logEvent(d.db, session, "db_onboarding_prepare_failed", { requestId: id }));
+    }
     if (before?.id === id && before.requested_scope !== result.requested_scope) {
       logEvent(d.db, session, "db_request_scope_changed", { id, from: before.requested_scope, to: result.requested_scope });
       d.notify(sharedTitle("Database access scope updated", session), `#${id}: ${name} — ${result.requested_scope}. Review the updated setup plan.`, { target: { kind: "prodWrites" }, blocked: true });
