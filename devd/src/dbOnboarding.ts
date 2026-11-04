@@ -58,7 +58,7 @@ function automaticRecheckDue(row: Stored, now: number): boolean {
   if (!Array.isArray(blocks)) return false;
   if (blocks.some((b) => !b || typeof b !== "object" || b.code === "unsupported_engine"
     || b.category !== "connection" && !(b.category === "decision" && ["target_selection", "target_choice"].includes(b.code))
-      && !(b.category === "configuration" && b.code === "target_reserved"))) return false;
+      && !(b.category === "configuration" && ["target_reserved", "coolify_missing"].includes(b.code)))) return false;
   // Resume an interrupted, already approved worker once. Its next preflight saves
   // any actual block and starts the normal persistent cooldown.
   if (!blocks.length && row.operation_id && row.step === "Resuming after host restart") return true;
