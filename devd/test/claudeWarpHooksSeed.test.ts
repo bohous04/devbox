@@ -23,9 +23,9 @@ function fixture(settings: Record<string, unknown> = {}) {
 
   return {
     home, config, hook, settingsPath,
-    async seed() {
+    async seed(skipRm = "0") {
       const process = Bun.spawn(["bash", SEED], {
-        env: { ...Bun.env, HOME: home, CLAUDE_CONFIG_DIR: config, WARP_HOOK: hook },
+        env: { ...Bun.env, HOME: home, CLAUDE_CONFIG_DIR: config, WARP_HOOK: hook, CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS: skipRm },
         stdout: "pipe", stderr: "pipe",
       });
       const error = await new Response(process.stderr).text();
@@ -57,7 +57,7 @@ test("Claude seed registers waiting and recovery events with the isolated emitte
     expect(command).toContain("# devd-warp-hook");
   }
   expect(settings.hooks.SessionStart[0].matcher).toBe("startup|resume");
-  expect(settings.hooks.Notification[0].matcher).toBe("idle_prompt");
+  expect(settings.hooks.Notification[0].matcher).toBe("idle_prompt|permission_prompt");
 });
 
 test("Claude seed removes only its stale command from a group shared with foreign hooks", async () => {
@@ -105,4 +105,13 @@ test("Claude seed preserves native Warp plugin configuration and enabledPlugins 
   const settings = await f.seed();
   expect(settings.enabledPlugins).toEqual(enabledPlugins);
   expect(readFileSync(nativeHooksPath, "utf8")).toBe(nativeConfig);
+});
+
+test("bypass removal mode removes only owned permission observers", async () => {
+  const foreign = { type: "command", command: "echo custom-permission" };
+  const f = fixture({ hooks: { PermissionRequest: [{ hooks: [foreign, { type: "command", command: "/opt/warp-hooks/warp-hook.sh permission_request" }] }] } });
+  const settings = await f.seed("1");
+  expect(settings.hooks.PermissionRequest).toEqual([{ hooks: [foreign] }]);
+  expect(settings.hooks.PreToolUse).toHaveLength(1);
+  expect((await f.seed("0")).hooks.PermissionRequest).toHaveLength(2);
 });

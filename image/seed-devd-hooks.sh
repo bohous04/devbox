@@ -25,7 +25,10 @@ mkdir -p "$(dirname "$SETTINGS")"
 # `[ -x … ]` guard: settings.json is on the SHARED volume, so a container from
 # an OLDER image (without /opt/devd-hooks) must not fail these hooks.
 cmd() { printf '[ -x %s ] && %s %s || true' "$HOOK" "$HOOK" "$1"; }
+# PermissionRequest observers make Claude ignore its dangerous-removal opt-out.
+# Keep the key empty in desired so reseeding also removes stale owned observers.
 desired="$(jq -nc \
+  --arg skip_rm "${CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS:-1}" \
   --arg pretool "$(cmd tool_start)" \
   --arg complete "$(cmd tool_complete)" \
   --arg interrupted "$(cmd interrupted)" \
@@ -53,7 +56,7 @@ desired="$(jq -nc \
   TeammateIdle:      [ { hooks: [ { type: "command", command: $tmidle } ] } ],
   TaskCreated:       [ { hooks: [ { type: "command", command: $tcreated } ] } ],
   TaskCompleted:     [ { hooks: [ { type: "command", command: $tdone } ] } ]
-}')"
+} | if $skip_rm == "1" then .PermissionRequest = [] else . end')"
 # Stop has a 300 s timeout: devd waits on it synchronously for the critic's verdict (criticGate).
 # Without a critic it answers immediately, so the delay never shows.
 # Notification deliberately WITHOUT a matcher (all types) — mapping/suppressing types
@@ -69,7 +72,8 @@ if jq --argjson d "$desired" --arg mark "/devd-hook.sh" '
     | reduce ($d | keys_unsorted[]) as $ev ($h;
         .[$ev] = (
           (($h[$ev] // [])
-            | map(select(((.hooks // []) | any((.command? // "") | contains($mark))) | not)))
+            | map(.hooks = ((.hooks // []) | map(select((.command? // "") | contains($mark) | not)))
+                | select(.hooks | length > 0)))
           + $d[$ev]
         )
       )

@@ -18,6 +18,11 @@ export CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS="${CLAUDE_CODE_EVEN_MO
 case "${1:-}" in
   --help|-h|--version|-v) ;;
   *)
+    # Refresh our observers before Claude reads settings. PermissionRequest observers
+    # disable Claude's explicit dangerous-removal opt-out even when they only log.
+    for seed in /usr/local/bin/seed-warp-hooks /usr/local/bin/seed-devd-hooks; do
+      [ ! -x "$seed" ] || "$seed"
+    done
     if [ -n "${TMUX_PANE:-}" ]; then
       tmux set-option -pu -t "$TMUX_PANE" @devd_auto_title 2>/dev/null || true
       tmux set-option -pu -t "$TMUX_PANE" @devd_title_session 2>/dev/null || true

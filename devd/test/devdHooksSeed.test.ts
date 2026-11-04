@@ -16,9 +16,9 @@ function fakeHook(dir: string): string {
   return p;
 }
 
-async function seed(dir: string): Promise<number> {
+async function seed(dir: string, skipRm = "0"): Promise<number> {
   const p = Bun.spawn(["bash", SEED], {
-    env: { ...process.env, HOME: dir, CLAUDE_CONFIG_DIR: dir }, stdout: "ignore", stderr: "ignore",
+    env: { ...process.env, HOME: dir, CLAUDE_CONFIG_DIR: dir, CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS: skipRm }, stdout: "ignore", stderr: "ignore",
   });
   return await p.exited;
 }
@@ -114,4 +114,17 @@ test("the old entry shape (/opt/devd-hooks/devd-hook.sh) is replaced after an up
   expect(j.hooks.Stop).toHaveLength(1);                       // old replaced by new, not added alongside
   expect(j.hooks.Stop[0].hooks[0].command).toContain("devd-hook.sh");
   rmSync(dir, { recursive: true, force: true });
+});
+
+test("bypass removal mode removes owned permission observers and preserves foreign hooks", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "devdhooks-")); fakeHook(dir);
+  try {
+    const foreign = { hooks: [{ command: "echo custom-permission" }] };
+    writeFileSync(join(dir, "settings.json"), JSON.stringify({ hooks: { PermissionRequest: [{ hooks: [...foreign.hooks, { command: "/opt/devd-hooks/devd-hook.sh permission_request" }] }] } }));
+    await seed(dir); await seed(dir, "1");
+    const j = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+    expect(j.hooks.PermissionRequest).toEqual([foreign]);
+    expect(j.hooks.Notification).toHaveLength(1);
+    await seed(dir); expect(JSON.parse(readFileSync(join(dir, "settings.json"), "utf8")).hooks.PermissionRequest).toHaveLength(2);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
