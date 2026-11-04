@@ -27,7 +27,10 @@ mkdir -p "$(dirname "$SETTINGS")"
 # lives in the SHARED claude-home volume, so a container running an OLDER image
 # (without /opt/warp-hooks) would otherwise fail every SessionStart hook.
 cmd() { printf '[ -x %s ] && %s %s || true # devd-warp-hook' "$HOOK" "$HOOK" "$1"; }
+# PermissionRequest observers make Claude ignore its dangerous-removal opt-out.
+# Keep the key empty in desired so reseeding also removes stale owned observers.
 desired="$(jq -nc \
+  --arg skip_rm "${CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS:-1}" \
   --arg session_start "$(cmd session_start)" \
   --arg prompt_submit "$(cmd prompt_submit)" \
   --arg tool_complete "$(cmd tool_complete)" \
@@ -43,9 +46,9 @@ desired="$(jq -nc \
   StopFailure:       [ {                            hooks: [ { type: "command", command: $failure } ] } ],
   PostToolUse:       [ {                            hooks: [ { type: "command", command: $tool_complete } ] } ],
   Stop:              [ {                            hooks: [ { type: "command", command: $stop } ] } ],
-  Notification:      [ { matcher: "idle_prompt",    hooks: [ { type: "command", command: $notification } ] } ],
+  Notification:      [ { matcher: "idle_prompt|permission_prompt",    hooks: [ { type: "command", command: $notification } ] } ],
   PermissionRequest: [ {                            hooks: [ { type: "command", command: $permission_request } ] } ]
-}')"
+} | if $skip_rm == "1" then .PermissionRequest = [] else . end')"
 
 # For each event: drop our prior command (matched by the legacy hook directory
 # or explicit marker), then append the current desired one.

@@ -4,9 +4,11 @@
 # `#(...)` every status-interval seconds; it runs as dev (uid 1000), /workspace has
 # `safe.directory` from the entrypoint. Silently prints nothing when it is not git / has no HEAD.
 cd /workspace 2>/dev/null || exit 0
-b=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || exit 0
+b=$(timeout 1s git rev-parse --abbrev-ref HEAD 2>/dev/null) || exit 0
 [ -n "$b" ] || exit 0
-n=$(git status --porcelain 2>/dev/null | grep -c .)
+# Large or remote workspaces must not leave tmux's first status job pending.
+changes=$(timeout 2s git --no-optional-locks status --porcelain 2>/dev/null) || changes=""
+n=$(printf '%s\n' "$changes" | grep -c .)
 # The "· " separator is carried by the helper, so a lone "· time" does not remain on the right for a non-git workspace.
 if [ "${n:-0}" -gt 0 ]; then
   printf '⎇ %s ±%s · ' "$b" "$n"
