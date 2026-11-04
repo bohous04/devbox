@@ -19,6 +19,7 @@ export interface OnboardingPlan {
   previousEntry?: DbEntry | null; write: boolean; migrations: boolean; changes: string[]; fingerprint: string;
 }
 export interface OnboardingHost {
+  inspectCandidate?: (candidate: Candidate) => Promise<{ db: string }>;
   preflight(plan: OnboardingPlan): Promise<Block[]>;
   execute(plan: OnboardingPlan, onProgress: (step: string) => void): Promise<void>;
   verify(plan: OnboardingPlan): Promise<void>;
@@ -34,6 +35,7 @@ export interface OnboardingDeps {
   notify?: (title: string, message: string) => void;
   /** Run verified host setup without a second human click. Exact SQL still uses its own approval queue. */
   autoApprove?: boolean;
+  serverForRequest?: (row: DbRequestRow) => string | undefined;
 }
 const block = (code: string, message: string, action: string, category: Block["category"] = "configuration"): Block => ({ code, message, action, category });
 const ident = /^[a-z_][a-z0-9_]{0,62}$/;
@@ -46,14 +48,17 @@ export const freeLocalPort = (port: number): Promise<boolean> => new Promise((re
 });
 const hash = (plan: Omit<OnboardingPlan, "fingerprint">) => createHash("sha256").update(JSON.stringify(plan)).digest("hex");
 
-/** Transient host outages can heal without intervention. Configuration, permission
- * and selection blocks need a manual prepare/resume, not recurring 1Password calls. */
+/** Retry transient outages and discovery/dependency blocks at a persistent bounded
+ * interval. Every retry recomputes uniqueness and runs the same host preflight;
+ * other configuration/permission decisions still need operator intervention. */
 export const BLOCKED_RECHECK_INTERVAL_MS = 15 * 60_000;
 function automaticRecheckDue(row: Stored, now: number): boolean {
   let blocks: unknown;
   try { blocks = JSON.parse(row.blocks); } catch { return false; }
   if (!Array.isArray(blocks)) return false;
-  if (blocks.some((b) => !b || typeof b !== "object" || b.category !== "connection" || b.code === "unsupported_engine")) return false;
+  if (blocks.some((b) => !b || typeof b !== "object" || b.code === "unsupported_engine"
+    || b.category !== "connection" && !(b.category === "decision" && ["target_selection", "target_choice"].includes(b.code))
+      && !(b.category === "configuration" && b.code === "target_reserved"))) return false;
   // Resume an interrupted, already approved worker once. Its next preflight saves
   // any actual block and starts the normal persistent cooldown.
   if (!blocks.length && row.operation_id && row.step === "Resuming after host restart") return true;
@@ -139,7 +144,10 @@ export function createDbOnboarding(d: OnboardingDeps) {
     return view(id)!;
   }
   async function prepare(id: number, raw: Record<string, unknown> = {}): Promise<RequestView> {
-    const prepared = await exclusive(id, () => buildPlan(id, raw));
+    await exclusive(id, () => buildPlan(id, raw));
+    // Automatic prepare and an agent's explicit prepare can await the same work.
+    // Re-read after the await so only the first caller approves the operation.
+    const prepared = view(id)!;
     if (d.autoApprove && prepared.state === "awaiting_approval" && prepared.operationId) {
       logEvent(d.db, prepared.session_id, "db_onboarding_auto_approved", {
         requestId: id, operationId: prepared.operationId, fingerprint: prepared.plan?.fingerprint,
@@ -154,6 +162,11 @@ export function createDbOnboarding(d: OnboardingDeps) {
       if (["ready", "rejected", "executing", "verifying"].includes(current.state)) return current;
       if (current.operationId) return current; // immutable once submitted for approval
       const currentEntry = d.catalog && dbEntry(d.catalog, row.wanted);
+      const serverHint = d.serverForRequest?.(row);
+      if (currentEntry && serverHint && currentEntry.server !== serverHint) {
+        save(id, "blocked", null, [block("catalog_target_mismatch", "This catalog name belongs to a different server than the session's verified project target.", "Use a distinct catalog name for this server's database.", "decision")]);
+        return view(id)!;
+      }
       if (current.plan && Object.keys(raw).length === 0) {
         if (scopeIncreased(current.plan, row)) raw = priorInput(current.plan);
         else if (!currentEntry || JSON.stringify(currentEntry) === JSON.stringify(current.plan.previousEntry) || JSON.stringify(currentEntry) === JSON.stringify(current.plan.entry)) return readyPlan(id, current.plan);
@@ -169,10 +182,10 @@ export function createDbOnboarding(d: OnboardingDeps) {
             name: currentEntry.name, db: currentEntry.db, environment: "catalogued", verified: true, matched: true } satisfies Candidate
         : undefined;
       const discovery = catalogued ? { candidates: [catalogued], blocks: [] as Block[] } : await d.discover(row);
-      const matches = discovery.candidates.filter((c) => c.matched && c.verified);
+      const matches = discovery.candidates.filter((c) => c.matched);
       const picked = choice ? discovery.candidates.find((c) => c.id === choice)
         : trim(raw.server) && trim(raw.container) ? discovery.candidates.find((c) => c.server === trim(raw.server) && c.container === trim(raw.container))
-        : matches.length === 1 ? matches[0] : undefined;
+        : matches.length === 1 && matches[0]!.verified ? matches[0] : undefined;
       const blocks: Block[] = [];
       if (!picked?.verified) blocks.push(block("target_selection", "Select a database with a verified server and environment.", "Pick a target from the discovered candidates.", "decision"));
       const serverName = trim(raw.server) || picked?.server || "";
@@ -346,7 +359,7 @@ export function createDbOnboarding(d: OnboardingDeps) {
     logEvent(d.db, r.session_id, "db_onboarding_rejected", { requestId: id, operationId: r.operationId });
   }
   async function tick() {
-    const rows = d.db.query("SELECT * FROM db_onboarding WHERE state='blocked' AND plan IS NOT NULL").all() as Stored[];
+    const rows = d.db.query("SELECT * FROM db_onboarding WHERE state='blocked' ORDER BY request_id").all() as Stored[];
     for (const r of rows) {
       if (working.has(r.request_id)) continue;
       const now = Date.now();

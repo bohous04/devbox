@@ -176,7 +176,7 @@ function catalogServers(db: CoolifyDatabase, inst: CoolifyInstance, catalog: Cat
 
 /** Match known catalog servers against observed Coolify destinations, never a project name. */
 export async function discoverDatabaseTargets(opts: {
-  catalog: Catalog; instances: Record<string, CoolifyInstance>; wanted: string; project?: string; applicationMappings?: Record<string, string>;
+  catalog: Catalog; instances: Record<string, CoolifyInstance>; wanted: string; project?: string; server?: string; applicationMappings?: Record<string, string>;
 }, doFetch: Fetch = (r) => fetch(r)): Promise<{ candidates: DatabaseTarget[]; blocks: DiscoveryBlock[] }> {
   const candidates: DatabaseTarget[] = [], blocks: DiscoveryBlock[] = [];
   const wanted = opts.wanted.trim(), project = opts.project?.trim();
@@ -214,7 +214,11 @@ export async function discoverDatabaseTargets(opts: {
       const application = appMatches.length === 1 ? str(appMatches[0].uuid) : undefined;
       const applicationName = application ? str(appMatches[0].name) : undefined;
       // Agents often cite the Coolify resource UUID verbatim; it identifies exactly one database.
-      const matched = wanted === db.uuid || wanted === db.container || matchName(db.name, wanted) || matchName(db.db, wanted) || appMatches.length === 1 && relevantApps.length === 1;
+      // environment_id is authoritative even when a read-only API token omits
+      // the related environment object/name. Never invent a production label.
+      if (!db.environment && Number.isSafeInteger(db.environmentId) && db.environmentId! > 0) db = { ...db, environment: `environment #${db.environmentId}` };
+      const named = wanted === db.uuid || wanted === db.container || matchName(db.name, wanted) || matchName(db.db, wanted) || appMatches.length === 1 && relevantApps.length === 1;
+      const matched = named && (!opts.server || servers.length === 1 && servers[0] === opts.server);
       if (servers.length !== 1) blocks.push({ code: "server_mapping", category: "configuration", message: `${inst.name}: the server of database ${db.name} cannot be unambiguously matched to the catalog.`, action: "Select and verify the actual server in the advanced settings.", instance: inst.name, candidateId });
       candidates.push({ ...db, id: candidateId, instance: inst.name, server: servers.length === 1 ? servers[0]! : "", verified: servers.length === 1 && !!db.db && !!db.environment && db.status.startsWith("running"), matched, ...(application ? { application } : {}), ...(applicationName ? { applicationName } : {}) });
     }
