@@ -104,8 +104,10 @@ security add-internet-password -a root -s <vps-tailnet-ip> -r "smb " -l "devbox 
 launchctl load ~/Library/LaunchAgents/cz.devbox.smbmount.plist
 ```
 
-The agent mounts `smb://root@<ip>/dev` at `/Volumes/dev` at login, every 5 minutes and on
-network changes. It takes the IP from `DEVBOX_SMB_HOST` or from `devdUrl` in the CLI config.
+The agent mounts `smb://root@<ip>/dev` at `/Volumes/dev` at login, every minute and on
+network changes. It mounts through a small NetFS helper (compiled with `swiftc` on first use into
+`~/Library/Caches/devbox-smbmount/`) with the UI turned off, so a failed mount on a flaky network
+shows no dialog. After a failure it backs off for 2, 4, 8 and at most 15 minutes. It takes the IP from `DEVBOX_SMB_HOST` or from `devdUrl` in the CLI config.
 Force a mount with `launchctl kickstart "gui/$(id -u)/cz.devbox.smbmount"`. Log:
 `/tmp/devbox-smbmount.log`.
 
