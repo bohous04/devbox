@@ -22,6 +22,17 @@ function fixture(host: OnboardingHost, accessMissing = false) {
 }
 const host: OnboardingHost = { preflight: async () => [], execute: async () => {}, verify: async () => {} };
 
+test("approve during an in-flight prepare still executes (not dropped, not stuck in executing)", async () => {
+  let ran = 0; const f = fixture({ ...host, execute: async () => { ran++; } });
+  try {
+    const id = f.request("alpha"), p = await f.on.prepare(id);
+    const again = f.on.prepare(id); // e.g. the agent re-polls prepare while the operator approves
+    f.on.approve(p.operationId!);
+    await again; await f.on.settled(id);
+    expect(f.on.view(id)!.state).toBe("ready"); expect(ran).toBe(1);
+  } finally { f.cleanup(); }
+});
+
 test("partial catalog persistence recovers after overlay failure without restart", async () => {
   const f = fixture(host, true);
   try {

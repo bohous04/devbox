@@ -11,7 +11,7 @@
 #   'i' -> write payload to the PTY master (keys)
 #   'r' -> payload = "cols,rows" -> set the window size (TIOCSWINSZ)
 # stdout (fd 1): raw PTY output.
-import os, sys, pty, select, struct, fcntl, termios, signal
+import os, sys, pty, select, struct, fcntl, termios, signal, time
 
 argv = sys.argv[1:]
 if not argv:
@@ -25,6 +25,18 @@ if pid == 0:  # child: runs in the PTY as the controlling terminal
 
 STDIN, STDOUT = 0, 1
 
+# Keystrokes go to the master NON-blocking through a queue: the tty input buffer is only ~4 KB,
+# so a big paste written in one blocking os.write would stall while the child is itself blocked
+# echoing into a full output buffer that nobody drains — the terminal froze for good.
+fcntl.fcntl(master, fcntl.F_SETFL, fcntl.fcntl(master, fcntl.F_GETFL) | os.O_NONBLOCK)
+pending = b""          # keystrokes not yet accepted by the PTY
+PENDING_MAX = 1 << 20  # stop reading stdin above this (backpressure to devd)
+
+def write_all(fd, data):
+    # stdout stays blocking; os.write may still return short, so loop.
+    while data:
+        data = data[os.write(fd, data):]
+
 def set_winsize(cols, rows):
     try:
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
@@ -34,7 +46,7 @@ def set_winsize(cols, rows):
 buf = b""
 
 def drain_frames():
-    global buf
+    global buf, pending
     while len(buf) >= 5:
         typ = buf[0:1]
         ln = struct.unpack(">I", buf[1:5])[0]
@@ -43,7 +55,7 @@ def drain_frames():
         payload = buf[5:5 + ln]
         buf = buf[5 + ln:]
         if typ == b"i":
-            os.write(master, payload)
+            pending += payload
         elif typ == b"r":
             try:
                 c, r = payload.decode().split(",")
@@ -53,23 +65,52 @@ def drain_frames():
 
 try:
     while True:
-        rlist, _, _ = select.select([master, STDIN], [], [])
+        rfds = [master] + ([STDIN] if len(pending) < PENDING_MAX else [])
+        rlist, wlist, _ = select.select(rfds, [master] if pending else [], [])
         if master in rlist:
             try:
                 data = os.read(master, 65536)
-            except OSError:
+            except BlockingIOError:
+                data = None
+            except OSError:  # EIO: the child closed the slave side
                 data = b""
-            if not data:
+            if data == b"":
                 break
-            os.write(STDOUT, data)
+            if data:
+                write_all(STDOUT, data)
+        if master in wlist and pending:
+            try:
+                pending = pending[os.write(master, pending[:65536]):]
+            except BlockingIOError:
+                pass
         if STDIN in rlist:
-            chunk = os.read(STDIN, 65536)
+            try:
+                chunk = os.read(STDIN, 65536)
+            except OSError:
+                chunk = b""
             if not chunk:
                 break
             buf += chunk
             drain_frames()
+except OSError:
+    pass  # stdout gone (devd disconnected) or master write failed — shut down below
 finally:
     try:
         os.kill(pid, signal.SIGTERM)
     except Exception:
+        pass
+    try:
+        os.close(master)
+    except OSError:
+        pass
+    # Reap the child; give it ~1 s after SIGTERM/HUP, then SIGKILL.
+    try:
+        for _ in range(20):
+            if os.waitpid(pid, os.WNOHANG)[0] != 0:
+                break
+            time.sleep(0.05)
+        else:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+    except (ChildProcessError, OSError):
         pass

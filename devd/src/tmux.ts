@@ -2,7 +2,7 @@
 // shared by the CLI (attach picker, manager) and devd (/api/sessions?tmux=1). No I/O.
 
 import { isAgentName, type AgentName } from "./db";
-import { dockerArgv } from "./dockerTarget";
+import { runDocker } from "./dockerTarget";
 
 export interface TmuxSession {
   name: string;          // tmux session name = identifier for attach/capture-pane
@@ -80,14 +80,12 @@ export type TmuxExec = (container: string, cmd: string, timeoutMs: number) => Pr
 
 // `docker exec` without blocking the event loop (devd is single-threaded and /api/sessions is
 // polled). Non-zero exit or exception → "" → the caller gets an empty list.
+// runDocker drains stdout while the child runs — reading it only after `exited` would deadlock
+// once the output outgrows the pipe buffer.
 const defaultExec: TmuxExec = async (container, cmd, timeoutMs) => {
   try {
-    const p = Bun.spawn([...dockerArgv(container), "exec", container, "bash", "-lc", cmd], { stdout: "pipe", stderr: "ignore" });
-    const timer = setTimeout(() => { try { p.kill(); } catch { /* already finished */ } }, timeoutMs);
-    const code = await p.exited;
-    clearTimeout(timer);
-    if (code !== 0) return "";
-    return await new Response(p.stdout).text();
+    const r = await runDocker(container, ["exec", container, "bash", "-lc", cmd], { timeoutMs });
+    return r.code === 0 && !r.timedOut ? r.stdout : "";
   } catch { return ""; }
 };
 
@@ -102,6 +100,9 @@ export function createTmuxProbe(opts: { ttlMs?: number; timeoutMs?: number; exec
   return async (containers: string[], now = Date.now()): Promise<Record<string, TmuxSession[]>> => {
     const out: Record<string, TmuxSession[]> = {};
     const stale: string[] = [];
+    // Expired entries are useless (they get re-probed) — dropping them keeps removed
+    // containers from piling up in the cache for the life of devd.
+    for (const [c, hit] of cache) if (now - hit.at >= ttl) cache.delete(c);
     for (const c of containers) {
       const hit = cache.get(c);
       if (hit && now - hit.at < ttl) out[c] = hit.rows;

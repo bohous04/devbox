@@ -540,6 +540,19 @@ test("historical account catch-up refuses undated usage instead of inventing tod
   expect(getHarvestState<{ sources?: Record<string, unknown> }>(d.db, "codex")!.sources?.second).toBeUndefined();
 });
 
+test("one profile refusing undated history does not stop harvesting of the other profiles", async () => {
+  const d: CodexHarvesterDeps = { ...deps(), scan: async volume => volume === "codex-home" ? ""
+    : volume === "codex-acct-second" ? scanOut({ input: 100, cachedInput: 0, cacheWrite: 0, output: 10 })
+    : `== ${rolloutPath("cccccccc-cccc-cccc-cccc-cccccccccccc")}\n${CTX_LINE}\n${timedCheckpoint(100, 10, NOW + 10)}\n` };
+  addAccount(d, "second", NOW - 1000);
+  addAccount(d, "third", NOW - 1000);
+  await expect(harvestCodexAccounts(d)).rejects.toThrow("without usage event timestamps");
+  const sources = getHarvestState<{ sources?: Record<string, unknown> }>(d.db, "codex")!.sources;
+  expect(sources?.second).toBeUndefined();
+  expect(sources?.third).toBeDefined();
+  expect(tokenSum(d)).toBe(110);
+});
+
 // ---- subagents (thread_spawn): they send no hook events, attribution is inherited from the parent ----
 
 const CHILD_ID = "01a13206-151c-7ee2-a7b5-fa58e3fadccc";

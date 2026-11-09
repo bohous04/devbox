@@ -84,6 +84,8 @@ export function tailscaleJoinCmd(hostname: string, healthUrl: string): string {
     `echo "devd health unreachable: $(tailscale status 2>&1 | head -3 | tr '\\n' ' ')" >&2; exit 1`;
 }
 
+const JOB_TTL_MS = 3_600_000;
+
 export class InstaboxSessions implements InstaboxLifecycle {
   private jobs = new Map<string, IbxJob>();
   private warned = new Set<string>();
@@ -179,7 +181,9 @@ export class InstaboxSessions implements InstaboxLifecycle {
           job.status = "error";
           job.error = (e as Error).message;
           deleteSession(this.d.db, id);
-        });
+        })
+        // The UI polls the job only right after create; a finished one expires instead of staying forever.
+        .finally(() => { setTimeout(() => this.jobs.delete(job.id), JOB_TTL_MS).unref?.(); });
       return job;
     });
   }
@@ -343,7 +347,11 @@ export class InstaboxSessions implements InstaboxLifecycle {
     const files = this.credFiles();
     // A session whose create is still running has no finished volumes or alias — sync would only interfere.
     const creating = new Set([...this.jobs.values()].filter((j) => j.status === "running").map((j) => j.sessionId));
-    for (const listed of listSessions(this.d.db).filter((x) => x.host === "instabox" && x.status === "running" && !creating.has(x.id))) {
+    const all = listSessions(this.d.db);
+    // Warnings of sessions that no longer exist would otherwise stay in `warned` forever.
+    const alive = new Set(all.map((x) => x.id));
+    for (const key of this.warned) if (!alive.has(key.slice(0, key.indexOf(":")))) this.warned.delete(key);
+    for (const listed of all.filter((x) => x.host === "instabox" && x.status === "running" && !creating.has(x.id))) {
       // I2: under the session lock — pause/end/resume never overlap with a sync run. Lock taken =
       // an operation on the session is running right now → this round skips it (next one in 2 min).
       let synced: { s: SessionRow; res: CredSyncResult[] } | null;
