@@ -144,10 +144,19 @@ def referenced(path):
     return False
 
 
+def stat_or_none(p):
+    # Paths live in directories shared with running containers: a file may vanish between listing and stat.
+    try:
+        return Path(p).stat()
+    except FileNotFoundError:
+        return None
+
+
 def held_files(paths):
     """Batch regular-file reference check: one procfs walk for the whole batch."""
     paths=[Path(p) for p in paths]
-    identities={(p.stat().st_dev,p.stat().st_ino):p for p in paths}
+    stats={p:stat_or_none(p) for p in paths}
+    identities={(s.st_dev,s.st_ino):p for p,s in stats.items() if s}
     held=set()
     if not Path('/proc').is_dir():return set(paths)
     for proc in Path('/proc').iterdir():
@@ -374,12 +383,21 @@ class Guard:
             root = Path(r['control']) / 'storage-events'
             if not beneath(root, '/var/lib/devd') or root.is_symlink():
                 continue
+            done = []
             for p in list(root.glob('*.json'))[:10000]:
                 try:
+                    # Unusable records are dropped, not skipped: left in place they would fill
+                    # the 10000-file window forever and starve new events.
                     if p.is_symlink() or p.stat().st_size > 16384:
+                        p.unlink(missing_ok=True)
                         continue
-                    e = read(p)
-                    if e.get('session') != r['name'] or not isinstance(e.get('path'), str):
+                    try:
+                        e = read(p)
+                    except ValueError:
+                        e = None
+                    if not isinstance(e, dict) or e.get('session') != r['name'] or not isinstance(e.get('path'), str) \
+                            or not isinstance(e.get('time'), (int, float)) or not isinstance(e.get('kind'), str):
+                        p.unlink(missing_ok=True)
                         continue
                     # Records contain data, never executable shell commands.
                     key = r['name'] + ':' + e['path']
@@ -395,10 +413,14 @@ class Guard:
                         entry['purpose']=str(e.get('purpose','auxiliary worktree'))[:300]
                     if e['kind'] == 'release':
                         entry['released_at'] = e['time']
-                    atomic(self.state / 'registry.json', registry)
-                    p.unlink()
+                    done.append(p)
                 except (OSError, ValueError, KeyError):
                     continue
+            if done:
+                # One registry write per session batch; events are removed only after it is durable.
+                atomic(self.state / 'registry.json', registry)
+                for p in done:
+                    p.unlink(missing_ok=True)
 
     def discover(self, rows):
         registry=read(self.state/'registry.json',{})
@@ -632,8 +654,9 @@ class Guard:
         budget=0
         selected=[]
         held=held_files(paths)
-        for p in sorted(paths,key=lambda p:p.stat().st_mtime):
-            s=p.stat()
+        stats={p:s for p in paths if (s:=stat_or_none(p))}
+        for p in sorted(stats,key=lambda p:stats[p].st_mtime):
+            s=stats[p]
             if len(selected)>=2048:break
             if budget+s.st_size>512*2**20 and selected:
                 continue
@@ -751,13 +774,17 @@ class Guard:
                     return
             except FileNotFoundError:pass
         blobs=[p for p in base.rglob('*') if p.is_file() and not p.is_symlink() and beneath(p,base)]
-        total=sum(p.stat().st_size for p in blobs)
+        stats={p:s for p in blobs if (s:=stat_or_none(p))}
+        total=sum(s.st_size for s in stats.values())
         removed=0
-        for p in sorted(blobs,key=lambda p:max(p.stat().st_atime,p.stat().st_mtime)):
+        for p in sorted(stats,key=lambda p:max(stats[p].st_atime,stats[p].st_mtime)):
             if total<=5*GIB:break
-            s=p.stat()
+            s=stats[p]
             if max(s.st_atime,s.st_mtime)>time.time()-7*86400 or referenced(p):continue
-            p.unlink()
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass  # npm removed it meanwhile; the space is freed either way
             total-=s.st_size;removed+=s.st_size
         self.audit('npm-download-cache-evicted',bytes=removed,remaining_bytes=total)
 
