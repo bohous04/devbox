@@ -201,6 +201,16 @@ test("github owners endpoint maps gh failure to 502 with error body", async () =
   expect(((await r.json()) as { error: string }).error).toContain("gh auth login");
 });
 
+test("github shared-repos endpoint lists collaborator repos and maps gh failure to 502", async () => {
+  const repo = { name: "app", nameWithOwner: "carol/app", url: "https://github.com/carol/app", visibility: "private", description: "", isPrivate: true, isArchived: false, updatedAt: "2026-07-01T10:00:00Z" };
+  const ok = await app({ owners: () => [], repos: () => [], sharedRepos: () => [repo] }).a.request("/api/github/shared-repos");
+  expect(ok.status).toBe(200);
+  expect(await ok.json()).toEqual({ repos: [repo] });
+  const { GithubError } = await import("../src/github");
+  const bad = await app({ owners: () => [], repos: () => [], sharedRepos: () => { throw new GithubError("gh api user/repos failed: auth"); } }).a.request("/api/github/shared-repos");
+  expect(bad.status).toBe(502);
+});
+
 test("github repos endpoint validates owner and returns repos", async () => {
   const repo = { name: "cms", nameWithOwner: "acme/cms", url: "https://github.com/acme/cms", visibility: "private", description: "", isPrivate: true, isArchived: false, updatedAt: "2026-07-01T10:00:00Z" };
   const { a } = app({ owners: () => [], repos: (o) => (o === "acme" ? [repo] : []) });

@@ -8,6 +8,11 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
+// Synthetic owner tile for repos the account can access only as a collaborator — they belong to
+// other users/orgs, so no account/org tile lists them. Its key cannot collide with a real login
+// (GitHub logins never contain spaces).
+const SHARED: GithubOwner = { login: "Shared with me", kind: "shared" };
+
 /**
  * GitHub tab of the RepoBrowser: account + orgs → repo list → a click adds/removes the
  * repo in the target (folder/project) of the config draft. The parent holds the draft; only
@@ -34,7 +39,7 @@ export function GithubPane({ target, isRepoAdded, ownerSource, onToggleRepo, onA
   useEffect(() => {
     let alive = true;
     api.githubOwners()
-      .then((r) => { if (alive) setOwners(r.owners); })
+      .then((r) => { if (alive) setOwners([...r.owners, SHARED]); })
       .catch((e) => { if (alive) setOwnersErr((e as Error).message); });
     return () => { alive = false; };
   }, []);
@@ -46,7 +51,7 @@ export function GithubPane({ target, isRepoAdded, ownerSource, onToggleRepo, onA
     if (repoCache[o.login]) return;
     setReposLoading(true);
     try {
-      const { repos } = await api.githubRepos(o.login);
+      const { repos } = o.kind === "shared" ? await api.githubSharedRepos() : await api.githubRepos(o.login);
       setRepoCache((c) => ({ ...c, [o.login]: repos }));
       searchRef.current?.focus();
     } catch (e) {
@@ -67,7 +72,8 @@ export function GithubPane({ target, isRepoAdded, ownerSource, onToggleRepo, onA
       r.description.toLowerCase().includes(needle));
   }, [repos, q]);
 
-  const src = sel ? ownerSource(sel.login) : undefined;
+  const shared = sel?.kind === "shared";
+  const src = sel && !shared ? ownerSource(sel.login) : undefined;
   const authHint = /auth|login|logged|credential|token/i.test(ownersErr ?? "");
 
   return (
@@ -103,9 +109,9 @@ export function GithubPane({ target, isRepoAdded, ownerSource, onToggleRepo, onA
                 >
                   {o.avatarUrl
                     ? <img className="size-6 flex-none rounded-full bg-muted" src={o.avatarUrl} alt="" loading="lazy" />
-                    : <span className="flex size-6 flex-none items-center justify-center rounded-full border font-mono text-xs font-semibold text-muted-foreground">{o.login.charAt(0).toUpperCase()}</span>}
+                    : <span className="flex size-6 flex-none items-center justify-center rounded-full border font-mono text-xs font-semibold text-muted-foreground">{o.kind === "shared" ? "⇄" : o.login.charAt(0).toUpperCase()}</span>}
                   <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] font-semibold" title={o.name ?? o.login}>{o.login}</span>
-                  <Badge variant="outline" className="flex-none font-mono text-[9.5px] uppercase tracking-wider text-muted-foreground">{o.kind === "user" ? "account" : "org"}</Badge>
+                  <Badge variant="outline" className="flex-none font-mono text-[9.5px] uppercase tracking-wider text-muted-foreground">{o.kind === "user" ? "account" : o.kind === "org" ? "org" : "collab"}</Badge>
                 </button>
               ))}
             </div>
@@ -115,7 +121,9 @@ export function GithubPane({ target, isRepoAdded, ownerSource, onToggleRepo, onA
 
       {sel && !ownersErr && (
         <>
-          {src ? (
+          {shared ? (
+            <p className="font-mono text-[11.5px] text-muted-foreground">Repos of other owners where you are a collaborator. Add them one by one — the owner itself can't be a source.</p>
+          ) : src ? (
             <div className="flex flex-wrap items-center gap-2.5 rounded-lg border border-emerald-600/40 bg-emerald-600/10 p-3 dark:border-emerald-400/40">
               <span className="min-w-40 flex-1 font-mono text-xs font-medium text-emerald-700 dark:text-emerald-400">✓ The whole owner {sel.login} is a source — repos load automatically ({src.visibility === "private" ? "private only" : src.visibility === "public" ? "public only" : "all"})</span>
               <Button variant="ghost" size="sm" onClick={() => onRemoveSource(sel)}>Remove source</Button>
@@ -142,7 +150,7 @@ export function GithubPane({ target, isRepoAdded, ownerSource, onToggleRepo, onA
               ref={searchRef}
               className="h-8 flex-1"
               type="text"
-              placeholder={`Search repos on ${sel.login}…`}
+              placeholder={shared ? "Search shared repos…" : `Search repos on ${sel.login}…`}
               value={q}
               onChange={(e) => setQ(e.target.value)}
               aria-label="Search repository"
@@ -163,7 +171,7 @@ export function GithubPane({ target, isRepoAdded, ownerSource, onToggleRepo, onA
           )}
           {repos && !reposLoading && !reposErr && (
             filtered.length === 0 ? (
-              <p className="font-mono text-[11.5px] text-muted-foreground">{repos.length === 0 ? "This owner has no repos." : "Nothing matches the search."}</p>
+              <p className="font-mono text-[11.5px] text-muted-foreground">{repos.length === 0 ? (shared ? "You aren't a collaborator on any other owner's repo." : "This owner has no repos.") : "Nothing matches the search."}</p>
             ) : (
               <div className="flex flex-none flex-col overflow-hidden rounded-lg border">
                 {filtered.map((r) => {
@@ -189,7 +197,7 @@ export function GithubPane({ target, isRepoAdded, ownerSource, onToggleRepo, onA
                       >
                         {added ? "✓" : "+"}
                       </span>
-                      <span className="max-w-[42%] flex-none truncate font-mono text-[12.5px] font-semibold">{r.name}</span>
+                      <span className="max-w-[42%] flex-none truncate font-mono text-[12.5px] font-semibold">{shared ? r.nameWithOwner : r.name}</span>
                       <Badge
                         variant="outline"
                         className={cn(

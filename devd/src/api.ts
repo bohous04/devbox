@@ -47,7 +47,7 @@ import type { ConfigRepo } from "./configrepo";
 import { countEvents, diskHistoryEnds, distinctEventTypes, getHarvestState, getRepoAgent, getSession, insertMetrics, insertNotifyLog, isAgentName, lastMetricTs, listCriticReviews, listEvents, listNotifyLog, listRepoAgents, listSessions, logEvent, resetStats, sanitizeSessionName, setCritic, setHarvestState, setImportant, setNotifyVerdict, setSessionName, deleteSchedule, getSchedule, insertSchedule, listSchedules, updateSchedule, deleteAccount, getAccount, insertAccount, insertLease, isLeaseClient, leaseHistory, setAccountDisabled, setAccountLabel, setAccountOrgId, setAccountQuarantined, setAccountWeight, ackPushAlert, upsertPushDevice, type AgentName, type LeaseClient, type NotifyDecision, type NotifyVerdict, type ScheduleRow, type SessionRow } from "./db";
 import { validCron } from "./cron";
 import { memoAsync } from "./cache";
-import { GithubError, listOwners, listRepos, validOwner, type GithubOwner, type GithubRepo } from "./github";
+import { GithubError, listOwners, listRepos, listSharedRepos, validOwner, type GithubOwner, type GithubRepo } from "./github";
 import { GiteaAuthError, GiteaError, GiteaUnknownInstanceError, type GiteaApi } from "./gitea";
 import { join } from "node:path";
 import { readUpload, UploadError } from "./uploads";
@@ -109,7 +109,7 @@ export interface ShareLockdown {
 
 const endSyncWaitMs = () => Number(process.env.DEVD_END_SYNC_WAIT_MS ?? 20_000);
 
-export interface ApiDeps { mgr: SessionManager; db: Database; cfg: DevConfig; root: string; tree: () => Promise<TreeProject[]>; listener: ListenerClient; notify: NotifyFn; stats: () => unknown; resources?: () => unknown; cloneQueue: CloneQueue; configRepo: ConfigRepo; dashboardDir?: string; previewHost?: string; backup: { build: () => Promise<string>; restore: (tarPath: string) => Promise<void> }; github?: { owners: () => GithubOwner[] | Promise<GithubOwner[]>; repos: (owner: string) => GithubRepo[] | Promise<GithubRepo[]> }; gitea?: GiteaApi; opToken?: string; vault?: Vault; gitProxy?: Hono; prodCatalogPath?: string; prodAccessPath?: string; sshKeyTitles?: () => Promise<string[]>; coolifyInstances?: () => Record<string, CoolifyInstance>; execOperation?: (op: string, params: Record<string, string>) => Promise<string>; dbTargets?: DbTargets; dbProxyHost?: string; agentEvents?: AgentEventHub; spawnPty?: SpawnPty; scheduler?: { fireNow: (id: string) => Promise<boolean> }; prodCatalog?: Catalog; prodDbAccess?: Record<string, Access>; readProdSecret?: (opItem: string) => string | Promise<string>; execProdWrite?: (opts: { entry: DbEntry; server: ServerRef; sql: string; preview: boolean; scope?: WriteScope }) => Promise<{ rows: number; note: string }>; tmuxProbe?: (containers: string[], now?: number) => Promise<Record<string, TmuxSession[]>>; onConfigWritten?: () => void;
+export interface ApiDeps { mgr: SessionManager; db: Database; cfg: DevConfig; root: string; tree: () => Promise<TreeProject[]>; listener: ListenerClient; notify: NotifyFn; stats: () => unknown; resources?: () => unknown; cloneQueue: CloneQueue; configRepo: ConfigRepo; dashboardDir?: string; previewHost?: string; backup: { build: () => Promise<string>; restore: (tarPath: string) => Promise<void> }; github?: { owners: () => GithubOwner[] | Promise<GithubOwner[]>; repos: (owner: string) => GithubRepo[] | Promise<GithubRepo[]>; sharedRepos?: () => GithubRepo[] | Promise<GithubRepo[]> }; gitea?: GiteaApi; opToken?: string; vault?: Vault; gitProxy?: Hono; prodCatalogPath?: string; prodAccessPath?: string; sshKeyTitles?: () => Promise<string[]>; coolifyInstances?: () => Record<string, CoolifyInstance>; execOperation?: (op: string, params: Record<string, string>) => Promise<string>; dbTargets?: DbTargets; dbProxyHost?: string; agentEvents?: AgentEventHub; spawnPty?: SpawnPty; scheduler?: { fireNow: (id: string) => Promise<boolean> }; prodCatalog?: Catalog; prodDbAccess?: Record<string, Access>; readProdSecret?: (opItem: string) => string | Promise<string>; execProdWrite?: (opts: { entry: DbEntry; server: ServerRef; sql: string; preview: boolean; scope?: WriteScope }) => Promise<{ rows: number; note: string }>; tmuxProbe?: (containers: string[], now?: number) => Promise<Record<string, TmuxSession[]>>; onConfigWritten?: () => void;
   liveActivities?: LiveActivities;
   /** Dashboard origins allowed to mutate the API from a browser; default see originGuard.ts (+ DEVD_DASHBOARD_ORIGINS). */
   dashboardOrigins?: string[];
@@ -2204,10 +2204,16 @@ export function createApp(d: ApiDeps): Hono {
   // ~0.8 s on every opening of the repository browser in Folders. SWR cache: the first
   // opening waits, later ones get the value immediately and the refresh runs in the background.
   const ownersCache = memoAsync(() => listOwners(), 10 * 60_000);
-  const github = d.github ?? { owners: () => ownersCache.get(), repos: (o: string) => listRepos(o) };
+  const github = d.github ?? { owners: () => ownersCache.get(), repos: (o: string) => listRepos(o), sharedRepos: () => listSharedRepos() };
   app.get("/api/github/owners", async (c) => {
     try { return c.json({ owners: await github.owners() }); }
     catch (e) { return c.json({ error: (e as Error).message }, 502); }
+  });
+  // Repos of other owners where the account is only a collaborator ("Shared with me" in Folders).
+  app.get("/api/github/shared-repos", async (c) => {
+    if (!github.sharedRepos) return c.json({ repos: [] });
+    try { return c.json({ repos: await github.sharedRepos() }); }
+    catch (e) { return c.json({ error: (e as Error).message }, e instanceof GithubError ? 502 : 500); }
   });
   app.get("/api/github/repos", async (c) => {
     const owner = c.req.query("owner") ?? "";
