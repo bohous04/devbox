@@ -157,6 +157,23 @@ export async function runInteractive(argv: string[], cwd?: string, env?: Record<
   return await p.exited;
 }
 
+// Attach run for the reconnect loop: same as runInteractive, but ssh's/docker's own stderr is captured
+// instead of printed. During an outage every attempt used to add an "ssh: connect to host … timed out"
+// line to the terminal; the loop now shows the last error inside the offline panel instead (and prints
+// it with the final failure message). With `ssh -t` the remote side's stderr goes through the pty, so
+// nothing from inside the session is lost.
+export async function runAttach(argv: string[]): Promise<{ code: number; error?: string }> {
+  const p = Bun.spawn(argv, { stdin: "inherit", stdout: "inherit", stderr: "pipe" });
+  const text = new Response(p.stderr).text().catch(() => "");
+  const code = await p.exited;
+  return { code, error: lastErrorLine(await text) };
+}
+
+export function lastErrorLine(stderr: string): string | undefined {
+  const lines = stderr.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  return lines.at(-1)?.slice(0, 300);
+}
+
 export { labelSetCmd, singleQuote };
 
 // Nickname from the API into the remote shell. A separate option keeps the tmux sessions'

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { attachLoop, backoffMs, dialFor, retryDecision, TERMINAL_RESET } from "../src/reconnect";
+import { attachLoop, backoffMs, createStatusPanel, dialFor, isConnectFailure, prettyError, renderRetryStatus, retryDecision, type RetryStatus, TERMINAL_RESET } from "../src/reconnect";
+import { lastErrorLine } from "../src/attach";
 
 test("cold recovery retries missing Docker/tmux while desired session is running", async () => {
   const codes = [137, 143, 125, 44, 1, 0];
@@ -182,6 +183,83 @@ test("attachLoop: a dropped connection resets the terminal before the retry mess
 });
 
 test("TERMINAL_RESET turns off every mouse mode and shows the cursor", () => {
-  for (const mode of ["1000", "1002", "1003", "1006", "2004", "1049"]) expect(TERMINAL_RESET).toContain(`\x1b[?${mode}l`);
+  for (const mode of ["1000", "1002", "1003", "1004", "1006", "2004", "1049"]) expect(TERMINAL_RESET).toContain(`\x1b[?${mode}l`);
   expect(TERMINAL_RESET).toContain("\x1b[?25h");
+});
+
+// 9 Nov 2026 (screenshot): an outage printed two lines per attempt ("⏳ Disconnected…" in red on
+// stderr + ssh's own "connect to host … timed out"), forever. With a status sink the loop
+// updates one panel instead and prints nothing.
+test("attachLoop with status: no lines printed, countdown ticks per second, panel removed on reconnect", async () => {
+  const lines: string[] = [];
+  const states: (RetryStatus | null)[] = [];
+  const sleeps: number[] = [];
+  const codes = [{ code: 255, error: "ssh: connect to host 1.2.3.4 port 2222: Operation timed out" }, { code: 255 }, 0];
+  let ri = 0;
+  expect(await attachLoop({
+    argv: ["ssh", "a"], argvAlt: ["ssh", "b"], pathNames: ["a", "b"], label: "x/y · main",
+    run: async () => codes[ri++]!, health: async () => "running",
+    sleep: async (ms) => { sleeps.push(ms); }, out: (l) => lines.push(l), status: (s) => states.push(s),
+  })).toBe(0);
+  expect(lines).toEqual([]);
+  expect(sleeps).toEqual([1000, 1000, 1000]); // attempt 1 = 1 s, attempt 2 = 2 s, ticked per second
+  const waiting = states.filter((s) => s?.phase === "waiting") as RetryStatus[];
+  expect(waiting.map((s) => s.secondsLeft)).toEqual([1, 2, 1]);
+  expect(waiting[0]!.via).toBe("b");
+  // the last error survives an attempt that failed without stderr
+  expect(waiting.at(-1)!.lastError).toContain("Operation timed out");
+  expect(states.some((s) => s?.phase === "connecting")).toBe(true);
+  expect(states.at(-1)).toBeNull();
+});
+
+test("attachLoop: a long attempt that never connected does not reset the counter", async () => {
+  const states: (RetryStatus | null)[] = [];
+  const times = [0, 80_000, 80_000, 160_000, 160_000, 160_000];
+  let ti = 0;
+  const codes = [{ code: 255, error: "ssh: connect to host 1.2.3.4 port 2222: Operation timed out" }, { code: 255, error: "ssh: connect to host 1.2.3.4 port 2222: Operation timed out" }, 0];
+  let ri = 0;
+  await attachLoop({ argv: [], label: "l", run: async () => codes[ri++]!, health: async () => "running",
+    sleep: async () => {}, now: () => times[ti++] ?? 160_000, status: (s) => states.push(s) });
+  const attempts = states.filter((s) => s?.phase === "waiting").map((s) => s!.attempt);
+  expect(attempts.at(-1)).toBe(2);
+});
+
+test("attachLoop: final failure message carries the captured error", async () => {
+  const lines: string[] = [];
+  await attachLoop({ argv: [], label: "l", run: async () => ({ code: 125, error: "Error: No such container: dev-x" }),
+    health: async () => "running", sleep: async () => {}, out: (l) => lines.push(l) });
+  expect(lines[0]).toContain("No such container");
+});
+
+test("isConnectFailure / prettyError / lastErrorLine", () => {
+  expect(isConnectFailure("ssh: connect to host 1.2.3.4 port 2222: Operation timed out")).toBe(true);
+  expect(isConnectFailure("Connection closed by 100.64.0.9 port 2222")).toBe(true);
+  expect(isConnectFailure("Timeout, server vps not responding.")).toBe(false);
+  expect(isConnectFailure(undefined)).toBe(false);
+  expect(prettyError("ssh: connect to host 1.2.3.4 port 2222: Operation timed out")).toBe("1.2.3.4:2222 — operation timed out");
+  expect(lastErrorLine("Warning: x\r\nssh: connect to host h port 1: No route to host\r\n\n")).toBe("ssh: connect to host h port 1: No route to host");
+  expect(lastErrorLine("")).toBeUndefined();
+});
+
+test("renderRetryStatus: short, truncated to width, shows path, error and offline time", () => {
+  const s: RetryStatus = { label: "shop/ledger", phase: "waiting", attempt: 7, secondsLeft: 12, via: "devbox-ts",
+    lastError: "ssh: connect to host 203.0.113.7 port 2222: Operation timed out", offlineSince: 0 };
+  const lines = renderRetryStatus(s, 192_000, 0, 200);
+  expect(lines.length).toBe(4);
+  expect(lines[0]).toContain("Offline · shop/ledger");
+  expect(lines[1]).toContain("reconnecting in 12s via devbox-ts");
+  expect(lines[2]).toContain("203.0.113.7:2222");
+  expect(lines[3]).toContain("3m 12s");
+  for (const l of renderRetryStatus(s, 0, 0, 30)) expect([...l].length).toBeLessThanOrEqual(29);
+});
+
+test("createStatusPanel redraws in place and clears", () => {
+  const out: string[] = [];
+  const panel = createStatusPanel((t) => out.push(t), { color: false, now: () => 0 });
+  const s: RetryStatus = { label: "l", phase: "waiting", attempt: 1, secondsLeft: 1, offlineSince: 0 };
+  panel(s); panel(s); panel(null); panel(null);
+  expect(out[0]).not.toContain("\x1b[3A");
+  expect(out[1]).toStartWith("\r\x1b[3A\x1b[J");
+  expect(out[2]).toBe("\r\x1b[3A\x1b[J\x1b[?25h");
+  expect(out.length).toBe(3);
 });

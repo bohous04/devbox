@@ -8,7 +8,7 @@ import { sanitizeSessionName, type AgentName } from "../../devd/src/db";
 import { sh } from "./sh";
 import type { TreeProject } from "../../devd/src/tree";
 import { ApiClient, type SessionInfo, type WriteRow } from "./api";
-import { agentLabel, altCfg, buildExecArgv, probeArgv, runInteractive, sessionPickerOptions, tmuxCommand, withSessionName } from "./attach";
+import { agentLabel, altCfg, buildExecArgv, probeArgv, runAttach, sessionPickerOptions, tmuxCommand, withSessionName } from "./attach";
 import { parseProbe } from "../../devd/src/tmux";
 import { loadCliConfig, type CliConfig } from "./config";
 import { runDoctor } from "./doctor";
@@ -19,7 +19,7 @@ import { agentSwitchSummary, exitMenuOptions, type ExitAction } from "./manager-
 import { agentFlag, agentOptions, folderOptions, freshLabel, gistOutcome, hostFlag, NEW_SOLO, projectOptions, repoOptions, runningSolosIn, shouldAskAgent, soloActionOptions, soloMenuOptions, stripAgentFlags, stripHostFlags } from "./picker";
 import type { IbxStatus } from "../../devd/src/instabox/reconcile";
 import type { BaseStep } from "../../devd/src/instabox/base";
-import { attachLoop, TERMINAL_RESET } from "./reconnect";
+import { attachLoop, createStatusPanel, type RetryStatus, TERMINAL_RESET } from "./reconnect";
 import { fileLastAttached, fileRecents, flattenTree, matchSessions, resolveQuery, sortByRecent, type Target } from "./resolve";
 import { newestRecoveryRecords, ownerAlive, recoveryLaunchConfig, safeTmuxSession, sameRecoveryServer, sameRecoveryTarget, terminalRecoveryStore, waitForSavedSession, warpPaneId } from "./recovery";
 import { detectedWarpGrokSupport } from "./warp";
@@ -778,6 +778,28 @@ export async function attachTo(deps: Deps, container: string, session?: string):
   return await runExitAware(deps, container, picked);
 }
 
+// Offline panel for the reconnect loop (TTY only). While waiting between attempts the terminal's echo
+// is off — otherwise every keypress (and the focus events ^[[I/^[[O Warp sends on tab switches) lands
+// in the middle of the panel. Echo goes back on before each attempt (ssh saves/restores the tty state
+// it finds) and on Ctrl-C, which during the wait means "back" = leave dev.
+function offlineStatus(): ((s: RetryStatus | null) => void) | undefined {
+  if (!(process.stdin.isTTY && process.stdout.isTTY)) return undefined;
+  const panel = createStatusPanel((t) => process.stdout.write(t), { width: () => process.stdout.columns || 100 });
+  let quiet = false;
+  const stty = (arg: string) => { try { Bun.spawnSync(["stty", arg], { stdin: "inherit", stdout: "ignore", stderr: "ignore" }); } catch { /* best effort */ } };
+  const onInt = () => { panel(null); stty("echo"); process.exit(130); };
+  const setQuiet = (on: boolean) => {
+    if (on === quiet) return;
+    quiet = on;
+    stty(on ? "-echo" : "echo");
+    if (on) process.on("SIGINT", onInt); else process.off("SIGINT", onInt);
+  };
+  return (s) => {
+    setQuiet(s?.phase === "waiting");
+    panel(s);
+  };
+}
+
 // Runs a tmux command in a loop (reconnect after an outage) and after F9 (code 42) shows the exit menu.
 // Shared by all attach paths (interactive and notification click).
 async function runExitAware(deps: Deps, container: string, tmuxSession: string, existingOnly = false, oldPaneId?: string): Promise<number> {
@@ -803,6 +825,7 @@ async function runExitAware(deps: Deps, container: string, tmuxSession: string, 
   // The session name is carried between iterations — it can be renamed in the menu and the old
   // value from the first read would lie after returning and another F9 in the menu.
   let name = s?.name ?? null;
+  const status = offlineStatus();
   for (;;) {
     const namedCommand = withSessionName(tmuxCommand(tmuxSession, grokSupport, existingOnly), name);
     const code = await attachLoop({
@@ -814,9 +837,10 @@ async function runExitAware(deps: Deps, container: string, tmuxSession: string, 
         // After a disconnect let devd restore the exact saved process first.
         // Creating a default agent here would race server cold recovery.
         const dialCfg = alt && argv.includes(alt.sshHost!) ? alt : deps.cfg;
-        return runInteractive(buildExecArgv(dialCfg, container,
+        return runAttach(buildExecArgv(dialCfg, container,
           withSessionName(tmuxCommand(tmuxSession, grokSupport, existingOnly || connectionAttempt++ > 0), name)));
       },
+      status,
       retryRemoteErrors: true,
       resetTerminal: () => { if (process.stdout.isTTY) process.stdout.write(TERMINAL_RESET); },
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
