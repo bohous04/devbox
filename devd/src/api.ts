@@ -378,7 +378,11 @@ export function createApp(d: ApiDeps): Hono {
           job.status = err instanceof CodexSessionAccountError ? err.status : 502;
           job.body = { error: err instanceof CodexSessionAccountError ? err.message : codexSwitchFailed };
         },
-      ).finally(() => { job.running = false; });
+      ).finally(() => {
+        job.running = false;
+        // A result nobody comes back for (tab closed, session ended) expires instead of living forever.
+        setTimeout(() => { if (codexSwitches.get(id) === job) codexSwitches.delete(id); }, 3_600_000).unref?.();
+      });
       let timer: ReturnType<typeof setTimeout> | undefined;
       const finished = await Promise.race([work.then(() => true),
         new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), d.codexSwitchWaitMs ?? 60_000); })]);

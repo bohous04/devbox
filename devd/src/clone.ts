@@ -49,7 +49,9 @@ export class CloneQueue {
     if (this.jobs.has(id)) return this.jobs.get(id)!;
     const row = this.d.db.query(`SELECT * FROM clone_jobs WHERE id=?`).get(id) as
       { id: string; scope: string; status: string; total: number; done: number; results: string } | null;
-    return row ? { ...row, status: row.status as CloneJob["status"], results: JSON.parse(row.results) } : null;
+    if (!row) return null;
+    const { id: rowId, scope, total, done } = row;
+    return { id: rowId, scope, status: row.status as CloneJob["status"], total, done, results: JSON.parse(row.results) };
   }
 
   wait(id: string): Promise<void> { return this.runs.get(id) ?? Promise.resolve(); }
@@ -72,10 +74,9 @@ export class CloneQueue {
           id, scope: JSON.stringify(scope), status: "error", total: 0, done: 0,
           results: [{ repo: "(disk)", ok: false, error: "not enough disk space" }],
         };
-        this.jobs.set(id, job);
+        // Finished on the spot: persisted only, get() reads it back from SQLite.
         persist(this.d.db, job);
         this.d.onDone?.(job);
-        this.runs.set(id, Promise.resolve());
         return id;
       }
     }
@@ -86,7 +87,10 @@ export class CloneQueue {
     const job: CloneJob = { id, scope: JSON.stringify(scope), status: "running", total: targets.length, done: 0, results: [] };
     this.jobs.set(id, job);
     persist(this.d.db, job);
-    this.runs.set(id, this.run(job, targets).catch((e) => { console.error("clone run failed:", e); }));
+    // Memory holds only running jobs; once finished the final state is in SQLite and get()
+    // falls back to it — a long-running devd would otherwise keep every job forever.
+    this.runs.set(id, this.run(job, targets).catch((e) => { console.error("clone run failed:", e); })
+      .finally(() => { this.jobs.delete(id); this.runs.delete(id); }));
     return id;
   }
 

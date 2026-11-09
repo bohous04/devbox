@@ -29,14 +29,20 @@ interface TurnState { id: string; baseline: Promise<string | null>; task: string
  * one turn goes unchecked, which is the right side to err on: the critic must never
  * block work because of its own failure (fail-open).
  */
+const MAX_TURNS = 256;
+
 export function createCriticGate(d: CriticDeps) {
   const turns = new Map<string, TurnState>();
   const now = () => d.now?.() ?? Date.now();
   const uuid = () => d.uuid?.() ?? crypto.randomUUID();
 
   function onPrompt(s: SessionRow, task: string): void {
-    if (s.critic !== 1) { turns.delete(s.id); return; }
+    turns.delete(s.id); // re-insert so Map order = least recently prompted first
+    if (s.critic !== 1) return;
     turns.set(s.id, { id: uuid(), baseline: safeHead(s), task: task.slice(0, 4000), rounds: 0 });
+    // Ended sessions are never told apart here; a size cap keeps them from piling up.
+    // Evicting a long-idle session only means its next stop passes unreviewed (fail-open).
+    for (const id of turns.keys()) { if (turns.size <= MAX_TURNS) break; turns.delete(id); }
   }
 
   function safeHead(s: SessionRow): Promise<string | null> {
