@@ -620,11 +620,12 @@ const critic = createCriticGate({
 
 // codexAuth: docker CLI via the host socket (async so it does not block the event loop), short sleep for log-poll.
 const codexAuth: CodexAuthDeps = {
+  // Through proc.run with a hard cap: the usage pollers/harvesters share this runner behind
+  // single-flight flags, so one hung `docker run` would otherwise stop them for the rest of
+  // devd's life. LOCAL (300 s), not DOCKER_LIFECYCLE — harvest reads of big volumes take a while.
   run: async (cmd, input) => {
-    const p = Bun.spawn(["docker", ...cmd], { stdout: "pipe", stderr: "pipe", stdin: input !== undefined ? "pipe" : "ignore" });
-    if (input !== undefined && p.stdin) { p.stdin.write(input); p.stdin.end(); }
-    const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
-    return { code: code ?? 1, stdout, stderr };
+    const r = await run(["docker", ...cmd], { timeoutMs: timeoutFor("LOCAL"), stdin: input });
+    return { code: r.code, stdout: r.stdout, stderr: r.stderr };
   },
   sleep: (ms) => Bun.sleep(ms),
   image: env("DEVD_IMAGE", "devbox:latest"),
@@ -902,10 +903,10 @@ const apiDeps: ApiDeps = {
   prodCatalog, prodDbAccess, readProdSecret, execProdWrite,
   previewHost: process.env.DEVD_BIND_IP,
   tmuxProbe: createTmuxProbe(),
+  // runDocker drains the pipes while the child runs (no 64 KB pipe deadlock) and kills it at the cap.
   tmuxExec: async (container, cmd) => {
-    const p = Bun.spawn([...dockerArgv(container), "exec", container, "bash", "-lc", cmd], { stdout: "pipe", stderr: "ignore" });
-    const code = await p.exited;
-    return { code, stdout: await new Response(p.stdout).text() };
+    const r = await runDocker(container, ["exec", container, "bash", "-lc", cmd], { timeoutMs: timeoutFor("DOCKER_QUERY") });
+    return { code: r.code, stdout: r.stdout };
   },
   agentUpkeep,
   ccUpkeep: { status: () => ccStatusCache.get(), run: ccUpkeepRun },
