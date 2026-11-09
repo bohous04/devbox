@@ -5,6 +5,9 @@
 // (8 bytes with a magic number), or StartupMessage with key/value pairs.
 const SSL_REQUEST = 80877103;
 const HEADER = 8;   // length (4) + protocol version or magic number (4)
+// Same cap as Postgres itself (MAX_STARTUP_PACKET_LENGTH): without it a client could announce
+// a 2 GB length and make the proxy buffer everything it sends.
+export const MAX_STARTUP = 10_000;
 
 export type Startup =
   | { ok: true; user: string; database: string }
@@ -14,7 +17,8 @@ export function parseStartup(buf: Buffer): Startup {
   if (buf.length < HEADER) return { ok: false, reason: "incomplete" };
   const len = buf.readInt32BE(0);
   if (buf.readInt32BE(4) === SSL_REQUEST) return { ok: false, reason: "ssl-request" };
-  if (len < HEADER || buf.length < len) return { ok: false, reason: "incomplete" };
+  if (len < HEADER || len > MAX_STARTUP) return { ok: false, reason: "bad" };
+  if (buf.length < len) return { ok: false, reason: "incomplete" };
 
   const parts = buf.subarray(HEADER, len).toString("utf8").split("\0");
   const kv: Record<string, string> = {};

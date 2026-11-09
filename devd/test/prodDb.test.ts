@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -70,6 +70,15 @@ test("grantAccess: writes the entitlement to disk; a missing file is not an erro
   expect(readAccessFile(path)).toEqual({ p: { read: ["eshop"] } });
   grantAccess(path, "p", "eshop", true);                     // the second call only adds write
   expect(readAccessFile(path)).toEqual({ p: { read: ["eshop"], write: ["eshop"] } });
+});
+
+test("grantAccess: replaces the file atomically, keeps its mode and leaves no temp files", () => {
+  const dir = mkdtempSync(join(tmpdir(), "acc-"));
+  const path = join(dir, "access.json");
+  writeFileSync(path, "{}\n", { mode: 0o640 });
+  grantAccess(path, "p", "eshop", false);
+  expect(statSync(path).mode & 0o777).toBe(0o640);
+  expect(readdirSync(dir)).toEqual(["access.json"]);
 });
 
 test("reloadCatalog: the in-memory catalog takes over the file contents, the reference stays", () => {

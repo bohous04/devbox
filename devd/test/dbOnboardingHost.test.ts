@@ -339,3 +339,9 @@ test("admin steps share one SSH connection so rate-limited targets see a single 
   expect(sshSteps(f).every(c => c.cmd.includes(sock) && c.cmd.includes("ControlMaster=no"))).toBe(true);
   expect(f.calls.filter(c => c.cmd.includes("-O") && c.cmd.includes("check"))).toHaveLength(1);
 });
+
+test("concurrent admin steps start one shared SSH master, not one each", async () => {
+  const f = harness(), p = plan();
+  expect(await Promise.all([f.host.preflight(p), f.host.preflight(p)])).toEqual([[], []]);
+  expect(f.calls.filter(c => c.cmd[0] === "ssh" && c.cmd.includes("-M"))).toHaveLength(1);
+});

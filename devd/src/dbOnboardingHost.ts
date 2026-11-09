@@ -218,26 +218,47 @@ export function createDbOnboardingHost(d: HostDeps): DbOnboardingHost {
   // Targets rate-limit new SSH connections (ufw LIMIT: 6 per 30 s). One setup
   // runs several admin steps and preflight repeats before execution, so every
   // admin step shares one authenticated connection that idles out on its own.
-  const masters = new Map<string, { dir: string; sock: string }>();
-  async function adminConnection(plan: Pick<OnboardingPlan, "server">, path: string, adminUser: string): Promise<string | undefined> {
-    const key = `${adminUser}@${plan.server.host}:${plan.server.port}`;
-    const known = masters.get(key);
-    if (known) {
-      const alive = await run(["ssh", "-F", "/dev/null", "-S", known.sock, "-O", "check", "-p", String(plan.server.port), `${adminUser}@${plan.server.host}`], { timeoutMs: 5_000 });
-      if (!alive.code && !alive.timedOut) return known.sock;
-      masters.delete(key); rmSync(known.dir, { recursive: true, force: true });
-    }
-    const dir = mkdtempSync(join(tmpdir(), "devd-db-ssh-")), sock = join(dir, "control");
-    const started = await run([...sshArgs(plan, path, true, adminUser), "-M", "-S", sock, "-f", "-N", "-o", "ControlPersist=60"], { timeoutMs: 20_000 });
-    // Without a master each step still works, just with its own connection.
-    if (started.code || started.timedOut) { rmSync(dir, { recursive: true, force: true }); return undefined; }
-    masters.set(key, { dir, sock });
-    return sock;
+  const masters = new Map<string, { dir: string; sock: string; reap?: ReturnType<typeof setTimeout> }>();
+  // Concurrent preflight/inspect would otherwise both start a master and the map would forget
+  // one of them (and its temp dir).
+  const masterSerial = createSerial();
+  // A master exits ControlPersist (60 s) after its last client; a step runs at most 90 s. Past
+  // that window the master is surely gone, so its temp dir and map entry would only linger.
+  const MASTER_REAP_MS = 180_000;
+  const dropMaster = (key: string) => {
+    const m = masters.get(key);
+    if (!m) return;
+    clearTimeout(m.reap); masters.delete(key); rmSync(m.dir, { recursive: true, force: true });
+  };
+  const scheduleReap = (key: string) => {
+    const m = masters.get(key)!;
+    clearTimeout(m.reap);
+    m.reap = setTimeout(() => dropMaster(key), MASTER_REAP_MS);
+    m.reap.unref?.();
+  };
+  function adminConnection(plan: Pick<OnboardingPlan, "server">, path: string, adminUser: string, keyId: string): Promise<string | undefined> {
+    // The key id is part of the identity: a master authenticated with another admin key must not be reused.
+    const key = `${keyId}:${adminUser}@${plan.server.host}:${plan.server.port}`;
+    return masterSerial.run(key, async () => {
+      const known = masters.get(key);
+      if (known) {
+        const alive = await run(["ssh", "-F", "/dev/null", "-S", known.sock, "-O", "check", "-p", String(plan.server.port), `${adminUser}@${plan.server.host}`], { timeoutMs: 5_000 });
+        if (!alive.code && !alive.timedOut) { scheduleReap(key); return known.sock; }
+        dropMaster(key);
+      }
+      const dir = mkdtempSync(join(tmpdir(), "devd-db-ssh-")), sock = join(dir, "control");
+      const started = await run([...sshArgs(plan, path, true, adminUser), "-M", "-S", sock, "-f", "-N", "-o", "ControlPersist=60"], { timeoutMs: 20_000 });
+      // Without a master each step still works, just with its own connection.
+      if (started.code || started.timedOut) { rmSync(dir, { recursive: true, force: true }); return undefined; }
+      masters.set(key, { dir, sock });
+      scheduleReap(key);
+      return sock;
+    });
   }
   async function remote(plan: Pick<OnboardingPlan, "server">, item: Item, script: string): Promise<string> {
     return withKey(item, async path => {
       const adminUser = item.sshUser ?? plan.server.adminUser ?? "root";
-      const sock = await adminConnection(plan, path, adminUser);
+      const sock = await adminConnection(plan, path, adminUser, item.id);
       const r = await run([...sshArgs(plan, path, true, adminUser), ...(sock ? ["-S", sock, "-o", "ControlMaster=no"] : []), adminUser !== "root" ? 'sudo -n env DEVD_SSH_CONNECTION="$SSH_CONNECTION" bash -s' : "bash -s"], { stdin: script, timeoutMs: 90_000 });
       if (r.code || r.timedOut) {
         const known = r.stdout.match(/^BLOCK:([a-z_]+)$/m)?.[1] ?? r.stderr.match(/devd (role_conflict|ddl_owner)/)?.[1];

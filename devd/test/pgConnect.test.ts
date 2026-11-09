@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { scramFinal } from "../src/pgAuth";
 import { createPgConnect, splitMessages } from "../src/pgConnect";
 
 function msg(type: string, body: string): Buffer {
@@ -49,11 +50,71 @@ async function until(cond: () => boolean, ms = 2000): Promise<void> {
   while (!cond() && Date.now() - t0 < ms) await Bun.sleep(10);
 }
 
+function authCode(code: number, rest = ""): Buffer {
+  const b = Buffer.alloc(4); b.writeInt32BE(code, 0);
+  return msg("R", b.toString("latin1") + rest);
+}
+
+/** Fake Postgres doing a real SCRAM exchange with `password`; after the client's proof it sends
+ *  SASLFinal (with `signature`, default = the correct one) followed by `afterAuth` in ONE chunk. */
+function scramServer(password: string, afterAuth: Buffer, signature?: string) {
+  return Bun.listen<{ step: number; sig: string }>({
+    hostname: "127.0.0.1", port: 0,
+    socket: {
+      open(s) { s.data = { step: 0, sig: "" }; },
+      data(s, chunk) {
+        if (s.data.step === 0) { s.write(authCode(10, "SCRAM-SHA-256\0\0")); s.data.step = 1; return; }
+        if (s.data.step === 1) {
+          const b = Buffer.from(chunk);
+          const mechEnd = b.indexOf(0, 5);
+          const n = b.readInt32BE(mechEnd + 1);
+          const clientNonce = b.subarray(mechEnd + 5, mechEnd + 5 + n).toString("utf8").split("r=")[1]!;
+          const serverFirst = `r=${clientNonce}srv,s=${Buffer.from("salt").toString("base64")},i=4096`;
+          s.data.sig = signature ?? scramFinal(password, clientNonce, serverFirst).serverSignature;
+          s.write(authCode(11, serverFirst)); s.data.step = 2; return;
+        }
+        s.write(Buffer.concat([authCode(12, `v=${s.data.sig}`), afterAuth]));
+        s.data.step = 3;
+      },
+    },
+  });
+}
+
+test("splitMessages rejects an impossible length instead of looping forever", () => {
+  const bad = Buffer.from([82, 0xff, 0xff, 0xff, 0xff, 0]);
+  expect(() => splitMessages(bad)).toThrow("invalid pg frame");
+  expect(() => splitMessages(Buffer.from([82, 0, 0, 0, 2, 0]))).toThrow("invalid pg frame");
+});
+
+test("AuthenticationOk without a verified SCRAM exchange closes instead of relaying", async () => {
+  const srv = fakeServer(Buffer.concat([authOk(), msg("Z", "I")]));
+  const got: Buffer[] = [];
+  let ended = false;
+  try {
+    await createPgConnect()(target(srv.port), "pw", (b) => got.push(Buffer.from(b)), () => { ended = true; });
+    await until(() => ended);
+    expect(ended).toBe(true);
+    expect(got.length).toBe(0);
+  } finally { srv.stop(true); }
+});
+
+test("a wrong server signature closes the connection", async () => {
+  const srv = scramServer("pw", Buffer.concat([authOk(), msg("Z", "I")]), "Zm9yZ2Vk");
+  const got: Buffer[] = [];
+  let ended = false;
+  try {
+    await createPgConnect()(target(srv.port), "pw", (b) => got.push(Buffer.from(b)), () => { ended = true; });
+    await until(() => ended);
+    expect(ended).toBe(true);
+    expect(got.length).toBe(0);
+  } finally { srv.stop(true); }
+});
+
 // Live on 2026-09-05: the server sends AuthenticationOk + ParameterStatus + BackendKeyData +
 // ReadyForQuery in ONE chunk; the proxy forwarded only AuthenticationOk and swallowed
 // the rest → psql in the container waited for ReadyForQuery forever.
 test("messages after AuthenticationOk in the same chunk reach the client (ReadyForQuery)", async () => {
-  const srv = fakeServer(Buffer.concat([authOk(), msg("S", "server_version\0" + "16\0"), msg("Z", "I")]));
+  const srv = scramServer("pw", Buffer.concat([authOk(), msg("S", "server_version\0" + "16\0"), msg("Z", "I")]));
   const got: Buffer[] = [];
   try {
     await createPgConnect()(target(srv.port), "pw", (b) => got.push(Buffer.from(b)));

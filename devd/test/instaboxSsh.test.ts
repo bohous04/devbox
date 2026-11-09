@@ -13,7 +13,7 @@ test("needsRefresh: < 2 h or unknown", () => {
 });
 
 test("hostBlock contains the cert, known_hosts and ControlMaster", () => {
-  const b = hostBlock("ibx-m_1", { host: "api.instabox.sh", port: 2222, username: "m_1" }, "/d");
+  const b = hostBlock("ibx-m_1", { host: "api.instabox.sh", port: 2222, username: "m_1" }, "/d", "/d/m_1-cert.pub");
   expect(b).toContain("Host ibx-m_1\n");
   expect(b).toContain("  HostName api.instabox.sh\n  Port 2222\n  User m_1\n");
   expect(b).toContain("  IdentityFile /d/id_ed25519\n");
@@ -42,6 +42,17 @@ test("ensure creates the key, cert, host block, known_hosts and include; a secon
   expect(fake.calls.filter((c) => c.startsWith("sshCredentials")).length).toBe(1);
   await ssh.ensure("m_1", true); // forced renewal (runDocker after Permission denied)
   expect(fake.calls.filter((c) => c.startsWith("sshCredentials")).length).toBe(2);
+});
+
+test("the host block points at the cert stored under the machine id, even when the SSH user differs", async () => {
+  const { dir, fake, ssh } = fresh();
+  const orig = fake.sshCredentials.bind(fake);
+  fake.sshCredentials = async (id: string) => ({ ...(await orig(id)), username: "sandbox" });
+  await ssh.ensure("m_1");
+  const conf = readFileSync(join(dir, "hosts", "m_1.conf"), "utf8");
+  expect(conf).toContain("  User sandbox\n");
+  expect(conf).toContain(`  CertificateFile ${join(dir, "m_1-cert.pub")}\n`);
+  expect(existsSync(join(dir, "m_1-cert.pub"))).toBe(true);
 });
 
 test("a second machine does not overwrite the first one's block; forget deletes only its own", async () => {
