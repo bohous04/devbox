@@ -346,7 +346,10 @@ final class AppModel: ObservableObject {
         guard Self.isConfigured(endpoints) else {
             return .failure(DevdClientError(description: "No network path configured"))
         }
-        return await health(via: DevdClient(endpoints: endpoints, session: Self.makeSession()))
+        // Throwaway session — invalidated after the probe so test runs do not accumulate live sessions.
+        let session = Self.makeSession()
+        defer { session.finishTasksAndInvalidate() }
+        return await health(via: DevdClient(endpoints: endpoints, session: session))
     }
 
     private func health(via client: DevdClient) async -> Result<String, Error> {

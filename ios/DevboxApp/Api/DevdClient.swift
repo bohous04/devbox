@@ -151,10 +151,25 @@ actor DevdClient {
             // User-visible (Settings renders it) — must be in English.
             throw DevdClientError(description: "No network path configured")
         }
-        let httpURL = URL(string: path, relativeTo: base)!.absoluteURL
-        var components = URLComponents(url: httpURL, resolvingAgainstBaseURL: false)!
+        let httpURL = try Self.resolve(path, against: base)
+        guard var components = URLComponents(url: httpURL, resolvingAgainstBaseURL: false) else {
+            throw DevdClientError(description: "Invalid URL: \(path)")
+        }
         components.scheme = components.scheme == "https" ? "wss" : "ws"
-        return components.url!
+        guard let url = components.url else {
+            throw DevdClientError(description: "Invalid URL: \(path)")
+        }
+        return url
+    }
+
+    /// `URL(string:relativeTo:)` returns nil for a path with characters that are not valid in a URL (e.g. an
+    /// unexpected session id) — an error instead of a force-unwrap that would crash the whole app.
+    private static func resolve(_ path: String, against base: URL) throws -> URL {
+        guard let url = URL(string: path, relativeTo: base) else {
+            // User-visible — must be in English.
+            throw DevdClientError(description: "Invalid URL: \(path)")
+        }
+        return url.absoluteURL
     }
 
     /// Handshake request for `URLSessionWebSocketTask(with:)` over the active path — same URL as
@@ -247,7 +262,7 @@ actor DevdClient {
             // User-visible (Settings renders it) — must be in English.
             throw DevdClientError(description: "\(label(path)) not configured", underlying: [])
         }
-        var urlRequest = URLRequest(url: URL(string: urlPath, relativeTo: base)!.absoluteURL)
+        var urlRequest = URLRequest(url: try Self.resolve(urlPath, against: base))
         urlRequest.httpMethod = method
         if urlPath.hasPrefix("/api/live-activities/") {
             // Live Activity token registration/unregistration is idempotent and must not delay a
