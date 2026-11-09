@@ -58,7 +58,7 @@ export function tmuxCmd(name: string, target: string): string {
 // Linux). The host (devd under Bun) only pipes frames through `docker exec -i` (no -t, so
 // no host TTY needed; node-pty does not work under Bun). Independent of the host OS.
 export const realSpawnPty: SpawnPty = (container, name, target, cols, rows) => {
-  type Sink = { write: (u: Uint8Array) => void; flush?: () => void };
+  type Sink = { write: (u: Uint8Array) => void; flush?: () => void; end?: () => void };
   // ref objects (not `let`) for narrowing in the nested closure; onData is set later
   const out: { cb: ((d: string) => void) | null; pending: string } = { cb: null, pending: "" };
   const exitCbs: (() => void)[] = [];
@@ -86,13 +86,20 @@ export const realSpawnPty: SpawnPty = (container, name, target, cols, rows) => {
       const dec = new TextDecoder();
       try {
         for await (const chunk of proc.stdout as unknown as AsyncIterable<Uint8Array>) {
-          const s = dec.decode(chunk);
+          // stream: a multi-byte char (Czech letters, tmux borders, spinners) split across two
+          // pipe chunks must not turn into two U+FFFD.
+          const s = dec.decode(chunk, { stream: true });
           if (out.cb) out.cb(s); else out.pending += s;
         }
       } catch { /* stream closed */ }
     })();
     proc.exited.then(() => { for (const cb of exitCbs) cb(); });
-    killer = () => { try { proc.kill(); } catch { /* already exited */ } };
+    // Close stdin first: EOF is what tells devbox-pty in the container to tear down its child
+    // (killing the local `docker exec` client alone may not propagate, notably over ssh://).
+    killer = () => {
+      try { sink?.end?.(); } catch { /* already closed */ }
+      try { proc.kill(); } catch { /* already exited */ }
+    };
   }).catch((e) => {
     // This `.catch` is NOT part of the chain on `ensureDevboxPty` above (that one
     // covers only its own error) — it is attached AFTER `.then()`, so it
