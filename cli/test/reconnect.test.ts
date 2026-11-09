@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { attachLoop, backoffMs, dialFor, retryDecision, TERMINAL_RESET } from "../src/reconnect";
+import { attachLoop, backoffMs, dialFor, MAX_MISSING_SESSION, retryDecision, TERMINAL_RESET } from "../src/reconnect";
 
 test("cold recovery retries missing Docker/tmux while desired session is running", async () => {
   const codes = [137, 143, 125, 44, 1, 0];
@@ -7,6 +7,15 @@ test("cold recovery retries missing Docker/tmux while desired session is running
   expect(await attachLoop({ argv: [], label: "exact", retryRemoteErrors: true,
     run: async () => codes.shift()!, health: async () => "running", sleep: async () => { retries++; }, out: () => {} })).toBe(0);
   expect(retries).toBe(5);
+});
+
+test("a tmux session that never comes back (exit 44) ends the loop instead of retrying forever", async () => {
+  let calls = 0;
+  const lines: string[] = [];
+  expect(await attachLoop({ argv: [], label: "exact", retryRemoteErrors: true,
+    run: async () => { calls++; return 44; }, health: async () => "running", sleep: async () => {}, out: (l) => lines.push(l) })).toBe(44);
+  expect(calls).toBe(MAX_MISSING_SESSION);
+  expect(lines.at(-1)).toContain("giving up");
 });
 
 test("cold recovery does not resurrect deliberately stopped container", async () => {
