@@ -22,7 +22,7 @@ import { getOperation, listOperations, proposeOperation, setOperationStatus } fr
 import type { Database } from "bun:sqlite";
 import { createBridge, terminalGuard, terminalTarget, type Bridge, type SpawnPty } from "./terminal";
 import { execInContainer } from "./docker";
-import { createReadStream, openSync, rmSync, statSync } from "node:fs";
+import { createReadStream, mkdtempSync, openSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { Readable } from "node:stream";
 import { liveActivitiesRoutes, type LiveActivities } from "./liveActivities";
 import { AGENT_EVENTS, type AgentEvent, type AgentEventHub, type HookMeta, type NotifyFn } from "./agentEvents";
@@ -49,6 +49,7 @@ import { validCron } from "./cron";
 import { memoAsync } from "./cache";
 import { GithubError, listOwners, listRepos, validOwner, type GithubOwner, type GithubRepo } from "./github";
 import { GiteaAuthError, GiteaError, GiteaUnknownInstanceError, type GiteaApi } from "./gitea";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readUpload, UploadError } from "./uploads";
 import { stageFile, stageShared } from "./inbox";
@@ -2404,19 +2405,25 @@ export function createApp(d: ApiDeps): Hono {
   });
   app.post("/api/restore", async (c) => {
     noIdleTimeout(c);
+    // Cheap early refusal: do not pull a multi-GB upload into RAM just to answer 409.
+    if (backupRunning) return c.json({ error: "backup is already running", inProgress: "backup" }, 409);
     // Reading the body BEFORE the flag: a failed/interrupted read (connection dropped in the middle
     // of the upload) must not set the flag at all, otherwise it would stay up forever —
-    // hence no `await` between `backupRunning = true` and the `try` below.
+    // hence no `await` between `backupRunning = true` and the `try` below. Checked again
+    // after the read, because another backup/restore may have started meanwhile.
     const buf = new Uint8Array(await c.req.arrayBuffer());
     if (backupRunning) return c.json({ error: "backup is already running", inProgress: "backup" }, 409);
     backupRunning = true;
-    const tmp = `/tmp/devd-restore-${buf.length}.tgz`;
+    // The archive holds secrets.json and the DB: private dir with an unpredictable name, file 0600.
+    let dir: string | undefined;
     try {
-      await Bun.write(tmp, buf);
+      dir = mkdtempSync(join(tmpdir(), "devd-restore-"));
+      const tmp = join(dir, "restore.tgz");
+      writeFileSync(tmp, buf, { mode: 0o600 });
       await d.backup.restore(tmp);
       return c.json({ ok: true });
     } catch (e) { return c.json({ error: (e as Error).message }, 500); }
-    finally { rmSync(tmp, { force: true }); backupRunning = false; }
+    finally { if (dir) rmSync(dir, { recursive: true, force: true }); backupRunning = false; }
   });
 
   // Pool of Anthropic accounts. Lease returns ONLY the profile name — no endpoint returns a token.
