@@ -595,7 +595,7 @@ export const api = {
     j<{ ok: true }>(`/api/prod-db/requests/${id}/reject`, { method: "POST" }),
   operations: () => j<OpRow[]>("/api/operations"),
   approveOperation: (id: number) => j<{ status: string; result: string }>(`/api/operations/${id}/approve`, { method: "POST" }),
-  rejectOperation: (id: number) => fetch(`/api/operations/${id}/reject`, { method: "POST" }).then(() => undefined),
+  rejectOperation: (id: number) => j<void>(`/api/operations/${id}/reject`, { method: "POST" }),
   vault: () => j<VaultStatus>("/api/vault"),
   unlockVault: (passphrase: string) => j<VaultStatus>("/api/vault/unlock", post({ passphrase })),
   sshKeys: () => j<{ keys: SshKey[] }>("/api/op/ssh-keys"),

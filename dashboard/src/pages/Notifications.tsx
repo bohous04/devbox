@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type NotifyDecision, type NotifyLogRow, type NotifyVerdict } from "../api";
 import { ActionButton, AppPage, EmptyState, Section } from "../components/primitives";
 import { Button } from "@/components/ui/button";
@@ -42,19 +42,24 @@ export function Notifications() {
   const [notes, setNotes] = useState<Record<number, string>>({});
   const [err, setErr] = useState<string | null>(null);
   const now = useNow(10_000);
+  // Only the newest request may write — a slow response for a previous filter must not overwrite the current one.
+  const seq = useRef(0);
 
   async function load(f: Filter = filter) {
+    const mine = ++seq.current;
     try {
       // "Only sent" filters on the server (decision=sent), not over the last 300 rows
       // of all decisions — on the live devbox sent/sweep_done is rare compared to subagent_start
       // /stop noise and a client-side filter could show nothing even when sent exists.
-      setRows(await api.notifyLog({
+      const r = await api.notifyLog({
         limit: 300,
         verdict: f === "flagged" ? "flagged" : undefined,
         decision: f === "sent" ? "sent" : undefined,
-      }));
+      });
+      if (mine !== seq.current) return;
+      setRows(r);
       setErr(null);
-    } catch (e) { setErr((e as Error).message); }
+    } catch (e) { if (mine === seq.current) setErr((e as Error).message); }
   }
   useEffect(() => { load(filter); }, [filter]);
 

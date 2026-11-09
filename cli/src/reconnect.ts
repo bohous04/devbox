@@ -25,6 +25,11 @@ export function backoffMs(attempt: number): number {
 // of attempts in the message.
 const ATTACHED_RESET_MS = 30000;
 
+// Exit 44 = the container runs but the tmux session is missing (existingOnly attach). Retrying it
+// waits for devd's cold recovery to recreate the session; if it never does (the session simply
+// ended), give up after this many consecutive misses (~2 min with backoff) instead of looping forever.
+export const MAX_MISSING_SESSION = 12;
+
 // Alternating network paths between attempts. The public IP and the tailnet are INDEPENDENT routes to the same
 // server: on 2026-07-25 the mac's IPv4 path to the VPS stopped working (~4 min), while Tailscale
 // between the same machines kept working over IPv6 — yet the loop kept dialing the dead public
@@ -95,6 +100,7 @@ export async function attachLoop(deps: AttachLoopDeps): Promise<number> {
   let attempt = 0;
   let offlineSince: number | null = null;
   let lastError: string | undefined;
+  let missing = 0;
   for (;;) {
     if (status && offlineSince !== null) {
       status({ label: deps.label, phase: "connecting", attempt, secondsLeft: 0, via: via(attempt), lastError, offlineSince });
@@ -105,12 +111,18 @@ export async function attachLoop(deps: AttachLoopDeps): Promise<number> {
     const ended = now();
     const attachedMs = ended - started;
     const decision = retryDecision(code);
+    missing = code === 44 ? missing + 1 : 0;
     if (decision === "done") { status?.(null); return 0; }
     deps.resetTerminal?.();   // every other outcome may have left tmux's modes on
     if (decision === "exit-menu") { status?.(null); return 42; }
     if (decision === "error" && !(deps.retryRemoteErrors && [1, 44, 125, 126, 137, 143].includes(code))) {
       status?.(null);
       out(`Connection failed (code ${code}) — container is probably not running. Try \`dev\`.${error ? `\n  ${error}` : ""}`);
+      return code;
+    }
+    if (missing >= MAX_MISSING_SESSION) {
+      status?.(null);
+      out(`Session ${deps.label} has no tmux session to attach to — giving up. Try \`dev\`.`);
       return code;
     }
     // "retry": tell a dropped network from a stopped container

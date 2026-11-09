@@ -7,7 +7,8 @@ set -euo pipefail
 LIMIT="${DEVBOX_SESSION_MEMORY:-15g}"
 SWAP_LIMIT="${DEVBOX_SESSION_MEMORY_SWAP:-35g}"   # RAM + swap, see SESSION_MEMORY_SWAP_LIMIT
 
-docker ps -a --format '{{.Names}}' | grep -E '^(dev-|dind-dev-)' | while read -r name; do
+# `|| true`: no session containers makes grep exit 1, which pipefail would turn into a failed unit.
+docker ps -a --format '{{.Names}}' | { grep -E '^(dev-|dind-dev-)' || true; } | while read -r name; do
   mem="$(docker inspect -f '{{.HostConfig.Memory}}' "$name" 2>/dev/null)" || continue
   [ "$mem" = "0" ] || continue
   if docker update --memory "$LIMIT" --memory-swap "$SWAP_LIMIT" "$name" >/dev/null; then

@@ -16,7 +16,7 @@ import { clearScreen, endEffect, fitLine, formatDoctor, formatOpenProgress, form
 import { runLocal } from "./local";
 import { promptName, sessionManager } from "./manager";
 import { agentSwitchSummary, exitMenuOptions, type ExitAction } from "./manager-view";
-import { agentFlag, agentOptions, folderOptions, freshLabel, gistOutcome, hostFlag, NEW_SOLO, projectOptions, repoOptions, runningSolosIn, shouldAskAgent, soloActionOptions, soloMenuOptions, stripAgentFlags, stripHostFlags } from "./picker";
+import { agentFlag, agentOptions, folderOptions, freshLabel, gistOutcome, gistScript, hostFlag, NEW_SOLO, projectOptions, repoOptions, runningSolosIn, shouldAskAgent, soloActionOptions, soloMenuOptions, stripAgentFlags, stripHostFlags } from "./picker";
 import type { IbxStatus } from "../../devd/src/instabox/reconcile";
 import type { BaseStep } from "../../devd/src/instabox/base";
 import { attachLoop, createStatusPanel, type RetryStatus, TERMINAL_RESET } from "./reconnect";
@@ -739,8 +739,7 @@ export async function endSoloInteractive(deps: Deps, s: SessionInfo): Promise<nu
   const action = await selectVal<"delete" | "keep" | "gist">("End claudeSolo:", options);
   if (action === undefined) return cancelled();
   if (action === "gist") {
-    const r = sh(process.cwd(), ...buildExecArgv(deps.cfg, s.container,
-      'cd /workspace && gh gist create -d "claudeSolo" $(git ls-files --cached --others --exclude-standard | head -20)', false));
+    const r = sh(process.cwd(), ...buildExecArgv(deps.cfg, s.container, gistScript(), false));
     const outcome = gistOutcome(r.code);
     if (outcome === "delete") {
       const out = (r.stdout + r.stderr).trim();

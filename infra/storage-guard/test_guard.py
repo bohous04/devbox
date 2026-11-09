@@ -55,6 +55,23 @@ class Safety(unittest.TestCase):
         with patch.dict(os.environ, {**env, 'DEVBOX_STORAGE_GUARD': '1'}, clear=True), patch.object(client, 'STATE', Path('/nonexistent/state.json')):
             self.assertIsNotNone(client.preflight({}))
 
+    def test_collect_events_drops_unusable_records_and_writes_registry_once(self):
+        control=self.root/'control';events=control/'storage-events';events.mkdir(parents=True)
+        good=dict(kind='created',time=1.0,session='dev-a',path='/srv/x',purpose='t')
+        (events/'good.json').write_text(json.dumps(good))
+        (events/'other.json').write_text(json.dumps({**good,'session':'dev-b'}))  # not this session
+        (events/'nopath.json').write_text(json.dumps({**good,'path':None}))
+        (events/'broken.json').write_text('{not json')
+        (events/'notime.json').write_text(json.dumps({k:v for k,v in good.items() if k!='time'}))
+        writes=[]
+        real=guard.atomic
+        with patch.object(guard,'beneath',return_value=True), \
+             patch.object(guard,'atomic',side_effect=lambda *a,**k:(writes.append(a[0]),real(*a,**k))):
+            self.g.collect_events([dict(name='dev-a',control=str(control))])
+        self.assertEqual(list(events.iterdir()),[])
+        self.assertEqual(len(writes),1)
+        self.assertIn('dev-a:/srv/x',guard.read(self.g.state/'registry.json'))
+
     def test_bare_repo_worktree_globs_come_from_config(self):
         self.assertEqual(self.g.c.get('bare_repo_worktree_globs', []), [])
 

@@ -178,6 +178,7 @@ export function Folders() {
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState("");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const aliveRef = useRef(true);
 
   async function load() {
     setLoadErr(null);
@@ -189,7 +190,11 @@ export function Folders() {
       api.giteaInstances().then((r) => setGiteaInfo(r.instances)).catch(() => setGiteaInfo([]));
     } catch (e) { setLoadErr((e as Error).message); }
   }
-  useEffect(() => { load(); return () => { if (pollRef.current) clearInterval(pollRef.current); }; }, []);
+  useEffect(() => {
+    aliveRef.current = true;
+    load();
+    return () => { aliveRef.current = false; if (pollRef.current) clearInterval(pollRef.current); pollRef.current = null; };
+  }, []);
 
   const dirty = useMemo(() => draft !== null && JSON.stringify(draft.folders) !== baseline, [draft, baseline]);
   const issues = useMemo(() => (draft ? configIssues(draft) : []), [draft]);
@@ -225,7 +230,10 @@ export function Folders() {
   async function startClone(scope: CloneScope) {
     await saver.flush();
     const { jobId } = await api.clone(scope);
-    setJob(await api.job(jobId));
+    const first = await api.job(jobId);
+    // Left the page during the awaits above: the unmount cleanup already ran, so a new interval would leak.
+    if (!aliveRef.current) return;
+    setJob(first);
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(async () => {
       try {

@@ -618,13 +618,15 @@ export function Hardware() {
   const load = useCallback(async () => {
     try { setSnap(await api.hardware()); setError(null); }
     catch (e) { setError((e as Error).message); }
+    // Manual Refresh/Reboot calls load() too — keep "ago" labels from going negative against a fresh snapshot.
+    finally { setNow(Date.now()); }
   }, []);
 
   useEffect(() => {
     load();
     // The snapshot on the server refreshes on its own schedule (see INTERVALS in hardware.ts);
     // this is just a pull from the cache, so it can be frequent without load on SSH.
-    const h = setInterval(() => { load(); setNow(Date.now()); }, 20_000);
+    const h = setInterval(() => { load(); }, 20_000);
     return () => clearInterval(h);
   }, [load]);
 
