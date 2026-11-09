@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -92,7 +93,8 @@ export function attachLaunchConfig(sessionId: string): string {
  * try/on error closes the file handle, otherwise an open accessor would be left dangling. */
 export function clipboardPngScript(path: string): string {
   return [
-    `set f to open for access POSIX file "${path}" with write permission`,
+    // Escaped for the AppleScript string literal (TMPDIR could contain a quote or backslash).
+    `set f to open for access POSIX file "${path.replace(/[\\"]/g, "\\$&")}" with write permission`,
     "try",
     "  set eof f to 0",
     "  write (the clipboard as «class PNGf») to f",
@@ -219,7 +221,7 @@ export function realActions(
   const out = clip.out ?? defaultOut;
   const readFile = clip.readFile ?? ((p: string) => new Uint8Array(readFileSync(p)));
   const rm = clip.rm ?? ((p: string) => rmSync(p, { force: true }));
-  const tmpFile = clip.tmpFile ?? (() => join(tmpdir(), `devbox-clip-${process.pid}-${Date.now()}.png`));
+  const tmpFile = clip.tmpFile ?? (() => join(tmpdir(), `devbox-clip-${randomUUID()}.png`));
   // Resolved once at listener startup; after building the helper a restart is required.
   const clipBin = clip.bin !== undefined ? clip.bin : (existsSync(defaultClipreadBin()) ? defaultClipreadBin() : null);
   return {
