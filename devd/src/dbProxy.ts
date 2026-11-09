@@ -32,25 +32,34 @@ export interface RunningDbProxy { port: number; stop(): void }
 
 const SSL_NO = Buffer.from("N");   // response to SSLRequest: no TLS, the network never leaves the bridge
 
+// `data` is async (1P read + tunnel + SCRAM), so the socket goes through phases: further chunks
+// arriving while connecting must neither start a second upstream nor be lost, and a client that
+// disconnects mid-handshake must not leave the freshly opened upstream dangling.
+type Phase = "startup" | "connecting" | "relay" | "closed";
+interface ConnState { phase: Phase; buf: Buffer; pending: Uint8Array[]; upstream: Upstream | null }
+
 export async function startDbProxy(d: DbProxyDeps): Promise<RunningDbProxy> {
-  const server = Bun.listen<{ buf: Buffer; upstream: Upstream | null }>({
+  const server = Bun.listen<ConnState>({
     hostname: d.hostname,
     port: d.port,
     socket: {
-      open(socket) { socket.data = { buf: Buffer.alloc(0), upstream: null }; },
+      open(socket) { socket.data = { phase: "startup", buf: Buffer.alloc(0), pending: [], upstream: null }; },
 
       async data(socket, chunk) {
+        const st = socket.data;
         // Once established we only forward — the proxy does not see into query contents.
-        if (socket.data.upstream) { socket.data.upstream.write(chunk); return; }
+        if (st.phase === "relay") { st.upstream!.write(chunk); return; }
+        if (st.phase === "connecting") { st.pending.push(Buffer.from(chunk)); return; }
+        if (st.phase === "closed") return;
 
-        socket.data.buf = Buffer.concat([socket.data.buf, Buffer.from(chunk)]);
-        const start = parseStartup(socket.data.buf);
+        st.buf = Buffer.concat([st.buf, Buffer.from(chunk)]);
+        const start = parseStartup(st.buf);
 
         if (!start.ok) {
           if (start.reason === "incomplete") return;             // wait for the rest
           if (start.reason === "ssl-request") {                  // refuse TLS and wait for startup
             socket.write(SSL_NO);
-            socket.data.buf = Buffer.alloc(0);
+            st.buf = Buffer.alloc(0);
             return;
           }
           socket.end(); return;                                  // bad
@@ -60,21 +69,41 @@ export async function startDbProxy(d: DbProxyDeps): Promise<RunningDbProxy> {
         if (!target || target.entry.engine !== "postgres") { socket.end(); return; }                   // unknown dummy
         if (d.vault.isLocked()) { socket.end(); return; }        // locked vault
 
+        st.phase = "connecting";
+        // Bytes pipelined after the startup message belong to the relay, not to the handshake.
+        const rest = st.buf.subarray(st.buf.readInt32BE(0));
+        if (rest.length) st.pending.push(rest);
+        st.buf = Buffer.alloc(0);
+
         let password: string;
         try { password = await d.readSecret(target.entry.opItem); }
         catch { socket.end(); return; }                          // password unavailable
+        if (st.phase !== "connecting") return;                   // client left while reading the secret
 
         d.audit?.({ session: target.session, db: target.entry.name });
-        try { socket.data.upstream = await d.connect(target, password, (b) => socket.write(b), () => socket.end()); }
+        let upstream: Upstream;
+        try { upstream = await d.connect(target, password, (b) => socket.write(b), () => socket.end()); }
         catch { socket.end(); return; }                          // target unavailable
+        if (st.phase !== "connecting") { upstream.end(); return; } // client left during the handshake
+        st.upstream = upstream;
+        st.phase = "relay";
+        for (const b of st.pending.splice(0)) upstream.write(b);
       },
 
-      close(socket) { socket.data?.upstream?.end(); },
-      error(socket) { socket.data?.upstream?.end(); },
+      close(socket) { closeConn(socket.data); },
+      error(socket) { closeConn(socket.data); },
     },
   });
 
   return { port: server.port, stop: () => server.stop(true) };
+}
+
+function closeConn(st: ConnState | undefined) {
+  if (!st) return;
+  st.phase = "closed";
+  st.pending = [];
+  st.upstream?.end();
+  st.upstream = null;
 }
 
 export type { DbEntry };

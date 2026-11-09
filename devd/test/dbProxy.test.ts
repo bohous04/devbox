@@ -124,3 +124,48 @@ test("the audit records the session and the database, not the password", async (
   expect(JSON.stringify(seen)).not.toContain("SKUTECNE");
   p.stop();
 });
+
+test("a client that disconnects during the upstream handshake does not leak the upstream", async () => {
+  const targets = createDbTargets({ entries: () => [entry] });
+  const cred = targets.issue("dev-a-b", "shop");
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  let ended = 0;
+  const p = await startDbProxy({
+    port: 0, hostname: "127.0.0.1", targets, vault: openVault, readSecret: () => "SKUTECNE",
+    connect: async () => { await gate; return { write: () => {}, end: () => { ended++; } }; },
+  });
+  const s = await Bun.connect({ hostname: "127.0.0.1", port: p.port, socket: { data() {} } });
+  s.write(startupPacket(cred.user));
+  await Bun.sleep(100);
+  s.end();
+  await Bun.sleep(100);
+  release();
+  await Bun.sleep(100);
+  expect(ended).toBe(1);
+  p.stop();
+});
+
+test("chunks arriving while connecting open no second upstream and are relayed once ready", async () => {
+  const targets = createDbTargets({ entries: () => [entry] });
+  const cred = targets.issue("dev-a-b", "shop");
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  let connects = 0;
+  const written: number[] = [];
+  const p = await startDbProxy({
+    port: 0, hostname: "127.0.0.1", targets, vault: openVault, readSecret: () => "SKUTECNE",
+    connect: async () => { connects++; await gate; return { write: (b) => { written.push(...b); }, end: () => {} }; },
+  });
+  const s = await Bun.connect({ hostname: "127.0.0.1", port: p.port, socket: { data() {} } });
+  s.write(startupPacket(cred.user));
+  await Bun.sleep(100);
+  s.write(new Uint8Array([88, 0, 0, 0, 4]));
+  await Bun.sleep(100);
+  release();
+  await Bun.sleep(100);
+  expect(connects).toBe(1);
+  expect(written).toEqual([88, 0, 0, 0, 4]);
+  s.end();
+  p.stop();
+});
