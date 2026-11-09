@@ -93,9 +93,13 @@ export function createDbOnboarding(d: OnboardingDeps) {
         : status === "failed" ? "Inspect blocks, then resume the same approved operation."
         : "Resolve the listed blocks or prepare the target in Operations." };
   }
+  // Serialize per request instead of coalescing: dropping a concurrent op lost approve()'s
+  // run() behind an in-flight prepare (stuck in "executing" forever) and a user's prepare(raw).
+  // buildPlan and run are idempotent against already-finished work, so running after is safe.
   async function exclusive<T>(id: number, fn: () => Promise<T>): Promise<T> {
-    const existing = working.get(id); if (existing) { await existing; return view(id) as T; }
-    const promise = fn(); working.set(id, promise);
+    const prev = working.get(id);
+    const promise = (async () => { if (prev) await prev.catch(() => {}); return fn(); })();
+    working.set(id, promise);
     try { return await promise; } finally { if (working.get(id) === promise) working.delete(id); }
   }
   async function checks(plan: OnboardingPlan): Promise<Block[]> {
@@ -295,7 +299,9 @@ export function createDbOnboarding(d: OnboardingDeps) {
   }
   async function run(id: number): Promise<void> {
     await exclusive(id, async () => {
-      const current = view(id); if (!current?.plan || !current.operationId) throw new Error("No prepared operation");
+      const current = view(id);
+      if (current?.state === "ready") return; // a queued duplicate run after one that already finished
+      if (!current?.plan || !current.operationId) throw new Error("No prepared operation");
       const { plan, operationId } = current;
       const op = getOperation(d.db, operationId)!;
       if (!op || !["approved", "failed"].includes(op.status) || !op.decided_at) throw new Error("Operation has not been approved");
