@@ -180,6 +180,12 @@ private struct TerminalHostView: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(model: model) }
 
+    /// The screen is going away — stop a running coast, otherwise the CADisplayLink (which retains its
+    /// target) keeps ticking into a dead model until the inertia decays.
+    static func dismantleUIView(_ uiView: DevboxTerminalView, coordinator: Coordinator) {
+        coordinator.scroller.stopInertia()
+    }
+
     /// SwiftTerm calls the delegate methods synchronously from the main thread (keyboard/layout are UIKit
     /// events) — so `@MainActor` on the Coordinator is a safe direct write to `model`, not just
     /// a courtesy annotation as with `TerminalSession`'s `URLSessionWebSocketDelegate` (which is
@@ -269,6 +275,7 @@ final class TerminalScrollController: NSObject, UIGestureRecognizerDelegate {
     }
 
     private func startInertia(velocity: Double) {
+        stopInertia() // never leave a previous link running (it retains `self`)
         inertia = ScrollInertia(velocity: velocity)
         lastTimestamp = nil
         let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
@@ -283,7 +290,7 @@ final class TerminalScrollController: NSObject, UIGestureRecognizerDelegate {
         apply(dy)
     }
 
-    private func stopInertia() {
+    func stopInertia() {
         displayLink?.invalidate()
         displayLink = nil
         inertia = nil

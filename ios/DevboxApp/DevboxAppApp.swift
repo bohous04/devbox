@@ -248,10 +248,13 @@ private struct SessionsContainer: View {
         Label(tab.title, systemImage: tab.systemImage)
     }
 
+    /// Overview/Stats/Hardware own a `@StateObject` store bound to the client from their first build (same
+    /// trap as `store` above) — `.id(appModel.clientIdentity)` on just those screens recreates them (and
+    /// their store) after a path change, without tearing down the tabs, navigation or `SettingsScreen`.
     var body: some View {
         TabView(selection: $selectedTab) {
             NavigationStack {
-                withVaultBanner(OverviewScreen(client: client))
+                withVaultBanner(OverviewScreen(client: client).id(appModel.clientIdentity))
             }
             .tabItem { tabLabel(.overview) }
             .tag(AppTab.overview)
@@ -263,13 +266,13 @@ private struct SessionsContainer: View {
             .tag(AppTab.sessions)
 
             NavigationStack {
-                withVaultBanner(StatsScreen(client: client))
+                withVaultBanner(StatsScreen(client: client).id(appModel.clientIdentity))
             }
             .tabItem { tabLabel(.stats) }
             .tag(AppTab.stats)
 
             NavigationStack {
-                withVaultBanner(HardwareScreen(client: client))
+                withVaultBanner(HardwareScreen(client: client).id(appModel.clientIdentity))
             }
             .tabItem { tabLabel(.hardware) }
             .tag(AppTab.hardware)
