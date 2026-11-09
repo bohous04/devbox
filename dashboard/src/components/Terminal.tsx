@@ -41,6 +41,9 @@ export function Terminal({ id, tmux, wsUrl, startUnlocked = false, title, onClos
 
   useEffect(() => {
     if (!host.current) return;
+    // A new socket starts read-only on the server — drop control/status left over from the previous one.
+    grantedRef.current = startUnlocked; setGranted(startUnlocked);
+    setStatus("connecting"); setScrolledUp(false);
     const term = new Xterm({ fontFamily: "IBM Plex Mono, monospace", fontSize: 13, cursorBlink: true, theme: { background: "#0b0e14" } });
     const fit = new FitAddon();
     term.loadAddon(fit);

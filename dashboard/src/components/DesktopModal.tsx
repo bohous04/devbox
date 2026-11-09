@@ -20,12 +20,15 @@ export function DesktopModal({ sessionId, title, onClose }: { sessionId: string;
   controlRef.current = control;
   // Last pre-renewed link — the iframe gets it only on Reconnect.
   const fresh = useRef<Link | null>(null);
+  // Restarts the renewal chain of the current mode — a failed renewal ends it, Reconnect resumes it.
+  const reschedule = useRef<(l: Link) => void>(() => {});
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let alive = true;
     fresh.current = null;
-    const schedule = (l: Link) => { timer = setTimeout(() => void refresh(), refreshDelayMs(l.expiresAt, Date.now())); };
+    const schedule = (l: Link) => { if (timer) clearTimeout(timer); timer = setTimeout(() => void refresh(), refreshDelayMs(l.expiresAt, Date.now())); };
+    reschedule.current = (l) => { if (alive) schedule(l); };
     // Renewal: refresh=true → devd invalidates nothing (not even in control mode).
     const refresh = async () => {
       try {
@@ -52,6 +55,7 @@ export function DesktopModal({ sessionId, title, onClose }: { sessionId: string;
       const l = reconnectLink(fresh.current, Date.now()) ?? await api.desktopLink(sessionId, control, true);
       fresh.current = null;
       setLink(l); setErr(null);
+      reschedule.current(l);
     } catch (e) { setErr((e as Error).message); }
   };
 

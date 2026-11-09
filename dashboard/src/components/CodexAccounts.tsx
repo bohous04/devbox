@@ -66,17 +66,19 @@ function AddCodexAccount({ account, onDone, onClose }: { account?: CodexAccountV
   }
 
   async function cancel() {
-    if (account) await api.codexAccountReauthCancel(account.id);
-    else if (device) await api.codexAccountLoginCancel(device.id);
-    setDevice(null);
-    onClose();
+    // Cancelling is best effort (the server-side login expires anyway) — a failed call must not trap the user in the dialog.
+    try {
+      if (account) await api.codexAccountReauthCancel(account.id);
+      else if (device) await api.codexAccountLoginCancel(device.id);
+    } catch (e) { console.warn("codex: failed to cancel sign-in", e); }
+    finally { setDevice(null); onClose(); }
   }
 
   const remainingMinutes = device
     ? Math.max(0, Math.ceil(Math.min(device.expiresInSec * 1_000, device.expiresAt - now) / 60_000))
     : 0;
   return (
-    <FormDialog open onOpenChange={(open) => { if (!open) void cancel().catch((e) => setError(errorMessage(e))); }} busy={busy} title={account ? "Reconnect ChatGPT account" : "Add ChatGPT account"} description="Sign in on the web. Each account keeps its own quota and history."><div className="space-y-4">
+    <FormDialog open onOpenChange={(open) => { if (!open) void cancel(); }} busy={busy} title={account ? "Reconnect ChatGPT account" : "Add ChatGPT account"} description="Sign in on the web. Each account keeps its own quota and history."><div className="space-y-4">
       {device ? (
         <>
           <p className="text-sm">{account ? "Sign in to the account" : "Sign in to ChatGPT to add"} <span className="font-medium">{label.trim()}</span>.</p>
