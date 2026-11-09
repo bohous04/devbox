@@ -319,6 +319,8 @@ class Bridge:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        # The preflight runs shielded, so cancelling the calls above does not stop it.
+        await self.preflight.cancel()
         if self.connecting:
             self.connecting.cancel()
             await asyncio.gather(self.connecting, return_exceptions=True)
