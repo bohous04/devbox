@@ -1073,7 +1073,7 @@ const checkpointBeforeShutdown = () => {
   // Host-side ssh tunnels/agents and decrypted prod keys must not outlive devd: outside a
   // systemd cgroup (or with KillMode≠control-group) an orphaned `ssh -L` keeps the port and
   // the next start's portFree check refuses to rebuild the tunnel.
-  prodTunnels.stopAll();
+  void prodTunnels.stopAll();
   try { rmSync(prodKeyDir, { recursive: true, force: true }); } catch (e) { console.error("removing prod key dir failed:", e); }
   // devd is ordered After=docker.service, so on graceful host shutdown these
   // checkpoints run before Docker stops the containers and their DinD daemons.
