@@ -184,6 +184,17 @@ test("an ssh-add failure cleans up the socket and propagates the error", async (
   expect(removed).toBeGreaterThan(0);
 });
 
+test("killAll terminates the agents of every session (devd shutdown)", async () => {
+  const { d, calls } = deps();
+  const a = createSshAgents(d);
+  await a.activate("s1", "key");
+  await a.activate("s2", "key");
+  await a.killAll();
+  expect(calls.filter((c) => c[0] === "kill")).toHaveLength(2);
+  await a.killAll();
+  expect(calls.filter((c) => c[0] === "kill")).toHaveLength(2);
+});
+
 test("kill without a running agent is a no-op", async () => {
   const { d } = deps();
   await expect(createSshAgents(d).kill("unknown")).resolves.toBeUndefined();

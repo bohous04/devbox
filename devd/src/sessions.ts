@@ -73,6 +73,10 @@ export interface SessionDeps {
   giteaInstances?: () => { name: string; url: string }[];
   /** Invalidates the session's dummies when the session ends. */
   revokePlaceholder?: (session: string) => void;
+  /** Kills the session's host ssh-agent (sshAgent.ts) when the session ends. Grant reapers only
+   *  cover expiring grants, so without this a permanent grant's agent (decrypted key in RAM)
+   *  would outlive the session forever. */
+  killSshAgent?: (session: string) => Promise<void>;
   /** Sidecar with its own docker daemon instead of the host socket. Opt-in. */
   dind?: boolean;
   /** Is the session shared or tainted (shareTaint.ts) RIGHT NOW, relative to the container that
@@ -443,6 +447,12 @@ export class SessionManager {
 
   private controlDir(id: string) {
     return join(this.d.controlRoot ?? DEFAULT_CONTROL_ROOT, id);
+  }
+
+  // A failed agent kill must not leave an orphaned session row (the container is already gone).
+  private async killSshAgent(id: string): Promise<void> {
+    try { await this.d.killSshAgent?.(id); }
+    catch (e) { console.error(`ssh-agent cleanup for ${id} failed:`, e); }
   }
 
   // Per-session directory for Claude Code transcripts. It is bind-mounted OVER the shared
@@ -1302,6 +1312,7 @@ export class SessionManager {
       if (s.host === "instabox") {
         await this.instaboxOrThrow().end(s);
         this.d.revokePlaceholder?.(id);
+        await this.killSshAgent(id);
         rmSync(this.controlDir(id), { recursive: true, force: true });
         rmSync(this.claudeProjectsDir(id), { recursive: true, force: true });
         deleteGitStat(this.d.db, id);
@@ -1326,6 +1337,7 @@ export class SessionManager {
       }
       this.d.revokePlaceholder?.(id);   // the dummy must not outlive the session it belonged to
       await this.cleanupDind(id, false);
+      await this.killSshAgent(id);
       rmSync(this.controlDir(id), { recursive: true, force: true });
       // Transcripts die with the session — same semantics as the worktree above. Without
       // cleanup, directories of dead sessions would pile up under _claude-projects forever.

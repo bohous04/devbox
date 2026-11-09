@@ -5,7 +5,7 @@ import { startMysqlProxy } from "./mysqlProxy";
 import { effectiveServer } from "./prodDb";
 import { createDbOnboardingHost } from "./dbOnboardingHost";
 import { resolveDbAdminTarget } from "./dbAdminTarget";
-import { chmodSync, chownSync, existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { chmodSync, chownSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createVault } from "./vault";
 import { createVaultNotifier } from "./vaultNotifier";
 import { createGitProxy } from "./gitProxy";
@@ -407,6 +407,8 @@ const mgr = new SessionManager({
   },
   issuePlaceholder: (session, instance) => placeholders.issue(session, instance),
   revokePlaceholder: (session) => placeholders.revoke(session),
+  // Late-bound: sshAgents is created below; end() never runs before startup finishes.
+  killSshAgent: (session) => sshAgents.kill(session),
   giteaInstances: getGiteaInstances,
   db, cfg, root,
   image: env("DEVD_IMAGE", "devbox:latest"),
@@ -1068,11 +1070,16 @@ const checkpointBeforeShutdown = () => {
   httpServer.stop();
   vmServer?.stop();
   shareServer?.stop();
+  // Host-side ssh tunnels/agents and decrypted prod keys must not outlive devd: outside a
+  // systemd cgroup (or with KillMode≠control-group) an orphaned `ssh -L` keeps the port and
+  // the next start's portFree check refuses to rebuild the tunnel.
+  prodTunnels.stopAll();
+  try { rmSync(prodKeyDir, { recursive: true, force: true }); } catch (e) { console.error("removing prod key dir failed:", e); }
   // devd is ordered After=docker.service, so on graceful host shutdown these
   // checkpoints run before Docker stops the containers and their DinD daemons.
   const deadline = setTimeout(() => process.exit(0), 15_000);
   deadline.unref();
-  void mgr.checkpointRunning().finally(() => process.exit(0));
+  void Promise.allSettled([mgr.checkpointRunning(), sshAgents.killAll()]).finally(() => process.exit(0));
 };
 process.once("SIGTERM", checkpointBeforeShutdown);
 process.once("SIGINT", checkpointBeforeShutdown);
