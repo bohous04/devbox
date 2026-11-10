@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type ActivityEvent } from "../api";
 import {
   ActionButton, AppPage, EmptyState, Pager, RowsSkeleton, Section, StatusDot,
@@ -56,7 +56,12 @@ export function Log() {
 
   const types = useMemo(() => typesForGroups(groups, allTypes), [groups, allTypes]);
 
+  // Shared by Refresh and the filter effect: only the newest request may write, so a slow
+  // Refresh for the old filter cannot overwrite results of a filter changed in the meantime.
+  const seq = useRef(0);
+
   async function load(pageIndex = p) {
+    const mine = ++seq.current;
     setErr(null);
     const r = await api.eventsPaged({
       limit: PER_PAGE,
@@ -66,6 +71,7 @@ export function Log() {
       session: session || undefined,
       types: types.length ? types : undefined,
     });
+    if (mine !== seq.current) return;
     setEvents(r.items);
     setTotal(r.total);
     setAllTypes(r.types);
@@ -76,7 +82,8 @@ export function Log() {
   useEffect(() => { setP(0); }, [range.from, range.to, session, groups]);
 
   useEffect(() => {
-    let alive = true;
+    const mine = ++seq.current;
+    const alive = () => mine === seq.current;
     setEvents(null);
     api.eventsPaged({
       limit: PER_PAGE,
@@ -86,9 +93,10 @@ export function Log() {
       session: session || undefined,
       types: types.length ? types : undefined,
     })
-      .then((r) => { if (alive) { setEvents(r.items); setTotal(r.total); setAllTypes(r.types); } })
-      .catch((e) => { if (alive) { setErr((e as Error).message); setEvents([]); } });
-    return () => { alive = false; };
+      .then((r) => { if (alive()) { setEvents(r.items); setTotal(r.total); setAllTypes(r.types); } })
+      .catch((e) => { if (alive()) { setErr((e as Error).message); setEvents([]); } });
+    // Unmount/re-run: invalidate the pending request.
+    return () => { if (alive()) seq.current++; };
   }, [p, range.from, range.to, session, types.join(",")]);
 
   const pages = pageCount(total, PER_PAGE);

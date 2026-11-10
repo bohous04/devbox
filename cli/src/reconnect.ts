@@ -25,6 +25,11 @@ export function backoffMs(attempt: number): number {
 // of attempts in the message.
 const ATTACHED_RESET_MS = 30000;
 
+// Exit 44 = the container runs but the tmux session is missing (existingOnly attach). Retrying it
+// waits for devd's cold recovery to recreate the session; if it never does (the session simply
+// ended), give up after this many consecutive misses (~2 min with backoff) instead of looping forever.
+export const MAX_MISSING_SESSION = 12;
+
 // Alternating network paths between attempts. The public IP and the tailnet are INDEPENDENT routes to the same
 // server: on 2026-07-25 the mac's IPv4 path to the VPS stopped working (~4 min), while Tailscale
 // between the same machines kept working over IPv6 — yet the loop kept dialing the dead public
@@ -41,9 +46,32 @@ export function dialFor(attempt: number, argv: string[], argvAlt?: string[]): st
 // seen live 1 Nov 2026), bracketed paste, a hidden cursor, the alternate screen. Turned off here.
 export const TERMINAL_RESET =
   "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l" + // mouse reporting
+  "\x1b[?1004l" +                                                     // focus events (^[[I / ^[[O on every tab switch)
   "\x1b[?2004l" +                                                     // bracketed paste
   "\x1b[?1049l" +                                                     // leave the alternate screen
   "\x1b[?25h";                                                        // show the cursor
+
+// What one attach attempt returned: the exit code plus the last line ssh/docker wrote to stderr
+// (captured, not shown — see runAttach in attach.ts). A bare number is accepted for simple callers/tests.
+export interface RunResult { code: number; error?: string }
+
+// ssh failed BEFORE we were attached (TCP connect, DNS, handshake). Such an attempt can take longer than
+// ATTACHED_RESET_MS (a stalled TCP connect ends with "Operation timed out" after ~75 s despite ConnectTimeout)
+// and must not reset the attempt counter — 9 Nov 2026 the counter kept falling back to "attempt 1".
+const CONNECT_FAILURE = /connect to host|could not resolve|network is unreachable|no route to host|connection refused|operation timed out|connection timed out|connection closed by|kex_exchange|banner exchange/i;
+export const isConnectFailure = (error?: string): boolean => !!error && CONNECT_FAILURE.test(error);
+
+// State of the offline panel; `null` = connected again / loop over → remove the panel.
+export interface RetryStatus {
+  label: string;
+  phase: "waiting" | "connecting";
+  attempt: number;
+  secondsLeft: number;     // waiting only
+  totalSeconds?: number;   // length of the current wait (countdown bar)
+  via?: string;            // network path of the next/current attempt
+  lastError?: string;
+  offlineSince: number;    // ms epoch of the first drop in this outage
+}
 
 export interface AttachLoopDeps {
   retryRemoteErrors?: boolean; // cold recovery: docker/tmux may be starting while the row is running
@@ -51,10 +79,12 @@ export interface AttachLoopDeps {
   argvAlt?: string[]; // second network path to the same container (see dialFor); optional
   pathNames?: [string, string]; // path names [primary, fallback] for the "via …" message
   label: string; // "shop/Ledger-App · main-2" for messages
-  run: (argv: string[]) => Promise<number>;
+  run: (argv: string[]) => Promise<number | RunResult>;
   sleep: (ms: number) => Promise<void>;
   health: () => Promise<"running" | "gone" | "unknown">;
   out?: (line: string) => void;
+  /** In-place offline panel (TTY). When set, retries update it instead of printing a line per attempt. */
+  status?: (s: RetryStatus | null) => void;
   now?: () => number; // injectable clock for tests; default Date.now
   resetTerminal?: () => void; // undo tmux's terminal modes after a dropped connection
 }
@@ -66,34 +96,202 @@ export interface AttachLoopDeps {
 export async function attachLoop(deps: AttachLoopDeps): Promise<number> {
   const out = deps.out ?? ((l) => console.error(l));
   const now = deps.now ?? Date.now;
+  const status = deps.status;
+  const via = (attempt: number) => (deps.argvAlt && deps.pathNames ? deps.pathNames[attempt % 2] : undefined);
   let attempt = 0;
+  let offlineSince: number | null = null;
+  let lastError: string | undefined;
+  let missing = 0;
   for (;;) {
+    if (status && offlineSince !== null) {
+      status({ label: deps.label, phase: "connecting", attempt, secondsLeft: 0, via: via(attempt), lastError, offlineSince });
+    }
     const started = now();
-    const code = await deps.run(dialFor(attempt, deps.argv, deps.argvAlt));
-    const attachedMs = now() - started;
+    const raw = await deps.run(dialFor(attempt, deps.argv, deps.argvAlt));
+    const { code, error } = typeof raw === "number" ? { code: raw, error: undefined } : raw;
+    const ended = now();
+    const attachedMs = ended - started;
     const decision = retryDecision(code);
-    if (decision === "done") return 0;
+    missing = code === 44 ? missing + 1 : 0;
+    if (decision === "done") { status?.(null); return 0; }
     deps.resetTerminal?.();   // every other outcome may have left tmux's modes on
-    if (decision === "exit-menu") return 42;
+    if (decision === "exit-menu") { status?.(null); return 42; }
     if (decision === "error" && !(deps.retryRemoteErrors && [1, 44, 125, 126, 137, 143].includes(code))) {
-      out(`Connection failed (code ${code}) — container is probably not running. Try \`dev\`.`);
+      status?.(null);
+      out(`Connection failed (code ${code}) — container is probably not running. Try \`dev\`.${error ? `\n  ${error}` : ""}`);
+      return code;
+    }
+    if (missing >= MAX_MISSING_SESSION) {
+      status?.(null);
+      out(`Session ${deps.label} has no tmux session to attach to — giving up. Try \`dev\`.`);
       return code;
     }
     // "retry": tell a dropped network from a stopped container
     const state = await deps.health();
     if (state === "gone") {
+      status?.(null);
       out(`Session ${deps.label} is no longer running (container stopped).`);
       return 0;
     }
     // After a successful (long enough) connection that then dropped, the attempt
-    // counter is reset — see ATTACHED_RESET_MS above (spec §1).
-    if (attachedMs >= ATTACHED_RESET_MS) attempt = 0;
+    // counter is reset — see ATTACHED_RESET_MS above (spec §1). A long attempt that never
+    // got past the connect is not "attached" (isConnectFailure).
+    if (attachedMs >= ATTACHED_RESET_MS && !isConnectFailure(error)) { attempt = 0; offlineSince = null; }
+    offlineSince ??= ended;
+    if (error) lastError = error;
     attempt++;
-    const secs = Math.round(backoffMs(attempt) / 1000);
-    // Path of the NEXT attempt (attempt is already incremented) — so the message shows that
-    // routes alternate, not that we keep hammering on one in vain.
-    const via = deps.argvAlt && deps.pathNames ? `, via ${deps.pathNames[attempt % 2]}` : "";
-    out(`⏳ Disconnected from ${deps.label} — retrying in ${secs}s (attempt ${attempt}${via}). Ctrl-C = back.`);
-    await deps.sleep(backoffMs(attempt));
+    const wait = backoffMs(attempt);
+    if (!status) {
+      // Path of the NEXT attempt (attempt is already incremented) — so the message shows that
+      // routes alternate, not that we keep hammering on one in vain.
+      const v = via(attempt);
+      out(`⏳ Disconnected from ${deps.label} — retrying in ${Math.round(wait / 1000)}s (attempt ${attempt}${v ? `, via ${v}` : ""}). Ctrl-C = back.`);
+      await deps.sleep(wait);
+      continue;
+    }
+    // Panel: count down once per second instead of printing another line.
+    for (let left = wait; left > 0; left -= 1000) {
+      status({ label: deps.label, phase: "waiting", attempt, secondsLeft: Math.ceil(left / 1000), totalSeconds: Math.ceil(wait / 1000), via: via(attempt), lastError, offlineSince });
+      await deps.sleep(Math.min(1000, left));
+    }
   }
+}
+
+// ---- Offline panel rendering -------------------------------------------------------------------
+
+const SPIN = ["◜", "◝", "◞", "◟"];
+
+function ago(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/** "ssh: connect to host 1.2.3.4 port 2222: Operation timed out" → "1.2.3.4:2222 — operation timed out". */
+export function prettyError(e: string): string {
+  const m = /connect to host (\S+) port (\d+): (.+)$/i.exec(e);
+  if (m) return `${m[1]}:${m[2]} — ${m[3]!.charAt(0).toLowerCase()}${m[3]!.slice(1)}`;
+  return e.replace(/^ssh:\s*/i, "");
+}
+
+function fit(s: string, width: number): string {
+  const chars = [...s];
+  return chars.length <= width ? s : chars.slice(0, Math.max(1, width - 1)).join("") + "…";
+}
+
+/** Plain-text lines of the panel; `frame` drives the spinner. Pure, so it is unit-tested. */
+export function renderRetryStatus(s: RetryStatus, now: number, frame: number, width = 100): string[] {
+  const spin = SPIN[frame % SPIN.length];
+  const path = s.via ? ` via ${s.via}` : "";
+  const lines = [
+    `${spin} Offline · ${s.label}`,
+    s.phase === "connecting"
+      ? `  connecting${path}…  (attempt ${s.attempt})`
+      : `  reconnecting in ${s.secondsLeft}s${path}  (attempt ${s.attempt})`,
+  ];
+  if (s.lastError) lines.push(`  ${prettyError(s.lastError)}`);
+  lines.push(`  offline for ${ago(now - s.offlineSince)} · Ctrl-C = back`);
+  return lines.map((l) => fit(l, Math.max(20, width - 1)));
+}
+
+// ---- Boxed panel with an ASCII Wi-Fi glyph ------------------------------------------------------
+
+type Style = "lit" | "unlit" | "dot" | "dotLive" | "title" | "label" | "text" | "dim" | "bar" | "barOff" | "frame" | "";
+export type Seg = [string, Style];
+
+// Three arcs (0 = outer … 2 = inner) above the dot; every segment is tagged with its arc so the
+// arcs can "search for signal" (light up inner → outer, frame by frame). -1 = padding, 3 = dot.
+const GLYPH: [string, number][][] = [
+  [["   ", -1], [".-'''''''-.", 0]],
+  [[" ", -1], [".'", 0], ["  ", -1], [".-'''-.", 1], ["  ", -1], ["'.", 0]],
+  [["    ", -1], [".'", 1], [" ", -1], [".-.", 2], [" ", -1], ["'.", 1]],
+  [["        ", -1], ["●", 3]],
+];
+const GLYPH_W = 17;
+
+const STYLE: Record<Exclude<Style, "">, string> = {
+  lit: "\x1b[33m", unlit: "\x1b[90m", dot: "\x1b[31m", dotLive: "\x1b[33m", title: "\x1b[1;33m",
+  label: "\x1b[1m", text: "", dim: "\x1b[2m", bar: "\x1b[33m", barOff: "\x1b[90m", frame: "\x1b[90m",
+};
+const segLen = (segs: Seg[]) => segs.reduce((n, [t]) => n + [...t].length, 0);
+
+function fitSegs(segs: Seg[], width: number): Seg[] {
+  if (segLen(segs) <= width) return [...segs, [" ".repeat(width - segLen(segs)), ""]];
+  const out: Seg[] = [];
+  let room = width - 1;
+  for (const [t, st] of segs) {
+    if (room <= 0) break;
+    const chars = [...t];
+    out.push([chars.slice(0, room).join(""), st]);
+    room -= Math.min(room, chars.length);
+  }
+  return [...out, ["…", "dim"]];
+}
+
+function glyphRow(row: number, frame: number, connecting: boolean): Seg[] {
+  // Waiting: 0..3 arcs lit, cycling; connecting: all arcs lit (we are actually dialing).
+  const level = connecting ? 3 : frame % 4;
+  const segs: Seg[] = (GLYPH[row] ?? []).map(([t, arc]): Seg =>
+    [t, arc < 0 ? "" : arc === 3 ? (connecting ? "dotLive" : "dot") : arc >= 3 - level ? "lit" : "unlit"]);
+  return [...segs, [" ".repeat(GLYPH_W - segLen(segs)), ""]];
+}
+
+/** Countdown bar ▰▰▰▱▱▱ — fills as the next attempt approaches. */
+export function countdownBar(left: number, total: number, cells = 10): Seg[] {
+  const done = total > 0 ? Math.round(((total - left) / total) * cells) : 0;
+  const d = Math.max(0, Math.min(cells, done));
+  return [["▰".repeat(d), "bar"], ["▱".repeat(cells - d), "barOff"]];
+}
+
+/** The boxed panel as styled segments per line; null = terminal too narrow (use renderRetryStatus). */
+export function renderRetryPanel(s: RetryStatus, now: number, frame: number, width = 100): Seg[][] | null {
+  const outer = Math.min(width - 1, 66);
+  if (outer < 52) return null;
+  const textW = outer - 4 - GLYPH_W - 2;
+  const connecting = s.phase === "connecting";
+  const where = [s.via ? `via ${s.via}` : "", `attempt ${s.attempt}`].filter(Boolean).join(" · ");
+  const text: Seg[][] = [
+    [["Offline", "title"], ["  ·  ", "dim"], [s.label, "label"]],
+    connecting
+      ? [["connecting…", "text"]]
+      : [[`reconnecting in ${s.secondsLeft}s  `, "text"], ...countdownBar(s.secondsLeft, s.totalSeconds ?? s.secondsLeft)],
+    [[where, "dim"]],
+    [[s.lastError ? prettyError(s.lastError) : "", "dim"]],
+    [[`offline ${ago(now - s.offlineSince)}  ·  Ctrl-C = back`, "dim"]],
+  ];
+  const lines: Seg[][] = [[["╭" + "─".repeat(outer - 2) + "╮", "frame"]]];
+  for (let i = 0; i < text.length; i++) {
+    lines.push([["│ ", "frame"], ...glyphRow(i, frame, connecting), ["  ", ""], ...fitSegs(text[i]!, textW), [" │", "frame"]]);
+  }
+  lines.push([["╰" + "─".repeat(outer - 2) + "╯", "frame"]]);
+  return lines;
+}
+
+const paint = (segs: Seg[], color: boolean) =>
+  segs.map(([t, st]) => (color && st && t ? STYLE[st] + t + "\x1b[0m" : t)).join("");
+
+/** Draws the panel in place: every update erases the previous one (cursor up + clear to end),
+ *  so an outage stays one box high instead of scrolling two lines per attempt. Narrow terminals
+ *  get the compact text lines. */
+export function createStatusPanel(write: (s: string) => void, opts: { width?: () => number; now?: () => number; color?: boolean } = {}) {
+  let drawn = 0;
+  let frame = 0;
+  const color = opts.color ?? true;
+  const erase = () => (drawn ? `\r\x1b[${drawn}A\x1b[J` : "");
+  return (s: RetryStatus | null): void => {
+    if (!s) {
+      if (drawn) write(erase() + "\x1b[?25h");
+      drawn = 0;
+      return;
+    }
+    const now = (opts.now ?? Date.now)(), width = opts.width?.() ?? 100, f = frame++;
+    const boxed = renderRetryPanel(s, now, f, width);
+    const lines = boxed
+      ? boxed.map((l) => paint(l, color))
+      : renderRetryStatus(s, now, f, width).map((l, i) => paint([[l, i === 0 ? "title" : "dim"]], color));
+    write(erase() + "\x1b[?25l" + lines.join("\n") + "\n");
+    drawn = lines.length;
+  };
 }

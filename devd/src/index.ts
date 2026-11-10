@@ -5,7 +5,7 @@ import { startMysqlProxy } from "./mysqlProxy";
 import { effectiveServer } from "./prodDb";
 import { createDbOnboardingHost } from "./dbOnboardingHost";
 import { resolveDbAdminTarget } from "./dbAdminTarget";
-import { chmodSync, chownSync, existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { chmodSync, chownSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createVault } from "./vault";
 import { createVaultNotifier } from "./vaultNotifier";
 import { createGitProxy } from "./gitProxy";
@@ -407,6 +407,8 @@ const mgr = new SessionManager({
   },
   issuePlaceholder: (session, instance) => placeholders.issue(session, instance),
   revokePlaceholder: (session) => placeholders.revoke(session),
+  // Late-bound: sshAgents is created below; end() never runs before startup finishes.
+  killSshAgent: (session) => sshAgents.kill(session),
   giteaInstances: getGiteaInstances,
   db, cfg, root,
   image: env("DEVD_IMAGE", "devbox:latest"),
@@ -620,11 +622,12 @@ const critic = createCriticGate({
 
 // codexAuth: docker CLI via the host socket (async so it does not block the event loop), short sleep for log-poll.
 const codexAuth: CodexAuthDeps = {
+  // Through proc.run with a hard cap: the usage pollers/harvesters share this runner behind
+  // single-flight flags, so one hung `docker run` would otherwise stop them for the rest of
+  // devd's life. LOCAL (300 s), not DOCKER_LIFECYCLE — harvest reads of big volumes take a while.
   run: async (cmd, input) => {
-    const p = Bun.spawn(["docker", ...cmd], { stdout: "pipe", stderr: "pipe", stdin: input !== undefined ? "pipe" : "ignore" });
-    if (input !== undefined && p.stdin) { p.stdin.write(input); p.stdin.end(); }
-    const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
-    return { code: code ?? 1, stdout, stderr };
+    const r = await run(["docker", ...cmd], { timeoutMs: timeoutFor("LOCAL"), stdin: input });
+    return { code: r.code, stdout: r.stdout, stderr: r.stderr };
   },
   sleep: (ms) => Bun.sleep(ms),
   image: env("DEVD_IMAGE", "devbox:latest"),
@@ -902,10 +905,10 @@ const apiDeps: ApiDeps = {
   prodCatalog, prodDbAccess, readProdSecret, execProdWrite,
   previewHost: process.env.DEVD_BIND_IP,
   tmuxProbe: createTmuxProbe(),
+  // runDocker drains the pipes while the child runs (no 64 KB pipe deadlock) and kills it at the cap.
   tmuxExec: async (container, cmd) => {
-    const p = Bun.spawn([...dockerArgv(container), "exec", container, "bash", "-lc", cmd], { stdout: "pipe", stderr: "ignore" });
-    const code = await p.exited;
-    return { code, stdout: await new Response(p.stdout).text() };
+    const r = await runDocker(container, ["exec", container, "bash", "-lc", cmd], { timeoutMs: timeoutFor("DOCKER_QUERY") });
+    return { code: r.code, stdout: r.stdout };
   },
   agentUpkeep,
   ccUpkeep: { status: () => ccStatusCache.get(), run: ccUpkeepRun },
@@ -1068,11 +1071,16 @@ const checkpointBeforeShutdown = () => {
   httpServer.stop();
   vmServer?.stop();
   shareServer?.stop();
+  // Host-side ssh tunnels/agents and decrypted prod keys must not outlive devd: outside a
+  // systemd cgroup (or with KillMode≠control-group) an orphaned `ssh -L` keeps the port and
+  // the next start's portFree check refuses to rebuild the tunnel.
+  void prodTunnels.stopAll();
+  try { rmSync(prodKeyDir, { recursive: true, force: true }); } catch (e) { console.error("removing prod key dir failed:", e); }
   // devd is ordered After=docker.service, so on graceful host shutdown these
   // checkpoints run before Docker stops the containers and their DinD daemons.
   const deadline = setTimeout(() => process.exit(0), 15_000);
   deadline.unref();
-  void mgr.checkpointRunning().finally(() => process.exit(0));
+  void Promise.allSettled([mgr.checkpointRunning(), sshAgents.killAll()]).finally(() => process.exit(0));
 };
 process.once("SIGTERM", checkpointBeforeShutdown);
 process.once("SIGINT", checkpointBeforeShutdown);

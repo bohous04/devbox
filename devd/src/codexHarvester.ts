@@ -252,14 +252,19 @@ export async function harvestCodexAccounts(d: CodexHarvesterDeps): Promise<void>
   }
   const accounts = listCodexAccounts(d.db);
   const ids = new Set<string>();
+  // One profile that refuses to harvest (e.g. undated history) must not starve the
+  // others; its error is still surfaced after the loop so the poller logs it.
+  let firstError: unknown;
   for (const account of [{ id: "default", added_at: 0 }, ...accounts]) {
     if (ids.has(account.id)) continue;
     ids.add(account.id);
     let volume: string;
     try { volume = codexAccountVolume(account.id); } catch { continue; }
     if (available && !available.has(volume)) continue; // never create missing volumes by reading
-    await harvestCodex({ ...d, volume, accountId: account.id, registeredAt: account.added_at });
+    try { await harvestCodex({ ...d, volume, accountId: account.id, registeredAt: account.added_at }); }
+    catch (e) { firstError ??= e; }
   }
+  if (firstError !== undefined) throw firstError;
 }
 
 export async function harvestCodex(d: CodexHarvesterDeps): Promise<void> {

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
 export type Engine = "postgres" | "mysql" | "mariadb";
@@ -77,6 +77,17 @@ export function readAccessFile(path: string): Record<string, Access> {
   return JSON.parse(readFileSync(path, "utf8")) as Record<string, Access>;
 }
 
+/** Replaces a JSON file atomically (tmp + rename), so a crash mid-write cannot leave a truncated
+ *  catalog/access file that would then fail to parse on every devd start. Keeps the file's
+ *  existing permissions (the catalog is also read through a bind mount). */
+function writeJsonAtomic(path: string, value: unknown): void {
+  let mode = 0o644;
+  try { mode = statSync(path).mode & 0o777; } catch {}
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try { writeFileSync(temporary, JSON.stringify(value, null, 2) + "\n", { mode, flag: "wx" }); renameSync(temporary, path); }
+  finally { try { unlinkSync(temporary); } catch {} }
+}
+
 /** Writes the requesting project's claim into the overlay file (next to the catalog): reading always,
  *  writing only on demand. At startup devd merges it with the repo default (mergeAccess),
  *  so a restart does not lose an approved claim. */
@@ -84,7 +95,7 @@ export function grantAccess(path: string, project: string, name: string, write: 
   const acc = readAccessFile(path);
   addGrant(acc, project, name, "read");
   if (write) addGrant(acc, project, name, "write");
-  writeFileSync(path, JSON.stringify(acc, null, 2) + "\n");
+  writeJsonAtomic(path, acc);
 }
 
 /** Reloads the in-memory catalog from disk and KEEPS the reference — the same object is held by api.ts,
@@ -126,7 +137,7 @@ export function addDatabase(path: string, entry: DbEntry): void {
     throw new Error(`port ${entry.hostPort} on server ${entry.server} is already used by '${clash.name}'`);
   }
   cat.databases.push(entry);
-  writeFileSync(path, JSON.stringify(cat, null, 2) + "\n");
+  writeJsonAtomic(path, cat);
 }
 
 /** Compare with both the reviewed prior entry and the intended result. This makes

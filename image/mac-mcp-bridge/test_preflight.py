@@ -81,5 +81,27 @@ class PreflightRuns(unittest.TestCase):
         # Verify it ran twice (after the cancel and after the fix).
         self.assertEqual(marker.read_text().count('attempt'), 2)
 
+class PreflightCancel(unittest.TestCase):
+    def test_cancel_kills_the_running_command(self):
+        # Bridge shutdown must not leave mac-sync/rsync running as an orphan.
+        import os, pathlib, tempfile
+        pidfile = pathlib.Path(tempfile.mkdtemp()) / 'pid'
+        p = Preflight(Reg([['/bin/sh', '-c', f'echo $$ > {pidfile}; exec sleep 30']]))
+
+        async def go():
+            caller = asyncio.create_task(p.ensure())
+            for _ in range(100):
+                if pidfile.exists() and pidfile.read_text().strip():
+                    break
+                await asyncio.sleep(0.05)
+            caller.cancel()  # the shielded run keeps going…
+            await asyncio.gather(caller, return_exceptions=True)
+            await p.cancel()  # …until the bridge cancels it explicitly
+        asyncio.run(go())
+        pid = int(pidfile.read_text())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+
 if __name__ == '__main__':
     unittest.main()

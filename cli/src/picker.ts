@@ -81,6 +81,23 @@ export function gistOutcome(code: number): "delete" | "keep" {
   return code === 0 ? "delete" : "keep";
 }
 
+// Most files a "Save as gist" captures. Above it the script refuses (non-zero → keep) instead of
+// truncating: a gist with only the first N files followed by a delete would silently lose the rest.
+export const GIST_MAX_FILES = 20;
+
+// Remote bash for "Save as gist": NUL-separated file list (names with spaces/globs survive), refuses
+// an empty or oversized workspace (gh would wait on stdin / the gist would be incomplete), and
+// `--` + </dev/null so neither a dash-leading name nor stdin can derail gh.
+export function gistScript(dir = "/workspace"): string {
+  return [
+    `cd ${dir} || exit 1`,
+    `files=(); while IFS= read -r -d '' f; do files+=("$f"); done < <(git ls-files -z --cached --others --exclude-standard)`,
+    `if [ \${#files[@]} -eq 0 ]; then echo "nothing to save" >&2; exit 3; fi`,
+    `if [ \${#files[@]} -gt ${GIST_MAX_FILES} ]; then echo "\${#files[@]} files — more than ${GIST_MAX_FILES}, refusing an incomplete gist" >&2; exit 3; fi`,
+    `gh gist create -d claudeSolo -- "\${files[@]}" </dev/null`,
+  ].join("\n");
+}
+
 // `dev --agent <id> <target>` — forcing a profile outside the interactive picker.
 // `--claude` / `--codex` remain as shortcuts (people still have them in their fingers
 // and in shell history). When several are given, the explicit `--agent` wins.

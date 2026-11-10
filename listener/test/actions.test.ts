@@ -207,6 +207,10 @@ test("clipboardPngScript writes to the given path and closes the file on error",
   expect(s).toContain("on error");
 });
 
+test("clipboardPngScript escapes quotes and backslashes in the path", () => {
+  expect(clipboardPngScript('/tmp/a"b\\c.png')).toContain('POSIX file "/tmp/a\\"b\\\\c.png"');
+});
+
 // Helper stub for files: cmd = [bin, "file", outpath, maxBytes]
 function clipFileFixture(over: Partial<{ code: number; name: string; bytes: Uint8Array }> = {}) {
   const bytes = over.bytes ?? new Uint8Array([1, 2, 3, 4]);

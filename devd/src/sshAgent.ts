@@ -110,7 +110,7 @@ export function createSerial(): { run<T>(key: string, fn: () => Promise<T>): Pro
   return { run, size: () => chains.size };
 }
 
-export function createSshAgents(deps: SshAgentDeps): SshAgents {
+export function createSshAgents(deps: SshAgentDeps): SshAgents & { killAll(): Promise<void> } {
   const run = deps.run ?? defaultRun;
   const rm = deps.rm ?? ((p) => rmSync(p, { force: true }));
   const getuid = deps.getuid ?? (() => process.getuid?.());
@@ -163,6 +163,11 @@ export function createSshAgents(deps: SshAgentDeps): SshAgents {
   return {
     sockPathFor,
     kill: (session, title) => serial(session, () => killNow(session, title)),
+    // devd shutdown: agents are daemonized (ssh-agent forks), so outside a systemd cgroup
+    // they would outlive devd with decrypted keys in RAM and nothing left to reap them.
+    killAll: async () => {
+      await Promise.allSettled([...pids.keys()].map((s) => serial(s, () => killNow(s))));
+    },
     activate: (session, title) => serial(session, async () => {
       const sock = sockPathFor(session);
       // Must throw BEFORE we start anything — fail closed, not a silent fallback

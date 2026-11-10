@@ -1,5 +1,5 @@
 import { KeyRound, ShieldCheck, Clock3, History, Check, X, Ban, Users } from "lucide-react";
-import { useEffect, useId, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from "react";
 import { api, type SshApproval, type SshKey, type SshScopeGrant, type TreeProject } from "../api";
 import { AppPage, ActionButton, ConfirmButton, EmptyState, Section, StatusDot } from "../components/primitives";
 import { FormDialog } from "../components/FormDialog";
@@ -337,8 +337,18 @@ export function SshApprovals() {
   // arrived fine. The gate fetch is NOT in `failed` below — its failure goes to `gate: "unknown"`
   // (banner), not to `err` (that would show under "Awaiting approval" as "Error: …",
   // even though rows/grants were fine).
+  // Newest load wins: a 1 s poll started before an approve/deny must not land after the
+  // post-action refresh and resurrect the decided row; ticks are skipped while one is in flight.
+  const seq = useRef(0);
+  const inFlight = useRef(0);
   async function load() {
-    const [rowsR, grantsR, gateR] = await Promise.allSettled([api.sshApprovals(), api.sshGrants(), api.sshGate()]);
+    const mine = ++seq.current;
+    inFlight.current++;
+    let settled;
+    try { settled = await Promise.allSettled([api.sshApprovals(), api.sshGrants(), api.sshGate()]); }
+    finally { inFlight.current--; }
+    if (mine !== seq.current) return;
+    const [rowsR, grantsR, gateR] = settled;
     if (rowsR.status === "fulfilled") setRows(rowsR.value);
     if (grantsR.status === "fulfilled") setGrants(grantsR.value);
     setGate(gateR.status === "fulfilled" ? (gateR.value.enabled ? "enabled" : "disabled") : "unknown");
@@ -346,7 +356,11 @@ export function SshApprovals() {
     setErr(failed ? (failed.reason as Error).message : null);
   }
   // One second, not five: the request lives 90 s and the countdown must be truthful.
-  useEffect(() => { load(); const t = setInterval(load, 1000); return () => clearInterval(t); }, []);
+  useEffect(() => {
+    load();
+    const t = setInterval(() => { if (inFlight.current === 0) void load(); }, 1000);
+    return () => clearInterval(t);
+  }, []);
 
   async function act(id: string, fn: () => Promise<unknown>) {
     setBusy(id);

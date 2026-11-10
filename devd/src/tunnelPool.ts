@@ -70,7 +70,8 @@ const defaultProbe = async (port: number): Promise<boolean> => {
 
 export interface TunnelPool {
   ensure(server: ServerRef, hostPort: number): Promise<void>;
-  stopAll(): void;
+  /** Kills every tunnel; resolves once they exited (bounded), so the ports are free again. */
+  stopAll(): Promise<void>;
   status(): { id: string; alive: boolean }[];
   owns(server: ServerRef, port: number): boolean;
 }
@@ -147,10 +148,12 @@ export function createTunnelPool(d: TunnelPoolDeps): TunnelPool {
       return task;
     },
 
-    stopAll() {
+    async stopAll() {
+      const procs = [...live.values()].map((e) => e.proc);
       for (const e of live.values()) { e.alive = false; e.proc.kill(); }
       live.clear();
       ready.clear();
+      await Promise.race([Promise.allSettled(procs.map((p) => p.exited)), Bun.sleep(3_000)]);
     },
 
     status: () => [...live.entries()].map(([id, e]) => ({ id, alive: e.alive })),

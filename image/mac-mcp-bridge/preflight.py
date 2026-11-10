@@ -32,6 +32,13 @@ class Preflight:
                 # the next call must run again, without restarting the session.
                 self.done = not running.cancelled() and running.exception() is None
 
+    async def cancel(self):
+        """Stops a shielded run that nobody awaits any more (bridge shutdown)."""
+        running = self.running
+        if running is not None and not running.done():
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+
     async def run(self):
         for cmd in self.registration.preflight:
             try:
@@ -44,7 +51,17 @@ class Preflight:
                 raise RuntimeError(
                     f'{self.registration.label}: mac preparation did not start '
                     f'({cmd[0]}): {exc}') from exc
-            _, stderr = await proc.communicate()
+            try:
+                _, stderr = await proc.communicate()
+            except BaseException:
+                # Cancelled (bridge closing): do not leave mac-sync/rsync running as an orphan.
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    await proc.wait()
+                raise
             if proc.returncode != 0:
                 detail = (stderr or b'').decode('utf-8', 'replace')[-STDERR_TAIL:]
                 raise RuntimeError(

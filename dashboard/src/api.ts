@@ -95,7 +95,8 @@ export interface DevdConfig {
   settings?: { autoStopHours?: number; portRangeStart?: number; portsPerSession?: number; diskWarnPercent?: number };
   [key: string]: unknown;
 }
-export interface GithubOwner { login: string; kind: "user" | "org"; name?: string; avatarUrl?: string }
+// kind "shared" = synthetic dashboard-only tile listing repos of other owners where the account is a collaborator.
+export interface GithubOwner { login: string; kind: "user" | "org" | "shared"; name?: string; avatarUrl?: string }
 export interface GithubRepo {
   name: string; nameWithOwner: string; url: string; visibility: string;
   description: string; isPrivate: boolean; isArchived: boolean; updatedAt: string;
@@ -500,6 +501,7 @@ export const api = {
   saveConfig: (config: unknown) => j<{ ok: true }>("/api/config", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ config }) }),
   githubOwners: () => j<{ owners: GithubOwner[] }>("/api/github/owners"),
   githubRepos: (owner: string) => j<{ repos: GithubRepo[] }>(`/api/github/repos?owner=${encodeURIComponent(owner)}`),
+  githubSharedRepos: () => j<{ repos: GithubRepo[] }>("/api/github/shared-repos"),
   giteaInstances: () => j<{ instances: GiteaInstanceInfo[] }>("/api/gitea/instances"),
   giteaRepos: (instance: string) => j<{ repos: GiteaRepo[] }>(`/api/gitea/repos?instance=${encodeURIComponent(instance)}`),
   giteaSetToken: (instance: string, token: string) => j<{ ok: true; login: string }>("/api/gitea/token", post({ instance, token })),
@@ -593,7 +595,7 @@ export const api = {
     j<{ ok: true }>(`/api/prod-db/requests/${id}/reject`, { method: "POST" }),
   operations: () => j<OpRow[]>("/api/operations"),
   approveOperation: (id: number) => j<{ status: string; result: string }>(`/api/operations/${id}/approve`, { method: "POST" }),
-  rejectOperation: (id: number) => fetch(`/api/operations/${id}/reject`, { method: "POST" }).then(() => undefined),
+  rejectOperation: (id: number) => j<void>(`/api/operations/${id}/reject`, { method: "POST" }),
   vault: () => j<VaultStatus>("/api/vault"),
   unlockVault: (passphrase: string) => j<VaultStatus>("/api/vault/unlock", post({ passphrase })),
   sshKeys: () => j<{ keys: SshKey[] }>("/api/op/ssh-keys"),

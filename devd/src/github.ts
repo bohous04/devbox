@@ -88,3 +88,31 @@ export async function listRepos(owner: string, run: Runner = defaultRun): Promis
     })
     .filter((x) => x.name !== "");
 }
+
+/** Repos of OTHER owners where the account is a collaborator (invited to a personal repo of someone
+ *  else, or an outside collaborator in an org it is not a member of). Neither `gh repo list <me>` nor
+ *  the org tiles return those, so before this the Folders browser had no way to add them. */
+export async function listSharedRepos(run: Runner = defaultRun): Promise<GithubRepo[]> {
+  const jq = ".[]|{name,full_name,html_url,visibility,description,private,archived,updated_at}";
+  const r = await run(process.cwd(), "gh", "api", "user/repos?affiliation=collaborator&per_page=100", "--paginate", "--jq", jq);
+  if (r.code !== 0) fail("gh api user/repos", r);
+  const out: GithubRepo[] = [];
+  for (const line of r.stdout.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    let v: Record<string, unknown>;
+    try { v = JSON.parse(t) as Record<string, unknown>; } catch { continue; }
+    if (typeof v.name !== "string" || !v.name || typeof v.full_name !== "string") continue;
+    out.push({
+      name: v.name,
+      nameWithOwner: v.full_name,
+      url: typeof v.html_url === "string" ? v.html_url : `https://github.com/${v.full_name}`,
+      visibility: typeof v.visibility === "string" ? v.visibility.toLowerCase() : (v.private ? "private" : "public"),
+      description: typeof v.description === "string" ? v.description : "",
+      isPrivate: Boolean(v.private),
+      isArchived: Boolean(v.archived),
+      updatedAt: typeof v.updated_at === "string" ? v.updated_at : "",
+    });
+  }
+  return out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { AGENT_IDS } from "../../devd/src/agents";
 import type { SessionRow } from "../../devd/src/db";
 import type { TreeProject } from "../../devd/src/tree";
-import { agentFlag, agentOptions, folderOptions, freshLabel, gistOutcome, NEW_SOLO, projectOptions, repoOptions, runningSolosIn, shouldAskAgent, soloActionOptions, soloEndOptions, soloMenuOptions, stripAgentFlags } from "../src/picker";
+import { agentFlag, agentOptions, folderOptions, freshLabel, GIST_MAX_FILES, gistOutcome, gistScript, NEW_SOLO, projectOptions, repoOptions, runningSolosIn, shouldAskAgent, soloActionOptions, soloEndOptions, soloMenuOptions, stripAgentFlags } from "../src/picker";
 
 const session = (over: Partial<SessionRow>): SessionRow => ({
   id: "id", folder: "acme", project: "shop", repo: "claudeSolo-1", container: "c",
@@ -156,4 +156,37 @@ test("freshLabel: promises its own worktree only where the session really gets o
   expect(freshLabel({ bare: false, cloned: true })).toContain("shares");
   // Older devd does not send `bare` — that must not turn into a promise.
   expect(freshLabel({ cloned: true })).not.toContain("own worktree");
+});
+
+// Runs gistScript against a real git dir with a fake `gh` that just records its argv.
+function runGist(files: string[]) {
+  const { mkdtempSync, writeFileSync, mkdirSync, chmodSync, readFileSync, existsSync } = require("node:fs");
+  const { join } = require("node:path");
+  const { tmpdir } = require("node:os");
+  const root = mkdtempSync(join(tmpdir(), "gist-"));
+  const ws = join(root, "ws"); const bin = join(root, "bin");
+  mkdirSync(ws); mkdirSync(bin);
+  Bun.spawnSync(["git", "init", "-q"], { cwd: ws });
+  for (const f of files) writeFileSync(join(ws, f), "x");
+  const log = join(root, "args");
+  writeFileSync(join(bin, "gh"), `#!/bin/bash\nprintf '%s\\n' "$@" > ${log}\n`);
+  chmodSync(join(bin, "gh"), 0o755);
+  const r = Bun.spawnSync(["bash", "-c", gistScript(ws)], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+  return { code: r.exitCode, args: existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : null };
+}
+
+test("gist script passes names with spaces and dashes as single arguments", () => {
+  const r = runGist(["a b.txt", "-x.md", "*.ts"]);
+  expect(r.code).toBe(0);
+  expect(r.args!.slice(0, 4)).toEqual(["gist", "create", "-d", "claudeSolo"]);
+  expect(r.args!.slice(5).sort()).toEqual(["*.ts", "-x.md", "a b.txt"]);
+});
+
+test("gist script refuses (keeps the workspace) instead of truncating or waiting on stdin", () => {
+  const many = runGist(Array.from({ length: GIST_MAX_FILES + 1 }, (_, i) => `f${i}.txt`));
+  expect(gistOutcome(many.code)).toBe("keep");
+  expect(many.args).toBeNull();
+  const none = runGist([]);
+  expect(gistOutcome(none.code)).toBe("keep");
+  expect(none.args).toBeNull();
 });

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { GithubError, listOwners, listRepos, validOwner, type Runner } from "../src/github";
+import { GithubError, listOwners, listRepos, listSharedRepos, validOwner, type Runner } from "../src/github";
 
 /** Runner stub keyed by the joined command; records invocations. */
 function stub(map: Record<string, { code: number; stdout: string; stderr?: string; timedOut?: boolean }>): { run: Runner; calls: string[][] } {
@@ -93,4 +93,26 @@ test("listRepos non-zero exit → GithubError with stderr detail", async () => {
     [`gh repo list ghost --limit 300 --json ${fields}`]: { code: 1, stdout: "", stderr: "GraphQL: Could not resolve to a User\n" },
   });
   await expect(listRepos("ghost", run)).rejects.toThrow("Could not resolve");
+});
+
+const SHARED = "gh api user/repos?affiliation=collaborator&per_page=100 --paginate --jq .[]|{name,full_name,html_url,visibility,description,private,archived,updated_at}";
+
+test("listSharedRepos returns other owners' repos where the account is a collaborator, newest first", async () => {
+  const { run } = stub({
+    [SHARED]: { code: 0, stdout: [
+      '{"name":"old","full_name":"bob/old","html_url":"https://github.com/bob/old","visibility":"public","description":null,"private":false,"archived":true,"updated_at":"2025-01-01T00:00:00Z"}',
+      'garbage',
+      '{"name":"app","full_name":"carol/app","html_url":"https://github.com/carol/app","visibility":"PRIVATE","description":"d","private":true,"archived":false,"updated_at":"2026-10-01T00:00:00Z"}',
+      '',
+    ].join("\n") },
+  });
+  const repos = await listSharedRepos(run);
+  expect(repos.map((r) => r.nameWithOwner)).toEqual(["carol/app", "bob/old"]);
+  expect(repos[0]).toEqual({ name: "app", nameWithOwner: "carol/app", url: "https://github.com/carol/app", visibility: "private", description: "d", isPrivate: true, isArchived: false, updatedAt: "2026-10-01T00:00:00Z" });
+  expect(repos[1]!.description).toBe("");
+});
+
+test("listSharedRepos surfaces gh failures as GithubError", async () => {
+  const { run } = stub({ [SHARED]: { code: 1, stdout: "", stderr: "gh: To get started with GitHub CLI, please run: gh auth login" } });
+  await expect(listSharedRepos(run)).rejects.toBeInstanceOf(GithubError);
 });

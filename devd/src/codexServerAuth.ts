@@ -12,6 +12,8 @@
 // its auth.json; if devd kept reading it, the Main account card would forever report
 // `stale-login` — even after a successful reauth, which writes into `codex-home`.
 
+import { run, timeoutFor } from "./proc";
+
 export const CODEX_SERVER_UNIT = "codex-remote-control";
 
 /** `systemctl show -p Environment --value` → CODEX_HOME (the last assignment wins). */
@@ -29,11 +31,11 @@ export function codexServerHome(show: string): string | null {
 
 export async function readCodexServerAuth(): Promise<string | null> {
   try {
-    const p = Bun.spawn(["systemctl", "show", CODEX_SERVER_UNIT, "-p", "ActiveState", "-p", "Environment"],
-      { stdout: "pipe", stderr: "ignore", stdin: "ignore" });
-    const show = await new Response(p.stdout).text();
-    if (await p.exited !== 0) return null;
-    const home = codexServerHome(show);
+    // Capped: this runs inside CodexAccounts.exclusive("default"), a hung systemctl would block it.
+    const r = await run(["systemctl", "show", CODEX_SERVER_UNIT, "-p", "ActiveState", "-p", "Environment"],
+      { timeoutMs: timeoutFor("DOCKER_QUERY") });
+    if (r.code !== 0 || r.timedOut) return null;
+    const home = codexServerHome(r.stdout);
     if (!home) return null;
     const file = Bun.file(`${home.replace(/\/$/, "")}/auth.json`);
     if (!await file.exists()) return null;

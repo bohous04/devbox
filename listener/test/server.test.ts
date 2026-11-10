@@ -98,8 +98,9 @@ test("open action failure surfaces as 500 with an error body", async () => {
   };
   const app = createListener(cfg, actions);
   const res = await post(app, "/open", { path: "/srv/dev/a/b.md" }, "secret");
-  expect(res.status).toBe(500);
-  expect(await res.json()).toEqual({ error: "open failed" });
+  // /Volumes/dev/a/b.md does not exist here → reported as an unmounted share, not a generic failure
+  expect(res.status).toBe(404);
+  expect(((await res.json()) as { error: string }).error).toContain("is the devbox SMB share mounted at /Volumes/dev?");
 });
 
 test("clicked: session → focus, on miss a new tab; no session → dashboard; auth", async () => {

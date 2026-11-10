@@ -12,6 +12,10 @@ import { scramFinal, scramFirstBare } from "./pgAuth";
 // no server is available (only psql from libpq).
 
 const AUTH_OK = 0, AUTH_SASL = 10, AUTH_SASL_CONTINUE = 11, AUTH_SASL_FINAL = 12;
+// Only used during the handshake, where messages are tiny; a bigger announced length is garbage.
+const MAX_MESSAGE = 10 * 1024 * 1024;
+// A tunnel that accepts TCP but never answers would otherwise keep both legs open indefinitely.
+const HANDSHAKE_TIMEOUT_MS = 15_000;
 
 function msg(type: string, body: Buffer): Buffer {
   const b = Buffer.alloc(5 + body.length);
@@ -30,12 +34,15 @@ function startupMessage(user: string, database: string): Buffer {
   return b;
 }
 
-/** Splits the buffer into complete `type + length + body` messages; returns the rest for completion. */
+/** Splits the buffer into complete `type + length + body` messages; returns the rest for completion.
+ *  Throws on an impossible length — `len < 4` would never advance `off` (or move it backwards)
+ *  and spin the event loop forever. */
 export function splitMessages(buf: Buffer): { messages: { type: string; body: Buffer }[]; rest: Buffer } {
   const messages: { type: string; body: Buffer }[] = [];
   let off = 0;
   while (buf.length - off >= 5) {
     const len = buf.readInt32BE(off + 1);
+    if (len < 4 || len > MAX_MESSAGE) throw new Error("invalid pg frame");
     if (buf.length - off < len + 1) break;
     messages.push({ type: buf.subarray(off, off + 1).toString("latin1"), body: buf.subarray(off + 5, off + 1 + len) });
     off += 1 + len;
@@ -54,18 +61,29 @@ export function createPgConnect(opts: { hostname?: string } = {}) {
     let buf: Buffer<ArrayBufferLike> = Buffer.alloc(0);
     let authed = false;
     let scram: { clientFinal: string; serverSignature: string } | null = null;
+    // AuthenticationOk is accepted only after the server proved it knows the password
+    // (SASL final with our expected signature) — otherwise anyone answering on the port
+    // could skip SCRAM and get the client's queries.
+    let serverVerified = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
 
     const socket = await Bun.connect({
       hostname: opts.hostname ?? "127.0.0.1",
       port: entry.hostPort,
       socket: {
-        open(s) { s.write(startupMessage(entry.roUser, entry.db)); },
+        open(s) {
+          s.write(startupMessage(entry.roUser, entry.db));
+          timer = setTimeout(() => { if (!authed) s.end(); }, HANDSHAKE_TIMEOUT_MS);
+        },
         data(s, chunk) {
           // After authentication completes we only forward to the client.
           if (authed) { onData(chunk); return; }
           buf = Buffer.concat([buf, Buffer.from(chunk)]);
-          const { messages, rest } = splitMessages(buf);
-          buf = rest;
+          let split: ReturnType<typeof splitMessages>;
+          try { split = splitMessages(buf); }
+          catch { s.end(); return; }
+          const messages = split.messages;
+          buf = split.rest;
           for (let i = 0; i < messages.length; i++) {
             const m = messages[i]!;
             if (m.type === "E") {
@@ -86,20 +104,27 @@ export function createPgConnect(opts: { hostname?: string } = {}) {
               const mech = Buffer.from("SCRAM-SHA-256\0");
               const len = Buffer.alloc(4); len.writeInt32BE(Buffer.byteLength(first), 0);
               s.write(msg("p", Buffer.concat([mech, len, Buffer.from(first)])));
+            } else if (code !== AUTH_SASL_CONTINUE && code !== AUTH_SASL_FINAL && code !== AUTH_OK) {
+              // Cleartext/MD5/etc.: never hand the real password to a weaker scheme — and do not hang.
+              s.end(); return;
             } else if (code === AUTH_SASL_CONTINUE) {
-              scram = scramFinal(password, nonce, m.body.subarray(4).toString("utf8"));
+              try { scram = scramFinal(password, nonce, m.body.subarray(4).toString("utf8")); }
+              catch { s.end(); return; }                // foreign nonce = not our server
               s.write(msg("p", Buffer.from(scram.clientFinal)));
             } else if (code === AUTH_SASL_FINAL) {
               // Verify that the server knows the password — otherwise we were talking to a forged server.
               const sv = m.body.subarray(4).toString("utf8");
-              if (scram && !sv.includes(scram.serverSignature)) { s.end(); return; }
+              if (!scram || !sv.includes(scram.serverSignature)) { s.end(); return; }
+              serverVerified = true;
             } else if (code === AUTH_OK) {
+              if (!serverVerified) { s.end(); return; }
               // From this point on everything belongs to the client — including ParameterStatus,
               // BackendKeyData and ReadyForQuery. Those typically arrive in the SAME chunk
               // as AuthenticationOk and splitMessages has already taken them out of the buffer, so they
               // must be sent from here, not just the rest of the buffer — without ReadyForQuery psql waits
               // forever (live 2026-09-05, first production use).
               authed = true;
+              clearTimeout(timer);
               const ok = Buffer.alloc(4); ok.writeInt32BE(AUTH_OK, 0);
               const tail = messages.slice(i + 1).map((x) => msg(x.type, x.body));
               onData(new Uint8Array(Buffer.concat([msg("R", ok), ...tail, buf])));
@@ -108,8 +133,8 @@ export function createPgConnect(opts: { hostname?: string } = {}) {
             }
           }
         },
-        close() { onEnd?.(); },
-        error() { onEnd?.(); },
+        close() { clearTimeout(timer); onEnd?.(); },
+        error() { clearTimeout(timer); onEnd?.(); },
       },
     });
 

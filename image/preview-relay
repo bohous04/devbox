@@ -16,6 +16,10 @@ const server = net.createServer((client) => {
   const upstream = net.connect(target, "127.0.0.1");
   client.on("error", () => upstream.destroy());
   upstream.on("error", () => client.destroy());
+  // Without these a gone browser leaves the upstream open while the server keeps it alive (SSE,
+  // WebSocket). Toward the client end(), not destroy(): flush response bytes still buffered.
+  client.on("close", () => upstream.destroy());
+  upstream.on("close", () => client.end());
   client.pipe(upstream);
   upstream.pipe(client);
 });

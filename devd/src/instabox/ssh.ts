@@ -16,9 +16,11 @@ export function needsRefresh(expiresAt: number | undefined, now: number): boolea
 // ControlMaster: `docker -H ssh://` opens a new ssh connection for EVERY command (inspect,
 // exec, probe…). Without multiplexing, the watchdog and tmux probe would pay the handshake through
 // the InstaBox gateway every time.
-export function hostBlock(alias: string, c: Pick<IbxSshCreds, "host" | "port" | "username">, dir: string): string {
+// `certFile` is passed explicitly: the cert is stored per machine id, and the SDK does not
+// promise that the SSH username equals the machine id.
+export function hostBlock(alias: string, c: Pick<IbxSshCreds, "host" | "port" | "username">, dir: string, certFile: string): string {
   return `Host ${alias}\n  HostName ${c.host}\n  Port ${c.port}\n  User ${c.username}\n` +
-    `  IdentityFile ${dir}/id_ed25519\n  CertificateFile ${dir}/${c.username}-cert.pub\n` +
+    `  IdentityFile ${dir}/id_ed25519\n  CertificateFile ${certFile}\n` +
     `  UserKnownHostsFile ${dir}/known_hosts\n  StrictHostKeyChecking yes\n` +
     `  ControlMaster auto\n  ControlPath ${dir}/cm-%C\n  ControlPersist 10m\n` +
     `  ServerAliveInterval 15\n  ConnectTimeout 15\n`;
@@ -68,7 +70,7 @@ export class InstaboxSsh {
     mkdirSync(join(this.dir, "hosts"), { recursive: true, mode: 0o700 });
     writeFileSync(this.certFile(machineId), c.certificate.trim() + "\n", { mode: 0o600 });
     chmodSync(this.certFile(machineId), 0o600);
-    writeFileSync(this.hostFile(machineId), hostBlock(alias, c, this.dir), { mode: 0o600 });
+    writeFileSync(this.hostFile(machineId), hostBlock(alias, c, this.dir, this.certFile(machineId)), { mode: 0o600 });
     this.addKnownHost(c.knownHostsLine);
     writeFileSync(this.metaFile(machineId), JSON.stringify({ expiresAt: c.expiresAt }), { mode: 0o600 });
     writeFileSync(this.paths.configFile, includeFile(this.dir), { mode: 0o644 });

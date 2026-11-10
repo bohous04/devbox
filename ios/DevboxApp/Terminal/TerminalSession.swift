@@ -65,6 +65,9 @@ final class TerminalSession: NSObject {
     private var backoff = TerminalSession.initialBackoff
     private var reconnectWorkItem: DispatchWorkItem?
     private var stopped = false
+    /// `open()` is waiting for `makeRequest()` — `task` is still nil then, so without this flag a second
+    /// `connect()` (or a reconnect firing meanwhile) would start a second, parallel WebSocket.
+    private var opening = false
 
     init(makeRequest: @escaping () async throws -> URLRequest) {
         self.makeRequest = makeRequest
@@ -75,7 +78,7 @@ final class TerminalSession: NSObject {
     /// Starts the connection — one-shot (see the class docstring). No effect if the socket is already running,
     /// or if the instance has been `cancel()`ed in the meantime.
     func connect() {
-        guard !stopped, task == nil else { return }
+        guard !stopped, task == nil, !opening else { return }
         open()
     }
 
@@ -94,16 +97,24 @@ final class TerminalSession: NSObject {
     // MARK: - Private
 
     private func open() {
+        guard !stopped, !opening else { return }
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
+        opening = true
         state = .connecting
         Task {
             do {
                 let request = try await makeRequest()
+                opening = false
                 guard !stopped else { return }
+                // Defensive: never orphan a previous socket (it would keep running unobserved).
+                task?.cancel(with: .goingAway, reason: nil)
                 let newTask = urlSession.webSocketTask(with: request)
                 task = newTask
                 newTask.resume()
                 receive(on: newTask)
             } catch {
+                opening = false
                 scheduleReconnect()
             }
         }

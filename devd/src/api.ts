@@ -22,7 +22,7 @@ import { getOperation, listOperations, proposeOperation, setOperationStatus } fr
 import type { Database } from "bun:sqlite";
 import { createBridge, terminalGuard, terminalTarget, type Bridge, type SpawnPty } from "./terminal";
 import { execInContainer } from "./docker";
-import { createReadStream, openSync, rmSync, statSync } from "node:fs";
+import { createReadStream, mkdtempSync, openSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { Readable } from "node:stream";
 import { liveActivitiesRoutes, type LiveActivities } from "./liveActivities";
 import { AGENT_EVENTS, type AgentEvent, type AgentEventHub, type HookMeta, type NotifyFn } from "./agentEvents";
@@ -47,8 +47,9 @@ import type { ConfigRepo } from "./configrepo";
 import { countEvents, diskHistoryEnds, distinctEventTypes, getHarvestState, getRepoAgent, getSession, insertMetrics, insertNotifyLog, isAgentName, lastMetricTs, listCriticReviews, listEvents, listNotifyLog, listRepoAgents, listSessions, logEvent, resetStats, sanitizeSessionName, setCritic, setHarvestState, setImportant, setNotifyVerdict, setSessionName, deleteSchedule, getSchedule, insertSchedule, listSchedules, updateSchedule, deleteAccount, getAccount, insertAccount, insertLease, isLeaseClient, leaseHistory, setAccountDisabled, setAccountLabel, setAccountOrgId, setAccountQuarantined, setAccountWeight, ackPushAlert, upsertPushDevice, type AgentName, type LeaseClient, type NotifyDecision, type NotifyVerdict, type ScheduleRow, type SessionRow } from "./db";
 import { validCron } from "./cron";
 import { memoAsync } from "./cache";
-import { GithubError, listOwners, listRepos, validOwner, type GithubOwner, type GithubRepo } from "./github";
+import { GithubError, listOwners, listRepos, listSharedRepos, validOwner, type GithubOwner, type GithubRepo } from "./github";
 import { GiteaAuthError, GiteaError, GiteaUnknownInstanceError, type GiteaApi } from "./gitea";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readUpload, UploadError } from "./uploads";
 import { stageFile, stageShared } from "./inbox";
@@ -109,7 +110,7 @@ export interface ShareLockdown {
 
 const endSyncWaitMs = () => Number(process.env.DEVD_END_SYNC_WAIT_MS ?? 20_000);
 
-export interface ApiDeps { mgr: SessionManager; db: Database; cfg: DevConfig; root: string; tree: () => Promise<TreeProject[]>; listener: ListenerClient; notify: NotifyFn; stats: () => unknown; resources?: () => unknown; cloneQueue: CloneQueue; configRepo: ConfigRepo; dashboardDir?: string; previewHost?: string; backup: { build: () => Promise<string>; restore: (tarPath: string) => Promise<void> }; github?: { owners: () => GithubOwner[] | Promise<GithubOwner[]>; repos: (owner: string) => GithubRepo[] | Promise<GithubRepo[]> }; gitea?: GiteaApi; opToken?: string; vault?: Vault; gitProxy?: Hono; prodCatalogPath?: string; prodAccessPath?: string; sshKeyTitles?: () => Promise<string[]>; coolifyInstances?: () => Record<string, CoolifyInstance>; execOperation?: (op: string, params: Record<string, string>) => Promise<string>; dbTargets?: DbTargets; dbProxyHost?: string; agentEvents?: AgentEventHub; spawnPty?: SpawnPty; scheduler?: { fireNow: (id: string) => Promise<boolean> }; prodCatalog?: Catalog; prodDbAccess?: Record<string, Access>; readProdSecret?: (opItem: string) => string | Promise<string>; execProdWrite?: (opts: { entry: DbEntry; server: ServerRef; sql: string; preview: boolean; scope?: WriteScope }) => Promise<{ rows: number; note: string }>; tmuxProbe?: (containers: string[], now?: number) => Promise<Record<string, TmuxSession[]>>; onConfigWritten?: () => void;
+export interface ApiDeps { mgr: SessionManager; db: Database; cfg: DevConfig; root: string; tree: () => Promise<TreeProject[]>; listener: ListenerClient; notify: NotifyFn; stats: () => unknown; resources?: () => unknown; cloneQueue: CloneQueue; configRepo: ConfigRepo; dashboardDir?: string; previewHost?: string; backup: { build: () => Promise<string>; restore: (tarPath: string) => Promise<void> }; github?: { owners: () => GithubOwner[] | Promise<GithubOwner[]>; repos: (owner: string) => GithubRepo[] | Promise<GithubRepo[]>; sharedRepos?: () => GithubRepo[] | Promise<GithubRepo[]> }; gitea?: GiteaApi; opToken?: string; vault?: Vault; gitProxy?: Hono; prodCatalogPath?: string; prodAccessPath?: string; sshKeyTitles?: () => Promise<string[]>; coolifyInstances?: () => Record<string, CoolifyInstance>; execOperation?: (op: string, params: Record<string, string>) => Promise<string>; dbTargets?: DbTargets; dbProxyHost?: string; agentEvents?: AgentEventHub; spawnPty?: SpawnPty; scheduler?: { fireNow: (id: string) => Promise<boolean> }; prodCatalog?: Catalog; prodDbAccess?: Record<string, Access>; readProdSecret?: (opItem: string) => string | Promise<string>; execProdWrite?: (opts: { entry: DbEntry; server: ServerRef; sql: string; preview: boolean; scope?: WriteScope }) => Promise<{ rows: number; note: string }>; tmuxProbe?: (containers: string[], now?: number) => Promise<Record<string, TmuxSession[]>>; onConfigWritten?: () => void;
   liveActivities?: LiveActivities;
   /** Dashboard origins allowed to mutate the API from a browser; default see originGuard.ts (+ DEVD_DASHBOARD_ORIGINS). */
   dashboardOrigins?: string[];
@@ -378,7 +379,11 @@ export function createApp(d: ApiDeps): Hono {
           job.status = err instanceof CodexSessionAccountError ? err.status : 502;
           job.body = { error: err instanceof CodexSessionAccountError ? err.message : codexSwitchFailed };
         },
-      ).finally(() => { job.running = false; });
+      ).finally(() => {
+        job.running = false;
+        // A result nobody comes back for (tab closed, session ended) expires instead of living forever.
+        setTimeout(() => { if (codexSwitches.get(id) === job) codexSwitches.delete(id); }, 3_600_000).unref?.();
+      });
       let timer: ReturnType<typeof setTimeout> | undefined;
       const finished = await Promise.race([work.then(() => true),
         new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), d.codexSwitchWaitMs ?? 60_000); })]);
@@ -2204,10 +2209,16 @@ export function createApp(d: ApiDeps): Hono {
   // ~0.8 s on every opening of the repository browser in Folders. SWR cache: the first
   // opening waits, later ones get the value immediately and the refresh runs in the background.
   const ownersCache = memoAsync(() => listOwners(), 10 * 60_000);
-  const github = d.github ?? { owners: () => ownersCache.get(), repos: (o: string) => listRepos(o) };
+  const github = d.github ?? { owners: () => ownersCache.get(), repos: (o: string) => listRepos(o), sharedRepos: () => listSharedRepos() };
   app.get("/api/github/owners", async (c) => {
     try { return c.json({ owners: await github.owners() }); }
     catch (e) { return c.json({ error: (e as Error).message }, 502); }
+  });
+  // Repos of other owners where the account is only a collaborator ("Shared with me" in Folders).
+  app.get("/api/github/shared-repos", async (c) => {
+    if (!github.sharedRepos) return c.json({ repos: [] });
+    try { return c.json({ repos: await github.sharedRepos() }); }
+    catch (e) { return c.json({ error: (e as Error).message }, e instanceof GithubError ? 502 : 500); }
   });
   app.get("/api/github/repos", async (c) => {
     const owner = c.req.query("owner") ?? "";
@@ -2404,19 +2415,25 @@ export function createApp(d: ApiDeps): Hono {
   });
   app.post("/api/restore", async (c) => {
     noIdleTimeout(c);
+    // Cheap early refusal: do not pull a multi-GB upload into RAM just to answer 409.
+    if (backupRunning) return c.json({ error: "backup is already running", inProgress: "backup" }, 409);
     // Reading the body BEFORE the flag: a failed/interrupted read (connection dropped in the middle
     // of the upload) must not set the flag at all, otherwise it would stay up forever —
-    // hence no `await` between `backupRunning = true` and the `try` below.
+    // hence no `await` between `backupRunning = true` and the `try` below. Checked again
+    // after the read, because another backup/restore may have started meanwhile.
     const buf = new Uint8Array(await c.req.arrayBuffer());
     if (backupRunning) return c.json({ error: "backup is already running", inProgress: "backup" }, 409);
     backupRunning = true;
-    const tmp = `/tmp/devd-restore-${buf.length}.tgz`;
+    // The archive holds secrets.json and the DB: private dir with an unpredictable name, file 0600.
+    let dir: string | undefined;
     try {
-      await Bun.write(tmp, buf);
+      dir = mkdtempSync(join(tmpdir(), "devd-restore-"));
+      const tmp = join(dir, "restore.tgz");
+      writeFileSync(tmp, buf, { mode: 0o600 });
       await d.backup.restore(tmp);
       return c.json({ ok: true });
     } catch (e) { return c.json({ error: (e as Error).message }, 500); }
-    finally { rmSync(tmp, { force: true }); backupRunning = false; }
+    finally { if (dir) rmSync(dir, { recursive: true, force: true }); backupRunning = false; }
   });
 
   // Pool of Anthropic accounts. Lease returns ONLY the profile name — no endpoint returns a token.

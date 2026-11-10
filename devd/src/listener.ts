@@ -50,7 +50,12 @@ export function createListenerClient(url: string | undefined, token: string | un
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(tmo),
     });
-    if (!res.ok) throw httpError(res.status, `listener returned ${res.status}`);
+    if (!res.ok) {
+      // Keep the listener's own explanation (e.g. "SMB share not mounted") — "listener returned 404"
+      // alone sends the user hunting in the wrong place.
+      const detail = await res.json().then((b) => (b as { error?: unknown }).error).catch(() => undefined);
+      throw httpError(res.status, `listener returned ${res.status}${typeof detail === "string" && detail ? `: ${detail.slice(0, 300)}` : ""}`);
+    }
   };
   return {
     // /open blocks the listener for the duration of `open` on the Mac (spawnSync) — an app cold launch

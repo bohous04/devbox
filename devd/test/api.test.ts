@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { ContainerIdentity } from "../src/containerIdentity";
 import { createShare } from "../src/shares";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_CONFIG } from "../src/config";
@@ -201,6 +201,16 @@ test("github owners endpoint maps gh failure to 502 with error body", async () =
   expect(((await r.json()) as { error: string }).error).toContain("gh auth login");
 });
 
+test("github shared-repos endpoint lists collaborator repos and maps gh failure to 502", async () => {
+  const repo = { name: "app", nameWithOwner: "carol/app", url: "https://github.com/carol/app", visibility: "private", description: "", isPrivate: true, isArchived: false, updatedAt: "2026-07-01T10:00:00Z" };
+  const ok = await app({ owners: () => [], repos: () => [], sharedRepos: () => [repo] }).a.request("/api/github/shared-repos");
+  expect(ok.status).toBe(200);
+  expect(await ok.json()).toEqual({ repos: [repo] });
+  const { GithubError } = await import("../src/github");
+  const bad = await app({ owners: () => [], repos: () => [], sharedRepos: () => { throw new GithubError("gh api user/repos failed: auth"); } }).a.request("/api/github/shared-repos");
+  expect(bad.status).toBe(502);
+});
+
 test("github repos endpoint validates owner and returns repos", async () => {
   const repo = { name: "cms", nameWithOwner: "acme/cms", url: "https://github.com/acme/cms", visibility: "private", description: "", isPrivate: true, isArchived: false, updatedAt: "2026-07-01T10:00:00Z" };
   const { a } = app({ owners: () => [], repos: (o) => (o === "acme" ? [repo] : []) });
@@ -261,6 +271,17 @@ test("POST /api/restore: a second restore/backup while a restore is running → 
   expect(backupDuring.status).toBe(409);
   release();
   await first;
+});
+
+test("POST /api/restore: the uploaded archive is written privately (0600, unpredictable dir) and removed", async () => {
+  let seen = "", mode = 0;
+  const backup = { build: async () => "/tmp/x", restore: async (p: string) => { seen = p; mode = statSync(p).mode & 0o777; } };
+  const { a } = app(undefined, undefined, undefined, { backup });
+  const res = await a.request("/api/restore", { method: "POST", body: new Uint8Array([1, 2, 3]) });
+  expect(res.status).toBe(200);
+  expect(mode).toBe(0o600);
+  expect(seen).not.toContain("devd-restore-3.tgz");
+  expect(existsSync(seen)).toBe(false);
 });
 
 test("POST /api/restore: a failed restore releases the single-flight flag", async () => {

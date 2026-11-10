@@ -37,3 +37,10 @@ test("a buffer longer than one packet is fine — it is read by length", () => {
   const s = startup({ user: "app", database: "shop" });
   expect(parseStartup(Buffer.concat([s, Buffer.from("extra")]))).toEqual({ ok: true, user: "app", database: "shop" });
 });
+
+test("an absurd or negative length is bad, not incomplete (no unbounded buffering)", () => {
+  const huge = Buffer.alloc(8); huge.writeInt32BE(2_000_000_000, 0); huge.writeInt32BE(196608, 4);
+  expect(parseStartup(huge)).toEqual({ ok: false, reason: "bad" });
+  const neg = Buffer.alloc(8); neg.writeInt32BE(-1, 0); neg.writeInt32BE(196608, 4);
+  expect(parseStartup(neg)).toEqual({ ok: false, reason: "bad" });
+});
