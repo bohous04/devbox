@@ -67,6 +67,7 @@ export interface RetryStatus {
   phase: "waiting" | "connecting";
   attempt: number;
   secondsLeft: number;     // waiting only
+  totalSeconds?: number;   // length of the current wait (countdown bar)
   via?: string;            // network path of the next/current attempt
   lastError?: string;
   offlineSince: number;    // ms epoch of the first drop in this outage
@@ -150,7 +151,7 @@ export async function attachLoop(deps: AttachLoopDeps): Promise<number> {
     }
     // Panel: count down once per second instead of printing another line.
     for (let left = wait; left > 0; left -= 1000) {
-      status({ label: deps.label, phase: "waiting", attempt, secondsLeft: Math.ceil(left / 1000), via: via(attempt), lastError, offlineSince });
+      status({ label: deps.label, phase: "waiting", attempt, secondsLeft: Math.ceil(left / 1000), totalSeconds: Math.ceil(wait / 1000), via: via(attempt), lastError, offlineSince });
       await deps.sleep(Math.min(1000, left));
     }
   }
@@ -195,10 +196,85 @@ export function renderRetryStatus(s: RetryStatus, now: number, frame: number, wi
   return lines.map((l) => fit(l, Math.max(20, width - 1)));
 }
 
-const C = { title: "\x1b[1;33m", dim: "\x1b[2m", reset: "\x1b[0m" };
+// ---- Boxed panel with an ASCII Wi-Fi glyph ------------------------------------------------------
+
+type Style = "lit" | "unlit" | "dot" | "dotLive" | "title" | "label" | "text" | "dim" | "bar" | "barOff" | "frame" | "";
+export type Seg = [string, Style];
+
+// Three arcs (0 = outer … 2 = inner) above the dot; every segment is tagged with its arc so the
+// arcs can "search for signal" (light up inner → outer, frame by frame). -1 = padding, 3 = dot.
+const GLYPH: [string, number][][] = [
+  [["   ", -1], [".-'''''''-.", 0]],
+  [[" ", -1], [".'", 0], ["  ", -1], [".-'''-.", 1], ["  ", -1], ["'.", 0]],
+  [["    ", -1], [".'", 1], [" ", -1], [".-.", 2], [" ", -1], ["'.", 1]],
+  [["        ", -1], ["●", 3]],
+];
+const GLYPH_W = 17;
+
+const STYLE: Record<Exclude<Style, "">, string> = {
+  lit: "\x1b[33m", unlit: "\x1b[90m", dot: "\x1b[31m", dotLive: "\x1b[33m", title: "\x1b[1;33m",
+  label: "\x1b[1m", text: "", dim: "\x1b[2m", bar: "\x1b[33m", barOff: "\x1b[90m", frame: "\x1b[90m",
+};
+const segLen = (segs: Seg[]) => segs.reduce((n, [t]) => n + [...t].length, 0);
+
+function fitSegs(segs: Seg[], width: number): Seg[] {
+  if (segLen(segs) <= width) return [...segs, [" ".repeat(width - segLen(segs)), ""]];
+  const out: Seg[] = [];
+  let room = width - 1;
+  for (const [t, st] of segs) {
+    if (room <= 0) break;
+    const chars = [...t];
+    out.push([chars.slice(0, room).join(""), st]);
+    room -= Math.min(room, chars.length);
+  }
+  return [...out, ["…", "dim"]];
+}
+
+function glyphRow(row: number, frame: number, connecting: boolean): Seg[] {
+  // Waiting: 0..3 arcs lit, cycling; connecting: all arcs lit (we are actually dialing).
+  const level = connecting ? 3 : frame % 4;
+  const segs: Seg[] = (GLYPH[row] ?? []).map(([t, arc]): Seg =>
+    [t, arc < 0 ? "" : arc === 3 ? (connecting ? "dotLive" : "dot") : arc >= 3 - level ? "lit" : "unlit"]);
+  return [...segs, [" ".repeat(GLYPH_W - segLen(segs)), ""]];
+}
+
+/** Countdown bar ▰▰▰▱▱▱ — fills as the next attempt approaches. */
+export function countdownBar(left: number, total: number, cells = 10): Seg[] {
+  const done = total > 0 ? Math.round(((total - left) / total) * cells) : 0;
+  const d = Math.max(0, Math.min(cells, done));
+  return [["▰".repeat(d), "bar"], ["▱".repeat(cells - d), "barOff"]];
+}
+
+/** The boxed panel as styled segments per line; null = terminal too narrow (use renderRetryStatus). */
+export function renderRetryPanel(s: RetryStatus, now: number, frame: number, width = 100): Seg[][] | null {
+  const outer = Math.min(width - 1, 66);
+  if (outer < 52) return null;
+  const textW = outer - 4 - GLYPH_W - 2;
+  const connecting = s.phase === "connecting";
+  const where = [s.via ? `via ${s.via}` : "", `attempt ${s.attempt}`].filter(Boolean).join(" · ");
+  const text: Seg[][] = [
+    [["Offline", "title"], ["  ·  ", "dim"], [s.label, "label"]],
+    connecting
+      ? [["connecting…", "text"]]
+      : [[`reconnecting in ${s.secondsLeft}s  `, "text"], ...countdownBar(s.secondsLeft, s.totalSeconds ?? s.secondsLeft)],
+    [[where, "dim"]],
+    [[s.lastError ? prettyError(s.lastError) : "", "dim"]],
+    [[`offline ${ago(now - s.offlineSince)}  ·  Ctrl-C = back`, "dim"]],
+  ];
+  const lines: Seg[][] = [[["╭" + "─".repeat(outer - 2) + "╮", "frame"]]];
+  for (let i = 0; i < text.length; i++) {
+    lines.push([["│ ", "frame"], ...glyphRow(i, frame, connecting), ["  ", ""], ...fitSegs(text[i]!, textW), [" │", "frame"]]);
+  }
+  lines.push([["╰" + "─".repeat(outer - 2) + "╯", "frame"]]);
+  return lines;
+}
+
+const paint = (segs: Seg[], color: boolean) =>
+  segs.map(([t, st]) => (color && st && t ? STYLE[st] + t + "\x1b[0m" : t)).join("");
 
 /** Draws the panel in place: every update erases the previous one (cursor up + clear to end),
- *  so an outage stays a few lines high instead of scrolling two lines per attempt. */
+ *  so an outage stays one box high instead of scrolling two lines per attempt. Narrow terminals
+ *  get the compact text lines. */
 export function createStatusPanel(write: (s: string) => void, opts: { width?: () => number; now?: () => number; color?: boolean } = {}) {
   let drawn = 0;
   let frame = 0;
@@ -210,9 +286,12 @@ export function createStatusPanel(write: (s: string) => void, opts: { width?: ()
       drawn = 0;
       return;
     }
-    const lines = renderRetryStatus(s, (opts.now ?? Date.now)(), frame++, opts.width?.() ?? 100);
-    const body = lines.map((l, i) => (color ? (i === 0 ? C.title : C.dim) + l + C.reset : l)).join("\n") + "\n";
-    write(erase() + "\x1b[?25l" + body);
+    const now = (opts.now ?? Date.now)(), width = opts.width?.() ?? 100, f = frame++;
+    const boxed = renderRetryPanel(s, now, f, width);
+    const lines = boxed
+      ? boxed.map((l) => paint(l, color))
+      : renderRetryStatus(s, now, f, width).map((l, i) => paint([[l, i === 0 ? "title" : "dim"]], color));
+    write(erase() + "\x1b[?25l" + lines.join("\n") + "\n");
     drawn = lines.length;
   };
 }

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { attachLoop, backoffMs, createStatusPanel, dialFor, isConnectFailure, MAX_MISSING_SESSION, prettyError, renderRetryStatus, retryDecision, type RetryStatus, TERMINAL_RESET } from "../src/reconnect";
+import { attachLoop, backoffMs, countdownBar, createStatusPanel, renderRetryPanel, dialFor, isConnectFailure, MAX_MISSING_SESSION, prettyError, renderRetryStatus, retryDecision, type RetryStatus, TERMINAL_RESET } from "../src/reconnect";
 import { lastErrorLine } from "../src/attach";
 
 test("cold recovery retries missing Docker/tmux while desired session is running", async () => {
@@ -264,11 +264,46 @@ test("renderRetryStatus: short, truncated to width, shows path, error and offlin
 
 test("createStatusPanel redraws in place and clears", () => {
   const out: string[] = [];
-  const panel = createStatusPanel((t) => out.push(t), { color: false, now: () => 0 });
+  const panel = createStatusPanel((t) => out.push(t), { color: false, now: () => 0, width: () => 40 }); // narrow → compact 3 lines
   const s: RetryStatus = { label: "l", phase: "waiting", attempt: 1, secondsLeft: 1, offlineSince: 0 };
   panel(s); panel(s); panel(null); panel(null);
   expect(out[0]).not.toContain("\x1b[3A");
   expect(out[1]).toStartWith("\r\x1b[3A\x1b[J");
   expect(out[2]).toBe("\r\x1b[3A\x1b[J\x1b[?25h");
   expect(out.length).toBe(3);
+});
+
+test("renderRetryPanel: boxed ASCII panel with equal-width rows, glyph, countdown and error", () => {
+  const s: RetryStatus = { label: "shop/ledger", phase: "waiting", attempt: 7, secondsLeft: 6, totalSeconds: 15, via: "devbox-ts",
+    lastError: "ssh: connect to host 203.0.113.7 port 2222: Operation timed out", offlineSince: 0 };
+  const rows = renderRetryPanel(s, 192_000, 0, 120)!.map((l) => l.map(([t]) => t).join(""));
+  expect(rows.length).toBe(7);
+  expect(new Set(rows.map((r) => [...r].length)).size).toBe(1); // every row exactly as wide as the frame
+  expect(rows[0]).toStartWith("╭");
+  expect(rows.at(-1)).toStartWith("╰");
+  expect(rows[1]).toContain("Offline  ·  shop/ledger");
+  expect(rows[2]).toContain("reconnecting in 6s  ▰▰▰▰▰▰▱▱▱▱");
+  expect(rows[3]).toContain("via devbox-ts · attempt 7");
+  expect(rows[4]).toContain("●");
+  expect(rows[4]).toContain("203.0.113.7:2222 — operation timed out");
+  // a very long label is truncated inside the frame instead of breaking it
+  const long = renderRetryPanel({ ...s, label: "x".repeat(200) }, 0, 0, 120)!.map((l) => l.map(([t]) => t).join(""));
+  expect(new Set(long.map((r) => [...r].length)).size).toBe(1);
+  expect(renderRetryPanel(s, 0, 0, 40)).toBeNull(); // too narrow → caller falls back to compact lines
+});
+
+test("renderRetryPanel: arcs light up frame by frame while waiting, all lit while connecting", () => {
+  const s: RetryStatus = { label: "l", phase: "waiting", attempt: 1, secondsLeft: 1, offlineSince: 0 };
+  const lit = (f: number, st = s) => renderRetryPanel(st, 0, f, 100)!.flat().filter(([, k]) => k === "lit").length;
+  expect(lit(0)).toBe(0);
+  expect(lit(1)).toBeLessThan(lit(2));
+  expect(lit(2)).toBeLessThan(lit(3));
+  expect(lit(0, { ...s, phase: "connecting" })).toBe(lit(3));
+});
+
+test("countdownBar fills towards the next attempt", () => {
+  const txt = (l: number, t: number) => countdownBar(l, t).map(([x]) => x).join("");
+  expect(txt(15, 15)).toBe("▱".repeat(10));
+  expect(txt(0, 15)).toBe("▰".repeat(10));
+  expect(txt(5, 0)).toBe("▱".repeat(10));
 });
