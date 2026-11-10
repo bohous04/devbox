@@ -746,14 +746,21 @@ class Guard:
             if not gitfile.is_file():
                 report.append(dict(path=str(p),reason='Not a linked worktree; requires review'))
                 continue
-            common=Path(run(['/usr/bin/git','-c','safe.directory=*','-C',p,'rev-parse','--path-format=absolute','--git-common-dir']).decode().strip())
-            if not beneath(common,self.root):
+            # One broken worktree (e.g. its registration was pruned) must not abort the sweep:
+            # it used to fail every run, so no released worktree was offloaded at all.
+            try:
+                common=Path(run(['/usr/bin/git','-c','safe.directory=*','-C',p,'rev-parse','--path-format=absolute','--git-common-dir']).decode().strip())
+                if not beneath(common,self.root):
+                    continue
+                archive,sigs=self.archive([p],'worktree',self.git_storage(common))
+                if referenced(p) or sigs!={str(x):signature(x) for x in [p]}:
+                    continue
+                # Git manages its registration. No rm -rf fallback for broken metadata.
+                run(['/usr/bin/git','-c','safe.directory=*','-C',p,'worktree','remove','--force',str(p)])
+            except (RuntimeError,OSError,subprocess.SubprocessError) as err:
+                report.append(dict(path=str(p),owner=e.get('session'),reason='Released, but cleanup failed; requires review: '+str(err)[-300:]))
+                self.audit('released-worktree-cleanup-failed',path=str(p),error=str(err)[-300:])
                 continue
-            archive,sigs=self.archive([p],'worktree',self.git_storage(common))
-            if referenced(p) or sigs!={str(x):signature(x) for x in [p]}:
-                continue
-            # Git manages its registration. No rm -rf fallback for broken metadata.
-            run(['/usr/bin/git','-c','safe.directory=*','-C',p,'worktree','remove','--force',str(p)])
             e['removed_at']=time.time()
             e['archive']=archive
             self.audit('released-worktree-offloaded',path=str(p),archive=archive)
