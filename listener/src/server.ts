@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import type { DbRequestReq } from "./dbPrompt";
 import { mapPath, type Actions, type NotifySession } from "./actions";
 import type { ListenerConfig } from "./config";
@@ -86,9 +87,15 @@ export function createListener(cfg: ListenerConfig, actions: Actions) {
         if (!body || typeof body.path !== "string") return Response.json({ error: "missing path" }, { status: 400 });
         const mapped = mapPath(cfg.mappings, body.path);
         if (!mapped) return Response.json({ error: "path outside the allowed mappings" }, { status: 403 });
-        return actions.open(mapped).code === 0
-          ? new Response(null, { status: 204 })
-          : Response.json({ error: "open failed" }, { status: 500 });
+        if (actions.open(mapped).code === 0) return new Response(null, { status: 204 });
+        // The usual cause is not `open` itself but a dropped SMB share: the file exists on the devbox,
+        // yet /Volumes/dev is an empty mountpoint (10 Nov 2026 — the mount agent hung for 5 days).
+        // Say so instead of a bare "open failed", the agent in the session relays it to the user.
+        if (!existsSync(mapped)) {
+          const root = cfg.mappings.find((m) => mapped.startsWith(m.to + "/") || mapped === m.to)?.to ?? mapped;
+          return Response.json({ error: `not visible on the Mac: ${mapped} — is the devbox SMB share mounted at ${root}?` }, { status: 404 });
+        }
+        return Response.json({ error: "open failed" }, { status: 500 });
       }
       // Bridge for the proxy login OAuth callback (CLIProxyAPI on the devbox): open
       // 127.0.0.1:1455 for 15 minutes and forward to the devd relay. The relay host is taken

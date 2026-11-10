@@ -4,8 +4,20 @@ set -euo pipefail
 target="${1:?usage: open <file>}"
 abs=$(realpath "$target")
 payload=$(jq -n --arg s "${DEVD_SESSION_ID:-}" --arg p "$abs" '{sessionId: $s, path: $p}')
-if ! curl -fsS -m 5 -X POST "${DEVD_URL:-http://host.docker.internal:4300}/api/open" \
-     -H 'content-type: application/json' -d "$payload" >/dev/null 2>&1; then
-  echo "open: devd unreachable or /api/open not available yet" >&2
+url="${DEVD_URL:-http://host.docker.internal:4300}/api/open"
+# Show devd's real answer: the old message ("devd unreachable") was printed for every failure,
+# including a dropped SMB share on the Mac, and sent everyone debugging devd instead.
+if ! out=$(curl -sS -m 15 -X POST "$url" -H 'content-type: application/json' -d "$payload" -w '\n%{http_code}' 2>&1); then
+  echo "open: devd unreachable at $url ($out)" >&2
   exit 1
 fi
+code="${out##*$'\n'}"
+body="${out%$'\n'*}"
+case "$code" in
+  2??) exit 0 ;;
+  404 | 405) if [ -z "$(jq -r '.error // empty' <<<"$body" 2>/dev/null)" ]; then
+       echo "open: /api/open not available on this devd (HTTP $code)" >&2; exit 1; fi ;;
+esac
+err=$(jq -r '.error // empty' <<<"$body" 2>/dev/null || true)
+echo "open: failed (HTTP $code): ${err:-$body}" >&2
+exit 1
