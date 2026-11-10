@@ -23,7 +23,16 @@ STATE_DIR="$HOME/Library/Caches/devbox-smbmount"
 FAILS_FILE="$STATE_DIR/fails"
 mkdir -p "$STATE_DIR"
 
-mount -t smbfs | grep -q "//root@${SERVER}/${SHARE} " && { rm -f "$FAILS_FILE"; exit 0; }
+MOUNTPOINT="/Volumes/${SHARE}"
+# Mounted where the listener mapping expects it → done. Mounted somewhere else (/Volumes/dev-1: a
+# stuck attempt had already claimed /Volumes/dev, seen 5 and 10 Nov 2026) → the listener cannot see
+# the files, so unmount it and mount again at the right place below.
+current=$(mount -t smbfs | sed -n "s#^//root@${SERVER}/${SHARE} on \(.*\) (smbfs.*#\1#p" | head -1)
+if [ "$current" = "$MOUNTPOINT" ]; then rm -f "$FAILS_FILE"; exit 0; fi
+if [ -n "$current" ]; then
+  echo "$(date '+%F %T') share mounted at $current instead of $MOUNTPOINT — remounting"
+  /usr/sbin/diskutil unmount force "$current" >/dev/null 2>&1 || exit 0
+fi
 
 # Backoff after failed attempts: 2, 4, 8, max 15 minutes.
 if [ -f "$FAILS_FILE" ]; then
@@ -47,7 +56,6 @@ with_deadline() {
   return $rc
 }
 
-MOUNTPOINT="/Volumes/${SHARE}"
 mounted=1
 if [ -d "$MOUNTPOINT" ] && [ -O "$MOUNTPOINT" ]; then
   # A mountpoint left behind by an earlier mount: mount_smbfs fills it directly. -N = never prompt,
