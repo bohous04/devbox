@@ -202,6 +202,35 @@ class Safety(unittest.TestCase):
             self.g.sweep()
         self.assertTrue((p/'unique').exists())
 
+    def test_broken_worktree_does_not_stop_sweep_of_the_rest(self):
+        # A released worktree whose Git registration is gone (pruned) made rev-parse fail and the
+        # whole sweep abort on every run, so no released worktree was ever offloaded again.
+        sessions=self.root/'_sessions'/'dev-owner'
+        broken=sessions/'.worktrees'/'broken';broken.mkdir(parents=True)
+        (broken/'.git').write_text('gitdir: /nowhere/worktrees/--help\n')
+        good=sessions/'.worktrees'/'good';good.mkdir(parents=True);(good/'.git').write_text('gitdir: x\n')
+        guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[]})
+        guard.atomic(self.g.state/'registry.json',{
+            'a':{'session':'dev-owner','path':str(broken),'released_at':1},
+            'b':{'session':'dev-owner','path':str(good),'released_at':1}})
+        calls=[]
+        def fake_run(args,*a,**k):
+            if str(broken) in [str(x) for x in args]:
+                raise RuntimeError('git -c failed (rc=128): fatal: not a git repository')
+            calls.append([str(x) for x in args])
+            return (str(self.root/'repo.git')+'\n').encode()
+        with patch.object(guard,'run',side_effect=fake_run), \
+             patch.object(guard,'referenced',return_value=False), \
+             patch.object(self.g,'git_storage',return_value=[]), \
+             patch.object(self.g,'archive',return_value=('arch',{str(good):guard.signature(good)})):
+            self.g.sweep()
+        self.assertTrue(any('remove' in c for c in calls))
+        registry=guard.read(self.g.state/'registry.json')
+        self.assertIn('removed_at',registry['b'])
+        self.assertNotIn('removed_at',registry['a'])
+        review=guard.read(self.g.state/'review.json')
+        self.assertTrue(any(c['path']==str(broken) for c in review['candidates']))
+
     def test_sweep_fails_closed_when_inventory_stale(self):
         guard.atomic(self.g.state/'inventory.json',{'time':1,'sessions':[]})
         with self.assertRaisesRegex(RuntimeError,'Stale'):self.g.sweep()
