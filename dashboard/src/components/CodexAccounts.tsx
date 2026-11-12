@@ -176,10 +176,9 @@ function CodexAccountCard({ account, preferred, busy, now, onRefresh, onToggle, 
         <ActionButton size="sm" variant="ghost" className={touchButton} disabled={busy} onError={onError} onAction={onToggle}>
           {account.disabled ? "Enable" : "Disable"}
         </ActionButton>
-        {!account.isDefault && (
-          <ConfirmButton size="sm" variant="ghost" className={touchButton} disabled={busy} confirmLabel="Delete account and history?"
-            onError={onError} onConfirm={onRemove}>Remove</ConfirmButton>
-        )}
+        <ConfirmButton size="sm" variant="ghost" className={touchButton} disabled={busy}
+          confirmLabel={account.isDefault ? "Remove the main account for good? Old threads stay on disk." : "Delete account and history?"}
+          onError={onError} onConfirm={onRemove}>Remove</ConfirmButton>
       </div>
     </CardContent></Card>
   );
