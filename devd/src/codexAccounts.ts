@@ -183,12 +183,16 @@ export class CodexAccounts {
   }
   async remove(id: string) {
     this.require(id);
-    if (id === "default") throw new AccountError("The main account cannot be removed.");
     await this.exclusive(id, async () => {
       await this.cleanReauth(id);
-      await cancelAccountLogin(this.d.auth, id);
-      await removeAccountProfile(this.d.auth, id);
+      // The main account has no login container of its own (a renewed sign-in runs via
+      // cleanReauth above).
+      if (id !== "default") await cancelAccountLogin(this.d.auth, id);
+      // The main account's volume (codex-home) also holds the history of old threads and is
+      // shared with the Codex Remote server — removing the account drops it from devd only.
+      if (id !== "default") await removeAccountProfile(this.d.auth, id);
       this.d.db.transaction(() => {
+        if (id === "default") this.d.db.query("UPDATE codex_account_settings SET default_removed=1 WHERE singleton=1").run();
         this.d.db.query("UPDATE codex_account_settings SET preferred_account_id=NULL WHERE preferred_account_id=?").run(id);
         this.d.db.query("DELETE FROM codex_accounts WHERE id=?").run(id);
         this.d.db.query("DELETE FROM codex_account_reauth WHERE account_id=?").run(id);

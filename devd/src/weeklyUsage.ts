@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import type { AccountUsage } from "./accountUsage";
+import { codexDefaultRemoved } from "./codexAccountsDb";
 import type { CodexWindow } from "./codexUsage";
 import type { UsageAccountHistory, UsagePoint, UsageProvider, UsageResponse } from "../../shared/usage";
 
@@ -78,7 +79,9 @@ export function buildWeeklyUsage(db: Database, from: number, to: number, now = D
   const hasCodexRegistry = Boolean(db.query("SELECT 1 FROM sqlite_master WHERE name='codex_accounts'").get());
   const codexAccounts = hasCodexRegistry ? db.query("SELECT id,label,identity FROM codex_accounts").all() as {id:string;label:string;identity:string|null}[] : [];
   // The main CO volume is a real account slot even before/without registry rows.
-  if (!codexAccounts.some((a) => a.id === "default")) codexAccounts.push({id:"default",label:"Main account",identity:null});
+  // …unless the operator removed it for good (codexAccountsDb: default_removed).
+  if (!codexAccounts.some((a) => a.id === "default") && !(hasCodexRegistry && codexDefaultRemoved(db)))
+    codexAccounts.push({id:"default",label:"Main account",identity:null});
   // Singleton pollers do not refresh tokens — an expired login is therefore a common state
   // with a clear fix, not a generic collection error (Grok refreshes the token only in a running `gr`).
   const loginExpired = (provider: UsageProvider, accountId: string) => {

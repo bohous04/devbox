@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
 import { openDb, insertAccount, upsertAccountUsage, upsertGrokUsage } from "../src/db";
+import { initCodexAccounts } from "../src/codexAccountsDb";
 import { buildWeeklyUsage, claudeWeeklyUsage, codexWeeklyUsage, migrateWeeklyUsage, recordWeeklyUsage, weeklyUsageFailed, weeklyUsageRange } from "../src/weeklyUsage";
 import { parseGrokBilling } from "../src/grokUsageFetch";
 
@@ -84,6 +85,17 @@ test("empty CO registry still exposes main account; deleted account history is a
   expect(old.archived).toBe(true);
   expect(old.state).toBe("stale");
   expect(old.accountLabel).toContain("removed account");
+});
+
+test("a removed main CO account is not resurrected; its history is archived", () => {
+  const db = openDb(":memory:");
+  initCodexAccounts(db);
+  recordWeeklyUsage(db,"codex","default","Main account","org-main",NOW,weekly(40));
+  db.exec("DELETE FROM codex_accounts WHERE id='default'; UPDATE codex_account_settings SET default_removed=1");
+  const main = buildWeeklyUsage(db,NOW-1,NOW+1,NOW).accounts.filter(a=>a.provider==="codex" && a.accountId==="default");
+  expect(main).toHaveLength(1);
+  expect(main[0]!.archived).toBe(true);
+  expect(main[0]!.accountLabel).toContain("removed account");
 });
 
 test("registered identity replacement archives history before the next quota poll", () => {

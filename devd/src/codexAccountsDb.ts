@@ -19,8 +19,22 @@ export function initCodexAccounts(db: Database): void {
     account_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, identity TEXT,
     started_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', error TEXT
   )`);
-  db.query(`INSERT OR IGNORE INTO codex_accounts (id,label,status,added_at) VALUES ('default','Main account','ready',0)`).run();
-  db.query(`INSERT OR IGNORE INTO codex_account_settings VALUES (1,NULL)`).run();
+  // The operator can remove the main account for good (e.g. its plan lapsed); the marker keeps
+  // this init from recreating it on every start. Older databases lack the column.
+  const cols = db.query("PRAGMA table_info(codex_account_settings)").all() as { name: string }[];
+  if (!cols.some((c) => c.name === "default_removed"))
+    db.run("ALTER TABLE codex_account_settings ADD COLUMN default_removed INTEGER NOT NULL DEFAULT 0");
+  db.query(`INSERT OR IGNORE INTO codex_account_settings (singleton,preferred_account_id) VALUES (1,NULL)`).run();
+  if (!codexDefaultRemoved(db))
+    db.query(`INSERT OR IGNORE INTO codex_accounts (id,label,status,added_at) VALUES ('default','Main account','ready',0)`).run();
+}
+
+/** True once the operator removed the main account (`codex-home`); it is then never recreated. */
+export function codexDefaultRemoved(db: Database): boolean {
+  try {
+    const row = db.query("SELECT default_removed FROM codex_account_settings WHERE singleton=1").get() as { default_removed: number } | null;
+    return row?.default_removed === 1;
+  } catch { return false; }   // registry not initialized yet (no table/column) → nothing was removed
 }
 
 export function listCodexAccounts(db: Database): CodexAccountRow[] {

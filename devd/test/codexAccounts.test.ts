@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { openDb, getCodexUsage } from "../src/db";
 import { CodexAccounts, chooseCodexAccount, codexAccountsRoutes, type CodexAccountView } from "../src/codexAccounts";
-import { getCodexAccount, storedCodexAccountUsage } from "../src/codexAccountsDb";
+import { getCodexAccount, initCodexAccounts, storedCodexAccountUsage } from "../src/codexAccountsDb";
 
 const NOW = 1_787_224_361_140;
 function fixture(readServerAuth?: () => Promise<string | null>) {
@@ -108,7 +108,6 @@ describe("Codex account API", () => {
     const f = fixture();
     for (const body of [{ label: "" }, { label: "x".repeat(101) }, { label: 123 }, null])
       expect((await f.request("/login/start", "POST", body)).status).toBe(400);
-    expect((await f.request("/default", "DELETE")).status).toBe(400);
     expect((await f.request("/default", "PATCH", { disabled: "false" })).status).toBe(400);
     expect((await f.request("/preference", "POST", {})).status).toBe(400);
     expect((await f.request("/missing", "DELETE")).status).toBe(404);
@@ -117,6 +116,25 @@ describe("Codex account API", () => {
     expect(getCodexAccount(f.db, extra.id)).toBe(null);
     expect(f.volumes.has(`codex-acct-${extra.id}`)).toBe(false);
     expect(f.volumes.has("codex-home")).toBe(true);
+  });
+
+  test("the main account can be removed for good; its volume with old threads stays", async () => {
+    const f = fixture();
+    const extra = await f.service.start("Work");
+    f.complete(extra.id, "work");
+    await f.service.loginStatus(extra.id);
+    await f.request("/preference", "POST", { accountId: "default" });
+    expect((await f.request("/default", "DELETE")).status).toBe(200);
+    expect(getCodexAccount(f.db, "default")).toBe(null);
+    expect(f.service.list().accounts.map((a) => a.id)).toEqual([extra.id]);
+    expect(f.service.list().preferredAccountId).toBe(null);
+    expect(f.service.select().accountId).toBe(extra.id);
+    // codex-home also holds legacy thread history; removing the account must not delete it.
+    expect(f.volumes.has("codex-home")).toBe(true);
+    // A devd restart re-runs the schema init: the removed main account must not come back.
+    initCodexAccounts(f.db);
+    expect(getCodexAccount(f.db, "default")).toBe(null);
+    expect((await f.request("/default", "DELETE")).status).toBe(404);
   });
 
   test("refresh coalesces requests and the API survives legacy wiring", async () => {
