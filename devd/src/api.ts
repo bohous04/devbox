@@ -194,7 +194,7 @@ export interface ApiDeps { mgr: SessionManager; db: Database; cfg: DevConfig; ro
   accounts?: {
     profiles: ProfileDeps; leaseMaxAgeMs: () => number;
     settings: () => AccountPoolSettings;
-    switchAccount: (sessionId: string) => Promise<SwitchAccountResult>;
+    switchAccount: (sessionId: string, accountId?: string) => Promise<SwitchAccountResult>;
     // Forced re-measurement of one account (POST /api/accounts/:id/refresh). Coalescing
     // concurrent calls and re-entrance against the regular poller is handled by index.ts —
     // the handler just waits for the result.
@@ -2505,13 +2505,18 @@ export function createApp(d: ApiDeps): Hono {
   app.post("/api/sessions/:id/switch-account", async (c) => {
     noIdleTimeout(c);
     const acc = needAccounts(); if (!acc) return c.json({ error: "account pool is not configured" }, 503);
-    const r = await acc.switchAccount(c.req.param("id"));
+    // Optional body `{ accountId }` = a manually picked target (F9); no body = automatic choice.
+    const body = (await c.req.json().catch(() => null)) as { accountId?: unknown } | null;
+    if (body?.accountId !== undefined && (typeof body.accountId !== "string" || !body.accountId))
+      return c.json({ error: "accountId must be a non-empty string" }, 400);
+    const r = await acc.switchAccount(c.req.param("id"), body?.accountId as string | undefined);
     switch (r.status) {
       case "unknown-session": return c.json({ error: "unknown session" }, 404);
       case "not-running": return c.json({ error: "session is not running" }, 409);
       case "wrong-agent": return c.json({ error: "the session profile does not run on an Anthropic account — the pool does not apply to it" }, 400);
       case "in-progress": return c.json({ error: "a switch for this session is already running" }, 409);
       case "no-account": return c.json({ ok: false, accountId: null, label: null, unchanged: false, exhausted: false, panes: [] });
+      case "invalid-account": return c.json({ error: "that account does not exist or is disabled/quarantined" }, 400);
       case "profile-unavailable": return c.json({ error: "The target Claude account could not be attached to this session. No Claude pane was stopped." }, 409);
       case "unchanged": return c.json({ ok: true, accountId: r.accountId, label: r.label, unchanged: true, exhausted: false, panes: [] });
       case "failed": return c.json({ ok: false, accountId: r.accountId, label: r.label, unchanged: false, exhausted: r.exhausted, panes: r.panes });

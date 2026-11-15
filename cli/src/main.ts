@@ -990,9 +990,33 @@ export async function pickAndSwitchAccount(
   }
   try {
     if (s.agent !== "codex") {
-      if (!await ui.confirm("Automatically choose a fresher Anthropic account for Claude Code? Each Claude pane restarts and resumes its exact current conversation. Unfinished local turns may be interrupted; if the conversation cannot be resumed, switching stops without starting a new one.")) return false;
-      ui.info("Switching Claude Code account automatically…");
-      const r = await deps.api.switchAccount(s.id);
+      // Manual pick next to the automatic one: the policy (preference + spillover, load
+      // ordering) can keep choosing an account the operator does not want right now.
+      const { accounts } = await deps.api.anthropicAccounts();
+      const pct = (v: number | null) => v === null ? "?" : `${Math.round(v)} %`;
+      const currentIds = new Set(accounts.filter(a => a.leases.some(l => l.client === "devbox" && l.sessionId === s.id)).map(a => a.id));
+      for (const a of accounts.filter(a => a.disabled || a.quarantined)) {
+        ui.info(`${a.label}: ${a.disabled ? "account disabled" : "account quarantined"}`);
+      }
+      const usable = accounts.filter(a => !a.disabled && !a.quarantined);
+      const picked = await ui.select(`Claude Code account for ${s.project}/${s.repo}?`, [
+        { value: "__auto__", label: "Automatic — devd picks a fresher account" },
+        ...usable.map(a => ({
+          value: a.id,
+          label: a.label,
+          hint: [currentIds.has(a.id) ? "current" : null, `5h ${pct(a.fiveHourPct)} · week ${pct(a.sevenDayPct)}`].filter(Boolean).join(" · "),
+        })),
+        { value: "__back__", label: "← Back" },
+      ]);
+      if (picked === undefined || picked === "__back__") return false;
+      const target = picked === "__auto__" ? undefined : usable.find(a => a.id === picked);
+      if (picked !== "__auto__" && !target) { ui.error("That account is unavailable. Reopen Change account to refresh the list."); return false; }
+      const resumeNote = "Each Claude pane restarts and resumes its exact current conversation. Unfinished local turns may be interrupted; if the conversation cannot be resumed, switching stops without starting a new one.";
+      if (!await ui.confirm(target
+        ? `Switch Claude Code to ${target.label}? ${resumeNote}`
+        : `Automatically choose a fresher Anthropic account for Claude Code? ${resumeNote}`)) return false;
+      ui.info(target ? `Switching Claude Code to ${target.label}…` : "Switching Claude Code account automatically…");
+      const r = await deps.api.switchAccount(s.id, target?.id);
       if (!r.accountId) {
         ui.error("No usable Anthropic account — check the dashboard (Login page).");
         return false;
@@ -1003,7 +1027,7 @@ export async function pickAndSwitchAccount(
         return false;
       }
       if (r.unchanged) { ui.info(`Already on ${r.label} — nothing to do.`); return false; }
-      if (r.exhausted) ui.warn(`${r.label} is over the usage threshold too.`);
+      if (r.exhausted) ui.warn(`${r.label} is over the usage threshold${target ? "" : " too"}.`);
       const stuck = r.panes.filter(p => p.outcome !== "restarted" && p.outcome !== "already-on-account");
       if (stuck.length) {
         ui.warn(`Only some Claude panes switched to ${r.label}. Check these panes: ${stuck.map(p => `${p.target} (${p.outcome})`).join(", ")}.`);

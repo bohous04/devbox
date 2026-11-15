@@ -654,3 +654,68 @@ test("all-exhausted branch: switches to another (still exhausted) account and ca
   expect(r.accountId).toBe("backup");
   expect(r.exhausted).toBe(true);
 });
+
+// Manual pick (F9 → a named account): bypasses the policy entirely. baseDb: primary 95 %
+// (exhausted), backup 20 % — the policy would pick backup; the operator asks for primary.
+test("manual target overrides the policy (even an exhausted account) and carries exhausted:true", async () => {
+  const db = baseDb();
+  insertSession(db, ROW);
+  insertLease(db, { account_id: "backup", client: "devbox", session_id: ROW.id, label: "shop/cms", created_at: NOW - HOUR, released_at: null });
+  const lc = pidLifecycle([62]);
+  const d = deps({
+    db,
+    exec: async (_c, cmd) => {
+      if (cmd[0] === "tmux" && cmd[1] === "list-panes") return ok("main:0.0\t62\n");
+      if (cmd[0] === "cat" && cmd[1] === "/proc/64/environ") return ok(environOf("/home/dev/.claude-accounts/backup"));
+      if (cmd[0] === "tmux" && cmd[1] === "send-keys") { lc.onSendKeys(62, cmd[4] as string); return ok(); }
+      if (cmd[0] === "ps") return ok(lc.ps([62]));
+      return ok();
+    },
+  });
+  const r = await switchAccount(d, ROW.id, "primary");
+  expect(r.status).toBe("switched");
+  if (r.status !== "switched") throw new Error("unreachable");
+  expect(r.accountId).toBe("primary");
+  expect(r.exhausted).toBe(true);
+  expect(leaseHistory(db, "devbox", ROW.id).filter((l) => l.released_at === null).map((l) => l.account_id)).toEqual(["primary"]);
+});
+
+test("manual target also overrides a project pin (explicit operator choice)", async () => {
+  const db = baseDb();
+  insertSession(db, ROW);
+  insertLease(db, { account_id: "primary", client: "devbox", session_id: ROW.id, label: "shop/cms", created_at: NOW - HOUR, released_at: null });
+  const lc = pidLifecycle([62]);
+  const d = deps({
+    db,
+    settings: () => ({ ...ACCOUNT_POOL_DEFAULTS, projectAccounts: { shop: "primary" } }),
+    exec: async (_c, cmd) => {
+      if (cmd[0] === "tmux" && cmd[1] === "list-panes") return ok("main:0.0\t62\n");
+      if (cmd[0] === "tmux" && cmd[1] === "send-keys") { lc.onSendKeys(62, cmd[4] as string); return ok(); }
+      if (cmd[0] === "ps") return ok(lc.ps([62]));
+      return ok();
+    },
+  });
+  const r = await switchAccount(d, ROW.id, "backup");
+  expect(r.status).toBe("switched");
+  if (r.status !== "switched") throw new Error("unreachable");
+  expect(r.accountId).toBe("backup");
+});
+
+test("manual target that is unknown, disabled or quarantined → invalid-account, no exec, lease untouched", async () => {
+  const db = baseDb();
+  insertSession(db, ROW);
+  insertAccount(db, { id: "off", label: "off@x.cz", disabled: 1, quarantined_at: null, added_at: 3 });
+  insertAccount(db, { id: "quar", label: "quar@x.cz", disabled: 0, quarantined_at: NOW - 1000, added_at: 4 });
+  upsertAccountUsage(db, usage("off", 0));
+  upsertAccountUsage(db, usage("quar", 0));
+  insertLease(db, { account_id: "primary", client: "devbox", session_id: ROW.id, label: "shop/cms", created_at: NOW - HOUR, released_at: null });
+  const before = leaseHistory(db, "devbox", ROW.id);
+  let calls = 0;
+  const d = deps({ db, exec: async () => { calls++; return ok(); } });
+  for (const id of ["nope", "off", "quar"]) {
+    expect(await switchAccount(d, ROW.id, id)).toEqual({ status: "invalid-account" });
+  }
+  expect(calls).toBe(0);
+  expect(leaseHistory(db, "devbox", ROW.id)).toEqual(before);
+  expect(d.inFlight.size).toBe(0);
+});

@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import type { Option } from "@clack/prompts";
-import { ApiClient, type CodexSessionAccountView, type CodexSessionAccountSwitchResult, type SwitchAccountResponse } from "../src/api";
+import { ApiClient, type AnthropicAccountView, type CodexSessionAccountView, type CodexSessionAccountSwitchResult, type SwitchAccountResponse } from "../src/api";
 import { pickAndSwitchAccount, type AccountSwitchUi } from "../src/main";
 
 const targetId = "00000000-0000-0000-0000-000000000001";
@@ -26,6 +26,11 @@ function setup() {
     getStatus: 200,
     pick: targetId as string | undefined,
     confirmed: true,
+    claudeAccounts: [
+      { id: "personal", label: "Personal", disabled: false, quarantined: false, fiveHourPct: null, sevenDayPct: 65, leases: [{ client: "devbox", sessionId: session.id }] },
+      { id: "claude-work", label: "Claude Work", disabled: false, quarantined: false, fiveHourPct: 14, sevenDayPct: 77, leases: [] },
+      { id: "paused", label: "Paused", disabled: true, quarantined: false, fiveHourPct: null, sevenDayPct: null, leases: [] },
+    ] as AnthropicAccountView[],
   };
   const requests: { method: string; path: string; body: unknown }[] = [];
   const logs: { level: string; message: string }[] = [];
@@ -34,6 +39,7 @@ function setup() {
   const server = Bun.serve({ port: 0, fetch: async request => {
     const path = new URL(request.url).pathname;
     requests.push({ method: request.method, path, body: request.method === "POST" ? await request.json().catch(() => null) : null });
+    if (request.method === "GET" && path === "/api/accounts") return Response.json({ accounts: state.claudeAccounts });
     if (request.method === "GET") return Response.json(state.getStatus === 200 ? state.view : { error: "Live account probe failed" }, { status: state.getStatus });
     return Response.json(state.result, { status: state.status });
   } });
@@ -181,30 +187,65 @@ test("F9 pending stopped conversation cannot switch to a different available acc
   expect(h.logs.some(l => l.message.includes("stopped; continuation pending"))).toBe(true);
 });
 
-test("F9 Claude uses the automatic endpoint and preserves the exact conversation", async () => {
+const claude = { ...session, agent: "claude" as const };
+
+test("F9 Claude offers automatic + usable accounts with usage, marks the current one, hides disabled", async () => {
   const h = setup();
-  h.state.result = { ok: true, accountId: "claude-work", label: "Claude Work", exhausted: false, unchanged: false, panes: [{ target: "main:0.0", outcome: "already-on-account" }] };
-  expect(await pickAndSwitchAccount(h.deps, { ...session, agent: "claude" }, h.ui)).toBe(true);
-  expect(h.requests).toEqual([{ method: "POST", path: `/api/sessions/${session.id}/switch-account`, body: null }]);
-  expect(h.confirmations[0]).toContain("Automatically choose");
+  h.state.pick = undefined;
+  expect(await pickAndSwitchAccount(h.deps, claude, h.ui)).toBe(false);
+  expect(h.requests).toEqual([{ method: "GET", path: "/api/accounts", body: null }]);
+  expect(h.prompts[0]!.options.map(o => o.value)).toEqual(["__auto__", "personal", "claude-work", "__back__"]);
+  expect(h.prompts[0]!.options[1]!.hint).toBe("current · 5h ? · week 65 %");
+  expect(h.prompts[0]!.options[2]!.hint).toBe("5h 14 % · week 77 %");
+  expect(h.logs.some(l => l.message === "Paused: account disabled")).toBe(true);
+});
+
+test("F9 Claude manual pick posts the chosen account and preserves the exact conversation", async () => {
+  const h = setup();
+  h.state.pick = "claude-work";
+  h.state.result = { ok: true, accountId: "claude-work", label: "Claude Work", exhausted: false, unchanged: false, panes: [{ target: "main:0.0", outcome: "restarted" }] };
+  expect(await pickAndSwitchAccount(h.deps, claude, h.ui)).toBe(true);
+  expect(h.requests.at(-1)).toEqual({ method: "POST", path: `/api/sessions/${session.id}/switch-account`, body: { accountId: "claude-work" } });
+  expect(h.confirmations[0]).toContain("Switch Claude Code to Claude Work?");
   expect(h.confirmations[0]).toContain("resumes its exact current conversation");
   expect(h.confirmations[0]).toContain("without starting a new one");
-  expect(h.prompts).toEqual([]);
   expect(h.logs.at(-1)?.level).toBe("success");
 });
 
-test("F9 Claude cancellation sends no request", async () => {
+test("F9 Claude manual pick of an over-threshold account warns but succeeds", async () => {
   const h = setup();
-  h.state.confirmed = false;
-  expect(await pickAndSwitchAccount(h.deps, { ...session, agent: "claude" }, h.ui)).toBe(false);
-  expect(h.requests).toEqual([]);
+  h.state.pick = "claude-work";
+  h.state.result = { ok: true, accountId: "claude-work", label: "Claude Work", exhausted: true, unchanged: false, panes: [{ target: "main:0.0", outcome: "restarted" }] };
+  expect(await pickAndSwitchAccount(h.deps, claude, h.ui)).toBe(true);
+  expect(h.logs.some(l => l.level === "warn" && l.message === "Claude Work is over the usage threshold.")).toBe(true);
+});
+
+test("F9 Claude automatic choice posts without a body", async () => {
+  const h = setup();
+  h.state.pick = "__auto__";
+  h.state.result = { ok: true, accountId: "claude-work", label: "Claude Work", exhausted: false, unchanged: false, panes: [{ target: "main:0.0", outcome: "already-on-account" }] };
+  expect(await pickAndSwitchAccount(h.deps, claude, h.ui)).toBe(true);
+  expect(h.requests.at(-1)).toEqual({ method: "POST", path: `/api/sessions/${session.id}/switch-account`, body: null });
+  expect(h.confirmations[0]).toContain("Automatically choose");
+  expect(h.logs.at(-1)?.level).toBe("success");
+});
+
+test("F9 Claude back, cancel or declined confirmation sends no switch request", async () => {
+  for (const [pick, confirmed] of [["__back__", true], [undefined, true], ["claude-work", false]] as const) {
+    const h = setup();
+    h.state.pick = pick;
+    h.state.confirmed = confirmed;
+    expect(await pickAndSwitchAccount(h.deps, claude, h.ui)).toBe(false);
+    expect(h.requests.filter(r => r.method === "POST")).toEqual([]);
+  }
 });
 
 test("F9 Claude no-op, missing account and partial restart remain visible in the menu", async () => {
   for (const mode of ["unchanged", "no-account", "partial"] as const) {
     const h = setup();
+    h.state.pick = "__auto__";
     h.state.result = { ok: mode !== "no-account", accountId: mode === "no-account" ? null : "claude-work", label: "Claude Work", exhausted: false, unchanged: mode === "unchanged", panes: mode === "partial" ? [{ target: "main:0.0", outcome: "restarted" }, { target: "main-2:0.0", outcome: "did-not-exit" }] : [] };
-    expect(await pickAndSwitchAccount(h.deps, { ...session, agent: "claude" }, h.ui)).toBe(false);
+    expect(await pickAndSwitchAccount(h.deps, claude, h.ui)).toBe(false);
     expect(h.logs.some(l => l.level === "success")).toBe(false);
     expect(h.logs.at(-1)?.message).toMatch(mode === "unchanged" ? /nothing to do/ : mode === "no-account" ? /No usable Anthropic account/ : /main-2:0.0 \(did-not-exit\)/);
   }

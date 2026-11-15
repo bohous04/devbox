@@ -8,7 +8,7 @@ import { openDb } from "../src/db";
 // tested in accountSwitch.test.ts with a fake exec/db) — here we only verify the
 // status → HTTP code mapping and the JSON response shape, just as ccUpkeepApi.test.ts
 // tests /api/cc-upkeep/run over a canned `run` function.
-function app(switchAccount: (id: string) => Promise<SwitchAccountResult>) {
+function app(switchAccount: (id: string, accountId?: string) => Promise<SwitchAccountResult>) {
   const db = openDb(":memory:");
   return createApp({
     mgr: {} as never, db, cfg: DEFAULT_CONFIG, root: "/tmp", tree: async () => [],
@@ -101,4 +101,28 @@ test("sessionId from the URL parameter reaches switchAccount", async () => {
   const a = app(async (id) => { seen.push(id); return { status: "unknown-session" }; });
   await a.request("/api/sessions/dev-shop-cms/switch-account", { method: "POST" });
   expect(seen).toEqual(["dev-shop-cms"]);
+});
+
+test("body { accountId } is passed through as the manual target; no body = automatic (undefined)", async () => {
+  const seen: (string | undefined)[] = [];
+  const a = app(async (_id, accountId) => { seen.push(accountId); return { status: "unchanged", accountId: "x", label: "X" }; });
+  await a.request("/api/sessions/dev-x-y/switch-account", { method: "POST" });
+  await a.request("/api/sessions/dev-x-y/switch-account", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ accountId: "Pohodar-I" }) });
+  expect(seen).toEqual([undefined, "Pohodar-I"]);
+});
+
+test("invalid accountId in the body → 400 without calling switchAccount", async () => {
+  let calls = 0;
+  const a = app(async () => { calls++; return { status: "unknown-session" }; });
+  for (const accountId of [42, ""]) {
+    const r = await a.request("/api/sessions/dev-x-y/switch-account", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ accountId }) });
+    expect(r.status).toBe(400);
+  }
+  expect(calls).toBe(0);
+});
+
+test("invalid-account (unknown/disabled target) → 400", async () => {
+  const a = app(async () => ({ status: "invalid-account" }));
+  const r = await a.request("/api/sessions/dev-x-y/switch-account", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ accountId: "nope" }) });
+  expect(r.status).toBe(400);
 });

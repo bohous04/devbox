@@ -922,7 +922,7 @@ const apiDeps: ApiDeps = {
     // not the startup snapshot `cfg.settings` (review round 4, I5): otherwise a change to
     // thresholdPct from the dashboard would only apply to /api/accounts/lease after a devd restart.
     settings: () => resolveAccountPool(freshCfg().settings),
-    switchAccount: (id) => switchAccount(accountSwitchDeps(), id),
+    switchAccount: (id, accountId) => switchAccount(accountSwitchDeps(), id, accountId),
     refresh: refreshAccount,
   },
   switchAgent: (id, agent) => switchAgent(agentSwitchDeps(), id, agent),

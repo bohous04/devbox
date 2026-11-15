@@ -113,7 +113,7 @@ export function exitMenuOptions(worktree: boolean, name?: string | null, agentNo
   const account: { value: ExitAction; label: string }[] = agent === "codex"
     ? [{ value: "account", label: "⇄ Change account (Codex)" }]
     : agent !== undefined && specFor(agent).anthropicAccount
-      ? [{ value: "account", label: "⇄ Change account (Claude Code — automatic selection)" }]
+      ? [{ value: "account", label: "⇄ Change account (Claude Code)" }]
       : [];
   return [
     { value: "back", label: "← Back to session (reattach)" },
