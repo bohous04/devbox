@@ -28,6 +28,17 @@ export interface SessionInfo extends SessionRow {
 }
 export interface OpenResult { session: SessionRow; pull?: PullResult; created: boolean; claudePrompt?: string }
 
+// Row of GET /api/accounts (devd/src/accounts.ts buildAccountViews) — only the fields the CLI reads.
+export interface AnthropicAccountView {
+  id: string;
+  label: string;
+  disabled: boolean;
+  quarantined: boolean;
+  fiveHourPct: number | null;
+  sevenDayPct: number | null;
+  leases: { client: string; sessionId: string | null }[];
+}
+
 // Response of POST /api/sessions/:id/switch-account (see devd/src/accountSwitch.ts).
 // `panes`: one row for EVERY pane with a live claude in the container (main and
 // main-2/main-3 share the sessionId) — "restarted" and "already-on-account" are BOTH
@@ -141,8 +152,14 @@ export class ApiClient {
   // claude in the container (main and main-2/main-3 share the sessionId, see
   // accountSwitch.ts) and writes the lease only once at least one pane has verifiably
   // restarted. The token never appears in the response.
-  switchAccount(sessionId: string) {
-    return this.req<SwitchAccountResponse>("POST", `/api/sessions/${sessionId}/switch-account`);
+  // `accountId` = a manually picked target (F9 → a named account); omitted = devd chooses.
+  switchAccount(sessionId: string, accountId?: string) {
+    return this.req<SwitchAccountResponse>("POST", `/api/sessions/${sessionId}/switch-account`, accountId === undefined ? undefined : { accountId });
+  }
+  // The Anthropic account pool as the dashboard sees it — the F9 picker reads usage and
+  // which account each session currently holds a lease on.
+  anthropicAccounts() {
+    return this.req<{ accounts: AnthropicAccountView[] }>("GET", "/api/accounts");
   }
   codexAccount(sessionId: string) {
     return this.req<CodexSessionAccountView>("GET", `/api/sessions/${encodeURIComponent(sessionId)}/codex-account`);

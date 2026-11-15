@@ -9,7 +9,7 @@
 
 import type { Database } from "bun:sqlite";
 import { currentAccount, lastSwitchAt } from "./accountLease";
-import { chooseAccount } from "./accountPolicy";
+import { chooseAccount, isExhausted, type PolicyDecision } from "./accountPolicy";
 import { toCandidates } from "./accounts";
 import { specFor } from "./agents";
 import {
@@ -38,6 +38,9 @@ export type SwitchAccountResult =
   // below) — a concurrent call on a different session never hits this status.
   | { status: "in-progress" }
   | { status: "no-account" }
+  // A manually requested target (F9 → pick an account) that does not exist, is disabled,
+  // quarantined or permanently unmeasured — nothing was touched.
+  | { status: "invalid-account" }
   | { status: "profile-unavailable" }
   // Best account == the account on which ALL panes of this session ALREADY VERIFIABLY run
   // (the actual CLAUDE_CONFIG_DIR, not a guess from leases) — nothing is restarted.
@@ -111,7 +114,13 @@ async function restartPanes(deps: RestartDeps, container: string, configDir: str
   return out;
 }
 
-export async function switchAccount(deps: SwitchAccountDeps, sessionId: string): Promise<SwitchAccountResult> {
+// `targetAccountId` = the operator picked a concrete account (F9 → Change account → a named
+// account). It bypasses the WHOLE policy — preference/spillover, load ordering and project pins
+// alike — because it is an explicit instruction, not a request for a recommendation. Only accounts
+// that cannot work at all (disabled, quarantined, permanently unmeasured — i.e. missing from
+// toCandidates) are refused. Over-threshold accounts are allowed and reported via `exhausted`,
+// the same as the all-exhausted branch of the policy.
+export async function switchAccount(deps: SwitchAccountDeps, sessionId: string, targetAccountId?: string): Promise<SwitchAccountResult> {
   const s = getSession(deps.db, sessionId);
   if (!s) return { status: "unknown-session" };
   if (s.status !== "running") return { status: "not-running" };
@@ -132,10 +141,17 @@ export async function switchAccount(deps: SwitchAccountDeps, sessionId: string):
     // the best, or the only option in the all-exhausted branch) — that is handled below as
     // "unchanged", but only AFTER verifying the panes' reality, not from `current` on
     // its own (see the comment below).
-    const decision = chooseAccount({
-      candidates: toCandidates(deps.db), current, lastSwitchAt: lastSwitchAt(history),
-      now, force: true, project: s.project, repo: s.repo, settings: deps.settings(),
-    });
+    let decision: PolicyDecision;
+    if (targetAccountId !== undefined) {
+      const target = toCandidates(deps.db).find((a) => a.id === targetAccountId);
+      if (!target || target.disabled || target.quarantined) return { status: "invalid-account" };
+      decision = { accountId: target.id, label: target.label, exhausted: isExhausted(target, now, deps.settings().thresholdPct), reason: "best" };
+    } else {
+      decision = chooseAccount({
+        candidates: toCandidates(deps.db), current, lastSwitchAt: lastSwitchAt(history),
+        now, force: true, project: s.project, repo: s.repo, settings: deps.settings(),
+      });
+    }
     if (decision.accountId === null) return { status: "no-account" };
 
     // "unchanged" used to be derived from leases (active rows / `current`) and in
