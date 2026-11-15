@@ -107,8 +107,8 @@ test("body { accountId } is passed through as the manual target; no body = autom
   const seen: (string | undefined)[] = [];
   const a = app(async (_id, accountId) => { seen.push(accountId); return { status: "unchanged", accountId: "x", label: "X" }; });
   await a.request("/api/sessions/dev-x-y/switch-account", { method: "POST" });
-  await a.request("/api/sessions/dev-x-y/switch-account", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ accountId: "Pohodar-I" }) });
-  expect(seen).toEqual([undefined, "Pohodar-I"]);
+  await a.request("/api/sessions/dev-x-y/switch-account", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ accountId: "backup" }) });
+  expect(seen).toEqual([undefined, "backup"]);
 });
 
 test("invalid accountId in the body → 400 without calling switchAccount", async () => {
