@@ -56,13 +56,15 @@ them over asking the user to do things manually:
 
 ## Deleting files
 
-Claude Code stops for **manual approval** — even in bypass mode, and no hook or
-permission rule can skip it — whenever an `rm -r`/`rm -rf` target resolves to a
-top-level directory such as `/embed-shots`. It resolves relative targets against the
-session's working directory (`/workspace`) and ignores an earlier `cd` in the same
-command, so `cd a/b && rm -rf ../out` is read as `rm -rf /out`. The user then has to
-answer a prompt (or it is denied after 2 minutes). Always pass `rm` an **absolute
-path** (`rm -rf /workspace/a/out`), and never a `$(…)` substitution as its target.
+`cc` starts Claude Code with `CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1`, so an
+`rm -r`/`rm -rf` whose target Claude Code reads as a critical path (`/`, a top-level directory such as
+`/embed-shots`, your home, `/workspace` or its parents), or a command it can't fully parse (heredocs,
+subshells), runs without a prompt. Sessions that Claude Code starts by itself (background agents,
+agent-team teammates, sessions created through Remote Control) don't get that variable and still
+stop for manual approval, which is denied after 2 minutes. Claude Code resolves relative targets
+against the working directory (`/workspace`) and ignores an earlier `cd` in the same command, so
+`cd a/b && rm -rf ../out` is read as `rm -rf /out`. Always pass `rm` an **absolute path**
+(`rm -rf /workspace/a/out`), and never a `$(…)` substitution as its target.
 
 ## Deploy and production database authority
 
