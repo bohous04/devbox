@@ -341,4 +341,19 @@ class Safety(unittest.TestCase):
         self.assertEqual((workspace/'unique').read_text(),'preserve me')
 
 
+class InspectExisting(unittest.TestCase):
+    def proc(self,rc,out,err):
+        return SimpleNamespace(returncode=rc,stdout=out,stderr=err)
+    def test_container_removed_mid_inspect_is_skipped(self):
+        out=json.dumps([{'Name':'/dev-a'}]).encode()
+        with patch.object(guard.subprocess,'run',return_value=self.proc(1,out,b'error: no such object: ae136b0f4dba\nError: No such object: 9c4626378ffc\n')):
+            self.assertEqual([c['Name'] for c in guard.inspect_existing(['a','ae136b0f4dba','9c4626378ffc'])],['/dev-a'])
+    def test_other_inspect_errors_still_fail(self):
+        with patch.object(guard.subprocess,'run',return_value=self.proc(1,b'','Cannot connect to the Docker daemon\n'.encode())):
+            with self.assertRaises(RuntimeError):guard.inspect_existing(['a'])
+    def test_no_ids_skips_docker(self):
+        with patch.object(guard.subprocess,'run',side_effect=AssertionError('called')):
+            self.assertEqual(guard.inspect_existing([]),[])
+
+
 if __name__=='__main__':unittest.main()
