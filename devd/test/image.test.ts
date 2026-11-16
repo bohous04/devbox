@@ -16,7 +16,7 @@ test.skipIf(!enabled)("image builds, toolchain present, entrypoint consumes prom
   // USER dev — see id -un/id -u below), not as root: a text-level check of the Dockerfile
   // cannot see a binary that only root can execute.
   const tools = sh(process.cwd(), "docker", "run", "--rm", "devbox:test", "bash", "-lc",
-    "node --version && bun --version && pnpm --version && gh --version && rg --version && glow --version && tmux -V && uv --version && jq --version && claude --version && typescript-language-server --version && id -un && id -u");
+    "node --version && bun --version && pnpm --version && gh --version && rg --version && glow --version && tmux -V && uv --version && jq --version && claude --version && typescript-language-server --version && lua-language-server --version && test -f \"$(npm root -g)/typescript/lib/tsserver.js\" && id -un && id -u");
   expect(tools.code).toBe(0);
   expect(tools.stdout).toMatch(/^v22\./m); // NodeSource repo actually landed, not Ubuntu's nodejs
   const lines = tools.stdout.trim().split("\n");
@@ -61,6 +61,18 @@ test("Dockerfile installs @openai/codex and sets CODEX_HOME", async () => {
 test("Dockerfile installs typescript-language-server (without it the LSP plugin is dead)", async () => {
   const df = await Bun.file(new URL("../../image/Dockerfile", import.meta.url).pathname).text();
   expect(df).toContain("typescript-language-server");
+});
+
+test("Dockerfile pins typescript below 7 (TS 7 has no tsserver.js, typescript-language-server dies)", async () => {
+  const df = await Bun.file(new URL("../../image/Dockerfile", import.meta.url).pathname).text();
+  expect(df).toMatch(/npm install -g typescript@6 typescript-language-server/);
+});
+
+test("Dockerfile installs a checksummed lua-language-server (the lua-lsp plugin needs it on PATH)", async () => {
+  const df = await Bun.file(new URL("../../image/Dockerfile", import.meta.url).pathname).text();
+  expect(df).toMatch(/ARG LUALS_SHA256=[0-9a-f]{64}/);
+  expect(df).toContain("sha256sum -c -");
+  expect(df).toMatch(/su -s \/bin\/sh -c 'lua-language-server --version' nobody/);
 });
 
 test("Dockerfile installs agy root-owned outside dev's home and copies ag + agy-trust", async () => {

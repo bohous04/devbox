@@ -75,7 +75,24 @@ RUN npm install -g @playwright/mcp@latest \
 
 # LSP: the typescript-lsp plugin declares `command: typescript-language-server`, so without
 # this binary LSP in the container is dead. As root → /usr/bin, i.e. on PATH.
-RUN npm install -g typescript typescript-language-server
+# typescript is pinned to 6: TypeScript 7 is the native Go port and ships no tsserver.js, so
+# typescript-language-server fails with "Could not find a valid TypeScript installation" in every
+# repo that has no typescript of its own in node_modules (seen 2026-11-16 with 7.0.2).
+RUN npm install -g typescript@6 typescript-language-server
+
+# LSP for Lua: the lua-lsp plugin declares `command: lua-language-server`. Pinned release +
+# checksum; the binary finds its runtime relative to its own path, hence a wrapper, not a symlink.
+# By default it writes its log and meta files next to itself, i.e. into root-owned /opt — as `dev`
+# it then hangs on initialize without a word. The wrapper points both into the user's cache.
+ARG LUALS_VERSION=3.19.2
+ARG LUALS_SHA256=93ad326b10f6c00911dd8c450fa098332dbd8f9f45d1052f5636a2d54479b947
+RUN curl -fsSL -o /tmp/luals.tgz "https://github.com/LuaLS/lua-language-server/releases/download/${LUALS_VERSION}/lua-language-server-${LUALS_VERSION}-linux-x64.tar.gz" \
+    && echo "${LUALS_SHA256}  /tmp/luals.tgz" | sha256sum -c - \
+    && mkdir -p /opt/lua-language-server && tar xzf /tmp/luals.tgz --no-same-owner -C /opt/lua-language-server && rm /tmp/luals.tgz \
+    && chmod -R a+rX /opt/lua-language-server \
+    && printf '#!/bin/sh\nc="${XDG_CACHE_HOME:-$HOME/.cache}/lua-language-server"\nexec /opt/lua-language-server/bin/lua-language-server --logpath="$c/log" --metapath="$c/meta" "$@"\n' > /usr/local/bin/lua-language-server \
+    && chmod 755 /usr/local/bin/lua-language-server \
+    && su -s /bin/sh -c 'lua-language-server --version' nobody
 
 # Claude Code in its own layer only AFTER playwright: the devd job (ccUpkeep) rebuilds the
 # image with `--build-arg CC_VERSION=<version>`, which invalidates this layer and everything
