@@ -12,13 +12,11 @@ test.skipIf(!enabled)("image builds, toolchain present, entrypoint consumes prom
   const build = sh(join(import.meta.dir, "..", ".."), "docker", "build", "-t", "devbox:test", "image");
   if (build.code !== 0) throw new Error(`docker build failed:\n${build.stderr.slice(-3000)}`);
 
-  // typescript-language-server and serena run here as `dev` (no --user, the container
-  // starts as USER dev — see id -un/id -u below), not as root: exactly the path through
-  // which a missing chmod or one of the UV_ variables would silently slip (serena would
-  // then start for root but crash for dev with "Permission denied"). A text-level
-  // check of the Dockerfile cannot see this class of bug.
+  // typescript-language-server runs here as `dev` (no --user, the container starts as
+  // USER dev — see id -un/id -u below), not as root: a text-level check of the Dockerfile
+  // cannot see a binary that only root can execute.
   const tools = sh(process.cwd(), "docker", "run", "--rm", "devbox:test", "bash", "-lc",
-    "node --version && bun --version && pnpm --version && gh --version && rg --version && glow --version && tmux -V && uv --version && jq --version && claude --version && typescript-language-server --version && serena start-mcp-server --help && id -un && id -u");
+    "node --version && bun --version && pnpm --version && gh --version && rg --version && glow --version && tmux -V && uv --version && jq --version && claude --version && typescript-language-server --version && id -un && id -u");
   expect(tools.code).toBe(0);
   expect(tools.stdout).toMatch(/^v22\./m); // NodeSource repo actually landed, not Ubuntu's nodejs
   const lines = tools.stdout.trim().split("\n");
@@ -63,16 +61,6 @@ test("Dockerfile installs @openai/codex and sets CODEX_HOME", async () => {
 test("Dockerfile installs typescript-language-server (without it the LSP plugin is dead)", async () => {
   const df = await Bun.file(new URL("../../image/Dockerfile", import.meta.url).pathname).text();
   expect(df).toContain("typescript-language-server");
-});
-
-test("Dockerfile installs serena with all three UV_ variables", async () => {
-  const df = await Bun.file(new URL("../../image/Dockerfile", import.meta.url).pathname).text();
-  expect(df).toContain("serena-agent");
-  // Each of them is required: without UV_TOOL_BIN_DIR serena is not on PATH, without UV_TOOL_DIR
-  // and UV_PYTHON_INSTALL_DIR both the tool and the interpreter point to /root, which uid 1000 cannot see.
-  for (const v of ["UV_PYTHON_INSTALL_DIR", "UV_TOOL_DIR", "UV_TOOL_BIN_DIR"]) {
-    expect(df).toContain(v);
-  }
 });
 
 test("Dockerfile installs agy root-owned outside dev's home and copies ag + agy-trust", async () => {

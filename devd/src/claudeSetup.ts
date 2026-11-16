@@ -54,11 +54,10 @@ const BUILTIN_MCP: Record<string, unknown> = {
     ],
     env_vars: ["DEVBOX_HEADED", "DISPLAY"],
   },
-  // Semantic code reading and editing via LSP. The binary is in the image at /usr/local/bin
-  // (see Dockerfile and spec — installed via uv with UV_* variables, otherwise the
-  // `dev` user could not run it). `--context ide` is the authors' recommendation for clients that
-  // have their own file reading; the default `desktop-app` would duplicate the tool set.
-  serena: { command: "serena", args: ["start-mcp-server", "--context", "ide"] },
+  // serena used to be here. Removed 2026-11-16: in transcripts Claude never called it and Codex
+  // only initialised it, and a benchmark on a large private Lua repo showed it saves nothing even when
+  // configured and recommended (forced use cost 2.3× more and was 11× slower), while every
+  // session and subagent paid for its process.
 };
 
 // Marketplaces and plugins the devbox needs regardless of what anyone has on the mac.
