@@ -65,8 +65,10 @@ const BUILTIN_MCP: Record<string, unknown> = {
 // force their own version, but without it the tools are not missing here.
 // Exported so a test can verify the invariant "the marketplace of every built-in
 // plugin is built-in too" directly on the real data, not on a rewritten copy.
+// caveman@caveman used to be built in here. Removed 2026-11-16: it switched itself on in every
+// session but nobody ever invoked it, and a benchmark (6 tasks x 3 runs) showed answers 11 %
+// shorter at the same cost and +9 % processed tokens, so it saved nothing.
 export const BUILTIN_MARKETPLACES: { name: string; source: string }[] = [
-  { name: "caveman", source: "JuliusBrussee/caveman" },
   // typescript-lsp (below) is from the official marketplace — it must be built in here too,
   // otherwise a built-in plugin would depend on the user not deleting it from the mac (see below).
   { name: "claude-plugins-official", source: "anthropics/claude-plugins-official" },
@@ -77,12 +79,11 @@ export const BUILTIN_MARKETPLACES: { name: string; source: string }[] = [
 // plugin would depend on the user happening to have that marketplace on the mac; if they
 // removed it, `plugin install` on a fresh devbox would fail with "not found in marketplace".
 export const BUILTIN_PLUGINS: string[] = [
-  "caveman@caveman",
   "typescript-lsp@claude-plugins-official",
 ];
 
 /** Merges built-in entries with the mac state so that none repeats (dedup by
- *  `keyOf`). Built-in ones go first — for marketplaces this is required so that `caveman@caveman`
+ *  `keyOf`). Built-in ones go first — for marketplaces this is required so that a built-in plugin
  *  has its marketplace registered before the plugin is installed. */
 function withBuiltins<T>(builtin: T[], fromMac: T[], keyOf: (v: T) => string): T[] {
   const macKeys = new Set(fromMac.map(keyOf));

@@ -29,10 +29,8 @@ test("buildSyncCommands emits marketplace adds, installs, then mcp add-json (inc
   const s = buildSetupFromMacState(known, installed);
   const cmds = buildSyncCommands(s, { context7: { type: "http", url: "https://mcp.context7.com" } });
   expect(cmds).toEqual([
-    ["claude", "plugin", "marketplace", "add", "JuliusBrussee/caveman"],
     ["claude", "plugin", "marketplace", "add", "anthropics/claude-plugins-official"],
     ["claude", "plugin", "marketplace", "add", "https://github.com/acme/infra-marketplace.git"],
-    ["claude", "plugin", "install", "caveman@caveman"],
     ["claude", "plugin", "install", "typescript-lsp@claude-plugins-official"],
     ["claude", "plugin", "install", "core@acme-skills"],
     ["claude", "plugin", "install", "superpowers@claude-plugins-official"],
@@ -47,9 +45,7 @@ test("an empty setup still registers built-in marketplaces, plugins and MCP serv
   const s = buildSetupFromMacState(undefined, undefined);
   expect(s).toEqual({ marketplaces: [], plugins: [] });
   expect(buildSyncCommands(s)).toEqual([
-    ["claude", "plugin", "marketplace", "add", "JuliusBrussee/caveman"],
     ["claude", "plugin", "marketplace", "add", "anthropics/claude-plugins-official"],
-    ["claude", "plugin", "install", "caveman@caveman"],
     ["claude", "plugin", "install", "typescript-lsp@claude-plugins-official"],
     ["claude", "mcp", "remove", "playwright", "-s", "user"],
     ["claude", "mcp", "add-json", "--scope", "user", "playwright", '{"command":"sh","args":["-c","if command -v playwright-mcp-devbox >/dev/null 2>&1; then exec playwright-mcp-devbox \\"$@\\"; else exec playwright-mcp --headless \\"$@\\"; fi","playwright-mcp","--browser","chromium","--no-sandbox"]}'],
@@ -100,9 +96,7 @@ test("a secret MCP named playwright overrides the built-in", () => {
   const s = buildSetupFromMacState(undefined, undefined);
   const cmds = buildSyncCommands(s, { playwright: { type: "http", url: "https://example.test" } });
   expect(cmds).toEqual([
-    ["claude", "plugin", "marketplace", "add", "JuliusBrussee/caveman"],
     ["claude", "plugin", "marketplace", "add", "anthropics/claude-plugins-official"],
-    ["claude", "plugin", "install", "caveman@caveman"],
     ["claude", "plugin", "install", "typescript-lsp@claude-plugins-official"],
     ["claude", "mcp", "remove", "playwright", "-s", "user"],
     ["claude", "mcp", "add-json", "--scope", "user", "playwright", '{"type":"http","url":"https://example.test"}'],
@@ -161,9 +155,9 @@ test("buildCodexSyncCommands: marketplaces, plugins, MCP; untranslatable ones re
   // the marketplace must be registered before a plugin is installed from it
   expect(flat.indexOf("codex plugin marketplace add https://github.com/acme/infra-marketplace.git"))
     .toBeLessThan(flat.indexOf("codex plugin add infra-skills@infra-marketplace"));
-  // built-in caveman and playwright are registered for Codex too
-  expect(flat).toContain("codex plugin marketplace add JuliusBrussee/caveman");
-  expect(flat).toContain("codex plugin add caveman@caveman");
+  // built-in typescript-lsp and playwright are registered for Codex too
+  expect(flat).toContain("codex plugin marketplace add anthropics/claude-plugins-official");
+  expect(flat).toContain("codex plugin add typescript-lsp@claude-plugins-official");
   expect(cmds.some((c) => c.join(" ").includes("mcp add playwright"))).toBe(true);
   // Codex passes env into an stdio MCP server only per the `env_vars` allow-list — without
   // it DISPLAY/DEVBOX_HEADED would not reach playwright-mcp-devbox on InstaBox.
@@ -267,9 +261,13 @@ test("buildSyncCommands: claude mcp add-json IS secret-bearing (the whole defini
 test("the built-in marketplace and plugins are in the commands even with an empty mac state", () => {
   const cmds = buildSyncCommands({ marketplaces: [], plugins: [] });
   const flat = cmds.map((c) => c.join(" "));
-  expect(flat).toContain("claude plugin marketplace add JuliusBrussee/caveman");
-  expect(flat).toContain("claude plugin install caveman@caveman");
+  expect(flat).toContain("claude plugin marketplace add anthropics/claude-plugins-official");
   expect(flat).toContain("claude plugin install typescript-lsp@claude-plugins-official");
+});
+
+test("caveman is no longer built in (removed 2026-11-16, saved nothing)", () => {
+  const flat = buildSyncCommands({ marketplaces: [], plugins: [] }).map((c) => c.join(" "));
+  expect(flat.some((c) => c.includes("caveman"))).toBe(false);
 });
 
 test("buildSetupFromMacState skips infra-mcp — in the container it would carry unexpanded ${…}", () => {
@@ -291,23 +289,24 @@ test("serena is no longer a built-in MCP (removed 2026-11-16, never used)", () =
 
 test("a marketplace from the mac state is not duplicated with the built-in", () => {
   const cmds = buildSyncCommands({
-    marketplaces: [{ name: "caveman", source: "JuliusBrussee/caveman" }], plugins: [],
+    marketplaces: [{ name: "claude-plugins-official", source: "anthropics/claude-plugins-official" }], plugins: [],
   });
-  const adds = cmds.map((c) => c.join(" ")).filter((s) => s.includes("marketplace add JuliusBrussee/caveman"));
+  const adds = cmds.map((c) => c.join(" ")).filter((s) => s.includes("marketplace add anthropics/claude-plugins-official"));
   expect(adds).toHaveLength(1);
 });
 
 test("a plugin from the mac state is not duplicated with the built-in", () => {
-  const cmds = buildSyncCommands({ marketplaces: [], plugins: ["caveman@caveman"] });
-  const installs = cmds.map((c) => c.join(" ")).filter((s) => s === "claude plugin install caveman@caveman");
+  const cmds = buildSyncCommands({ marketplaces: [], plugins: ["typescript-lsp@claude-plugins-official"] });
+  const installs = cmds.map((c) => c.join(" ")).filter((s) => s === "claude plugin install typescript-lsp@claude-plugins-official");
   expect(installs).toHaveLength(1);
 });
 
 test("the Codex arm gets built-in marketplaces, plugins and MCP", () => {
   const { cmds } = buildCodexSyncCommands({ marketplaces: [], plugins: [] });
   const flat = cmds.map((c) => c.join(" "));
-  expect(flat).toContain("codex plugin marketplace add JuliusBrussee/caveman");
-  expect(flat).toContain("codex plugin add caveman@caveman");
+  expect(flat).toContain("codex plugin marketplace add anthropics/claude-plugins-official");
+  expect(flat).toContain("codex plugin add typescript-lsp@claude-plugins-official");
+  expect(flat.some((s) => s.includes("caveman"))).toBe(false);
   expect(flat.some((s) => s.includes("playwright"))).toBe(true);
   expect(flat.some((s) => s.includes("serena"))).toBe(false);
 });
@@ -400,12 +399,13 @@ test("grokMcpCommands: nonsensical definition → null", () => {
 });
 
 test("the Grok arm gets built-in marketplaces and MCP; skips caveman and *-lsp", () => {
-  const { cmds, skippedPlugins } = buildGrokSyncCommands({ marketplaces: [], plugins: [] });
+  // caveman is no longer built in; it comes from the mac state here so the skip stays covered.
+  const { cmds, skippedPlugins } = buildGrokSyncCommands({ marketplaces: [{ name: "caveman", source: "JuliusBrussee/caveman" }], plugins: ["caveman@caveman"] });
   const flat = cmds.map((c) => c.join(" "));
   // The marketplace is still registered — Grok may want other plugins from it.
   expect(flat).toContain("grok plugin marketplace add JuliusBrussee/caveman");
   expect(flat.some((s) => s.includes("playwright"))).toBe(true);
-  // caveman and typescript-lsp are built-in, but Grok cannot install them; instead of
+  // Grok cannot install caveman or typescript-lsp; instead of
   // four FAILs on every sync they are skipped and reported.
   expect(flat.some((s) => s.includes("plugin install caveman@caveman"))).toBe(false);
   expect(flat.some((s) => s.includes("plugin install typescript-lsp"))).toBe(false);
