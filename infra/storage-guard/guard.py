@@ -33,6 +33,21 @@ def run(args, timeout=300, **kw):
     return p.stdout
 
 
+def inspect_existing(ids):
+    """`docker inspect --size` over a `docker ps` snapshot. With ~70 containers the
+    call takes tens of seconds, so short-lived ones (`docker run --rm`, CI jobs)
+    vanish mid-way; Docker still prints the rest and exits 1. Only that case is
+    tolerated — any other error still fails the run."""
+    if not ids:
+        return []
+    p = subprocess.run([DOCKER, 'inspect', '--size', *ids], capture_output=True, timeout=900)
+    if p.returncode:
+        errors = [l for l in p.stderr.decode(errors='replace').splitlines() if l.strip()]
+        if not errors or not all(re.match(r'(error: |Error: )?no such object: ', l, re.I) for l in errors):
+            raise RuntimeError(f'docker inspect failed (rc={p.returncode}): ' + '\n'.join(errors)[-800:])
+    return json.loads(p.stdout or b'[]')
+
+
 def atomic(path, data, mode=0o600):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -294,7 +309,7 @@ class Guard:
 
     def inventory(self):
         ids = run([DOCKER, 'ps', '-aq']).decode().split()
-        containers = json.loads(run([DOCKER, 'inspect', '--size', *ids], timeout=900)) if ids else []
+        containers = inspect_existing(ids)
         old = read(self.state / 'inventory.json', {})
         rows = []
         for c in containers:
