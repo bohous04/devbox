@@ -28,8 +28,8 @@ RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash \
 # by research (Task 7): `bash -s X.Y.Z`, validated by a regex inside install.sh.
 # Without a pin the image would drift over time, same as with CC_VERSION.
 #
-# HOME=/opt/grok is a necessity, not cosmetics — the same trap as with serena below (:46) and
-# playwright above (:34). The installer drops into `$HOME/.grok` and RUN runs as root, so
+# HOME=/opt/grok is a necessity, not cosmetics — the same trap as with
+# playwright above. The installer drops into `$HOME/.grok` and RUN runs as root, so
 # without redirection the binary ends up under /root/.grok (mode 0700) and `/usr/local/bin/grok`
 # is only a symlink to it. User `dev` (uid 1000) cannot see into /root → "grok: command not
 # found", i.e. a dead `grok` profile, a dead login in the dashboard and a dead Grok branch
@@ -76,17 +76,6 @@ RUN npm install -g @playwright/mcp@latest \
 # LSP: the typescript-lsp plugin declares `command: typescript-language-server`, so without
 # this binary LSP in the container is dead. As root → /usr/bin, i.e. on PATH.
 RUN npm install -g typescript typescript-language-server
-
-# serena (MCP for semantic code reading/editing). All three variables are required: without them
-# uv stores both the tool and the downloaded interpreter in /root, which user `dev` (uid 1000) cannot see, and
-# `serena` ends with "Permission denied". The system python 3.12 is not enough, serena wants 3.13.
-# The variables are only on this RUN, not in an ENV layer: if they stayed set permanently,
-# a user's own `uv tool install` in a running container would target the root-owned
-# /opt/uv-tools and fail with Permission denied. Serena does not need them after install —
-# the venv has absolute paths baked into the shebang.
-RUN UV_PYTHON_INSTALL_DIR=/opt/uv-python UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin \
-    uv tool install -p 3.13 serena-agent \
-    && chmod -R a+rX /opt/uv-python /opt/uv-tools
 
 # Claude Code in its own layer only AFTER playwright: the devd job (ccUpkeep) rebuilds the
 # image with `--build-arg CC_VERSION=<version>`, which invalidates this layer and everything

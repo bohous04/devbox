@@ -40,8 +40,6 @@ test("buildSyncCommands emits marketplace adds, installs, then mcp add-json (inc
     ["claude", "mcp", "add-json", "--scope", "user", "context7", '{"type":"http","url":"https://mcp.context7.com"}'],
     ["claude", "mcp", "remove", "playwright", "-s", "user"],
     ["claude", "mcp", "add-json", "--scope", "user", "playwright", '{"command":"sh","args":["-c","if command -v playwright-mcp-devbox >/dev/null 2>&1; then exec playwright-mcp-devbox \\"$@\\"; else exec playwright-mcp --headless \\"$@\\"; fi","playwright-mcp","--browser","chromium","--no-sandbox"]}'],
-    ["claude", "mcp", "remove", "serena", "-s", "user"],
-    ["claude", "mcp", "add-json", "--scope", "user", "serena", '{"command":"serena","args":["start-mcp-server","--context","ide"]}'],
   ]);
 });
 
@@ -55,8 +53,6 @@ test("an empty setup still registers built-in marketplaces, plugins and MCP serv
     ["claude", "plugin", "install", "typescript-lsp@claude-plugins-official"],
     ["claude", "mcp", "remove", "playwright", "-s", "user"],
     ["claude", "mcp", "add-json", "--scope", "user", "playwright", '{"command":"sh","args":["-c","if command -v playwright-mcp-devbox >/dev/null 2>&1; then exec playwright-mcp-devbox \\"$@\\"; else exec playwright-mcp --headless \\"$@\\"; fi","playwright-mcp","--browser","chromium","--no-sandbox"]}'],
-    ["claude", "mcp", "remove", "serena", "-s", "user"],
-    ["claude", "mcp", "add-json", "--scope", "user", "serena", '{"command":"serena","args":["start-mcp-server","--context","ide"]}'],
   ]);
 });
 
@@ -110,8 +106,6 @@ test("a secret MCP named playwright overrides the built-in", () => {
     ["claude", "plugin", "install", "typescript-lsp@claude-plugins-official"],
     ["claude", "mcp", "remove", "playwright", "-s", "user"],
     ["claude", "mcp", "add-json", "--scope", "user", "playwright", '{"type":"http","url":"https://example.test"}'],
-    ["claude", "mcp", "remove", "serena", "-s", "user"],
-    ["claude", "mcp", "add-json", "--scope", "user", "serena", '{"command":"serena","args":["start-mcp-server","--context","ide"]}'],
   ]);
 });
 
@@ -268,7 +262,7 @@ test("buildSyncCommands: claude mcp add-json IS secret-bearing (the whole defini
   expect(describeCommand(addJson!)).not.toContain("s3cr3t");
 });
 
-// --- Built-in marketplaces, plugins and serena ------------------------------------------
+// --- Built-in marketplaces, plugins and MCP ------------------------------------------
 
 test("the built-in marketplace and plugins are in the commands even with an empty mac state", () => {
   const cmds = buildSyncCommands({ marketplaces: [], plugins: [] });
@@ -289,15 +283,10 @@ test("buildSetupFromMacState skips infra-mcp — in the container it would carry
   expect(setup.plugins).not.toContain("infra-mcp@infra-marketplace");
 });
 
-test("serena is a built-in MCP with an stdio command and the ide context", () => {
-  const cmds = buildSyncCommands({ marketplaces: [], plugins: [] });
-  // `add-json` explicitly: since the idempotent `remove` was introduced, every server has
-  // a pair of commands and a plain c.includes("serena") would hit the removing one.
-  const serena = cmds.find((c) => c[1] === "mcp" && c[2] === "add-json" && c.includes("serena"));
-  expect(serena).toBeDefined();
-  const def = JSON.parse(serena![serena!.length - 1]) as { command: string; args: string[] };
-  expect(def.command).toBe("serena");
-  expect(def.args).toEqual(["start-mcp-server", "--context", "ide"]);
+test("serena is no longer a built-in MCP (removed 2026-11-16, never used)", () => {
+  const flat = buildSyncCommands({ marketplaces: [], plugins: [] }).map((c) => c.join(" "));
+  expect(flat.some((c) => c.includes("serena"))).toBe(false);
+  expect(desiredMcpNames({}).has("serena")).toBe(false);
 });
 
 test("a marketplace from the mac state is not duplicated with the built-in", () => {
@@ -314,12 +303,13 @@ test("a plugin from the mac state is not duplicated with the built-in", () => {
   expect(installs).toHaveLength(1);
 });
 
-test("the Codex arm gets built-in marketplaces, plugins and serena", () => {
+test("the Codex arm gets built-in marketplaces, plugins and MCP", () => {
   const { cmds } = buildCodexSyncCommands({ marketplaces: [], plugins: [] });
   const flat = cmds.map((c) => c.join(" "));
   expect(flat).toContain("codex plugin marketplace add JuliusBrussee/caveman");
   expect(flat).toContain("codex plugin add caveman@caveman");
-  expect(flat.some((s) => s.includes("serena"))).toBe(true);
+  expect(flat.some((s) => s.includes("playwright"))).toBe(true);
+  expect(flat.some((s) => s.includes("serena"))).toBe(false);
 });
 
 // --- Fix round 2: typescript-lsp must not depend on only the mac having the marketplace -------
@@ -409,12 +399,12 @@ test("grokMcpCommands: nonsensical definition → null", () => {
   expect(grokMcpCommands("x", null)).toBeNull();
 });
 
-test("the Grok arm gets built-in marketplaces and serena; skips caveman and *-lsp", () => {
+test("the Grok arm gets built-in marketplaces and MCP; skips caveman and *-lsp", () => {
   const { cmds, skippedPlugins } = buildGrokSyncCommands({ marketplaces: [], plugins: [] });
   const flat = cmds.map((c) => c.join(" "));
   // The marketplace is still registered — Grok may want other plugins from it.
   expect(flat).toContain("grok plugin marketplace add JuliusBrussee/caveman");
-  expect(flat.some((s) => s.includes("serena"))).toBe(true);
+  expect(flat.some((s) => s.includes("playwright"))).toBe(true);
   // caveman and typescript-lsp are built-in, but Grok cannot install them; instead of
   // four FAILs on every sync they are skipped and reported.
   expect(flat.some((s) => s.includes("plugin install caveman@caveman"))).toBe(false);
@@ -586,7 +576,6 @@ test("desiredMcpNames contains built-ins and the catalog", () => {
   const d = desiredMcpNames({ context7: {} });
   expect(d.has("context7")).toBe(true);
   expect(d.has("playwright")).toBe(true);
-  expect(d.has("serena")).toBe(true);
 });
 
 test("buildPruneCommands removes only what is not in the catalog", () => {
@@ -603,7 +592,7 @@ test("buildPruneCommands removes only what is not in the catalog", () => {
 });
 
 test("buildPruneCommands: a built-in server is never pruned, even with an empty catalog", () => {
-  const removals = buildPruneCommands(desiredMcpNames({}), { claude: ["playwright", "serena"], codex: [], grok: [], agy: [] });
+  const removals = buildPruneCommands(desiredMcpNames({}), { claude: ["playwright"], codex: [], grok: [], agy: [] });
   expect(removals).toEqual([]);
 });
 
