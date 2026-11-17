@@ -136,16 +136,6 @@ if (dump.code !== 0) {
   }
 }
 
-// Agent configurations carry MCP tokens in plaintext and live in SHARED volumes
-// (claude-home / codex-home / grok-home / antigravity-home are mounted into every
-// session), so their permissions decide who inside the container can read them. Claude and Codex
-// create the file with 0600, but `grok mcp add` writes 0644 — i.e. world-readable even outside
-// uid 1000, which the agent runs as — and so does `agy mcp add` (measured 2026-10-15).
-// We fix it up after them; the chmod inside each of those CLIs cannot be influenced. Found
-// 2026-09-04, also confirmed by the other side as the worst of the current exposures.
-//
-// This does not solve the main problem — the tokens are still in those files and the agent has
-// access to them. It only closes needlessly broad permissions, not access itself.
 // The user's own global AGENTS.md (optional): <config>/AGENTS.md on the host is copied into
 // claude-home, which every container mounts, and seed-devbox-guide puts it as a `user-agents`
 // block into Claude's CLAUDE.md and the Codex, Grok and Antigravity AGENTS.md. Running the seed
@@ -159,6 +149,16 @@ const userAgents = sh(process.cwd(), "docker", "run", "--rm", ...mounts,
 if (userAgents.code === 0) console.log(`ok:   user AGENTS.md ${hasUserAgents ? "applied" : "absent, block removed"}`);
 else { failed++; console.error(`FAIL: user AGENTS.md: ${userAgents.stderr.trim()}`); }
 
+// Agent configurations carry MCP tokens in plaintext and live in SHARED volumes
+// (claude-home / codex-home / grok-home / antigravity-home are mounted into every
+// session), so their permissions decide who inside the container can read them. Claude and Codex
+// create the file with 0600, but `grok mcp add` writes 0644 — i.e. world-readable even outside
+// uid 1000, which the agent runs as — and so does `agy mcp add` (measured 2026-10-15).
+// We fix it up after them; the chmod inside each of those CLIs cannot be influenced. Found
+// 2026-09-04, also confirmed by the other side as the worst of the current exposures.
+//
+// This does not solve the main problem — the tokens are still in those files and the agent has
+// access to them. It only closes needlessly broad permissions, not access itself.
 const hardenPaths = ["/home/dev/.grok/config.toml", "/home/dev/.codex/config.toml", "/home/dev/.claude/.claude.json", "/home/dev/.gemini/config/mcp_config.json"];
 const harden = sh(process.cwd(), "docker", "run", "--rm", ...mounts, image,
   "bash", "-lc", `chmod 600 ${hardenPaths.join(" ")} 2>/dev/null; ls -l ${hardenPaths.join(" ")}`);
