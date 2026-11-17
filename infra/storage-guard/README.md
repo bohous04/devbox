@@ -31,6 +31,12 @@ Docker daemon or active session restart is needed to install this protection.
   read; a worktree that changed meanwhile is kept. A released worktree whose Git
   registration was pruned is archived and then deleted directly, together with a
   leftover registration that still names it. Unknown copies need review.
+* The same sweep removes session directories (`/srv/dev/_sessions/<id>`) that no session
+  owns any more: unknown to devd (`sessions_url`), no container, unchanged for the grace
+  period and unreferenced (retained Codex workspaces, worktrees kept by autoEnd, failed
+  starts). They go into the sweep's archive first, then the directory and its (often locked)
+  Git registration are removed. An unreachable devd removes nothing. Claude chats are not
+  there: devd moves them to `/srv/dev/_chat-archive/<id>-<time>` when a session ends.
 * `git worktree prune` is refused inside sessions: the bare clone is shared, and the
   container cannot see sibling sessions' paths, so prune unregistered their worktrees.
 * Explicit session End/removal is intercepted at host Docker CLI level: stop the

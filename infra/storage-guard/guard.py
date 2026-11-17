@@ -812,15 +812,29 @@ class Guard:
             if common is not None and not beneath(common,self.root):
                 continue
             todo[key]=(p,common)
-        if todo:
+        orphans=self.orphan_sessions(report,mounts,grace)
+        # A released worktree inside an orphaned session goes with that session's directory.
+        todo={k:v for k,v in todo.items() if not any(beneath(v[0],o) for o in orphans)}
+        if todo or orphans:
             # One archive per sweep: each per-worktree archive re-read the whole shared bare
             # repo (~15 min each), so a sweep could never keep up with agents.
             shared=list(dict.fromkeys(x for _,c in todo.values() if c for x in self.git_storage(c)))
             try:
-                archive,sigs=self.archive([p for p,_ in todo.values()],'worktrees',shared,require_stable=False)
+                archive,sigs=self.archive([p for p,_ in todo.values()]+orphans,'worktrees',shared,require_stable=False)
             except (RuntimeError,OSError,subprocess.SubprocessError) as err:
-                self.audit('released-worktree-archive-failed',paths=[str(p) for p,_ in todo.values()],error=str(err)[-300:])
-                todo={};report.append(dict(path='(batch)',reason='Archive of released worktrees failed: '+str(err)[-300:]))
+                self.audit('released-worktree-archive-failed',paths=[str(p) for p,_ in todo.values()]+list(map(str,orphans)),error=str(err)[-300:])
+                todo={};orphans=[];report.append(dict(path='(batch)',reason='Archive of released worktrees failed: '+str(err)[-300:]))
+        for p in orphans:
+            try:
+                if self.container_exists(p.name) or referenced(p) or sigs.get(str(p.resolve()))!=signature(p.resolve()):
+                    report.append(dict(path=str(p),reason='Ended session changed or in use during archive; kept'))
+                    continue
+                self.remove_unregistered(p,p)
+            except (RuntimeError,OSError,subprocess.SubprocessError) as err:
+                report.append(dict(path=str(p),reason='Ended session cleanup failed; requires review: '+str(err)[-300:]))
+                self.audit('ended-session-cleanup-failed',path=str(p),error=str(err)[-300:])
+                continue
+            self.audit('ended-session-offloaded',path=str(p),archive=archive)
         for key,(p,common) in todo.items():
             e=registry[key]
             try:
@@ -847,6 +861,36 @@ class Guard:
                 current[key].update(removed_at=registry[key]['removed_at'],archive=registry[key]['archive'])
         atomic(self.state/'registry.json',current)
         atomic(self.state/'review.json',dict(time=time.time(),candidates=report))
+
+    def devd_sessions(self):
+        with urllib.request.urlopen(self.c['sessions_url'], timeout=10) as r:
+            return {s['id'] for s in json.load(r)}
+
+    def container_exists(self, name):
+        return subprocess.run([DOCKER,'inspect','--type','container',name],capture_output=True).returncode==0
+
+    def orphan_sessions(self, report, mounts, grace):
+        """Session directories no session owns any more: unknown to devd, no container (a
+        retained Codex workspace, a kept worktree after autoEnd, a failed start). Chats live in
+        _chat-archive / codex-home, not here. Unreachable devd = nothing is an orphan."""
+        try:
+            live=self.devd_sessions()
+        except Exception as err:  # fail closed: without devd's list nothing may be removed
+            report.append(dict(path=str(self.root/'_sessions'),reason='devd sessions unavailable; ended sessions not cleaned: '+str(err)[-200:]))
+            return []
+        names={c['Name'].lstrip('/') for c in read(self.state/'containers.json',[])}
+        out=[]
+        base=self.root/'_sessions'
+        for d in sorted(base.iterdir()) if base.is_dir() else []:
+            if not d.name.startswith('dev-') or d.is_symlink() or not d.is_dir() or d.name in live or d.name in names:
+                continue
+            newest=max(x.stat().st_mtime for x in (d,d/'.git') if x.exists())
+            if time.time()-newest<grace or self.container_exists(d.name) or referenced(d):
+                continue
+            if any(m==str(d) or beneath(m,d) for m in mounts):
+                continue
+            out.append(d)
+        return out
 
     def registration_pruned(self, p, owner):
         """True only when `.git` names an admin dir under <bare>/worktrees/ inside the root
