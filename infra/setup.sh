@@ -16,7 +16,7 @@ read -r -a FOLDERS <<< "${DEVD_FOLDERS:-apps websites}"
 #   op           1Password CLI; devd brokers SSH keys to sessions with an op service account
 #   cliproxy     local proxy for subscription-backed proxy profiles (see docs/account-pool.md)
 #   storage-guard  disk/session budgets, offsite-verified cleanup (infra/storage-guard; needs borg)
-#   auto-update    nightly deploy of origin/main once CI passed (infra/devbox-update.ts)
+#   auto-update    daily (14:00) deploy of origin/main once CI passed (infra/devbox-update.ts)
 DEVBOX_FEATURES="${DEVBOX_FEATURES:-}"
 has_feature() { [[ " $DEVBOX_FEATURES " == *" all "* || " $DEVBOX_FEATURES " == *" $1 "* ]]; }
 
@@ -361,7 +361,7 @@ PY
 }
 
 install_auto_update() {
-  # Nightly: fast-forward to origin/main only after CI passed on it, rebuild what changed,
+  # Daily at 14:00: fast-forward to origin/main only after CI passed on it, rebuild what changed,
   # restart devd with a health check and roll back on failure. Manual run: devbox-update.
   has_feature auto-update || return 0
   sed -e "s#__REPO__#$REPO_DIR#g" "$REPO_DIR/infra/devbox-update.service" > /etc/systemd/system/devbox-update.service
