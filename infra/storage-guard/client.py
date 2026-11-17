@@ -35,14 +35,26 @@ def clone_destination(args, cwd):
     return (Path(cwd)/dest).resolve()
 
 
+def git_command(args):
+    # Strip global options: e.g. git -C repo worktree add --detach path HEAD.
+    a = list(args)
+    while a and a[0].startswith('-'):
+        flag = a.pop(0)
+        if flag in ('-C', '-c', '--git-dir', '--work-tree') and a:
+            a.pop(0)
+    return a
+
+
+def shared_prune(tool, args):
+    # Inside a session the bare clone is shared with every sibling session, whose worktree
+    # paths do not exist in this container: `git worktree prune` here deletes their (and their
+    # agents' nested) registrations, which breaks git in them and blocks the storage sweep.
+    return tool == 'git' and bool(os.environ.get('DEVD_SESSION_ID')) and git_command(args)[:2] == ['worktree', 'prune']
+
+
 def expanding(tool, args):
     if tool == 'git':
-        # Ignore global options: e.g. git -C repo worktree add --detach path HEAD.
-        a = list(args)
-        while a and a[0].startswith('-'):
-            flag = a.pop(0)
-            if flag in ('-C', '-c', '--git-dir', '--work-tree') and a:
-                a.pop(0)
+        a = git_command(args)
         return bool(a and (a[0] == 'clone' or a[:2] == ['worktree', 'add']))
     if tool == 'docker':
         return bool(args and (args[0] in ('build', 'pull') or args[:2] == ['buildx', 'build'] or
@@ -115,6 +127,12 @@ def main():
         return scratch(sys.argv[1:])
     tool = name if name in ('git', 'docker') else sys.argv[1]
     args = sys.argv[1:] if name in ('git', 'docker') else sys.argv[2:]
+    if shared_prune(tool, args):
+        # Exit 0: agents chain prune after their own `worktree remove`, which already did the work.
+        print('devbox storage: `git worktree prune` is disabled in sessions (the repository is shared with '
+              'other sessions and prune would unregister their worktrees). Use `git worktree remove PATH` '
+              'and `devbox-scratch release PATH`; nothing was pruned.', file=sys.stderr)
+        return 0
     if expanding(tool, args):
         try:
             state = json.loads(STATE.read_text())

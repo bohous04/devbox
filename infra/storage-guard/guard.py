@@ -219,7 +219,7 @@ class Guard:
             raise RuntimeError(f'borg {args[0]} failed (rc={p.returncode}): ' + p.stderr.decode(errors='replace')[-800:])
         return p.stdout
 
-    def archive(self, paths, kind, shared=()):
+    def archive(self, paths, kind, shared=(), require_stable=True):
         """`shared` = Git common store of a repo other live sessions keep writing to
         (new objects, refs, their worktrees/*). It is archived, but not required to
         be stable: removal never deletes it, and requiring it would deny every End
@@ -230,14 +230,25 @@ class Guard:
             raise RuntimeError('Unsafe archive path')
         name = 'storage-guard-' + kind + '-' + time.strftime('%Y%m%dT%H%M%S') + '-' + uuid.uuid4().hex[:8]
         dest = self.c['borg_repo'] + '::' + name
-        before = {str(p): signature(p) for p in paths}
+        if require_stable:
+            before = {str(p): signature(p) for p in paths}
+        else:
+            # Batch mode: a path busy while hashing is left out of `before`, so the caller keeps it.
+            before = {}
+            for p in paths:
+                try:
+                    before[str(p)] = signature(p)
+                except (RuntimeError, OSError):
+                    pass
         # Exit code 1 is also a failure here: changing files cannot authorize deletion.
         # With shared sources a warning can only come from them — owned paths are
         # re-verified by signature below, so rc=1 is accepted in that case alone.
         create = ['create', '--compression', 'zstd,3', dest, *map(str, paths + shared)]
-        self.borg(create, allow_warning=True) if shared else self.borg(create)
+        self.borg(create, allow_warning=True) if shared or not require_stable else self.borg(create)
         self.borg(['extract', '--dry-run', dest])
-        if before != {str(p): signature(p) for p in paths}:
+        # require_stable=False: the caller re-checks every path against `before` itself and
+        # deletes only the unchanged ones (a batch must not fail on one busy worktree).
+        if require_stable and before != {str(p): signature(p) for p in paths}:
             raise RuntimeError('Source changed during backup; deletion denied')
         self.audit('archive-verified', archive=name, paths=list(before), shared=list(map(str, shared)))
         return name, before
@@ -288,8 +299,24 @@ class Guard:
             alerts.append(f"Nárůst {current['growth_bytes_24h']/GIB:.1f} GiB za posledních {current['growth_window_seconds']/3600:.1f} h" + attribution)
         for message in alerts:
             self.notify('disk' if message.startswith('Disk') else 'growth', message)
+        if current['percent'] >= self.c['disk_warn_percent'] or current['available_bytes'] < self.c['reserve_gib'] * GIB:
+            self.start_sweep()
         self.publish(inventory.get('sessions', []), current)
         return current
+
+    def start_sweep(self):
+        # The daily timer alone let agents fill hundreds of GiB between runs. Under pressure
+        # start the same maintenance unit now (a no-op while it still runs), at most hourly.
+        f=self.state/'sweep-trigger.json'
+        if time.time()-read(f,{}).get('time',0)<3600:
+            return
+        r=subprocess.run(['systemctl','start','--no-block','devbox-storage-maintenance.service'],capture_output=True)
+        if r.returncode:
+            # No cooldown marker: the next 5-minute sample retries.
+            self.audit('sweep-start-failed',error=r.stderr.decode(errors='replace')[-300:])
+            return
+        atomic(f,dict(time=time.time()))
+        self.audit('sweep-started-on-pressure')
 
     def publish(self, sessions, disk):
         for row in sessions:
@@ -424,9 +451,14 @@ class Guard:
                     entry = registry.setdefault(key, dict(session=r['name'], path=host_path, container_path=original, first_seen=e['time']))
                     entry.update(last_seen=e['time'], kind=e['kind'])
                     if e['kind']=='created':
+                        # Same path created again after a release: new work, not the released copy.
+                        # Event files are read in random order, so compare their timestamps.
+                        entry['created_at']=max(entry.get('created_at',0),e['time'])
+                        if entry.get('released_at',0)<=e['time']:
+                            entry.pop('released_at',None);entry.pop('removed_at',None);entry.pop('archive',None)
                         entry['created_by_guard']=True
                         entry['purpose']=str(e.get('purpose','auxiliary worktree'))[:300]
-                    if e['kind'] == 'release':
+                    if e['kind'] == 'release' and e['time'] >= entry.get('created_at', 0):
                         entry['released_at'] = e['time']
                     done.append(p)
                 except (OSError, ValueError, KeyError):
@@ -740,38 +772,66 @@ class Guard:
         live={r['name'] for r in inventory.get('sessions',[])}
         if time.time()-inventory.get('time',0)>self.c['inventory_max_age_seconds']:
             raise RuntimeError('Stale inventory; no automatic cleanup')
+        grace=self.c.get('release_grace_hours',1)*3600
         report=[dict(path=e['path'],owner=e.get('session'),reason=e.get('purpose','Ownership/release review needed'))
                 for e in registry.values() if not e.get('released_at') and not e.get('removed_at')]
+        mounts=[m['Source'] for c in read(self.state/'containers.json',[]) for m in c['Mounts']]
+        bare_roots=[self.root/g.split('/')[0] for g in self.c.get('bare_repo_worktree_globs',[])]
+        todo={}
         for key,e in registry.items():
-            if not e.get('released_at') or (e['session'] in live and time.time()-e['released_at']<86400):
+            if not e.get('released_at') or e.get('removed_at') or (e['session'] in live and time.time()-e['released_at']<grace):
                 continue
             # Only explicitly released host worktrees. Container-only paths need
             # end preservation and are not traversed through stale /proc roots.
             p=Path(e['path'])
             owner=self.root/'_sessions'/e['session']
-            bare_roots=[self.root/g.split('/')[0] for g in self.c.get('bare_repo_worktree_globs',[])]
             bare_helper=(e.get('created_by_guard') and '.git/.claude/worktrees/' in str(p)
                          and any(beneath(p,r) for r in bare_roots))
             if not (beneath(p,owner) or bare_helper) or not p.exists() or p.is_symlink() or referenced(p):
                 continue
-            if any(m['Source']==str(p) or beneath(m['Source'],p)
-                   for c in read(self.state/'containers.json',[] ) for m in c['Mounts']):
+            if any(m==str(p) or beneath(m,p) for m in mounts):
                 continue
-            gitfile=p/'.git'
-            if not gitfile.is_file():
+            if not (p/'.git').is_file():
                 report.append(dict(path=str(p),reason='Not a linked worktree; requires review'))
                 continue
-            # One broken worktree (e.g. its registration was pruned) must not abort the sweep:
-            # it used to fail every run, so no released worktree was offloaded at all.
+            # `.git` is written once by `worktree add`: newer than the release means the path was
+            # re-created (possibly by /usr/bin/git, which emits no event) and holds new work.
+            if (p/'.git').stat().st_mtime>e['released_at']:
+                report.append(dict(path=str(p),owner=e.get('session'),reason='Re-created after release; kept'))
+                continue
             try:
                 common=Path(run(['/usr/bin/git','-c','safe.directory=*','-C',p,'rev-parse','--path-format=absolute','--git-common-dir']).decode().strip())
-                if not beneath(common,self.root):
+            except (RuntimeError,OSError,subprocess.SubprocessError) as err:
+                # Registration pruned (agents run `git worktree prune` in their container, where
+                # the other sessions' paths do not exist): HEAD/index are gone, the files are
+                # archived and removed directly. Any other git failure needs a human.
+                if not self.registration_pruned(p,self.root/'_sessions'/e['session']):
+                    report.append(dict(path=str(p),owner=e.get('session'),reason='Git failed; requires review: '+str(err)[-300:]))
                     continue
-                archive,sigs=self.archive([p],'worktree',self.git_storage(common))
-                if referenced(p) or sigs!={str(x):signature(x) for x in [p]}:
+                common=None
+            if common is not None and not beneath(common,self.root):
+                continue
+            todo[key]=(p,common)
+        if todo:
+            # One archive per sweep: each per-worktree archive re-read the whole shared bare
+            # repo (~15 min each), so a sweep could never keep up with agents.
+            shared=list(dict.fromkeys(x for _,c in todo.values() if c for x in self.git_storage(c)))
+            try:
+                archive,sigs=self.archive([p for p,_ in todo.values()],'worktrees',shared,require_stable=False)
+            except (RuntimeError,OSError,subprocess.SubprocessError) as err:
+                self.audit('released-worktree-archive-failed',paths=[str(p) for p,_ in todo.values()],error=str(err)[-300:])
+                todo={};report.append(dict(path='(batch)',reason='Archive of released worktrees failed: '+str(err)[-300:]))
+        for key,(p,common) in todo.items():
+            e=registry[key]
+            try:
+                if referenced(p) or sigs.get(str(p.resolve()))!=signature(p.resolve()):
+                    report.append(dict(path=str(p),owner=e.get('session'),reason='Changed or in use during archive; kept'))
                     continue
-                # Git manages its registration. No rm -rf fallback for broken metadata.
-                run(['/usr/bin/git','-c','safe.directory=*','-C',p,'worktree','remove','--force',str(p)])
+                if common is not None:
+                    # Git manages its registration. Double force: agents lock some of theirs.
+                    run(['/usr/bin/git','-c','safe.directory=*','-C',p,'worktree','remove','--force','--force',str(p)])
+                else:
+                    self.remove_unregistered(p,self.root/'_sessions'/e['session'])
             except (RuntimeError,OSError,subprocess.SubprocessError) as err:
                 report.append(dict(path=str(p),owner=e.get('session'),reason='Released, but cleanup failed; requires review: '+str(err)[-300:]))
                 self.audit('released-worktree-cleanup-failed',path=str(p),error=str(err)[-300:])
@@ -779,8 +839,45 @@ class Guard:
             e['removed_at']=time.time()
             e['archive']=archive
             self.audit('released-worktree-offloaded',path=str(p),archive=archive)
-            atomic(self.state/'registry.json',registry)
+        # Re-read: agents release more worktrees while the archive runs (minutes to hours).
+        current=read(self.state/'registry.json',{})
+        for key,_ in todo.items():
+            # Only the same release cycle: a `created` meanwhile cleared it on purpose.
+            if 'removed_at' in registry[key] and key in current and current[key].get('released_at')==registry[key]['released_at']:
+                current[key].update(removed_at=registry[key]['removed_at'],archive=registry[key]['archive'])
+        atomic(self.state/'registry.json',current)
         atomic(self.state/'review.json',dict(time=time.time(),candidates=report))
+
+    def registration_pruned(self, p, owner):
+        """True only when `.git` names an admin dir under <bare>/worktrees/ inside the root
+        whose bare repo still exists but the admin dir itself is gone."""
+        try:
+            admin=(p/'.git').read_text().split('gitdir:',1)[1].strip()
+        except (OSError,IndexError):
+            return False
+        admin=owner/admin[len('/workspace/'):] if admin.startswith('/workspace/') else Path(admin)
+        return (admin.is_absolute() and admin.parent.name=='worktrees' and beneath(admin,self.root)
+                and (admin.parent.parent/'objects').is_dir() and not admin.exists())
+
+    def remove_unregistered(self, p, owner):
+        """Delete an archived worktree whose Git registration is broken, plus a leftover
+        registration that still names it (git would otherwise refuse that path/branch again)."""
+        try:
+            admin=Path((p/'.git').read_text().split('gitdir:',1)[1].strip())
+        except (OSError,IndexError):
+            admin=None
+        shutil.rmtree(p)
+        if admin and str(admin).startswith('/workspace/'):
+            admin=owner/str(admin)[len('/workspace/'):]
+        if not admin or admin.parent.name!='worktrees' or not admin.is_dir() or not beneath(admin,self.root):
+            return
+        try:
+            target=(admin/'gitdir').read_text().strip()
+        except OSError:
+            return
+        mapped=owner/target[len('/workspace/'):] if target.startswith('/workspace/') else Path(target)
+        if mapped==p/'.git':
+            shutil.rmtree(admin)
 
     def cache_maintenance(self):
         # Content-addressed npm download blobs only. Never remove _npx executables,

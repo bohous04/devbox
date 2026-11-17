@@ -21,12 +21,18 @@ Docker daemon or active session restart is needed to install this protection.
   state is published through the existing `/run/devd` mount.
 * `devbox-scratch create PATH [REF]` creates a linked worktree and records its
   purpose (`DEVBOX_SCRATCH_PURPOSE`), owner and time. `release PATH` marks it finished.
-  The daily sweep only removes explicitly released worktrees after their owning
-  container no longer exists, or after a 24-hour release grace period for a live
-  owner. It requires fresh inventory, no references/mounts (including container
-  namespace aliases, checked by device/inode),
-  an encrypted offsite archive including the Git common directory, stable source
-  signatures and a full Borg integrity read. Unknown/broken copies need review.
+  The sweep runs daily and, under disk pressure (warn threshold or reserve), is also
+  started by the 5-minute sample at most once an hour. It only removes explicitly
+  released worktrees after their owning container no longer exists, or after a
+  release grace period (`release_grace_hours`, default 1) for a live owner. It requires
+  fresh inventory, no references/mounts (including container namespace aliases,
+  checked by device/inode), one encrypted offsite archive per sweep including the Git
+  common directories, an unchanged signature per worktree and a full Borg integrity
+  read; a worktree that changed meanwhile is kept. A released worktree whose Git
+  registration was pruned is archived and then deleted directly, together with a
+  leftover registration that still names it. Unknown copies need review.
+* `git worktree prune` is refused inside sessions: the bare clone is shared, and the
+  container cannot see sibling sessions' paths, so prune unregistered their worktrees.
 * Explicit session End/removal is intercepted at host Docker CLI level: stop the
   target and its nested daemon, preserve the writable rootfs, workspace, Git common
   directory, nested databases and session transcript directory offsite, then allow
