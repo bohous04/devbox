@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -219,34 +220,158 @@ class Safety(unittest.TestCase):
             self.g.sweep()
         self.assertTrue((p/'unique').exists())
 
-    def test_broken_worktree_does_not_stop_sweep_of_the_rest(self):
-        # A released worktree whose Git registration is gone (pruned) made rev-parse fail and the
-        # whole sweep abort on every run, so no released worktree was ever offloaded again.
-        sessions=self.root/'_sessions'/'dev-owner'
-        broken=sessions/'.worktrees'/'broken';broken.mkdir(parents=True)
-        (broken/'.git').write_text('gitdir: /nowhere/worktrees/--help\n')
-        good=sessions/'.worktrees'/'good';good.mkdir(parents=True);(good/'.git').write_text('gitdir: x\n')
+    def git(self, p, text):
+        # `.git` older than any release: a worktree created before it was released.
+        (p/'.git').write_text(text);os.utime(p/'.git',(0,0))
+
+    def released(self, *names, session='dev-owner', released_at=1):
+        owner=self.root/'_sessions'/session
+        out={}
+        for n in names:
+            p=owner/'.worktrees'/n;p.mkdir(parents=True);(p/'file').write_text(n)
+            out[n]=p
+        guard.atomic(self.g.state/'registry.json',{n:{'session':session,'path':str(p),'released_at':released_at} for n,p in out.items()})
+        return out
+
+    def test_broken_registration_is_archived_and_removed(self):
+        # Agents run `git worktree prune` in their container, which unregisters the nested
+        # worktrees of every other session. Those released copies used to stay on disk forever
+        # ("not a git repository" -> review), ~500 GB on the devbox. Archive + rm them instead.
+        bare=self.root/'fivem'/'repo.git';(bare/'worktrees').mkdir(parents=True);(bare/'objects').mkdir()
+        w=self.released('broken')['broken']
+        self.git(w,f'gitdir: {bare}/worktrees/broken\n')   # admin dir pruned
+        other=bare/'worktrees'/'other';other.mkdir();(other/'gitdir').write_text('/workspace/.worktrees/other/.git\n')
         guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[]})
-        guard.atomic(self.g.state/'registry.json',{
-            'a':{'session':'dev-owner','path':str(broken),'released_at':1},
-            'b':{'session':'dev-owner','path':str(good),'released_at':1}})
-        calls=[]
+        archived=[]
+        def fake_archive(paths,kind,shared=(),require_stable=True):
+            archived.append([str(x) for x in paths]);return 'arch',{str(x):guard.signature(x) for x in paths}
+        with patch.object(guard,'run',side_effect=RuntimeError('fatal: not a git repository')), \
+             patch.object(guard,'referenced',return_value=False), \
+             patch.object(self.g,'archive',side_effect=fake_archive):
+            self.g.sweep()
+        self.assertEqual(archived,[[str(w)]])
+        self.assertFalse(w.exists())
+        self.assertTrue(other.exists(), 'registrations of other worktrees stay')
+        self.assertEqual(guard.read(self.g.state/'registry.json')['broken']['archive'],'arch')
+
+    def test_other_git_failure_is_kept_for_review(self):
+        bare=self.root/'fivem'/'repo.git';(bare/'worktrees'/'w').mkdir(parents=True);(bare/'objects').mkdir()
+        w=self.released('w')['w'];self.git(w,f'gitdir: {bare}/worktrees/w\n')   # registered, git just failed
+        guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[]})
+        with patch.object(guard,'run',side_effect=RuntimeError('timeout')), \
+             patch.object(guard,'referenced',return_value=False), \
+             patch.object(self.g,'archive',side_effect=AssertionError('must not archive')):
+            self.g.sweep()
+        self.assertTrue(w.exists())
+        self.assertTrue(any(c['path']==str(w) for c in guard.read(self.g.state/'review.json')['candidates']))
+
+    def test_recreated_path_is_no_longer_released(self):
+        control=self.root/'control';events=control/'storage-events';events.mkdir(parents=True)
+        guard.atomic(self.g.state/'registry.json',{'dev-a:/srv/x':{'session':'dev-a','path':'/srv/x','released_at':1,'removed_at':2,'archive':'a'}})
+        (events/'1.json').write_text(json.dumps(dict(kind='created',time=3.0,session='dev-a',path='/srv/x')))
+        with patch.object(guard,'beneath',return_value=True):
+            self.g.collect_events([dict(name='dev-a',control=str(control))])
+        e=guard.read(self.g.state/'registry.json')['dev-a:/srv/x']
+        self.assertNotIn('released_at',e);self.assertNotIn('removed_at',e)
+        # A late-read release of the OLD copy (older timestamp) must not mark the new one.
+        (events/'2.json').write_text(json.dumps(dict(kind='release',time=1.5,session='dev-a',path='/srv/x')))
+        with patch.object(guard,'beneath',return_value=True):
+            self.g.collect_events([dict(name='dev-a',control=str(control))])
+        self.assertNotIn('released_at',guard.read(self.g.state/'registry.json')['dev-a:/srv/x'])
+
+    def test_worktree_recreated_outside_the_shim_is_kept(self):
+        w=self.released('w',released_at=time.time()-7200)['w'];(w/'.git').write_text('gitdir: x\n')   # fresh .git
+        guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[]})
+        with patch.object(guard,'referenced',return_value=False), \
+             patch.object(self.g,'archive',side_effect=AssertionError('must not archive')):
+            self.g.sweep()
+        self.assertTrue(w.exists())
+
+    def test_released_worktrees_share_one_archive(self):
+        ws=self.released('a','b','c')
+        for p in ws.values():self.git(p,'gitdir: x\n')
+        guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[]})
+        calls=[];archived=[]
         def fake_run(args,*a,**k):
-            if str(broken) in [str(x) for x in args]:
-                raise RuntimeError('git -c failed (rc=128): fatal: not a git repository')
             calls.append([str(x) for x in args])
+            if 'remove' in calls[-1]:shutil.rmtree(calls[-1][-1])
+            return (str(self.root/'repo.git')+'\n').encode()
+        def fake_archive(paths,kind,shared=(),require_stable=True):
+            archived.append(sorted(map(str,paths)));return 'arch',{str(x):guard.signature(x) for x in paths}
+        with patch.object(guard,'run',side_effect=fake_run), \
+             patch.object(guard,'referenced',return_value=False), \
+             patch.object(self.g,'git_storage',return_value=[]), \
+             patch.object(self.g,'archive',side_effect=fake_archive):
+            self.g.sweep()
+        self.assertEqual(archived,[sorted(map(str,ws.values()))])
+        removes=[c for c in calls if 'remove' in c]
+        self.assertEqual(len(removes),3)
+        self.assertTrue(all(c.count('--force')==2 for c in removes), 'locked agent worktrees too')
+        self.assertTrue(all('removed_at' in e for e in guard.read(self.g.state/'registry.json').values()))
+
+    def test_worktree_changed_during_archive_is_kept(self):
+        ws=self.released('a','b')
+        for p in ws.values():self.git(p,'gitdir: x\n')
+        guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[]})
+        def fake_archive(paths,kind,shared=(),require_stable=True):
+            self.assertFalse(require_stable)
+            sigs={str(x):guard.signature(x) for x in paths}
+            (ws['a']/'file').write_text('new work')
+            return 'arch',sigs
+        def fake_run(args,*a,**k):
+            if 'remove' in args:shutil.rmtree(args[-1])
             return (str(self.root/'repo.git')+'\n').encode()
         with patch.object(guard,'run',side_effect=fake_run), \
              patch.object(guard,'referenced',return_value=False), \
              patch.object(self.g,'git_storage',return_value=[]), \
-             patch.object(self.g,'archive',return_value=('arch',{str(good):guard.signature(good)})):
+             patch.object(self.g,'archive',side_effect=fake_archive):
             self.g.sweep()
-        self.assertTrue(any('remove' in c for c in calls))
-        registry=guard.read(self.g.state/'registry.json')
-        self.assertIn('removed_at',registry['b'])
-        self.assertNotIn('removed_at',registry['a'])
-        review=guard.read(self.g.state/'review.json')
-        self.assertTrue(any(c['path']==str(broken) for c in review['candidates']))
+        self.assertTrue(ws['a'].exists());self.assertFalse(ws['b'].exists())
+
+    def test_live_owner_grace_is_one_hour(self):
+        ws=self.released('old','fresh',session='dev-live',released_at=time.time()-7200)
+        for w in ws.values():self.git(w,'gitdir: x\n')
+        reg=guard.read(self.g.state/'registry.json');reg['fresh']['released_at']=time.time()-600
+        guard.atomic(self.g.state/'registry.json',reg)
+        guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[{'name':'dev-live'}]})
+        seen=[]
+        def fake_archive(paths,kind,shared=(),require_stable=True):
+            seen.extend(map(str,paths));raise RuntimeError('stop here')
+        with patch.object(guard,'run',return_value=(str(self.root/'repo.git')+'\n').encode()), \
+             patch.object(guard,'referenced',return_value=False), \
+             patch.object(self.g,'git_storage',return_value=[]), \
+             patch.object(self.g,'archive',side_effect=fake_archive):
+            self.g.sweep()
+        self.assertIn(str(ws['old']),seen);self.assertNotIn(str(ws['fresh']),seen)
+
+    def test_disk_pressure_starts_the_sweep_with_cooldown(self):
+        full={'time':time.time(),'used_bytes':90,'available_bytes':10,'percent':90}
+        with patch.object(self.g,'disk',return_value=full),patch.object(self.g,'publish'),patch.object(self.g,'notify'), \
+             patch.object(guard.subprocess,'run',return_value=SimpleNamespace(returncode=0,stderr=b'')) as run:
+            self.g.sample();self.g.sample()
+        starts=[c for c in run.call_args_list if 'devbox-storage-maintenance.service' in c.args[0]]
+        self.assertEqual(len(starts),1)
+
+    def test_failed_sweep_start_retries_next_sample(self):
+        full={'time':time.time(),'used_bytes':90,'available_bytes':10,'percent':90}
+        with patch.object(self.g,'disk',return_value=full),patch.object(self.g,'publish'),patch.object(self.g,'notify'), \
+             patch.object(guard.subprocess,'run',return_value=SimpleNamespace(returncode=1,stderr=b'nope')) as run:
+            self.g.sample();self.g.sample()
+        self.assertEqual(len(run.call_args_list),2)
+
+    def test_no_sweep_without_pressure(self):
+        ok={'time':time.time(),'used_bytes':10,'available_bytes':10**15,'percent':10}
+        with patch.object(self.g,'disk',return_value=ok),patch.object(self.g,'publish'),patch.object(self.g,'notify'), \
+             patch.object(guard.subprocess,'run') as run:
+            self.g.sample()
+        self.assertFalse(run.called)
+
+    def test_worktree_prune_is_refused_inside_sessions(self):
+        with patch.dict(os.environ,{'DEVD_SESSION_ID':'dev-a'}):
+            self.assertTrue(client.shared_prune('git',['-C','/workspace','worktree','prune']))
+            self.assertFalse(client.shared_prune('git',['worktree','remove','x']))
+        with patch.dict(os.environ,{k:v for k,v in os.environ.items() if k!='DEVD_SESSION_ID'},clear=True):
+            self.assertFalse(client.shared_prune('git',['worktree','prune']))
 
     def test_sweep_fails_closed_when_inventory_stale(self):
         guard.atomic(self.g.state/'inventory.json',{'time':1,'sessions':[]})
@@ -255,7 +380,7 @@ class Safety(unittest.TestCase):
     def test_disk_samples_keep_actual_growth_window(self):
         baseline={'time':time.time()-3600,'used_bytes':100,'available_bytes':1000000,'percent':1}
         guard.atomic(self.g.state/'disk-history.json',[baseline])
-        with patch.object(self.g,'disk',return_value={'time':time.time(),'used_bytes':200,'available_bytes':1000000,'percent':1}),patch.object(self.g,'publish'),patch.object(self.g,'notify'):
+        with patch.object(self.g,'disk',return_value={'time':time.time(),'used_bytes':200,'available_bytes':1000000,'percent':1}),patch.object(self.g,'publish'),patch.object(self.g,'notify'),patch.object(self.g,'start_sweep'):
             s=self.g.sample()
         self.assertEqual(s['growth_bytes_24h'],100)
         self.assertAlmostEqual(s['growth_window_seconds'],3600,delta=2)

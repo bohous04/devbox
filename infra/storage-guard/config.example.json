@@ -10,6 +10,7 @@
   "session_limits": {},
   "notify_enabled": true,
   "inventory_max_age_seconds": 10800,
+  "release_grace_hours": 1,
   "history_local_days": 30,
   "recovery_local_days": 30,
   "offsite_keep_days": 180,
