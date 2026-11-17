@@ -320,6 +320,10 @@ export type ResumeDialogState =
   | { kind: "ready"; steps: number };  // how far to move the cursor (negative = up)
 
 export const CAPTURE_CMD = (target: string) => ["tmux", "capture-pane", "-p", "-J", "-t", target];
+// For the exit banner only: current cc clears the screen on /exit, so the banner lands in the
+// scrollback right above a viewport that holds just the shell prompt (live 2026-11-17). Dialog
+// and prompt detection keep the viewport-only capture, where stale history must not count.
+const BANNER_CAPTURE_CMD = (target: string) => ["tmux", "capture-pane", "-p", "-J", "-S", "-200", "-t", target];
 
 // Option line: "  ❯ 2. Resume full session as-is" / "    1. Resume from summary…".
 const OPTION_LINE = /^\s*(❯\s*)?(\d+)\.\s+(.*\S)\s*$/;
@@ -371,8 +375,8 @@ export function exitDialogShown(paneText: string): boolean {
   return lines.some((l, i) => i > lastOption && l.includes(EXIT_DIALOG_CONFIRM_MARK));
 }
 
-async function paneText(deps: RestartDeps, container: string, target: string): Promise<string | null> {
-  const r = await deps.exec(container, CAPTURE_CMD(target), 10_000);
+async function paneText(deps: RestartDeps, container: string, target: string, history = false): Promise<string | null> {
+  const r = await deps.exec(container, (history ? BANNER_CAPTURE_CMD : CAPTURE_CMD)(target), 10_000);
   return r.code === 0 && !r.timedOut ? r.stdout : null;
 }
 
@@ -564,7 +568,7 @@ export type RestartOutcome =
 export async function bannerSessionId(
   deps: RestartDeps, container: string, pane: Pane, configDir: string | null, beforeExit?: string,
 ): Promise<string | null | "unverifiable"> {
-  const text = await paneText(deps, container, pane.target);
+  const text = await paneText(deps, container, pane.target, true);
   if (text === null) return "unverifiable";
   const id = parseExitBannerId(text);
   if (id === null) return null;
@@ -723,13 +727,13 @@ export async function restartPane(
       const parsed = JSON.parse(preflight.stdout) as { boundaryNs?: unknown };
       if (typeof parsed.boundaryNs !== "string" || !/^\d+$/.test(parsed.boundaryNs)) return "unknown-session";
       boundaryNs = parsed.boundaryNs;
-      beforeExit = await paneText(deps, container, pane.target);
+      beforeExit = await paneText(deps, container, pane.target, true);
       if (beforeExit === null || await paneClaudePid(deps, container, pane) !== claudePid) return "unknown-session";
     } catch { return "unknown-session"; }
   }
 
   if (!exact && harvest) {
-    beforeExit = await paneText(deps, container, pane.target);
+    beforeExit = await paneText(deps, container, pane.target, true);
     if (beforeExit === null && (plan.requireId ?? true)) return "unknown-session";
   }
 
@@ -769,7 +773,7 @@ export async function restartPane(
   let id: string | null = null;
   if (exact) {
     try {
-      const after = await paneText(deps, container, pane.target);
+      const after = await paneText(deps, container, pane.target, true);
       id = after === null ? null : exactExitBannerId(beforeExit!, after);
       if (id === null) return "unknown-session";
       const transcript = await deps.exec(container, ["python3", "-c", CLAUDE_RESUME_TRANSCRIPT, exact.sourceConfigDir, exact.targetConfigDir, id, boundaryNs!], 15_000);

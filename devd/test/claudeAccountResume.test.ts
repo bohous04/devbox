@@ -15,7 +15,7 @@ const argv = (id: string) => `claude\0--resume\0${id}\0`;
 const banner = (id: string) => `Resume this session with:\nclaude --resume ${id}\n$ `;
 
 function fixture() {
-  const state = { before: "Current conversation", after: banner(SID), oldArgv: argv(OLD), newArgv: argv(SID), newConfig: target, preflight: ok('{"boundaryNs":"1000"}'), transcript: ok("ok"), returnedPid: 65, exited: false, started: false, sendExitFails: false };
+  const state = { before: "Current conversation", after: banner(SID), oldArgv: argv(OLD), newArgv: argv(SID), newConfig: target, preflight: ok('{"boundaryNs":"1000"}'), transcript: ok("ok"), returnedPid: 65, exited: false, started: false, sendExitFails: false, scrollback: "" };
   const commands: string[][] = [];
   const d: RestartDeps = {
     sleep: async () => {},
@@ -27,7 +27,11 @@ function fixture() {
       if (cmd[0] === "cat" && cmd[1] === "/proc/65/environ") return ok(env(state.newConfig));
       if (cmd[0] === "cat" && cmd[1] === "/proc/65/cmdline") return ok(state.newArgv);
       if (cmd[0] === "python3") return cmd[2] === CLAUDE_RESUME_PREFLIGHT ? state.preflight : state.transcript;
-      if (cmd[0] === "tmux" && cmd[1] === "capture-pane") return ok(state.started ? "Resumed conversation" : state.exited ? state.after : state.before);
+      if (cmd[0] === "tmux" && cmd[1] === "capture-pane") {
+        const viewport = state.started ? "Resumed conversation" : state.exited ? state.after : state.before;
+        // `-S <start>` includes tmux history above the viewport.
+        return ok(cmd.includes("-S") && state.exited ? state.scrollback + viewport : viewport);
+      }
       if (cmd[0] === "tmux" && cmd[1] === "send-keys") {
         if (cmd[4] === "/exit") { if (state.sendExitFails) return bad(); state.exited = true; }
         else if (cmd[4]?.includes("cc --resume")) state.started = true;
@@ -87,6 +91,19 @@ test("strict account switch recognizes a new same-ID exit banner after viewport 
   h.state.before = banner(SID) + "\ncurrent TUI footer";
   h.state.after = "current TUI footer\n" + banner(SID);
   expect(await h.run()).toBe("restarted");
+});
+
+// Live 2026-11-17: current cc clears the screen on /exit, so the
+// banner lands in tmux scrollback and the viewport holds only the shell prompt. A viewport-only
+// capture missed it and the switch left the pane at a bare shell ("unknown-session").
+test("strict account switch finds the exit banner pushed into tmux scrollback", async () => {
+  const h = fixture();
+  const history = `Resume this session with:\nclaude --dangerously-skip-permissions --remote-control dev-fixture --resume ${SID}\n`;
+  h.state.after = "283b56aeff80% ";
+  h.state.before = "Current conversation";
+  h.state.scrollback = history;
+  expect(await h.run()).toBe("restarted");
+  expect(h.sends()).toEqual(["/exit", `export CLAUDE_CONFIG_DIR=${target}; cc --resume ${SID}`]);
 });
 
 test("unavailable shared profile or invalid preflight blocks account switch before /exit", async () => {
