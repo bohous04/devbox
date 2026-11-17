@@ -243,6 +243,19 @@ try {
 }
 
 /** Commands for one MCP server. `remove` first = idempotence (also removes subtables). */
+// Plane MCP delete tools. Claude blocks them with deny rules in settings.json; Codex has no
+// such layer, so the server entry gets them as disabled_tools (Codex 0.169 honours the key,
+// `codex mcp get --json` lists it). Must match the deny list in the Claude settings.
+const PLANE_DELETE_TOOLS = ["cycle", "epic", "initiative", "intake_work_item", "label", "milestone", "module",
+  "project", "project_estimate", "project_estimate_point", "state", "work_item", "work_item_attachment",
+  "work_item_comment", "work_item_link", "work_item_property", "work_item_property_option",
+  "work_item_property_value", "work_item_type", "work_log"].map((t) => `delete_${t}`);
+
+/** A Plane server runs the `plane-mcp-server` package, directly (`uvx plane-mcp-server@x`) or as a
+ *  dependency (`uv run --with plane-mcp-server shim.py`). */
+const isPlaneServer = (args: unknown) =>
+  Array.isArray(args) && args.some((a) => typeof a === "string" && /^plane-mcp-server(@|$)/.test(a));
+
 export function codexMcpCommands(name: string, def: unknown): string[][] | null {
   const d = def as McpServerDef | null;
   if (!d || typeof d !== "object") return null;
@@ -250,6 +263,7 @@ export function codexMcpCommands(name: string, def: unknown): string[][] | null 
   if (typeof d.command === "string" && d.command) {
     const metadata = codexStdioMetadata(d as Record<string, unknown>);
     if (metadata === null) return null;
+    if (isPlaneServer(d.args)) metadata.push(`disabled_tools = [${PLANE_DELETE_TOOLS.map(tomlString).join(", ")}]`);
     const env = Object.entries(d.env ?? {}).flatMap(([k, v]) => ["--env", `${k}=${v}`]);
     const cmds = [remove, ["codex", "mcp", "add", name, ...env, "--", d.command, ...(d.args ?? [])]];
     if (metadata.length) cmds.push(codexMetadataCommand(name, metadata));

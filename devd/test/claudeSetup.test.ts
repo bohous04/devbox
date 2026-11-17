@@ -625,3 +625,21 @@ test("the stdio MCP bridge (mac-mcp-bridge) is translated for Claude, Codex and 
   expect(grok.cmds.some((c) => c.includes("xcode") && c.join(" ").includes("bridge.py"))).toBe(true);
   expect(grok.skipped).not.toContain("xcode");
 });
+
+// Claude has deny rules for every Plane delete_* tool in settings.json. Codex has no
+// permission layer like that, so agent-sync disables those tools on the server entry itself.
+test("codexMcpCommands: Plane server → delete tools disabled via disabled_tools", () => {
+  for (const args of [["plane-mcp-server@0.2.8", "stdio"], ["run", "--with", "plane-mcp-server", "/opt/plane-cf-shim.py", "stdio"]]) {
+    const cmds = codexMcpCommands("lnrt-plane", { command: "uvx", args, env: { PLANE_API_KEY: "k" } })!;
+    expect(cmds).toHaveLength(3);
+    const meta = cmds[2].join(" ");
+    expect(meta).toContain("disabled_tools = [");
+    for (const t of ["delete_work_item", "delete_project", "delete_module", "delete_work_item_comment", "delete_work_log"]) expect(meta).toContain(`"${t}"`);
+    expect(meta.match(/"delete_[a-z_]+"/g)).toHaveLength(20);
+  }
+});
+
+test("codexMcpCommands: non-Plane server → no disabled_tools", () => {
+  const cmds = codexMcpCommands("other", { command: "uvx", args: ["some-mcp-server", "stdio"] })!;
+  expect(cmds.flat().join(" ")).not.toContain("disabled_tools");
+});
