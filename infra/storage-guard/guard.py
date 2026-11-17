@@ -813,22 +813,31 @@ class Guard:
                 continue
             todo[key]=(p,common)
         orphans=self.orphan_sessions(report,mounts,grace)
+        # HEAD, index and reflog of an orphan live in its registration (admin) dir: archive it too.
+        orphan_admin=[a for a in (self.admin_dir(o,o) for o in orphans) if a and a.is_dir()]
         # A released worktree inside an orphaned session goes with that session's directory.
         todo={k:v for k,v in todo.items() if not any(beneath(v[0],o) for o in orphans)}
         if todo or orphans:
             # One archive per sweep: each per-worktree archive re-read the whole shared bare
             # repo (~15 min each), so a sweep could never keep up with agents.
-            shared=list(dict.fromkeys(x for _,c in todo.values() if c for x in self.git_storage(c)))
+            shared=list(dict.fromkeys([x for _,c in todo.values() if c for x in self.git_storage(c)]+orphan_admin))
             try:
                 archive,sigs=self.archive([p for p,_ in todo.values()]+orphans,'worktrees',shared,require_stable=False)
             except (RuntimeError,OSError,subprocess.SubprocessError) as err:
                 self.audit('released-worktree-archive-failed',paths=[str(p) for p,_ in todo.values()]+list(map(str,orphans)),error=str(err)[-300:])
                 todo={};orphans=[];report.append(dict(path='(batch)',reason='Archive of released worktrees failed: '+str(err)[-300:]))
+        try:
+            # The archive can take hours: a session may have claimed its directory meanwhile.
+            live=self.devd_sessions() if orphans else set()
+        except Exception as err:  # fail closed
+            report.append(dict(path=str(self.root/'_sessions'),reason='devd sessions unavailable after archive; ended sessions kept: '+str(err)[-200:]))
+            orphans=[]
         for p in orphans:
             try:
-                if self.container_exists(p.name) or referenced(p) or sigs.get(str(p.resolve()))!=signature(p.resolve()):
+                if p.name in live or self.container_exists(p.name) or referenced(p) or sigs.get(str(p.resolve()))!=signature(p.resolve()):
                     report.append(dict(path=str(p),reason='Ended session changed or in use during archive; kept'))
                     continue
+                self.keep_detached_head(p)
                 self.remove_unregistered(p,p)
             except (RuntimeError,OSError,subprocess.SubprocessError) as err:
                 report.append(dict(path=str(p),reason='Ended session cleanup failed; requires review: '+str(err)[-300:]))
@@ -879,6 +888,11 @@ class Guard:
             report.append(dict(path=str(self.root/'_sessions'),reason='devd sessions unavailable; ended sessions not cleaned: '+str(err)[-200:]))
             return []
         names={c['Name'].lstrip('/') for c in read(self.state/'containers.json',[])}
+        if not live and any(n.startswith('dev-') for n in names):
+            # Session containers exist but devd lists none: a wrong/fresh DB or another service
+            # answering — treat as unavailable rather than "every directory is an orphan".
+            report.append(dict(path=str(self.root/'_sessions'),reason='devd lists no sessions while session containers exist; ended sessions not cleaned'))
+            return []
         out=[]
         base=self.root/'_sessions'
         for d in sorted(base.iterdir()) if base.is_dir() else []:
@@ -891,6 +905,26 @@ class Guard:
                 continue
             out.append(d)
         return out
+
+    def admin_dir(self, p, owner):
+        try:
+            admin=(p/'.git').read_text().split('gitdir:',1)[1].strip()
+        except (OSError,IndexError):
+            return None
+        admin=owner/admin[len('/workspace/'):] if admin.startswith('/workspace/') else Path(admin)
+        return admin if admin.parent.name=='worktrees' and beneath(admin,self.root) else None
+
+    def keep_detached_head(self, p):
+        """Commits reachable only from a detached HEAD (agent mid-rebase or on a bare sha) would
+        be garbage-collected once the registration goes; pin them under refs/devbox/ended/."""
+        admin=self.admin_dir(p,p)
+        if not admin or not (admin/'HEAD').is_file():
+            return
+        head=(admin/'HEAD').read_text().strip()
+        if head.startswith('ref:') or not re.fullmatch(r'[0-9a-f]{40,64}',head):
+            return
+        common=(admin/(admin/'commondir').read_text().strip()).resolve() if (admin/'commondir').is_file() else admin.parent.parent
+        run(['/usr/bin/git','-c','safe.directory=*','--git-dir',common,'update-ref','refs/devbox/ended/'+p.name,head])
 
     def registration_pruned(self, p, owner):
         """True only when `.git` names an admin dir under <bare>/worktrees/ inside the root
