@@ -373,6 +373,93 @@ class Safety(unittest.TestCase):
         with patch.dict(os.environ,{k:v for k,v in os.environ.items() if k!='DEVD_SESSION_ID'},clear=True):
             self.assertFalse(client.shared_prune('git',['worktree','prune']))
 
+    def orphan(self, name, age=7200):
+        bare=self.root/'fivem'/'repo.git';(bare/'objects').mkdir(parents=True,exist_ok=True)
+        d=self.root/'_sessions'/name;(d/'.worktrees'/'x').mkdir(parents=True);(d/'file').write_text('work')
+        (d/'.git').write_text(f'gitdir: {bare}/worktrees/{name}\n')
+        admin=bare/'worktrees'/name;admin.mkdir(parents=True);(admin/'gitdir').write_text(f'{d}/.git\n');(admin/'locked').write_text('')
+        old=time.time()-age
+        for x in (d,d/'.git'):os.utime(x,(old,old))
+        return d,admin
+
+    def run_orphan_sweep(self, live=(), containers=(), archived=None):
+        guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[]})
+        guard.atomic(self.g.state/'containers.json',[{'Id':'x','Name':'/'+n,'Mounts':[],'State':{}} for n in containers])
+        guard.atomic(self.g.state/'registry.json',{})
+        def fake_archive(paths,kind,shared=(),require_stable=True):
+            if archived is not None:archived.extend(map(str,paths))
+            return 'arch',{str(Path(x).resolve()):guard.signature(Path(x).resolve()) for x in paths}
+        with patch.object(guard,'referenced',return_value=False), \
+             patch.object(self.g,'devd_sessions',return_value=set(live)), \
+             patch.object(self.g,'container_exists',side_effect=lambda n:n in containers), \
+             patch.object(self.g,'archive',side_effect=fake_archive):
+            self.g.sweep()
+
+    def test_orphan_session_dir_is_archived_and_removed_with_its_registration(self):
+        # Ended sessions whose workspace devd retained (or a failed start) stayed on disk forever,
+        # and a leftover LOCKED registration then broke a new session with the same name.
+        d,admin=self.orphan('dev-p-r-3')
+        archived=[]
+        self.run_orphan_sweep(archived=archived)
+        self.assertEqual(archived,[str(d)])
+        self.assertFalse(d.exists());self.assertFalse(admin.exists())
+
+    def test_session_known_to_devd_or_with_container_is_kept(self):
+        a,_=self.orphan('dev-p-r-4');b,_=self.orphan('dev-p-r-5')
+        self.run_orphan_sweep(live=['dev-p-r-4'],containers=['dev-p-r-5'])
+        self.assertTrue(a.exists());self.assertTrue(b.exists())
+
+    def test_recent_session_dir_is_kept(self):
+        # devd checks the worktree out before the container exists.
+        d,_=self.orphan('dev-p-r-6',age=60)
+        self.run_orphan_sweep()
+        self.assertTrue(d.exists())
+
+    def test_empty_devd_list_with_session_containers_removes_nothing(self):
+        d,_=self.orphan('dev-p-r-8')
+        self.run_orphan_sweep(live=(),containers=['dev-other-1'])
+        self.assertTrue(d.exists())
+
+    def test_detached_head_of_orphan_is_pinned_and_registration_archived(self):
+        d,admin=self.orphan('dev-p-r-9')
+        sha='a'*40;(admin/'HEAD').write_text(sha+'\n');(admin/'commondir').write_text('../..\n')
+        archived=[];calls=[]
+        guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[]})
+        guard.atomic(self.g.state/'containers.json',[]);guard.atomic(self.g.state/'registry.json',{})
+        def fake_archive(paths,kind,shared=(),require_stable=True):
+            archived.extend(map(str,shared));return 'arch',{str(Path(x).resolve()):guard.signature(Path(x).resolve()) for x in paths}
+        with patch.object(guard,'referenced',return_value=False), \
+             patch.object(self.g,'devd_sessions',return_value=set()), \
+             patch.object(self.g,'container_exists',return_value=False), \
+             patch.object(guard,'run',side_effect=lambda a,*x,**k:calls.append([str(v) for v in a]) or b''), \
+             patch.object(self.g,'archive',side_effect=fake_archive):
+            self.g.sweep()
+        self.assertIn(str(admin),archived)
+        self.assertTrue(any('update-ref' in c and 'refs/devbox/ended/dev-p-r-9' in c and sha in c for c in calls))
+        self.assertFalse(d.exists())
+
+    def test_session_claimed_during_archive_is_kept(self):
+        d,_=self.orphan('dev-p-r-10')
+        answers=iter([set(),{'dev-p-r-10'}])
+        guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[]})
+        guard.atomic(self.g.state/'containers.json',[]);guard.atomic(self.g.state/'registry.json',{})
+        with patch.object(guard,'referenced',return_value=False), \
+             patch.object(self.g,'devd_sessions',side_effect=lambda:next(answers)), \
+             patch.object(self.g,'container_exists',return_value=False), \
+             patch.object(self.g,'archive',side_effect=lambda paths,*a,**k:('arch',{str(Path(x).resolve()):guard.signature(Path(x).resolve()) for x in paths})):
+            self.g.sweep()
+        self.assertTrue(d.exists())
+
+    def test_unreachable_devd_removes_no_session_dir(self):
+        d,_=self.orphan('dev-p-r-7')
+        guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[]})
+        guard.atomic(self.g.state/'containers.json',[])
+        with patch.object(guard,'referenced',return_value=False), \
+             patch.object(self.g,'devd_sessions',side_effect=OSError('connection refused')), \
+             patch.object(self.g,'archive',side_effect=AssertionError('must not archive')):
+            self.g.sweep()
+        self.assertTrue(d.exists())
+
     def test_sweep_fails_closed_when_inventory_stale(self):
         guard.atomic(self.g.state/'inventory.json',{'time':1,'sessions':[]})
         with self.assertRaisesRegex(RuntimeError,'Stale'):self.g.sweep()

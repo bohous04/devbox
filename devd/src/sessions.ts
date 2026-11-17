@@ -1,4 +1,5 @@
 import { loadRemoteRoute, inspectRemoteContainer, prepareRemoteWorkspace, restoreExactSession, retainRemoteWorkspace, type RemoteRoute } from "../../infra/codex-remote/restoreSession";
+import { archiveChats } from "./chatArchive";
 import { codexRemoteLaunchScope } from "./codexRemoteLaunch";
 import type { Database } from "bun:sqlite";
 import { chmodSync, chownSync, existsSync, mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -463,6 +464,12 @@ export class SessionManager {
   // so does `--resume <id>` across account profiles (accountSwitch), the overlay is the same for all
   // profiles. Deliberately under `root` (=/srv/dev): that directory is in the borg backup
   // (infra/devbox-backup.sh), so the conversation history is not lost from the backup.
+  private keepChats(id: string) {
+    // A failed move leaves the transcripts in place (and logged) — never deletes them.
+    try { archiveChats(this.d.root, id, new Date(this.now())); }
+    catch (e) { console.error(`archiving chats of ${id} failed, left in _claude-projects:`, e); }
+  }
+
   private claudeProjectsDir(id: string) {
     return join(this.d.root, "_claude-projects", id);
   }
@@ -1314,7 +1321,7 @@ export class SessionManager {
         this.d.revokePlaceholder?.(id);
         await this.killSshAgent(id);
         rmSync(this.controlDir(id), { recursive: true, force: true });
-        rmSync(this.claudeProjectsDir(id), { recursive: true, force: true });
+        this.keepChats(id);
         deleteGitStat(this.d.db, id);
         try { releaseLeasesForSession(this.d.db, id, this.now()); }
         catch (e) { console.error(`release lease for ${id} failed:`, e); }
@@ -1339,9 +1346,9 @@ export class SessionManager {
       await this.cleanupDind(id, false);
       await this.killSshAgent(id);
       rmSync(this.controlDir(id), { recursive: true, force: true });
-      // Transcripts die with the session — same semantics as the worktree above. Without
-      // cleanup, directories of dead sessions would pile up under _claude-projects forever.
-      rmSync(this.claudeProjectsDir(id), { recursive: true, force: true });
+      // Transcripts outlive the session: the user returns to old conversations, so they move to
+      // _chat-archive instead of piling up under _claude-projects or being deleted.
+      this.keepChats(id);
       deleteGitStat(this.d.db, id);
       // The lease belongs to the session — without releasing it the account would look occupied until the
       // period expires and the poller would needlessly keep it at the fast cadence. An error here must not, however,
