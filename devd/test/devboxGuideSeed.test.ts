@@ -173,3 +173,56 @@ test("also seeds Antigravity AGENTS.md in agy's global customizations", async ()
   expect(count(agents, /BEGIN devbox-guide/g)).toBe(1);
   rmSync(dir, { recursive: true, force: true });
 });
+
+// The user's own global AGENTS.md: agent-sync copies it into claude-home as
+// devbox-user-agents.md, and the seed keeps it as a second block next to the house guide.
+function userSetup() {
+  const dir = tmp();
+  const guide = join(dir, "guide.md");
+  const user = join(dir, "user.md");
+  writeFileSync(guide, "# Devbox\nuse `srv`\n");
+  const env = { CLAUDE_CONFIG_DIR: dir, DEVBOX_GUIDE: guide, DEVBOX_USER_GUIDE: user, HOME: dir };
+  return { dir, user, env };
+}
+
+test("user AGENTS.md → its own block next to the guide, in every target", async () => {
+  const { dir, user, env } = userSetup();
+  writeFileSync(user, "# My rules\nno silent fallbacks\n");
+  expect(await seed(env)).toBe(0);
+  for (const f of [join(dir, "CLAUDE.md"), join(dir, ".codex", "AGENTS.md"), join(dir, ".grok", "AGENTS.md"), join(dir, ".gemini", "config", "AGENTS.md")]) {
+    const md = readFileSync(f, "utf8");
+    expect(count(md, /BEGIN user-agents/g)).toBe(1);
+    expect(count(md, /BEGIN devbox-guide/g)).toBe(1);
+    expect(md).toContain("no silent fallbacks");
+    expect(md).toContain("use `srv`");
+  }
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("changed user AGENTS.md is replaced in place, not duplicated; other content survives", async () => {
+  const { dir, user, env } = userSetup();
+  writeFileSync(user, "old rule\n");
+  await seed(env);
+  writeFileSync(join(dir, "CLAUDE.md"), readFileSync(join(dir, "CLAUDE.md"), "utf8") + "\nMY NOTES\n");
+  writeFileSync(user, "new rule\n");
+  await seed(env);
+  const md = readFileSync(join(dir, "CLAUDE.md"), "utf8");
+  expect(md).toContain("new rule");
+  expect(md).not.toContain("old rule");
+  expect(count(md, /BEGIN user-agents/g)).toBe(1);
+  expect(md).toContain("MY NOTES");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("user AGENTS.md removed on the host → its block disappears, the guide stays", async () => {
+  const { dir, user, env } = userSetup();
+  writeFileSync(user, "temporary rule\n");
+  await seed(env);
+  rmSync(user);
+  await seed(env);
+  const md = readFileSync(join(dir, "CLAUDE.md"), "utf8");
+  expect(md).not.toContain("user-agents");
+  expect(md).not.toContain("temporary rule");
+  expect(count(md, /BEGIN devbox-guide/g)).toBe(1);
+  rmSync(dir, { recursive: true, force: true });
+});

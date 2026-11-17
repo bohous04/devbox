@@ -152,6 +152,11 @@ as a password, and remove the temporary profile after importing it.
 `claude-setup.json` is optional: without it, agent-sync installs no extra marketplaces or
 plugins but still syncs MCP servers. Invalid JSON remains an error.
 
+`AGENTS.md` next to it is optional too: your own global instructions for every agent. agent-sync
+copies it into the shared Claude home, and each container start puts it as a `user-agents` block
+into Claude's `CLAUDE.md` and the Codex, Grok and Antigravity `AGENTS.md`, next to the devbox
+guide. Delete the file and run agent-sync again to remove the block.
+
 Check everything with `dev doctor` if you have a Mac.
 
 ## Firewall

@@ -146,6 +146,19 @@ if (dump.code !== 0) {
 //
 // This does not solve the main problem — the tokens are still in those files and the agent has
 // access to them. It only closes needlessly broad permissions, not access itself.
+// The user's own global AGENTS.md (optional): <config>/AGENTS.md on the host is copied into
+// claude-home, which every container mounts, and seed-devbox-guide puts it as a `user-agents`
+// block into Claude's CLAUDE.md and the Codex, Grok and Antigravity AGENTS.md. Running the seed
+// here applies it right away to the shared homes; account profiles pick it up on their next
+// container start. Removing the host file removes the block the same way.
+const userAgentsPath = join(configDir, "AGENTS.md");
+const hasUserAgents = existsSync(userAgentsPath);
+const userAgents = sh(process.cwd(), "docker", "run", "--rm", ...mounts,
+  ...(hasUserAgents ? ["-v", `${userAgentsPath}:/tmp/user-agents.md:ro`] : []), image, "bash", "-lc",
+  `${hasUserAgents ? "install -m 0644 /tmp/user-agents.md" : "rm -f"} /home/dev/.claude/devbox-user-agents.md && seed-devbox-guide`);
+if (userAgents.code === 0) console.log(`ok:   user AGENTS.md ${hasUserAgents ? "applied" : "absent, block removed"}`);
+else { failed++; console.error(`FAIL: user AGENTS.md: ${userAgents.stderr.trim()}`); }
+
 const hardenPaths = ["/home/dev/.grok/config.toml", "/home/dev/.codex/config.toml", "/home/dev/.claude/.claude.json", "/home/dev/.gemini/config/mcp_config.json"];
 const harden = sh(process.cwd(), "docker", "run", "--rm", ...mounts, image,
   "bash", "-lc", `chmod 600 ${hardenPaths.join(" ")} 2>/dev/null; ls -l ${hardenPaths.join(" ")}`);
