@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // devbox-update — deploys exactly what is on origin/main, and only once CI passed on it.
 //
-// Run by devbox-update.timer every night (after the Claude Code upkeep window) or by hand
+// Run by devbox-update.timer every day at 14:00 or by hand
 // (`devbox-update`). It never deploys another branch and never touches a checkout with local
 // changes: those runs stop and notify instead, so "deployed something that is not main"
 // cannot happen. Steps:
