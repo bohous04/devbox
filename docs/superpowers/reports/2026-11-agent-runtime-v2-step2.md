@@ -43,11 +43,14 @@ browser over the SSH tunnel).
   comes back as running and has to be ended again. Pre-existing, not specific to step 2.
 - `notify_log` shows `stop armed unknown-main-id` for chat sessions: chat has no hook main-agent id. Cosmetic.
 
-## Not verified live
+## Checked after the scenarios
 
-- Codex question and plan requests (they need Codex's plan collaboration mode).
-- Restoring inner Docker containers of a chat session after a host reboot (unit-tested; the test sessions had none
-  running).
+- Inner Docker of a chat session: an inner container running, the journal recorded its id, then DinD and the
+  session container were restarted; the container was running again within 10 s and `check-ready` returned 0.
+- Codex questions: in the default collaboration mode codex-cli 0.169.0 offers no `request_user_input` tool, so the
+  agent asks in plain text and the run ends as "needs you / completed". The bridge's question path is unused for
+  Codex until the `default_mode_request_user_input` feature (under development) is enabled; tracked as a follow-up
+  in Plane. Approvals never arrive by design (`approvalPolicy: never`).
 
 ## Deferred (before chat becomes the default in step 6)
 
