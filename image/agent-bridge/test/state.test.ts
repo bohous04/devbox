@@ -18,6 +18,7 @@ const state: BridgeState = {
   activeRunId: "r1",
   queue: [{ runId: "r2", text: "hi", attachments: ["a.png"] }],
   continuations: [1, 2],
+  usageBaseline: { usage: { input: 1, output: 2, cacheCreation: 3, cacheRead: 4 }, costUsd: 0.5 },
 };
 
 test("saveState then loadState round-trips", () => {

@@ -1,3 +1,4 @@
+import type { UsageBaseline } from "./claudeSession";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 
 export interface BridgeState {
@@ -9,6 +10,8 @@ export interface BridgeState {
   queue: { runId: string; text: string; attachments: string[] }[];
   /** Epoch ms of automatic continuations. */
   continuations: number[];
+  /** Claude's running usage totals at the last result; null for Codex or before the first result. */
+  usageBaseline: UsageBaseline | null;
 }
 
 /** Null when the file is missing; throws on corrupt JSON so a damaged state is never silently reset. */

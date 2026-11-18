@@ -124,6 +124,7 @@ RUN userdel -r ubuntu 2>/dev/null || true \
 COPY entrypoint.sh /usr/local/bin/devbox-entrypoint
 COPY claude-launch.sh /usr/local/bin/claude-launch
 COPY agent-launch.sh /usr/local/bin/agent-launch
+COPY agent-bridge-launch.sh /usr/local/bin/agent-bridge-launch
 COPY devbox-recovery /usr/local/bin/devbox-recovery
 COPY recovery/ /usr/local/lib/devbox-recovery/
 RUN chmod 755 /usr/local/bin/devbox-recovery
@@ -134,7 +135,7 @@ COPY devbox-pty /usr/local/bin/devbox-pty
 COPY devbox-tmux-status /usr/local/bin/devbox-tmux-status
 COPY playwright-mcp-devbox /usr/local/bin/playwright-mcp-devbox
 COPY --chown=dev:dev tmux.conf /home/dev/.tmux.conf
-RUN chmod 755 /usr/local/bin/devbox-entrypoint /usr/local/bin/claude-launch /usr/local/bin/agent-launch /usr/local/bin/open /usr/local/bin/devbox-pty /usr/local/bin/devbox-tmux-status /usr/local/bin/playwright-mcp-devbox
+RUN chmod 755 /usr/local/bin/devbox-entrypoint /usr/local/bin/claude-launch /usr/local/bin/agent-launch /usr/local/bin/agent-bridge-launch /usr/local/bin/open /usr/local/bin/devbox-pty /usr/local/bin/devbox-tmux-status /usr/local/bin/playwright-mcp-devbox
 RUN chmod 755 /usr/local/bin/account-lease
 RUN chmod 755 /usr/local/bin/link-shared-profile
 COPY git-credential-devbox /usr/local/bin/git-credential-devbox

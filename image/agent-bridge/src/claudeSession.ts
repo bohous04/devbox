@@ -21,8 +21,17 @@ export interface ClaudeSessionOptions {
   mcpServers: Record<string, unknown>;
   appendSystemPrompt: string;
   emit: (e: BridgeEvent) => void;
+  /** Running usage totals at the last result before this session was opened (persisted across resume). */
+  usageBaseline?: UsageBaseline | null;
+  /** Called with the new running totals after every result, so the caller can persist them. */
+  onUsageBaseline?: (b: UsageBaseline) => void;
   now?: () => number;
   logError?: (msg: string) => void;
+}
+
+export interface UsageBaseline {
+  usage: TokenUsage;
+  costUsd: number;
 }
 
 // The answer to a plan request that approves it; any other text rejects the plan with that text as feedback.
@@ -102,8 +111,9 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
   let nativeThreadId: string | null = o.resume;
   // modelUsage and total_cost_usd are running totals of the query (sdk.d.ts SDKResultMessage),
   // so a run's own usage is the difference to the previous result.
-  let lastUsage: TokenUsage = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
-  let lastCost = 0;
+  // A resumed query continues the previous process's totals, so it starts from the persisted baseline.
+  let lastUsage: TokenUsage = o.usageBaseline?.usage ?? { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
+  let lastCost = o.usageBaseline?.costUsd ?? 0;
   let ended = false;
 
   const emit = o.emit;
@@ -147,6 +157,7 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
     }
     lastUsage = total;
     lastCost = msg.total_cost_usd;
+    o.onUsageBaseline?.({ usage: total, costUsd: msg.total_cost_usd });
     if (run.interrupted) reportInterrupt(run);
     else {
       const error = resultError(msg);

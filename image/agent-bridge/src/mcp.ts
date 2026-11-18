@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { encodeFrame, type BridgeCommand, type ServerFrame } from "./protocol";
 
-const DEFAULT_SOCKET = "/run/devd/agent.sock";
+export const DEFAULT_SOCKET = "/run/devd/agent.sock";
 
 const TOOLS = [
   {

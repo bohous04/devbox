@@ -5,27 +5,33 @@ set -euo pipefail
 if [ "$#" -gt 0 ]; then
   exec "$@"
 fi
-# Register the Warp cli-agent status hooks into the shared claude-home settings.json
-# so this session's Claude Code state shows up in the Warp tab. Idempotent, non-fatal.
-seed-warp-hooks 2>/dev/null || true
+# Chat sessions (agent runtime v2) get their state from the agent bridge, not from hooks.
+chat=0
+if [ "${DEVD_RUNTIME:-}" = chat ]; then chat=1; fi
 
-# Register the devd agent-event hooks (precise done/blocked notifications).
-seed-devd-hooks 2>/dev/null || true
+if [ "$chat" = 0 ]; then
+  # Register the Warp cli-agent status hooks into the shared claude-home settings.json
+  # so this session's Claude Code state shows up in the Warp tab. Idempotent, non-fatal.
+  seed-warp-hooks 2>/dev/null || true
 
-# Same for Codex (~/.codex/hooks.json): the same emitter, the same events.
-seed-codex-hooks 2>/dev/null || true
+  # Register the devd agent-event hooks (precise done/blocked notifications).
+  seed-devd-hooks 2>/dev/null || true
 
-# Same for Grok (~/.grok/hooks/devd.json — NOT ~/.grok/hooks.json, see seed-grok-hooks.sh):
-# the same emitter, the same events.
-# Unlike its neighbors, stderr is NOT DISCARDED here: this script has one known silent
-# failure (unwritable grok-home → session without hooks and without explanation) and that single
-# sentence must reach `docker logs`. Nothing else writes to stderr, so startup stays quiet.
-seed-grok-hooks || true
+  # Same for Codex (~/.codex/hooks.json): the same emitter, the same events.
+  seed-codex-hooks 2>/dev/null || true
 
-# Same for Antigravity CLI (~/.gemini/config/hooks.json, a named hook `devd`).
-# stderr is not discarded for the same reason as with grok: the single sentence about an unwritable
-# volume must reach `docker logs`.
-seed-agy-hooks || true
+  # Same for Grok (~/.grok/hooks/devd.json — NOT ~/.grok/hooks.json, see seed-grok-hooks.sh):
+  # the same emitter, the same events.
+  # Unlike its neighbors, stderr is NOT DISCARDED here: this script has one known silent
+  # failure (unwritable grok-home → session without hooks and without explanation) and that single
+  # sentence must reach `docker logs`. Nothing else writes to stderr, so startup stays quiet.
+  seed-grok-hooks || true
+
+  # Same for Antigravity CLI (~/.gemini/config/hooks.json, a named hook `devd`).
+  # stderr is not discarded for the same reason as with grok: the single sentence about an unwritable
+  # volume must reach `docker logs`.
+  seed-agy-hooks || true
+fi
 
 # Seed the devbox house guide into agent user-memory (Claude CLAUDE.md + Codex/Grok
 # AGENTS.md) so every session knows about srv/open/preview/prod-db. Idempotent,
@@ -53,7 +59,11 @@ fi
 # Start the main tmux session running the agent, then keep the container alive.
 # `docker start` re-runs this, so a restarted container gets a fresh session
 # (and agent-launch re-checks /run/devd/prompt — the conflict-prompt channel).
-if [ -x /usr/local/bin/devbox-recovery ]; then
+if [ "$chat" = 1 ]; then
+  # The bridge owns the agent; tmux keeps only a shell for the terminal tab.
+  /usr/local/bin/agent-bridge-launch &
+  tmux new-session -d -s main -c /workspace zsh || true
+elif [ -x /usr/local/bin/devbox-recovery ]; then
   recovery_status=0
   /usr/local/bin/devbox-recovery restore || recovery_status=$?
   if [ "$recovery_status" = 3 ]; then

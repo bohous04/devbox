@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { runClaudeTurn, type QueryFn } from "./claude.ts";
 import { EventLog } from "./eventLog.ts";
 import type { TokenUsage } from "./events.ts";
+import { runMcp } from "./mcp.ts";
+import { runServe } from "./serve.ts";
 
 export interface OnceArgs {
   promptFile: string;
@@ -32,7 +34,7 @@ const OPTIONAL: Record<string, keyof OnceArgs> = {
 };
 
 export function parseArgs(argv: string[]): OnceArgs {
-  if (argv[0] !== "once") throw new Error("usage: agent-bridge once --prompt-file <path> --cwd <dir> --model <m> --log <path>");
+  if (argv[0] !== "once") throw new Error("usage: agent-bridge serve | mcp | once --prompt-file <path> --cwd <dir> --model <m> --log <path>");
   const values: Partial<Record<keyof OnceArgs, string>> = {};
   for (let i = 1; i < argv.length; i += 2) {
     const key = REQUIRED[argv[i]] ?? OPTIONAL[argv[i]];
@@ -80,10 +82,19 @@ export async function runOnce(args: OnceArgs, queryFn?: QueryFn): Promise<OnceSu
 }
 
 if (import.meta.main) {
+  const argv = process.argv.slice(2);
   try {
-    const summary = await runOnce(parseArgs(process.argv.slice(2)));
-    console.log(JSON.stringify(summary));
-    process.exit(summary.status === "completed" ? 0 : 1);
+    if (argv[0] === "serve") {
+      await runServe();
+      process.exit(0);
+    } else if (argv[0] === "mcp") {
+      // Stays alive on stdio until the MCP client closes it.
+      await runMcp();
+    } else {
+      const summary = await runOnce(parseArgs(argv));
+      console.log(JSON.stringify(summary));
+      process.exit(summary.status === "completed" ? 0 : 1);
+    }
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(2);

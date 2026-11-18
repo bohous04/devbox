@@ -4,7 +4,7 @@ import type { QueryFn } from "../src/claude.ts";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openClaudeSession, PLAN_UNAVAILABLE } from "../src/claudeSession.ts";
+import { openClaudeSession, PLAN_UNAVAILABLE, type ClaudeSessionOptions, type UsageBaseline } from "../src/claudeSession.ts";
 import type { BridgeEvent } from "../src/events.ts";
 
 // Scripted SDK: the test pushes output messages and reads what the session wrote to the input stream.
@@ -61,7 +61,7 @@ async function until(cond: () => boolean) {
   expect(cond()).toBe(true);
 }
 
-function open(sdk: ReturnType<typeof fakeSdk>, now = () => 0) {
+function open(sdk: ReturnType<typeof fakeSdk>, now = () => 0, extra: Partial<ClaudeSessionOptions> = {}) {
   const events: BridgeEvent[] = [];
   const logs: string[] = [];
   const session = openClaudeSession(
@@ -76,6 +76,7 @@ function open(sdk: ReturnType<typeof fakeSdk>, now = () => 0) {
       emit: (e) => events.push(e),
       now,
       logError: (m) => logs.push(m),
+      ...extra,
     },
     sdk.queryFn,
   );
@@ -175,6 +176,20 @@ describe("openClaudeSession", () => {
     expect(done.map((e) => e.type === "run.completed" && e.runId)).toEqual(["run-1", "run-2"]);
     expect(done[1]).toMatchObject({ usage: { input: 30, output: 20, cacheCreation: 0, cacheRead: 30 } });
     expect((done[1] as { costUsd: number }).costUsd).toBeCloseTo(0.005, 10);
+  });
+
+  test("a resumed session subtracts the persisted baseline and reports each new baseline", async () => {
+    const sdk = fakeSdk();
+    const baselines: UsageBaseline[] = [];
+    const baseline: UsageBaseline = { usage: { input: 100, output: 50, cacheCreation: 10, cacheRead: 20 }, costUsd: 0.01 };
+    const { session, events } = open(sdk, () => 0, { resume: "sess-1", usageBaseline: baseline, onUsageBaseline: (b) => baselines.push(b) });
+    await session.startTurn("run-1", "again", "user");
+    sdk.push(init(), assistantText("m1", "a"), result(usage(130, 70, 10, 50), 0.015));
+    await flush();
+    const done = events.find((e) => e.type === "run.completed") as Extract<BridgeEvent, { type: "run.completed" }>;
+    expect(done.usage).toEqual({ input: 30, output: 20, cacheCreation: 0, cacheRead: 30 });
+    expect(done.costUsd).toBeCloseTo(0.005, 10);
+    expect(baselines).toEqual([{ usage: { input: 130, output: 70, cacheCreation: 10, cacheRead: 50 }, costUsd: 0.015 }]);
   });
 
   test("AskUserQuestion becomes request.opened and the answer is passed back as updatedInput.answers", async () => {
