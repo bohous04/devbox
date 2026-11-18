@@ -5,7 +5,8 @@ import type { EventLog } from "./eventLog";
 import { encodeFrame, parseClientFrame, type BridgeCommand, type ServerFrame } from "./protocol";
 
 export interface CommandHandler {
-  (cmd: BridgeCommand): Promise<void>;
+  /** A returned value is sent back to the client as the `res` frame's `result`. */
+  (cmd: BridgeCommand): Promise<unknown>;
 }
 
 interface Client {
@@ -56,8 +57,8 @@ export function startServer(o: { socketPath: string; log: EventLog; onCommand: C
   const runCommand = (c: Client, id: string, cmd: BridgeCommand) => {
     c.commands = c.commands.then(async () => {
       try {
-        await o.onCommand(cmd);
-        send(c, { t: "res", id, ok: true });
+        const result = await o.onCommand(cmd);
+        send(c, { t: "res", id, ok: true, ...(result === undefined ? {} : { result }) });
       } catch (err) {
         send(c, { t: "res", id, ok: false, error: err instanceof Error ? err.message : String(err) });
       }

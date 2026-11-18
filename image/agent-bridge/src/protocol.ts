@@ -6,12 +6,15 @@ export type BridgeCommand =
   | { kind: "answer"; requestId: string; answer: string }
   // Nightly binary update: close and reopen the harness with resume; refused while a run is active.
   | { kind: "restartAgent" }
-  | { kind: "stop" };
+  | { kind: "stop" }
+  // Held until `endWait` or expiry; `waitKind` because `kind` is the discriminator.
+  | { kind: "declareWait"; reason: string; waitKind: "command" | "ci"; timeoutMinutes?: number }
+  | { kind: "endWait" };
 
 export type ClientFrame = { t: "hello"; afterSeq: number } | { t: "cmd"; id: string; cmd: BridgeCommand };
 export type ServerFrame =
   | { t: "event"; e: LoggedEvent }
-  | { t: "res"; id: string; ok: boolean; error?: string }
+  | { t: "res"; id: string; ok: boolean; error?: string; result?: unknown }
   | { t: "ready"; lastSeq: number };
 
 export class ProtocolError extends Error {}
@@ -39,11 +42,19 @@ function parseCommand(v: unknown): BridgeCommand {
     case "interrupt":
     case "restartAgent":
     case "stop":
+    case "endWait":
       return { kind: v.kind };
     case "answer": {
       const requestId = nonEmptyString(v.requestId, "answer.requestId");
       if (typeof v.answer !== "string") throw new ProtocolError("answer.answer must be a string");
       return { kind: "answer", requestId, answer: v.answer };
+    }
+    case "declareWait": {
+      const reason = nonEmptyString(v.reason, "declareWait.reason");
+      if (v.waitKind !== "command" && v.waitKind !== "ci") throw new ProtocolError('declareWait.waitKind must be "command" or "ci"');
+      if (v.timeoutMinutes === undefined) return { kind: "declareWait", reason, waitKind: v.waitKind };
+      if (typeof v.timeoutMinutes !== "number") throw new ProtocolError("declareWait.timeoutMinutes must be a number");
+      return { kind: "declareWait", reason, waitKind: v.waitKind, timeoutMinutes: v.timeoutMinutes };
     }
     default:
       throw new ProtocolError(`unknown command kind: ${String(v.kind)}`);

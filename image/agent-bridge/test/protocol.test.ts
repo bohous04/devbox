@@ -17,6 +17,8 @@ describe("parseClientFrame", () => {
       { kind: "answer", requestId: "q1", answer: "yes" },
       { kind: "restartAgent" },
       { kind: "stop" },
+      { kind: "endWait" },
+      { kind: "declareWait", reason: "ci", waitKind: "ci", timeoutMinutes: 5 },
     ];
     for (const cmd of cmds) {
       expect(parseClientFrame(JSON.stringify({ t: "cmd", id: "c", cmd }))).toEqual({ t: "cmd", id: "c", cmd });
@@ -35,6 +37,7 @@ describe("parseClientFrame", () => {
       '{"t":"cmd","id":"c1","cmd":{"kind":"startTurn","text":"x","attachments":[1]}}',
       '{"t":"cmd","id":"","cmd":{"kind":"stop"}}',
       '{"t":"cmd","id":"c1","cmd":{"kind":"answer","requestId":"q1"}}',
+      '{"t":"cmd","id":"c1","cmd":{"kind":"declareWait","reason":"x","waitKind":"nope"}}',
       "null",
     ];
     for (const line of bad) expect(() => parseClientFrame(line)).toThrow(ProtocolError);
