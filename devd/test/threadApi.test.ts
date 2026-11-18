@@ -335,6 +335,18 @@ test("SSE without a session gets inbox events but no thread events", async () =>
   expect(got[0].data).toMatchObject({ sessionId: CHAT.id, attention: { section: "working" } });
 });
 
+test("SSE sends a comment at once, so a browser EventSource opens before the first event or ping", async () => {
+  const t = setup();
+  for (const path of ["/api/stream", `/api/stream?session=${CHAT.id}`]) {
+    const res = await t.a.fetch(req("GET", path));
+    const reader = res.body!.getReader();
+    const first = await Promise.race([reader.read(), Bun.sleep(200).then(() => null)]);
+    expect(first).not.toBeNull();
+    expect(new TextDecoder().decode(first!.value)).toBe(": open\n\n");
+    await reader.cancel();
+  }
+});
+
 test("SSE: unknown session 404, tmux session 409, Last-Event-ID without session or not an integer 400", async () => {
   const t = setup();
   expect((await t.a.fetch(req("GET", "/api/stream?session=dev-nope"))).status).toBe(404);

@@ -184,6 +184,9 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
           unsubscribe();
         };
         c.req.raw.signal.addEventListener("abort", stop);
+        // Chrome fires EventSource `open` only once body bytes arrive; without this comment a stream with no replay
+        // stayed "connecting" until the first ping (25 s) and the inbox, which loads on `open`, stayed empty.
+        send(": open\n\n");
         if (store && replayAfter !== null) {
           const snapshot = store.snapshot({ afterSeq: replayAfter });
           sentSeq = Math.max(sentSeq, snapshot.lastSeq);
