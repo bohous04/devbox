@@ -21,8 +21,10 @@ export interface Handoff {
 }
 
 const MAX_TOKENS = 16_000;
+// Spec-mandated bound; the 16k-token cap binds first today.
 const MAX_BYTES_AS_TOKENS = 64 * 1024;
 const HEADER = "Context carried over from the previous conversation (selected messages, commands, errors, file changes and plans, oldest first):\n";
+const WRAPPER = "\n\nUser message:\n";
 const encoder = new TextEncoder();
 
 // 1 token is charged per UTF-8 byte: a deliberate over-estimate that needs no tokenizer.
@@ -114,8 +116,8 @@ export function buildHandoff(i: HandoffInput): Handoff {
   }
 
   // The request is never shortened; history is what gives way. Reserve room for the header and the
-  // worst-case omitted note so the final preamble cannot overshoot the budget.
-  let left = budget - cost(HEADER) - cost(omittedNote(candidates.length)) - 1;
+  // worst-case omitted note and the deliverInline wrapper so the final preamble cannot overshoot the budget.
+  let left = budget - cost(WRAPPER) - cost(HEADER) - cost(omittedNote(candidates.length)) - 1;
   const chosen = new Set<number>();
   const take = (idx: number): void => {
     if (idx < 0 || chosen.has(idx)) return;
@@ -139,5 +141,5 @@ export function buildHandoff(i: HandoffInput): Handoff {
 }
 
 export function deliverInline(h: Handoff, request: string): string {
-  return h.preamble === null ? request : `${h.preamble}\n\nUser message:\n${request}`;
+  return h.preamble === null ? request : `${h.preamble}${WRAPPER}${request}`;
 }

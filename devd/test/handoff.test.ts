@@ -10,6 +10,7 @@ const run = (o: Partial<RunRow> = {}): RunRow => ({
   runId: "r1", origin: "user", status: "completed", harness: null, nativeThreadId: null, model: null,
   queuedAt: null, startedAt: null, endedAt: null, endedSeq: null, usage: null, error: null, ...o,
 });
+const WRAPPER_BYTES = 16; // "\n\nUser message:\n"
 const base = { runs: [run()], request: "next", window: 200_000, used: 0, reserve: 0 };
 
 test("budget: each of the three bounds wins", () => {
@@ -32,7 +33,7 @@ test("selection order: latest user, latest assistant, first user, then newest fi
   const header = full.preamble!.split("\n")[0].length + 1;
   const note = "(6 earlier items omitted; read the full history with devbox_thread_read)".length;
   // header + worst-case note + three entries ("[user] U1\n" = 10, "[assistant] A3\n" = 15 ...)
-  const window = header + note + 1 + 10 + 10 + 15;
+  const window = header + note + 1 + WRAPPER_BYTES + 10 + 10 + 15;
   const h = buildHandoff({ ...base, items, window, request: "" });
   expect(h.includedItemSeqs).toEqual([items[0].seq, items[4].seq, items[5].seq]);
   expect(h.omitted).toBe(3);
@@ -97,6 +98,32 @@ test("oversized request keeps the request and drops history", () => {
   expect(h.includedItemSeqs).toEqual([]);
   expect(h.omitted).toBe(2);
   expect(deliverInline(h, request)).toBe(request);
+
+  // The request alone exceeds the window: the budget clamps to 0.
+  const over = buildHandoff({ ...base, items, request, window: 10_000 });
+  expect(over.budget).toBe(0);
+  expect(over.preamble).toBeNull();
+  expect(over.includedItemSeqs).toEqual([]);
+  expect(deliverInline(over, request)).toBe(request);
+});
+
+test("preamble plus the deliverInline wrapper never exceed the budget, exact at the boundary", () => {
+  const items = [user("hello")];
+  const bytes = (s: string) => new TextEncoder().encode(s).length;
+  const fitsAt = (window: number) => buildHandoff({ ...base, items, request: "", window });
+  let smallest: number | undefined;
+  for (let w = 0; w < 400; w++) {
+    const h = fitsAt(w);
+    if (h.preamble !== null) {
+      smallest ??= w;
+      expect(bytes(deliverInline(h, ""))).toBeLessThanOrEqual(h.budget);
+    }
+  }
+  if (smallest === undefined) throw new Error("never fits");
+  expect(fitsAt(smallest - 1).preamble).toBeNull();
+  expect(bytes(deliverInline(fitsAt(smallest), ""))).toBeLessThanOrEqual(smallest);
+  // Without charging the wrapper the entry would already fit WRAPPER_BYTES earlier.
+  expect(smallest).toBeGreaterThanOrEqual(bytes(fitsAt(smallest).preamble!) + WRAPPER_BYTES);
 });
 
 test("bytes are counted as UTF-8, not characters", () => {
@@ -104,12 +131,10 @@ test("bytes are counted as UTF-8, not characters", () => {
   const items = [user(msg)];
   const fits = buildHandoff({ ...base, items, request: "", window: 100_000 });
   expect(fits.includedItemSeqs).toHaveLength(1);
-  const entry = "[user] ".length + 200 + 1;
   const header = fits.preamble!.split("\n")[0].length + 1;
   const note = "(1 earlier items omitted; read the full history with devbox_thread_read)".length;
-  const chars = header + note + 1 + "[user] ".length + 100 + 1; // enough if (wrongly) counted in chars
+  const chars = header + note + 1 + WRAPPER_BYTES + "[user] ".length + 100 + 1; // enough if (wrongly) counted in chars
   expect(buildHandoff({ ...base, items, request: "", window: chars }).includedItemSeqs).toEqual([]);
-  expect(entry).toBeGreaterThan(chars - header - note - 1);
   expect(handoffBudget(1_000, 0, new TextEncoder().encode("žž").length, 0)).toBe(996);
 });
 
