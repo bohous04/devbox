@@ -8,7 +8,10 @@ export type Runner = (cwd: string, ...cmd: string[]) => R | Promise<R>;
 // it goes through proc.run, not git.ts sh(), which has shorter timeouts for git operations.
 const defaultRun: Runner = (cwd, ...cmd) => runProc(cmd, { cwd, timeoutMs: timeoutFor("BACKUP") });
 
-export interface BackupDeps { volume: string; codexVolume?: string; extraVolumes?: { volume: string; file: string }[]; secretsPath: string; vaultPath?: string; dbPath: string; tmpDir: string; run?: Runner }
+export interface BackupDeps { volume: string; codexVolume?: string; extraVolumes?: { volume: string; file: string }[]; secretsPath: string; vaultPath?: string; dbPath: string; tmpDir: string; run?: Runner;
+  /** Folds the live DB's WAL into its main file (db.ts checkpointFully). The DB runs in WAL mode,
+   *  so a copy of the file alone would miss the latest commits. Throws when it cannot. */
+  checkpointDb?: () => void }
 
 // The staged plaintext artifacts inside tmpDir. They hold secrets + the live sqlite
 // db, so they're shredded from tmpDir once they're safely inside backup.tgz (build)
@@ -41,7 +44,7 @@ export async function buildBackupTar(d: BackupDeps): Promise<string> {
   // instead of being silently swallowed.
   if (existsSync(d.secretsPath)) copyFileSync(d.secretsPath, join(d.tmpDir, "secrets.json"));
   if (d.vaultPath && existsSync(d.vaultPath)) copyFileSync(d.vaultPath, join(d.tmpDir, "vault.age"));
-  if (existsSync(d.dbPath)) copyFileSync(d.dbPath, join(d.tmpDir, "devd.sqlite"));
+  if (existsSync(d.dbPath)) { d.checkpointDb?.(); copyFileSync(d.dbPath, join(d.tmpDir, "devd.sqlite")); }
   // Other agent home volumes (grok-home, antigravity-home). Only EXISTING ones: `docker run
   // -v name:/vol` would create a missing volume as root:root and sessions could then not write
   // into their home (same bug as with grok-home, seed-grok-hooks.sh).
@@ -84,7 +87,9 @@ export async function restoreBackup(d: BackupDeps, tarPath: string): Promise<voi
   // half-applied restore.
   if (existsSync(join(d.tmpDir, "secrets.json"))) copyFileSync(join(d.tmpDir, "secrets.json"), d.secretsPath);
   if (d.vaultPath && existsSync(join(d.tmpDir, "vault.age"))) copyFileSync(join(d.tmpDir, "vault.age"), d.vaultPath);
-  if (existsSync(join(d.tmpDir, "devd.sqlite"))) copyFileSync(join(d.tmpDir, "devd.sqlite"), d.dbPath);
+  // Not over the live file: open WAL connections would write their cached pages back over it.
+  // devd swaps it in on its next start (db.ts applyPendingRestore); the caller restarts devd.
+  if (existsSync(join(d.tmpDir, "devd.sqlite"))) copyFileSync(join(d.tmpDir, "devd.sqlite"), `${d.dbPath}.restore`);
   // shred the extracted plaintext staging files
   for (const f of staged(d)) rmSync(join(d.tmpDir, f), { force: true });
 }

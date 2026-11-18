@@ -40,7 +40,7 @@ import { createGiteaApi } from "./gitea";
 import { giteaAuthEnv } from "./git";
 import {
   activeLeases, diskHistoryEnds, failRunningCloneJobs, getSession, type SessionRow, insertDiskTotal, lastMetricTs, listAccounts, listSessions, logEvent,
-  openDb, pruneAccountLeases, pruneCriticReviews, pruneDiskStats, pruneEvents, pruneNotifyLog, prunePushAlerts,
+  applyPendingRestore, checkpointFully, openDb, startCheckpointer, pruneAccountLeases, pruneCriticReviews, pruneDiskStats, pruneEvents, pruneNotifyLog, prunePushAlerts,
 } from "./db";
 import { createSshAgents } from "./sshAgent";
 import { pendingSshLabel, reapExpiredGrants } from "./sshApprovals";
@@ -130,7 +130,9 @@ const vaultPath = process.env.DEVD_VAULT;
 // secrets AND without any way to unlock.
 const useVault = !!vaultPath && existsSync(vaultPath);
 const secrets: Secrets = useVault ? {} : loadSecrets(secretsPath);
+if (applyPendingRestore(env("DEVD_DB", "/var/lib/devd/devd.sqlite"))) console.log("devd: restored database swapped in");
 const db = openDb(env("DEVD_DB", "/var/lib/devd/devd.sqlite"));
+startCheckpointer(env("DEVD_DB", "/var/lib/devd/devd.sqlite"));
 initCodexAccounts(db);
 
 // listener and pushover both take the token at construction, so we rebuild them after unlock.
@@ -594,7 +596,8 @@ const cloneQueue = new CloneQueue({
   },
 });
 const dashboardDir = env("DEVD_DASHBOARD_DIR", `${import.meta.dir}/../../dashboard/dist`);
-const backupDeps = { volume: "claude-home", codexVolume: "codex-home", extraVolumes: [{ volume: "grok-home", file: "grok-home.tgz" }, { volume: "antigravity-home", file: "antigravity-home.tgz" }], secretsPath, vaultPath, dbPath: env("DEVD_DB", "/var/lib/devd/devd.sqlite"), tmpDir: "/tmp/devd-backup" };
+const backupDeps = { volume: "claude-home", codexVolume: "codex-home", extraVolumes: [{ volume: "grok-home", file: "grok-home.tgz" }, { volume: "antigravity-home", file: "antigravity-home.tgz" }], secretsPath, vaultPath, dbPath: env("DEVD_DB", "/var/lib/devd/devd.sqlite"), tmpDir: "/tmp/devd-backup",
+  checkpointDb: () => checkpointFully(db) };
 
 // Scheduled (cron) runs: reuse the prompt channel (mgr.open with a prompt), run in
 // bypass in tmux `main`, are important (the stuck detector watches). Skip when the session is running.
@@ -892,7 +895,12 @@ const apiDeps: ApiDeps = {
   onConfigWritten: () => treeCache.invalidate(),
   unpushed,
   hardware,
-  backup: { build: () => buildBackupTar(backupDeps), restore: (t) => restoreBackup(backupDeps, t) },
+  backup: {
+    build: () => buildBackupTar(backupDeps),
+    // The restored DB is swapped in on start (applyPendingRestore): answer first, then restart
+    // through the normal shutdown path; systemd (Restart=always) starts devd again.
+    restore: async (t) => { await restoreBackup(backupDeps, t); setTimeout(() => process.kill(process.pid, "SIGTERM"), 1000); },
+  },
   agentEvents, liveActivities, gitea, spawnPty: realSpawnPty, scheduler, critic, codexAuth,
   codexUsage: { view: () => buildCodexView(db) },
   codexAccounts,
