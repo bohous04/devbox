@@ -1,0 +1,380 @@
+import { describe, expect, test } from "bun:test";
+import { openCodexSession, spawnCodex, type CodexSpawn } from "../src/codexSession.ts";
+import type { BridgeEvent } from "../src/events.ts";
+import {
+  commandApprovalRequest,
+  simpleTurn,
+  THREAD_ID,
+  threadResumeResponse,
+  threadStartResponse,
+  turn,
+  turnStartResponse,
+  userInputRequest,
+} from "./fixtures/codexProtocol.ts";
+
+interface Sent {
+  id?: number | string;
+  method?: string;
+  params?: any;
+  result?: any;
+  error?: { code: number; message: string };
+}
+
+// Scripted app-server: answers client requests from `responders`, lets the test push notifications and
+// server requests, and records everything the session wrote to stdin.
+function fakeCodex() {
+  const sent: Sent[] = [];
+  const pending: string[] = [];
+  let wake: (() => void) | null = null;
+  let ended = false;
+  let exit: (code: number) => void = () => {};
+  let turnSeq = 0;
+  const fake = {
+    sent,
+    argv: [] as string[],
+    env: {} as Record<string, string>,
+    killed: false,
+    responders: {
+      initialize: () => ({ userAgent: "codex/0.169.0", codexHome: "/home/dev/.codex", platformFamily: "unix", platformOs: "linux" }),
+      "thread/start": () => threadStartResponse(),
+      "thread/resume": (p: any) => threadResumeResponse(p.threadId),
+      "turn/start": () => turnStartResponse(`turn-${++turnSeq}`),
+      "turn/interrupt": () => ({}),
+    } as Record<string, ((params: any) => unknown) | undefined>,
+    push(...msgs: unknown[]) {
+      pending.push(...msgs.map((m) => JSON.stringify(m)));
+      wake?.();
+    },
+    exit(code: number) {
+      ended = true;
+      wake?.();
+      exit(code);
+    },
+    requests(method: string) {
+      return sent.filter((m) => m.method === method && m.id !== undefined);
+    },
+    responseTo(id: number | string) {
+      return sent.find((m) => m.id === id && m.method === undefined);
+    },
+    spawn: ((argv: string[], env: Record<string, string>) => {
+      fake.argv = argv;
+      fake.env = env;
+      const lines = (async function* () {
+        while (true) {
+          while (pending.length) yield pending.shift()!;
+          if (ended) return;
+          await new Promise<void>((r) => (wake = r));
+          wake = null;
+        }
+      })();
+      return {
+        stdin: {
+          write(s: string) {
+            for (const line of s.split("\n").filter(Boolean)) {
+              const msg = JSON.parse(line) as Sent;
+              sent.push(msg);
+              const respond = msg.method !== undefined && msg.id !== undefined ? fake.responders[msg.method] : undefined;
+              if (respond) fake.push({ id: msg.id, result: respond(msg.params) });
+            }
+          },
+        },
+        lines,
+        exited: new Promise<number>((r) => (exit = r)),
+        kill() {
+          fake.killed = true;
+          fake.exit(143);
+        },
+      };
+    }) as CodexSpawn,
+  };
+  return fake;
+}
+
+async function until(cond: () => boolean) {
+  for (let i = 0; i < 100 && !cond(); i++) await new Promise((r) => setTimeout(r, 5));
+  expect(cond()).toBe(true);
+}
+
+function open(fake: ReturnType<typeof fakeCodex>, o: { resume?: string | null; model?: string | null } = {}) {
+  const events: BridgeEvent[] = [];
+  const logs: string[] = [];
+  const session = openCodexSession(
+    {
+      cwd: "/workspace",
+      model: o.model === undefined ? "gpt-5.5-codex" : o.model,
+      codexHome: "/home/dev/.codex-accounts/a",
+      resume: o.resume ?? null,
+      mcpConfigArgs: ["-c", 'mcp_servers.devbox.command="agent-bridge"'],
+      developerInstructions: "call devbox_wait",
+      emit: (e) => events.push(e),
+      logError: (m) => logs.push(m),
+    },
+    fake.spawn,
+  );
+  return { session, events, logs };
+}
+
+const types = (events: BridgeEvent[]) => events.map((e) => e.type);
+
+describe("openCodexSession", () => {
+  test("thread/start then turn/start; deltas, final message, command item, turn completed with usage", async () => {
+    const fake = fakeCodex();
+    const { session, events } = open(fake);
+    await session.startTurn("run-1", "list files", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+
+    expect(fake.argv).toEqual(["codex", "app-server", "-c", 'mcp_servers.devbox.command="agent-bridge"']);
+    expect(fake.env.CODEX_HOME).toBe("/home/dev/.codex-accounts/a");
+    expect(fake.sent.map((m) => m.method)).toEqual(["initialize", "initialized", "thread/start", "turn/start"]);
+    expect(fake.requests("initialize")[0]!.params).toEqual({
+      clientInfo: { name: "devbox-agent-bridge", title: null, version: expect.any(String) },
+      capabilities: { experimentalApi: false, requestAttestation: false },
+    });
+    expect(fake.requests("thread/start")[0]!.params).toEqual({
+      cwd: "/workspace",
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+      developerInstructions: "call devbox_wait",
+    });
+    expect(fake.requests("turn/start")[0]!.params).toEqual({
+      threadId: THREAD_ID,
+      input: [{ type: "text", text: "list files", text_elements: [] }],
+      model: "gpt-5.5-codex",
+    });
+
+    fake.push(...simpleTurn("turn-1"));
+    await until(() => events.some((e) => e.type === "run.completed"));
+    expect(events).toEqual([
+      { type: "thread.native", harness: "codex", nativeThreadId: THREAD_ID, account: null, model: "gpt-5.5-codex" },
+      { type: "run.started", runId: "run-1", origin: "user", nativeThreadId: THREAD_ID, model: "gpt-5.5-codex" },
+      { type: "message.delta", runId: "run-1", itemId: "msg_1", text: "Lis" },
+      { type: "message.delta", runId: "run-1", itemId: "msg_1", text: "ting" },
+      { type: "message.final", runId: "run-1", itemId: "msg_1", role: "assistant", text: "Listing" },
+      { type: "tool.started", runId: "run-1", itemId: "call_1", tool: "command", input: "ls -la" },
+      { type: "tool.finished", runId: "run-1", itemId: "call_1", isError: false, output: "a\nb\n" },
+      { type: "message.final", runId: "run-1", itemId: "msg_2", role: "assistant", text: "Two files." },
+      {
+        type: "run.completed",
+        runId: "run-1",
+        nativeThreadId: THREAD_ID,
+        // Turn usage = last total minus the total before the turn's first response (total - last of the
+        // first update): input 1400-1000, cached 250-100, output 90-50. Codex input tokens include cached
+        // ones; TokenUsage keeps them apart like the harvester does.
+        usage: { input: 400 - 150, output: 40, cacheCreation: 0, cacheRead: 150 },
+        costUsd: null,
+      },
+    ]);
+  });
+
+  test("resume uses thread/resume with the stored id", async () => {
+    const fake = fakeCodex();
+    const resumed = "019a0000-0000-7000-8000-0000000000aa";
+    const { session, events } = open(fake, { resume: resumed });
+    await session.startTurn("run-1", "go on", "continuation");
+    await until(() => fake.requests("turn/start").length === 1);
+    expect(fake.requests("thread/start")).toEqual([]);
+    expect(fake.requests("thread/resume")[0]!.params).toEqual({
+      threadId: resumed,
+      cwd: "/workspace",
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+      developerInstructions: "call devbox_wait",
+    });
+    expect(fake.requests("turn/start")[0]!.params.threadId).toBe(resumed);
+    expect(events[0]).toEqual({ type: "thread.native", harness: "codex", nativeThreadId: resumed, account: null, model: "gpt-5.5-codex" });
+    expect(events[1]).toMatchObject({ type: "run.started", runId: "run-1", origin: "continuation", nativeThreadId: resumed });
+  });
+
+  test("a model of null is not sent with turn/start", async () => {
+    const fake = fakeCodex();
+    const { session } = open(fake, { model: null });
+    await session.startTurn("run-1", "hi", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    expect("model" in fake.requests("turn/start")[0]!.params).toBe(false);
+  });
+
+  test("requestUserInput becomes request.opened and the answer is the response", async () => {
+    const fake = fakeCodex();
+    const { session, events } = open(fake);
+    await session.startTurn("run-1", "set up a db", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    fake.push({ method: "turn/started", params: { threadId: THREAD_ID, turn: turn("turn-1", "inProgress") } });
+    fake.push({ id: 0, method: "item/tool/requestUserInput", params: userInputRequest("turn-1") });
+    await until(() => events.some((e) => e.type === "request.opened"));
+    const opened = events.find((e) => e.type === "request.opened") as Extract<BridgeEvent, { type: "request.opened" }>;
+    expect(opened).toEqual({
+      type: "request.opened",
+      runId: "run-1",
+      requestId: opened.requestId,
+      kind: "question",
+      prompt: "Which database?",
+      options: [
+        { label: "Postgres", description: "server" },
+        { label: "SQLite", description: "file" },
+      ],
+    });
+    expect(fake.responseTo(0)).toBeUndefined();
+
+    await session.answer(opened.requestId, "SQLite");
+    await until(() => fake.responseTo(0) !== undefined);
+    expect(fake.responseTo(0)).toEqual({ id: 0, result: { answers: { db: { answers: ["SQLite"] } } } });
+    expect(events.at(-1)).toEqual({ type: "request.resolved", requestId: opened.requestId, answer: "SQLite", by: "user" });
+  });
+
+  test("a question without text is refused with an error and logged, never opened", async () => {
+    const fake = fakeCodex();
+    const { session, events, logs } = open(fake);
+    await session.startTurn("run-1", "x", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    const params = userInputRequest("turn-1");
+    params.questions[0]!.question = "";
+    fake.push({ id: 0, method: "item/tool/requestUserInput", params });
+    await until(() => fake.responseTo(0) !== undefined);
+    expect(fake.responseTo(0)!.error!.message).toContain("no question text");
+    expect(events.some((e) => e.type === "request.opened")).toBe(false);
+    expect(logs.some((l) => l.includes("requestUserInput"))).toBe(true);
+  });
+
+  test("a command approval becomes an approval request; Accept accepts, other text declines", async () => {
+    const fake = fakeCodex();
+    const { session, events } = open(fake);
+    await session.startTurn("run-1", "clean", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    fake.push({ id: 0, method: "item/commandExecution/requestApproval", params: commandApprovalRequest("turn-1") });
+    fake.push({ id: 1, method: "item/commandExecution/requestApproval", params: commandApprovalRequest("turn-1") });
+    await until(() => events.filter((e) => e.type === "request.opened").length === 2);
+    const [a, b] = events.filter((e) => e.type === "request.opened") as Extract<BridgeEvent, { type: "request.opened" }>[];
+    expect(a).toMatchObject({ kind: "approval", prompt: "needs to delete build output\n\nrm -rf dist", options: [{ label: "Accept" }, { label: "Decline" }] });
+    await session.answer(a!.requestId, "Accept");
+    await session.answer(b!.requestId, "no, keep it");
+    await until(() => fake.responseTo(1) !== undefined);
+    expect(fake.responseTo(0)).toEqual({ id: 0, result: { decision: "accept" } });
+    expect(fake.responseTo(1)).toEqual({ id: 1, result: { decision: "decline" } });
+  });
+
+  test("message during an active run starts the next turn after turn/completed", async () => {
+    const fake = fakeCodex();
+    const { session, events } = open(fake);
+    await session.startTurn("run-1", "first", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    await session.startTurn("run-2", "second", "user");
+    fake.push({ method: "turn/started", params: { threadId: THREAD_ID, turn: turn("turn-1", "inProgress") } });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fake.requests("turn/start")).toHaveLength(1);
+    expect(types(events)).toEqual(["thread.native", "run.started"]);
+
+    fake.push({ method: "turn/completed", params: { threadId: THREAD_ID, turn: turn("turn-1", "completed") } });
+    await until(() => fake.requests("turn/start").length === 2);
+    expect(fake.requests("turn/start")[1]!.params.input).toEqual([{ type: "text", text: "second", text_elements: [] }]);
+    expect(types(events)).toEqual(["thread.native", "run.started", "run.completed", "run.started"]);
+    expect(events.at(-1)).toMatchObject({ runId: "run-2" });
+  });
+
+  test("a turn started before the thread is ready waits for it", async () => {
+    const fake = fakeCodex();
+    fake.responders["thread/start"] = undefined;
+    const { session } = open(fake);
+    await session.startTurn("run-1", "early", "user");
+    await until(() => fake.requests("thread/start").length === 1);
+    expect(fake.requests("turn/start")).toHaveLength(0);
+    fake.push({ id: fake.requests("thread/start")[0]!.id, result: threadStartResponse() });
+    await until(() => fake.requests("turn/start").length === 1);
+  });
+
+  test("interrupt sends turn/interrupt; run.interrupted comes before the next run.started", async () => {
+    const fake = fakeCodex();
+    const { session, events } = open(fake);
+    await session.startTurn("run-1", "long", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    await session.startTurn("run-2", "next", "user");
+    await session.interrupt();
+    expect(fake.requests("turn/interrupt")[0]!.params).toEqual({ threadId: THREAD_ID, turnId: "turn-1" });
+    fake.push({ method: "turn/completed", params: { threadId: THREAD_ID, turn: turn("turn-1", "interrupted") } });
+    await until(() => fake.requests("turn/start").length === 2);
+    expect(types(events)).toEqual(["thread.native", "run.started", "run.interrupted", "run.started"]);
+  });
+
+  test("notifications without params or of other threads are ignored", async () => {
+    const fake = fakeCodex();
+    const { session, events } = open(fake);
+    await session.startTurn("run-1", "x", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    fake.push({ method: "skills/changed" });
+    fake.push({ method: "item/agentMessage/delta", params: { threadId: "other-thread", turnId: "t9", itemId: "m9", delta: "sub" } });
+    fake.push({ method: "turn/completed", params: { threadId: THREAD_ID, turn: turn("turn-1", "completed") } });
+    await until(() => events.some((e) => e.type === "run.completed"));
+    expect(types(events)).toEqual(["thread.native", "run.started", "run.completed"]);
+  });
+
+  test("a failed turn is run.failed with the turn error", async () => {
+    const fake = fakeCodex();
+    const { session, events } = open(fake);
+    await session.startTurn("run-1", "x", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    fake.push({ method: "turn/completed", params: { threadId: THREAD_ID, turn: turn("turn-1", "failed", "usage limit reached") } });
+    await until(() => events.some((e) => e.type === "run.failed"));
+    expect(events.at(-1)).toEqual({ type: "run.failed", runId: "run-1", error: "usage limit reached" });
+  });
+
+  test("process exit mid-run is run.failed; open requests expire and queued runs fail", async () => {
+    const fake = fakeCodex();
+    const { session, events } = open(fake);
+    await session.startTurn("run-1", "x", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    await session.startTurn("run-2", "y", "user");
+    fake.push({ id: 0, method: "item/tool/requestUserInput", params: userInputRequest("turn-1") });
+    await until(() => events.some((e) => e.type === "request.opened"));
+    const opened = events.find((e) => e.type === "request.opened") as Extract<BridgeEvent, { type: "request.opened" }>;
+    fake.exit(137);
+    await until(() => events.filter((e) => e.type === "run.failed").length === 2);
+    expect(events.slice(-3)).toEqual([
+      { type: "request.resolved", requestId: opened.requestId, answer: null, by: "expired" },
+      { type: "run.failed", runId: "run-1", error: "codex app-server exited with code 137" },
+      { type: "run.failed", runId: "run-2", error: "codex app-server exited with code 137" },
+    ]);
+    expect(await session.startTurn("run-3", "z", "user").catch((e) => e.message)).toBe("codex app-server exited with code 137");
+  });
+
+  test("a request the server resolves itself expires", async () => {
+    const fake = fakeCodex();
+    const { session, events } = open(fake);
+    await session.startTurn("run-1", "x", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    fake.push({ id: 5, method: "item/tool/requestUserInput", params: userInputRequest("turn-1") });
+    await until(() => events.some((e) => e.type === "request.opened"));
+    const opened = events.find((e) => e.type === "request.opened") as Extract<BridgeEvent, { type: "request.opened" }>;
+    fake.push({ method: "serverRequest/resolved", params: { threadId: THREAD_ID, requestId: 5 } });
+    await until(() => events.some((e) => e.type === "request.resolved"));
+    expect(events.at(-1)).toEqual({ type: "request.resolved", requestId: opened.requestId, answer: null, by: "expired" });
+    expect(await session.answer(opened.requestId, "late").catch((e) => e.message)).toBe(`no open request ${opened.requestId}`);
+  });
+
+  test("a failing thread/start ends the session and fails waiting runs", async () => {
+    const fake = fakeCodex();
+    fake.responders["thread/start"] = undefined;
+    const { session, events } = open(fake);
+    await session.startTurn("run-1", "x", "user");
+    await until(() => fake.requests("thread/start").length === 1);
+    fake.push({ id: fake.requests("thread/start")[0]!.id, error: { code: -32600, message: "not logged in" } });
+    await until(() => events.some((e) => e.type === "run.failed"));
+    expect(events).toEqual([{ type: "run.failed", runId: "run-1", error: "thread/start: not logged in" }]);
+  });
+
+  test("close kills the process", async () => {
+    const fake = fakeCodex();
+    const { session } = open(fake);
+    await until(() => fake.requests("thread/start").length === 1);
+    await session.close();
+    expect(fake.killed).toBe(true);
+  });
+});
+
+describe("spawnCodex", () => {
+  test("yields stdout lines across chunk boundaries and the exit code", async () => {
+    const proc = spawnCodex(["sh", "-c", "printf 'a\\nb'; sleep 0.05; printf 'c\\n\\nd\\n'; exit 3"], { PATH: process.env.PATH ?? "" });
+    const lines: string[] = [];
+    for await (const l of proc.lines) lines.push(l);
+    expect(lines).toEqual(["a", "bc", "d"]);
+    expect(await proc.exited).toBe(3);
+  });
+});
