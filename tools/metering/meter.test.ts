@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { FILE_MARK, gate, sessionUsage, transcriptUsage, validateRun, weightedTokens, type RunRecord } from "./meter.ts";
+import { FILE_MARK, gate, sessionUsage, tokenGate, transcriptUsage, validateRun, weightedTokens, type RunRecord } from "./meter.ts";
 
 const fx = (n: string) => readFileSync(new URL(`./fixtures/${n}`, import.meta.url), "utf8");
 
@@ -143,5 +143,41 @@ describe("gate", () => {
   });
   test("refuses to judge without valid runs on both paths", () => {
     expect(() => gate(runs("tui", 3))).toThrow(/bridge/);
+  });
+});
+
+describe("validateRun in tokens mode", () => {
+  test("accepts a run without usage reads", () => {
+    const r = run("tui", 0, { before: null, after: null });
+    expect(validateRun(r, "claude-opus-5-5", { tokensOnly: true }).ok).toBe(true);
+  });
+  test("still rejects a model mismatch and missing usage", () => {
+    expect(validateRun(run("tui", 0, { before: null, after: null, model: "claude-x" }), "claude-opus-5-5", { tokensOnly: true }).reason).toBe("model-mismatch");
+    expect(validateRun(run("tui", 0, { before: null, after: null, usage: null }), "claude-opus-5-5", { tokensOnly: true }).reason).toBe("missing-usage");
+  });
+});
+
+describe("tokenGate", () => {
+  const tok = (path: "tui" | "bridge", input: number, cacheRead = 0) =>
+    run(path, 0, { before: null, after: null, usage: { input, output: 0, cacheCreation: 0, cacheRead } });
+  test("passes at equal tokens per task", () => {
+    const g = tokenGate([tok("tui", 1000), tok("bridge", 1000), tok("tui", 1000), tok("bridge", 1000)]);
+    expect(g.ratio).toBe(1);
+    expect(g.pass).toBe(true);
+  });
+  test("fails when the bridge uses more than 15 percent more weighted tokens per task", () => {
+    const g = tokenGate([tok("tui", 1000), tok("bridge", 1200)]);
+    expect(g.ratio).toBeCloseTo(1.2, 5);
+    expect(g.pass).toBe(false);
+  });
+  test("reports the cache-read share per path", () => {
+    const g = tokenGate([tok("tui", 100, 900), tok("bridge", 1000, 0)]);
+    expect(g.tuiCacheReadShare).toBeCloseTo(0.9, 5);
+    expect(g.bridgeCacheReadShare).toBe(0);
+  });
+  test("ignores failed runs and refuses without valid runs on both paths", () => {
+    const g = tokenGate([tok("tui", 1000), tok("bridge", 1000), { ...tok("bridge", 99999), ok: false, reason: "timeout" }]);
+    expect(g.ratio).toBe(1);
+    expect(() => tokenGate([tok("tui", 1000)])).toThrow(/bridge/);
   });
 });

@@ -23,10 +23,13 @@ export function weightedTokens(u: TokenUsage): number {
   return u.input + u.cacheCreation * 1.25 + u.cacheRead * 0.1 + u.output * 5;
 }
 
-export function validateRun(r: RunRecord, expectedModel: string): RunRecord {
+export function validateRun(r: RunRecord, expectedModel: string, o: { tokensOnly?: boolean } = {}): RunRecord {
   if (!r.ok) return r;
   const fail = (reason: string): RunRecord => ({ ...r, ok: false, reason });
   if (!r.usage) return fail("missing-usage");
+  if (o.tokensOnly) {
+    return r.model !== expectedModel || r.models?.some((x) => x !== expectedModel) ? fail("model-mismatch") : r;
+  }
   if (!r.before || !r.after) return fail("missing-usage-read");
   if (r.before.resetsAt !== r.after.resetsAt) return fail("window-reset");
   if (r.after.pct < r.before.pct) return fail("negative-delta");
@@ -124,5 +127,33 @@ export function gate(runs: RunRecord[]): {
     tuiMeanDeltaPct: tui.delta / tui.n, bridgeMeanDeltaPct: bridge.delta / bridge.n,
     tuiMeanWeighted: tui.tokens / tui.n, bridgeMeanWeighted: bridge.tokens / bridge.n,
     lowSignal,
+  };
+}
+
+function tokenStats(runs: RunRecord[], path: "tui" | "bridge"): { meanWeighted: number; cacheReadShare: number; n: number } {
+  const ok = runs.filter((r) => r.ok && r.path === path && r.usage);
+  if (ok.length === 0) throw new Error(`no valid ${path} runs; cannot compute the gate`);
+  const weighted = ok.reduce((s, r) => s + weightedTokens(r.usage!), 0);
+  const read = ok.reduce((s, r) => s + r.usage!.cacheRead, 0);
+  const prompt = ok.reduce((s, r) => s + r.usage!.input + r.usage!.cacheCreation + r.usage!.cacheRead, 0);
+  return { meanWeighted: weighted / ok.length, cacheReadShare: prompt > 0 ? read / prompt : 0, n: ok.length };
+}
+
+/** For accounts without a 5-hour meter (only whole-percent weekly limits, too coarse to measure a
+ *  few runs): compares what each path sends for the same task. It cannot see the server billing
+ *  identical tokens differently per client; the window gate covers that where a 5-hour meter exists. */
+export function tokenGate(runs: RunRecord[]): {
+  ratio: number; pass: boolean; tuiMeanWeighted: number; bridgeMeanWeighted: number;
+  tuiCacheReadShare: number; bridgeCacheReadShare: number; tuiRuns: number; bridgeRuns: number;
+} {
+  const tui = tokenStats(runs, "tui");
+  const bridge = tokenStats(runs, "bridge");
+  if (tui.meanWeighted <= 0) throw new Error("tui runs have zero weighted tokens");
+  const ratio = bridge.meanWeighted / tui.meanWeighted;
+  return {
+    ratio, pass: ratio <= GATE_RATIO,
+    tuiMeanWeighted: tui.meanWeighted, bridgeMeanWeighted: bridge.meanWeighted,
+    tuiCacheReadShare: tui.cacheReadShare, bridgeCacheReadShare: bridge.cacheReadShare,
+    tuiRuns: tui.n, bridgeRuns: bridge.n,
   };
 }

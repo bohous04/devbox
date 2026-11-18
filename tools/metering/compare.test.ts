@@ -115,3 +115,13 @@ describe("runAll", () => {
     expect(x.calls).toEqual(["tui1", "bridge1"]);
   });
 });
+
+describe("--mode", () => {
+  test("defaults to window and accepts tokens", () => {
+    expect(parseCompareArgs(["--account", "a", "--model", "claude-opus-5-5"]).mode).toBe("window");
+    expect(parseCompareArgs(["--account", "a", "--model", "claude-opus-5-5", "--mode", "tokens"]).mode).toBe("tokens");
+  });
+  test("rejects an unknown mode", () => {
+    expect(() => parseCompareArgs(["--account", "a", "--model", "claude-opus-5-5", "--mode", "x"])).toThrow(/--mode/);
+  });
+});

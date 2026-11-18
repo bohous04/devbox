@@ -1,6 +1,6 @@
 import { appendFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { gate, LOW_SIGNAL_PCT, type RunRecord } from "./meter.ts";
+import { gate, LOW_SIGNAL_PCT, tokenGate, type RunRecord } from "./meter.ts";
 import {
   assertAccountIdle, assertImageHasBridge, assertTokenLasts, FatalError, measureRun, realExec, type Deps,
 } from "./runners.ts";
@@ -8,6 +8,8 @@ import {
 export interface CompareArgs {
   account: string; model: string; runs: number; entrypoint?: string;
   commit?: string; repo?: string; out: string;
+  /** window: 5-hour meter reads (needs a disabled, idle account); tokens: transcript tokens only. */
+  mode: "window" | "tokens";
 }
 
 const SAFE = /^[A-Za-z0-9._-]+$/;
@@ -17,7 +19,7 @@ const MODEL_ID = /^claude-[a-z0-9][a-z0-9.-]*$/;
 
 export function parseCompareArgs(argv: string[]): CompareArgs {
   const v: Record<string, string> = {};
-  const known = ["--account", "--model", "--runs", "--entrypoint", "--commit", "--repo", "--out"];
+  const known = ["--account", "--model", "--runs", "--entrypoint", "--commit", "--repo", "--out", "--mode"];
   for (let i = 0; i < argv.length; i += 2) {
     if (!known.includes(argv[i])) throw new Error(`unknown flag ${argv[i]}`);
     if (argv[i + 1] === undefined) throw new Error(`missing value for ${argv[i]}`);
@@ -31,11 +33,13 @@ export function parseCompareArgs(argv: string[]): CompareArgs {
   if (!MODEL_ID.test(v["--model"])) {
     throw new Error("--model must be a full model id such as claude-opus-5-5, not an alias");
   }
+  const mode = v["--mode"] ?? "window";
+  if (mode !== "window" && mode !== "tokens") throw new Error("--mode must be window or tokens");
   const runs = v["--runs"] === undefined ? 5 : Number(v["--runs"]);
   if (!Number.isInteger(runs) || runs < 1) throw new Error("--runs must be a positive integer");
   return {
     account: v["--account"], model: v["--model"], runs, entrypoint: v["--entrypoint"],
-    commit: v["--commit"], repo: v["--repo"], out: v["--out"] ?? "metering-report.json",
+    commit: v["--commit"], repo: v["--repo"], out: v["--out"] ?? "metering-report.json", mode,
   };
 }
 
@@ -111,9 +115,11 @@ async function main() {
   const d: Deps = { exec: realExec, fetch, now: Date.now, sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
 
   await assertImageHasBridge(d);
-  const checkIdle = () => assertAccountIdle(fetch, devdUrl, a.account);
+  const tokensOnly = a.mode === "tokens";
+  // Tokens mode reads no usage meter, so other sessions on the same account cannot skew it.
+  const checkIdle = tokensOnly ? async () => {} : () => assertAccountIdle(fetch, devdUrl, a.account);
   await checkIdle();
-  await assertTokenLasts(d, a.account, a.runs);
+  if (!tokensOnly) await assertTokenLasts(d, a.account, a.runs);
 
   const partial = `${a.out}.runs.jsonl`;
   writeFileSync(partial, "");
@@ -121,7 +127,7 @@ async function main() {
     checkIdle,
     measure: (path, n) => measureRun(d, {
       account: a.account, path, n, model: a.model, expectedModel: a.model,
-      commit, repo, entrypoint: a.entrypoint,
+      commit, repo, entrypoint: a.entrypoint, tokensOnly,
     }),
     onRecord: (rec) => {
       appendFileSync(partial, JSON.stringify(rec) + "\n");
@@ -129,6 +135,16 @@ async function main() {
     },
   });
 
+  if (tokensOnly) {
+    const t = tokenGate(records);
+    const report = { account: "<redacted>", mode: a.mode, model: a.model, commit, entrypoint: a.entrypoint ?? null, gate: t, runs: records };
+    writeFileSync(a.out, JSON.stringify(report, null, 2) + "\n");
+    console.log(JSON.stringify(report, null, 2));
+    const line = `bridge/tui weighted tokens per task ${t.ratio.toFixed(3)} (limit 1.15), cache-read share tui ${t.tuiCacheReadShare.toFixed(3)} bridge ${t.bridgeCacheReadShare.toFixed(3)}`;
+    console.log(t.pass ? `PASS (tokens): ${line}` : `FAIL (tokens): ${line}`);
+    if (!t.pass) process.exitCode = 1;
+    return;
+  }
   const g = gate(records);
   const report = { account: "<redacted>", model: a.model, commit, entrypoint: a.entrypoint ?? null, gate: g, runs: records };
   writeFileSync(a.out, JSON.stringify(report, null, 2) + "\n");

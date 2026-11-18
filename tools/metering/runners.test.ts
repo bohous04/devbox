@@ -329,4 +329,12 @@ describe("measureRun", () => {
     await expect(measureRun(deps(e, usage), opts)).rejects.toThrow("docker died");
     expect(cmds).toContain("rm -rf /transcripts");
   });
+  test("tokens mode never reads the usage endpoint", async () => {
+    const cmds: string[] = [];
+    let fetched = 0;
+    const counting = (async () => { fetched++; return json({ five_hour: null }); }) as any;
+    await expect(measureRun(deps(exec(cmds), counting), { ...opts, tokensOnly: true })).rejects.toThrow("docker died");
+    expect(fetched).toBe(0);
+    expect(cmds.some((c) => c.includes("/a:ro"))).toBe(false);
+  });
 });
