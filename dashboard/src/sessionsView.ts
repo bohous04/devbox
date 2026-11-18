@@ -1,4 +1,4 @@
-import type { SwitchAgentResponse } from "./api";
+import type { OpenResult, SessionRuntime, SwitchAgentResponse } from "./api";
 
 // Agent switch returns failure as HTTP 200 too (same as switch-account) —
 // ConfirmButton reports an error only via throw, so the response is translated into a sentence.
@@ -13,4 +13,12 @@ export function agentSwitchError(r: SwitchAgentResponse, label: string): string 
     case "failed": return `Couldn't switch any panel onto ${label}${detail ? `: ${detail}` : " — check the container"}.`;
     case "switched": return detail ? `Switched to ${label}, but some panes stayed behind: ${detail}.` : null;
   }
+}
+
+/** What opening a session tells the user. A chat session opens on its thread, which is its status; only a pull
+ *  conflict needs saying (devd sends the agent the conflict as the first message). */
+export function openedNotice(pull: OpenResult["pull"], runtime: SessionRuntime): string | null {
+  const conflict = pull?.status === "conflict";
+  if (runtime === "chat") return conflict ? "The agent is resolving a pull conflict." : null;
+  return conflict ? "Session started. The agent is resolving a pull conflict." : "Session is ready.";
 }

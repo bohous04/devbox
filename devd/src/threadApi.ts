@@ -13,7 +13,7 @@ export const SSE_PING_MS = 25_000;
 export interface ThreadApiDeps {
   db: Database;
   mgr: { isEnding: (id: string) => boolean };
-  links: Pick<BridgeLinks, "send" | "ensure">;
+  links: Pick<BridgeLinks, "send" | "ensure" | "startTurnWhenConnected">;
   /** The session's thread store (index.ts: opened lazily, shared with its bridge link). */
   threads: (id: string) => ThreadStore;
   bus: EventBus;

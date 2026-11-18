@@ -953,9 +953,16 @@ export function createApp(d: ApiDeps): Hono {
   });
 
   // Link the bridge of an opened chat session now instead of at the next 5 s link sync in index.ts. The session
-  // did open, so a failure here is logged, not answered: that sync retries.
-  const linkOpenedChat = (s: SessionRow) => {
-    try { if (storedRuntime(s) === "chat" && s.status === "running") d.links?.ensure(s.id); }
+  // did open, so a failure here is logged, not answered: that sync retries. devd's prompt for the agent (a pull
+  // conflict) reaches a chat session as its first message, as the prompt file does for tmux.
+  const linkOpenedChat = (r: { session: SessionRow; claudePrompt?: string }) => {
+    const s = r.session;
+    try {
+      if (storedRuntime(s) === "chat" && s.status === "running") {
+        d.links?.ensure(s.id);
+        if (r.claudePrompt !== undefined) d.links?.startTurnWhenConnected(s.id, r.claudePrompt);
+      }
+    }
     catch (e) { console.error(`bridge link of opened session ${s.id} failed:`, e); }
     d.inbox?.changedSafe(s.id);
   };
@@ -1017,7 +1024,7 @@ export function createApp(d: ApiDeps): Hono {
         }
       }
       const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, runtime, fresh: body.fresh, sessionId: body.sessionId });
-      linkOpenedChat(r.session);
+      linkOpenedChat(r);
       return c.json(r, r.created ? 201 : 200);
     } catch (e) {
       return busy(c, e) ?? c.json({ error: (e as Error).message }, 400);

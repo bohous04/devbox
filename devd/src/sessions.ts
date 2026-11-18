@@ -582,11 +582,17 @@ export class SessionManager {
   // Writes the conflict prompt for the container launcher (or clears a stale one).
   // Must run BEFORE the container is run/started; docker start re-runs the
   // entrypoint, so the file channel also covers restarted containers.
-  private syncPromptFile(id: string, pull: PullResult, override?: string): string | undefined {
+  // A chat session has no launcher reading the file: the prompt is only returned, and the API sends it as the
+  // session's first message once the bridge link connects.
+  private syncPromptFile(id: string, runtime: SessionRuntime, pull: PullResult, override?: string): string | undefined {
     const dir = this.controlDir(id);
     mkdirSync(dir, { recursive: true });
     chmodSync(dir, 0o777); // devd may run as root; container user is uid 1000
     const file = join(dir, "prompt");
+    if (runtime === "chat") {
+      rmSync(file, { force: true });
+      return pull.status === "conflict" ? conflictPrompt(pull.files) : override;
+    }
     if (pull.status === "conflict") {
       const prompt = conflictPrompt(pull.files);
       writeFileSync(file, prompt);
@@ -944,7 +950,7 @@ export class SessionManager {
     progress({ step: "pull" });
     const pull = await pullWithRebase(dir, authEnv);
     progress({ step: "container", detail: "setting file ownership" });
-    const claudePrompt = this.syncPromptFile(id, pull, t.prompt);
+    const claudePrompt = this.syncPromptFile(id, existing ? storedRuntime(existing) : (t.runtime ?? "tmux"), pull, t.prompt);
     if (pull.status === "conflict") {
       logEvent(this.d.db, id, "pull-conflict", { files: pull.files });
       this.d.notify?.("devbox", `${t.project}/${t.repo}: pull conflict — Claude is resolving it`);
@@ -1032,7 +1038,7 @@ export class SessionManager {
           status: "running", solo: 1, created_at: this.now(), last_active_at: this.now(), important: 0, agent: chosen,
         };
         insertSession(this.d.db, row);
-        this.syncPromptFile(id, { status: "clean" });
+        this.syncPromptFile(id, "tmux", { status: "clean" });
         await this.ensureOwned(ws); // git init ran as root → chown to dev (uid 1000)
         try {
           await this.ensureDind(id);
@@ -1227,7 +1233,8 @@ export class SessionManager {
           await this.ensureOwned(route.cwd);
           if (created && route.restore.bare) await this.ownBare(route.restore.bare);
         },
-        clearPrompt: () => { this.syncPromptFile(id, { status: "clean" }); },
+        // A clean pull only clears the file, whatever the runtime.
+        clearPrompt: () => { this.syncPromptFile(id, "tmux", { status: "clean" }); },
         ensureDind: () => this.ensureDind(id),
         start: () => startContainer(id),
         removeStopped: (observed) => removeStoppedWorkspaceContainer(observed),

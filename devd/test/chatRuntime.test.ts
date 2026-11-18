@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../src/api";
@@ -135,4 +135,25 @@ test("SessionManager.open refuses an agent chat cannot run on a stored chat sess
     .rejects.toThrow("Claude Code + GPT is not available in chat sessions yet");
   expect(getSession(db, "dev-p-r")!.agent).toBe("claude");
   expect(getRepoAgent(db, "f", "p", "r")).toBeNull();
+});
+
+test("a pull conflict is written to the prompt file for tmux only; chat gets it back to send as a message", () => {
+  const db = openDb(":memory:");
+  const root = mkdtempSync(join(tmpdir(), "rt-prompt-"));
+  const mgr = new SessionManager({ db, cfg: DEFAULT_CONFIG, root, image: "alpine:3", controlRoot: join(root, "ctl") });
+  const sync = (mgr as unknown as { syncPromptFile: (id: string, runtime: string, pull: unknown, override?: string) => string | undefined }).syncPromptFile.bind(mgr);
+  const conflict = { status: "conflict", files: ["a.ts"] };
+  const file = (id: string) => join(root, "ctl", id, "prompt");
+
+  const tmux = sync("dev-a-tmux", "tmux", conflict);
+  expect(tmux).toContain("a.ts");
+  expect(readFileSync(file("dev-a-tmux"), "utf8")).toBe(tmux!);
+
+  // A stale prompt file from an earlier tmux life of the id is cleared, never left for agent-launch.
+  mkdirSync(join(root, "ctl", "dev-a-chat"), { recursive: true });
+  writeFileSync(file("dev-a-chat"), "stale");
+  const chat = sync("dev-a-chat", "chat", conflict);
+  expect(chat).toBe(tmux);
+  expect(existsSync(file("dev-a-chat"))).toBe(false);
+  expect(sync("dev-a-chat", "chat", { status: "ok" })).toBeUndefined();
 });

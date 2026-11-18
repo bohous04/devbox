@@ -66,6 +66,8 @@ function parseServerFrame(line: string): ServerFrame {
  *  `hello{afterSeq: store.lastSeq()}`, so the bridge replays only what the store is missing. */
 export class BridgeLinks {
   private links = new Map<string, Link>();
+  /** devd's own first message per session (startTurnWhenConnected), until the bridge took it. */
+  private firstTurns = new Map<string, string>();
   private retryMs: number;
   private log: (msg: string) => void;
 
@@ -98,6 +100,7 @@ export class BridgeLinks {
   /** Stops retrying and closes the socket. Commands in flight fail with AgentDisconnected. No status callback:
    *  dropping is the owner's decision (stop/end), not something the link observed. */
   drop(sessionId: string): void {
+    if (this.firstTurns.delete(sessionId)) this.log(`bridge link ${sessionId}: dropped before devd's first message was sent; it is discarded`);
     const link = this.links.get(sessionId);
     if (!link) return;
     this.links.delete(sessionId);
@@ -131,6 +134,28 @@ export class BridgeLinks {
       }, timeoutMs);
       link.pending.set(id, { resolve, reject, timer });
       this.write(link, { t: "cmd", id, cmd });
+    });
+  }
+
+  /** Sends `text` as a startTurn once the link is connected (at once if it is). For devd's own first message
+   *  of a session (a pull conflict on open). Not sent because the bridge was unreachable: tried again on the next
+   *  connection. Timed out (outcome unknown) or refused: logged, never resent. */
+  startTurnWhenConnected(sessionId: string, text: string): void {
+    this.firstTurns.set(sessionId, text);
+    if (this.status(sessionId) === "connected") this.sendFirstTurn(sessionId);
+  }
+
+  private sendFirstTurn(sessionId: string) {
+    const text = this.firstTurns.get(sessionId);
+    if (text === undefined) return;
+    this.firstTurns.delete(sessionId);
+    this.send(sessionId, { kind: "startTurn", text }).catch((err: Error) => {
+      if (err instanceof AgentDisconnected && !(err instanceof CommandTimeout) && this.links.has(sessionId)) {
+        this.firstTurns.set(sessionId, text);
+        this.log(`bridge link ${sessionId}: devd's first message not sent (${err.message}); retrying on the next connection`);
+        return;
+      }
+      this.log(`bridge link ${sessionId}: devd's first message failed, not resent: ${err.message}`);
     });
   }
 
@@ -206,6 +231,7 @@ export class BridgeLinks {
     link.outageLogged = false;
     this.write(link, { t: "hello", afterSeq });
     this.setStatus(sessionId, link, "connected");
+    this.sendFirstTurn(sessionId);
   }
 
   private onClose(sessionId: string, link: Link, why: string) {

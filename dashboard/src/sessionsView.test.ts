@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { agentSwitchError } from "./sessionsView";
+import { agentSwitchError, openedNotice } from "./sessionsView";
 
 // Swapping the agent returns failure as HTTP 200 too (like switch-account, see M1
 // on the Switch account button) — without translating it into an error sentence ConfirmButton would stay silent.
@@ -15,4 +15,12 @@ test("agentSwitchError: success → null, failures and stale panes → a sentenc
   expect(failed).toContain("did-not-exit");
   const partial = agentSwitchError({ ok: true, status: "switched", panes: [pane("main:0.0", "restarted"), pane("main-2:0.0", "did-not-exit")] }, "Codex");
   expect(partial).toContain("main-2:0.0");
+});
+
+test("openedNotice: a pull conflict is reported for both runtimes; a clean chat open says nothing", () => {
+  expect(openedNotice({ status: "conflict", files: ["a.ts"] }, "tmux")).toBe("Session started. The agent is resolving a pull conflict.");
+  expect(openedNotice({ status: "clean" }, "tmux")).toBe("Session is ready.");
+  expect(openedNotice({ status: "conflict", files: ["a.ts"] }, "chat")).toBe("The agent is resolving a pull conflict.");
+  expect(openedNotice({ status: "clean" }, "chat")).toBeNull();
+  expect(openedNotice(undefined, "chat")).toBeNull();
 });

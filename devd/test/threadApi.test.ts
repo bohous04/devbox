@@ -40,12 +40,14 @@ function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown
   };
   const sent: [string, BridgeCommand][] = [];
   const ensured: string[] = [];
+  const firstTurns: [string, string][] = [];
   const links = {
     send: async (id: string, cmd: BridgeCommand) => {
       sent.push([id, cmd]);
       if (opts.sendError) throw opts.sendError;
     },
     ensure: (id: string) => { ensured.push(id); },
+    startTurnWhenConnected: (id: string, text: string) => { firstTurns.push([id, text]); },
   };
   const hub = new AgentEventHub({ db, notify: () => {} });
   const bus = new EventBus();
@@ -74,7 +76,7 @@ function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown
     }
     return out;
   };
-  return { a, db, threads, sent, ensured, bus, inbox, feed, ending };
+  return { a, db, threads, sent, ensured, firstTurns, bus, inbox, feed, ending };
 }
 
 const req = (method: string, path: string, body?: unknown, headers: Record<string, string> = {}) =>
@@ -227,6 +229,21 @@ test("GET inbox lists every session with its attention, needs_you first", async 
 });
 
 // --- open starts the link ---
+
+test("a chat session opened with a pull conflict gets the conflict prompt as its first message; tmux does not", async () => {
+  const conflict = { status: "conflict", files: ["a.ts"] };
+  for (const [row, pull, expected] of [
+    [CHAT, conflict, [[CHAT.id, "resolve a.ts"]]],
+    [CHAT, { status: "ok" }, []],
+    [TMUX, conflict, []],
+  ] as const) {
+    const claudePrompt = pull.status === "conflict" ? "resolve a.ts" : undefined;
+    const t = setup({ open: async () => ({ session: row, created: false, pull, claudePrompt }) });
+    const r = await t.a.fetch(req("POST", "/api/sessions", { folder: row.folder, project: row.project, repo: row.repo }));
+    expect(r.status).toBe(200);
+    expect(t.firstTurns).toEqual(expected.map((e) => [...e]));
+  }
+});
 
 test("opening a session publishes its inbox item", async () => {
   for (const row of [CHAT, TMUX]) {

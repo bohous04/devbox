@@ -302,3 +302,30 @@ test("a bridge log behind the store is logged, shown as a notice and reported, u
   await waitFor(() => store.lastSeq() === 6 && links.behind(ID) === null, "caught up");
   expect(behind).toEqual([ID, ID]);
 });
+
+test("devd's first message waits for the connection and is sent once", async () => {
+  const { links, serve } = setup();
+  links.ensure(ID);
+  links.startTurnWhenConnected(ID, "resolve the conflict");
+  await waitFor(() => links.status(ID) === "disconnected", "no bridge yet");
+  const b = serve();
+  await waitFor(() => b.cmds.length === 1, "first turn sent");
+  expect(b.cmds).toEqual([{ kind: "startTurn", text: "resolve the conflict" }]);
+  b.close();
+  await waitFor(() => links.status(ID) === "disconnected", "disconnect");
+  const c = serve();
+  await waitFor(() => links.status(ID) === "connected" && c.hellos.length === 1, "reconnect");
+  await Bun.sleep(30);
+  expect(c.cmds).toEqual([]);
+});
+
+test("devd's first message on a connected link goes out at once; a refused one is logged, not resent", async () => {
+  const { links, serve, logs } = setup();
+  const b = serve();
+  b.setReply({ ok: false, error: "attachments are not supported yet" });
+  links.ensure(ID);
+  await waitFor(() => links.status(ID) === "connected", "connected");
+  links.startTurnWhenConnected(ID, "resolve the conflict");
+  await waitFor(() => logs.some((l) => l.includes("first message") && l.includes("attachments are not supported yet")), "refusal logged");
+  expect(b.cmds).toHaveLength(1);
+});

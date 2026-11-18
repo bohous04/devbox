@@ -18,7 +18,7 @@ import { cn } from "@/lib/utils";
 import { agoLabel, bytes, compactNumber, czCurrency, durationLabel, stateLabel } from "../format";
 import { AGENT_IDS, AGENT_PROFILES, SOLO, agentNameFor, chatRuntimeBlock, defaultAgentFor, folderChoices, instaboxAgentBlock, profileFor, projectChoices, repoChoices, sessionsFor, soleProject } from "../newSession";
 import { CC_EVENT_TYPES, fleetBadge, historyLine, rowState, type HistoryTone } from "../ccUpkeepView";
-import { agentSwitchError } from "../sessionsView";
+import { agentSwitchError, openedNotice } from "../sessionsView";
 import { terminalTabUrl } from "../terminalRoute";
 import { useNow, useStore } from "../store";
 import { FormDialog } from "../components/FormDialog";
@@ -131,10 +131,12 @@ function NewSession({ open, onClose, onStarted }: { open: boolean; onClose: () =
         ? await api.openSolo({ folder, project, agent })
         : await api.openSession({ folder, project, repo, cloneUrl: selected?.cloneUrl, agent, fresh, runtime });
       setRepo("");
-      if (runtime === "chat") { onClose(); navigate(`/s/${encodeURIComponent(r.session.id)}`); return; }
-      await onStarted(r.session.id, r.pull?.status === "conflict"
-        ? "Session started. The agent is resolving a pull conflict."
-        : "Session is ready.");
+      if (runtime === "chat") {
+        onClose();
+        navigate(`/s/${encodeURIComponent(r.session.id)}`, { state: { notice: openedNotice(r.pull, "chat") } });
+        return;
+      }
+      await onStarted(r.session.id, openedNotice(r.pull, "tmux")!);
       onClose();
     } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
   }

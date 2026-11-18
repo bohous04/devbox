@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowLeft } from "lucide-react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router-dom";
 import type { ThreadSnapshot } from "../../../shared/thread";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -30,6 +30,8 @@ function ChatPage({ id }: { id: string }) {
   const threadRef = useRef(thread);
   threadRef.current = thread;
   const bottom = useRef<HTMLDivElement | null>(null);
+  // Set by the New session dialog (openedNotice), e.g. a pull conflict the agent was asked to resolve.
+  const notice = (useLocation().state as { notice?: string | null } | null)?.notice ?? null;
 
   useEffect(() => {
     let alive = true;
@@ -111,6 +113,7 @@ function ChatPage({ id }: { id: string }) {
           {paused ? "live updates paused — reconnecting" : `live update dropped: ${badFrame} — reload to catch up`}
         </p>
       )}
+      {notice && <p role="status" className="mb-3 text-sm text-muted-foreground">{notice}</p>}
       {seenErr && <p role="alert" className="mb-3 text-sm text-destructive">could not mark the thread as seen: {seenErr}</p>}
 
       {loadErr ? (
