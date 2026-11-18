@@ -469,6 +469,26 @@ class Safety(unittest.TestCase):
             self.g.sample()
         self.assertFalse(run.called)
 
+    def test_checkout_slots_limit_parallel_worktree_adds_per_repository(self):
+        # Five parallel 13 GB `worktree add` saturated the disk and devd hung for 12 minutes.
+        repo=self.root/'repo';subprocess.run(['git','init','-q',str(repo)],check=True)
+        held=[client.checkout_slot(['-C',str(repo)],slots=2,wait=0) for _ in range(2)]
+        self.assertTrue(all(held))
+        with self.assertRaises(TimeoutError):
+            client.checkout_slot(['-C',str(repo)],slots=2,wait=0)
+        held[0].close()
+        self.assertIsNotNone(client.checkout_slot(['-C',str(repo)],slots=2,wait=0),'a freed slot is reused')
+
+    def test_checkout_slot_outside_a_repository_is_left_to_git(self):
+        self.assertIsNone(client.checkout_slot(['-C',str(self.root)],slots=2,wait=0))
+
+    def test_checkout_slots_are_published_to_sessions(self):
+        control=self.root/'var'/'lib'/'devd'/'s';control.mkdir(parents=True)
+        self.g.c['checkout_slots']=3
+        with patch.object(guard,'beneath',return_value=True):
+            self.g.publish([dict(name='dev-a',control=str(control),bytes=0,measured_at=1)],dict(percent=1,available_bytes=10**15))
+        self.assertEqual(guard.read(control/'storage-state.json')['checkout_slots'],3)
+
     def test_worktree_prune_is_refused_inside_sessions(self):
         with patch.dict(os.environ,{'DEVD_SESSION_ID':'dev-a'}):
             self.assertTrue(client.shared_prune('git',['-C','/workspace','worktree','prune']))

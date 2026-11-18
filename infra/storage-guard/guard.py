@@ -333,7 +333,8 @@ class Guard:
                          reason=('Global disk emergency threshold reached.' if global_block else
                                  f'Session storage budget exceeded ({block_gib} GiB; workspace + writable layer + nested Docker).' if blocked else 'Within current storage budget.'),
                          budget_gib=block_gib,
-                         reserve_bytes=self.c['reserve_gib'] * GIB, bytes=row['bytes'])
+                         reserve_bytes=self.c['reserve_gib'] * GIB, bytes=row['bytes'],
+                         checkout_slots=self.c.get('checkout_slots', 2))
             atomic(Path(control) / 'storage-state.json', value, 0o644)
 
     def inventory(self):
