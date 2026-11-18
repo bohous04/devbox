@@ -1,5 +1,6 @@
 import importlib.machinery
 import importlib.util
+import io
 import contextlib
 import json
 import os
@@ -320,16 +321,16 @@ class RestoreChatTests(unittest.TestCase):
     def stop_intent(self):
         r.atomic(self.root / 'manual-stop', {'stopped': True})
 
-    def check_ready_pending(self):
-        latest = r.read(self.root / 'latest.json')
-        return bool((self.root / 'restore-incomplete').exists() or (self.root / 'pending-docker.json').exists()
-                    or (latest and latest.get('generation') != r.generation()
-                        and not (self.root / ('plan-' + r.generation() + '.json.ready')).exists()))
+    def check_ready_code(self):
+        with patch.object(sys, 'argv', ['devbox-recovery', 'check-ready']):
+            with self.assertRaises(SystemExit) as raised:
+                r.main()
+        return raised.exception.code
 
     def test_older_generation_restores_docker_and_marks_ready(self):
         r.atomic(self.root / 'latest.json', self.journal)
         self.stop_intent()
-        self.assertTrue(self.check_ready_pending())
+        self.assertEqual(self.check_ready_code(), 4)
         with patch.object(r, 'restore_docker') as docker:
             r.restore_chat()
         docker.assert_called_once_with(self.journal)
@@ -338,12 +339,16 @@ class RestoreChatTests(unittest.TestCase):
         self.assertFalse((self.root / 'restore-incomplete').exists())
         self.assertFalse((self.root / 'manual-stop').exists())
         self.assertFalse((self.root / 'pending-docker.json').exists())
-        self.assertFalse(self.check_ready_pending())
+        self.assertEqual(self.check_ready_code(), 0)
 
     def test_docker_failure_is_pending_but_still_ready(self):
         r.atomic(self.root / 'latest.json', self.journal)
-        with patch.object(r, 'restore_docker', side_effect=ValueError('DinD not up')):
+        self.stop_intent()
+        with patch.object(r, 'restore_docker', side_effect=ValueError('DinD not up')), \
+             patch.object(sys, 'stderr', new_callable=io.StringIO) as err:
             r.restore_chat()
+        self.assertIn('inner Docker cannot be restored yet', err.getvalue())
+        self.assertFalse((self.root / 'manual-stop').exists())
         self.assertEqual(r.read(self.root / 'pending-docker.json'), self.journal)
         self.assertTrue((self.root / ('plan-' + self.gen + '.json.ready')).exists())
         self.assertFalse((self.root / 'restore-incomplete').exists())
@@ -368,6 +373,7 @@ class RestoreChatTests(unittest.TestCase):
     def test_journal_of_another_session_is_refused_and_untouched(self):
         self.journal['session'] = 'dev-other'
         r.atomic(self.root / 'latest.json', self.journal)
+        self.stop_intent()
         before = (self.root / 'latest.json').read_bytes()
         with patch.object(r, 'restore_docker') as docker:
             with self.assertRaises(ValueError):
@@ -375,6 +381,7 @@ class RestoreChatTests(unittest.TestCase):
         docker.assert_not_called()
         self.assertEqual((self.root / 'latest.json').read_bytes(), before)
         self.assertFalse(list(self.root.glob('plan-*')))
+        self.assertFalse((self.root / 'manual-stop').exists())
 
 
 class AgyRecovery(unittest.TestCase):
