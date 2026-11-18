@@ -378,7 +378,7 @@ const credentialsForUrl = (url: string): Record<string, string> => {
 const controlRoot = env("DEVD_CONTROL_ROOT", DEFAULT_CONTROL_ROOT);
 // Chat sessions: ONE thread store per session, opened lazily and shared by the bridge link and its readers,
 // and a link to the session's agent bridge (<controlDir>/agent.sock). SessionManager calls
-// releaseThread at the start of stop()/end(), so end() archives a store nobody holds open.
+// releaseThread at the start of stop() and right before end() archives the store, so nobody holds it open then.
 const threadStores = new Map<string, ThreadStore>();
 const threadStore = (id: string): ThreadStore => {
   const open = threadStores.get(id);

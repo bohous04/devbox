@@ -78,8 +78,9 @@ export interface SessionDeps {
    *  cover expiring grants, so without this a permanent grant's agent (decrypted key in RAM)
    *  would outlive the session forever. */
   killSshAgent?: (session: string) => Promise<void>;
-  /** Drops the chat session's bridge link and closes its thread store. Runs inside the session lock at the
-   *  start of stop() and end(), so no handle is open when end() archives `_threads/<id>.sqlite`. */
+  /** Drops the chat session's bridge link and closes its thread store. Runs inside the session lock: at the
+   *  start of stop(), and in end() right before the archive, so no handle is open when end() archives
+   *  `_threads/<id>.sqlite`. */
   releaseThread?: (session: string) => void;
   /** Sidecar with its own docker daemon instead of the host socket. Opt-in. */
   dind?: boolean;
@@ -1341,7 +1342,6 @@ export class SessionManager {
     return this.locked([id], "end", async () => {
       const s = getSession(this.d.db, id);
       if (!s) throw new Error(`Unknown session ${id}`);
-      this.d.releaseThread?.(id);
       // Sharing belongs to the session, not the container — it ends with it (end/delete), but survives
       // stop/restart (that goes through stop(), not end()).
       this.revokeShares(id);
@@ -1350,6 +1350,7 @@ export class SessionManager {
         this.d.revokePlaceholder?.(id);
         await this.killSshAgent(id);
         rmSync(this.controlDir(id), { recursive: true, force: true });
+        this.d.releaseThread?.(id);
         this.keepChats(id);
         deleteGitStat(this.d.db, id);
         try { releaseLeasesForSession(this.d.db, id, this.now()); }
@@ -1377,6 +1378,9 @@ export class SessionManager {
       rmSync(this.controlDir(id), { recursive: true, force: true });
       // Transcripts outlive the session: the user returns to old conversations, so they move to
       // _chat-archive instead of piling up under _claude-projects or being deleted.
+      // The chat store is released only now: until the container is gone the bridge may still send events, and
+      // the store takes them (isEnding keeps readers out). Closed here, it is archived with no handle open.
+      this.d.releaseThread?.(id);
       this.keepChats(id);
       deleteGitStat(this.d.db, id);
       // The lease belongs to the session — without releasing it the account would look occupied until the
