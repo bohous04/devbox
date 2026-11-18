@@ -65,3 +65,16 @@ export interface Attention {
   reason: "request" | "failed" | "completed" | "disconnected" | "running" | "background" | "queued" | null;
   since: number;
 }
+
+/** One session in the inbox (`GET /api/inbox`, SSE `inbox` events). `lastText` is the newest user or assistant
+ *  message of a chat session, clipped for display; null for tmux sessions and empty threads. */
+export interface InboxItem {
+  sessionId: string;
+  runtime: "tmux" | "chat";
+  title: string;
+  project: string;
+  repo: string;
+  agent: string;
+  attention: Attention;
+  lastText: string | null;
+}

@@ -437,7 +437,7 @@ test("path-traversal folder segment → 400 with error body", async () => {
 
 test("HTTP Gitea clone URL reaches Codex session creation", async () => {
   const calls: unknown[] = [];
-  const mgr = { open: async (input: unknown) => { calls.push(input); return { created: true }; } } as unknown as SessionManager;
+  const mgr = { open: async (input: unknown) => { calls.push(input); return { created: true, session: { id: "dev-games-game_web", status: "running", runtime: "tmux" } }; } } as unknown as SessionManager;
   const { a } = app(undefined, undefined, undefined, { mgr });
   const input = { folder: "games", project: "games", repo: "game_web", cloneUrl: "http://gitea.example:3000/Alice/game_web.git", agent: "codex" };
   const response = await a.request("/api/sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });

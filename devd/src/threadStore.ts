@@ -231,5 +231,11 @@ export class ThreadStore {
     };
   }
 
+  /** Text of the newest user or assistant item (also one still streaming); null for a thread without messages. */
+  lastMessageText(): string | null {
+    const r = this.db.query(`SELECT text FROM items WHERE kind IN ('user', 'assistant') ORDER BY id DESC LIMIT 1`).get() as { text: string } | null;
+    return r ? r.text : null;
+  }
+
   close(): void { this.db.close(); }
 }

@@ -74,6 +74,8 @@ import { DEFAULT_CONTROL_ROOT, DEFAULT_DEVD_URL, DEFAULT_OPENROUTER_URL, Session
 import { BridgeLinks } from "./bridgeLink";
 import { ThreadStore } from "./threadStore";
 import { ChatHub } from "./chatHub";
+import { EventBus } from "./eventBus";
+import { Inbox } from "./sessionInbox";
 import { chatAttention, chatBusy } from "./attention";
 import { contextLengthCached } from "./openrouterModels";
 import { parseMeminfo, resourceBreakdown } from "./resources";
@@ -393,12 +395,28 @@ const threadStore = (id: string): ThreadStore => {
 const chatHub = new ChatHub({ hub: agentEvents, session: (id) => getSession(db, id) });
 // The hub-facing snapshot needs runs, pending and background only: `limit: 0` skips loading every item per event.
 const chatSnapshot = (id: string) => threadStore(id).snapshot({ limit: 0 });
+// SSE fan-out (threadApi.ts) and the inbox over all sessions; an ending session is left out (its store is being archived).
+const bus = new EventBus();
+const inbox = new Inbox({
+  sessions: () => listSessions(db).filter((s) => !mgr.isEnding(s.id)),
+  session: (id) => (mgr.isEnding(id) ? null : getSession(db, id)),
+  threads: threadStore,
+  chatLink: (id) => chatHub.link(id),
+  tmuxLive: (id) => agentEvents.liveSnapshot(id),
+  bus,
+});
 const bridgeLinks = new BridgeLinks({
   controlDir: (id) => join(controlRoot, id),
   store: threadStore,
-  // TODO(Task 11): the SSE thread stream consumes these too.
-  onEvent: (id, e) => chatHub.onEvent(id, e, () => chatSnapshot(id)),
-  onStatus: (id, s) => chatHub.onStatus(id, s, () => chatSnapshot(id)),
+  onEvent: (id, e) => {
+    bus.publish(`thread:${id}`, e);
+    chatHub.onEvent(id, e, () => chatSnapshot(id));
+    inbox.changed(id);
+  },
+  onStatus: (id, s) => {
+    chatHub.onStatus(id, s, () => chatSnapshot(id));
+    inbox.changed(id);
+  },
 });
 const releaseThread = (id: string) => {
   bridgeLinks.drop(id);
@@ -960,6 +978,7 @@ const apiDeps: ApiDeps = {
     },
   },
   agentEvents, liveActivities, gitea, spawnPty: realSpawnPty, scheduler, critic, codexAuth,
+  links: bridgeLinks, threads: threadStore, bus, inbox,
   codexUsage: { view: () => buildCodexView(db) },
   codexAccounts,
   codexSessionAccounts: new CodexSessionAccounts({
@@ -1168,6 +1187,10 @@ setInterval(guardedTick("ssh grant cleanup", async () => {
 setInterval(() => {
   let done: string[] = [];
   try { done = agentEvents.sweep(); liveActivities.request(); } catch (e) { console.error("agent-event sweep failed:", e); }
+  // Sessions the sweep just marked done: the hub has no change hook, the inbox follows its callers.
+  for (const id of done) {
+    try { inbox.changed(id); } catch (e) { console.error(`inbox update of ${id} failed:`, e); }
+  }
   // Cleanup after scheduled runs: the "finished work" notification just went out, the session
   // flagged auto_end has served its purpose. Await is not possible here (interval), hence its own
   // catch — an uncaught rejected promise would bring down all of devd.

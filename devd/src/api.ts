@@ -53,13 +53,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readUpload, UploadError } from "./uploads";
 import { stageFile, stageShared } from "./inbox";
+import { registerThreadRoutes, type ThreadApiDeps } from "./threadApi";
 import type { SshKeyRef } from "./op";
 import { resolveSshTarget, type SshServer } from "./sshServers";
 import { createScopeGrant, keyCovered, listScopeGrants, liveScopeGrant, revokeScopeGrant, scopeIssue, scopeLabel } from "./sshScopeGrants";
 import { dbEntry, roUrl, entitledDbs, type Catalog, type Access, type DbEntry, type ServerRef } from "./prodDb";
 import { createProposal, listProposals, getProposal, setStatus, type WriteStatus, type WriteScope } from "./prodWrites";
 import type { ListenerClient } from "./listener";
-import { agentContextTokens, ExternalStartError, resolveAgent, RestartError, SessionBusyError, type SessionManager } from "./sessions";
+import { agentContextTokens, ExternalStartError, resolveAgent, RestartError, SessionBusyError, storedRuntime, type SessionManager } from "./sessions";
 import { localEnvProfiles } from "./localEnv";
 import { parseOtlpMetrics, pointsToRows } from "./metrics";
 import { classifyClaudeState } from "./stats";
@@ -174,6 +175,12 @@ export interface ApiDeps { mgr: SessionManager; db: Database; cfg: DevConfig; ro
   // ccUpkeep status and manual trigger for the dashboard. `run` returns null when the job is already running.
   agentUpkeep?: { status: (provider: UpkeepProvider) => Promise<AgentUpkeepStatus>; run: (provider: UpkeepProvider, only?: string[]) => Promise<AgentUpkeepResult | null> };
   ccUpkeep?: { status: () => Promise<CcStatus>; run: (only?: string[]) => Promise<UpkeepResult | null> };
+  // Chat sessions (threadApi.ts): bridge links, per-session thread stores, the SSE bus and the inbox.
+  // Optional like the other feature deps: without them the thread, inbox and stream routes answer 503.
+  links?: ThreadApiDeps["links"];
+  threads?: ThreadApiDeps["threads"];
+  bus?: ThreadApiDeps["bus"];
+  inbox?: ThreadApiDeps["inbox"];
   // "Update now": status of the server checkout vs origin/main and a manual start of devbox-update.service
   // (the nightly unit). `run` returns null when an update is already running.
   selfUpdate?: { status: () => Promise<SelfUpdateStatus>; run: () => Promise<{ ok: true } | null> };
@@ -296,6 +303,7 @@ export function createApp(d: ApiDeps): Hono {
     if (!session || !d.agentEvents) return;
     d.agentEvents.setSshWaiting(session, pendingSshLabel(d.db, session));
     d.liveActivities?.request();
+    d.inbox?.changed(session);
   };
   const app = new Hono();
   // Only /api/*: static files are served by StaticFiles with precomputed gzip (see static.ts),
@@ -342,6 +350,8 @@ export function createApp(d: ApiDeps): Hono {
     return c.json(buildWeeklyUsage(d.db,range.from,range.to,now));
   });
   app.route("/api/live-activities", liveActivitiesRoutes(d.db, d.liveActivities));
+  registerThreadRoutes(app, d.links && d.threads && d.bus && d.inbox
+    ? { db: d.db, mgr: d.mgr, links: d.links, threads: d.threads, bus: d.bus, inbox: d.inbox } : null);
 
   // The git proxy MUST be registered first: further down the file is a catch-all that
   // serves the dashboard SPA, and Hono matches in registration order — otherwise requests
@@ -1000,6 +1010,8 @@ export function createApp(d: ApiDeps): Hono {
         }
       }
       const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, runtime, fresh: body.fresh, sessionId: body.sessionId });
+      // Link the bridge now instead of at the next 5 s link sync in index.ts.
+      if (storedRuntime(r.session) === "chat" && r.session.status === "running") d.links?.ensure(r.session.id);
       return c.json(r, r.created ? 201 : 200);
     } catch (e) {
       return busy(c, e) ?? c.json({ error: (e as Error).message }, 400);
@@ -1608,6 +1620,7 @@ export function createApp(d: ApiDeps): Hono {
     }
     d.agentEvents.handle(s, body.event as AgentEvent, hookMeta(body));
     d.liveActivities?.request();
+    d.inbox?.changed(s.id);
     return c.json({ ok: true });
   });
 

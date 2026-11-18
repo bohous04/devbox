@@ -54,7 +54,7 @@ const BASE = { folder: "f", project: "p", repo: "r" };
 
 test("POST /api/sessions runtime=chat agent=claude → 201 and mgr.open gets runtime", async () => {
   const seen: Record<string, unknown>[] = [];
-  const a = appWith(async (t) => { seen.push(t); return { created: true }; });
+  const a = appWith(async (t) => { seen.push(t); return { created: true, session: { id: "dev-p-r", status: "running", runtime: "chat" } }; });
   const r = await post(a, { ...BASE, runtime: "chat", agent: "claude" });
   expect(r.status).toBe(201);
   expect(seen[0]!.runtime).toBe("chat");
@@ -62,7 +62,7 @@ test("POST /api/sessions runtime=chat agent=claude → 201 and mgr.open gets run
 
 test("POST /api/sessions without runtime passes none (tmux default)", async () => {
   const seen: Record<string, unknown>[] = [];
-  const a = appWith(async (t) => { seen.push(t); return { created: true }; });
+  const a = appWith(async (t) => { seen.push(t); return { created: true, session: { id: "dev-p-r", status: "running", runtime: "tmux" } }; });
   expect((await post(a, BASE)).status).toBe(201);
   expect(seen[0]!.runtime).toBeUndefined();
 });

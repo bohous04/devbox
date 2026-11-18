@@ -1,0 +1,187 @@
+import type { Context, Hono } from "hono";
+import type { Database } from "bun:sqlite";
+import type { LoggedEvent } from "../../shared/thread";
+import { AgentDisconnected, CommandFailed, CommandTimeout, type BridgeLinks } from "./bridgeLink";
+import { getSession, type SessionRow } from "./db";
+import type { BusTopic, EventBus } from "./eventBus";
+import type { Inbox } from "./sessionInbox";
+import { storedRuntime } from "./sessions";
+import type { ThreadStore } from "./threadStore";
+
+export const SSE_PING_MS = 25_000;
+
+export interface ThreadApiDeps {
+  db: Database;
+  mgr: { isEnding: (id: string) => boolean };
+  links: Pick<BridgeLinks, "send" | "ensure">;
+  /** The session's thread store (index.ts: opened lazily, shared with its bridge link). */
+  threads: (id: string) => ThreadStore;
+  bus: EventBus;
+  inbox: Inbox;
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** A non-negative integer from a query/header value; null when it is anything else. */
+function nonNegInt(raw: string): number | null {
+  if (!/^\d+$/.test(raw)) return null;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
+/** The outcome of a command the bridge did not confirm is unknown: never retried here. */
+function commandError(c: Context, e: unknown): Response {
+  // CommandTimeout extends AgentDisconnected: checked first, the message may have been queued.
+  if (e instanceof CommandTimeout) return c.json({ error: "agent-timeout" }, 504);
+  if (e instanceof AgentDisconnected) return c.json({ error: "agent-disconnected" }, 409);
+  if (e instanceof CommandFailed) return c.json({ error: "command-failed", message: e.message }, 409);
+  throw e;
+}
+
+const sseFrame = (event: string, data: unknown, id?: number) =>
+  `event: ${event}\n${id === undefined ? "" : `id: ${id}\n`}data: ${JSON.stringify(data)}\n\n`;
+
+/** Chat thread routes, the inbox and the SSE stream. Registered by createApp after its middleware. */
+export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
+  if (!d) {
+    const off = (c: Context) => c.json({ error: "chat runtime is not configured" }, 503);
+    for (const path of ["/api/sessions/:id/thread", "/api/sessions/:id/thread/*", "/api/inbox", "/api/stream"]) app.all(path, off);
+    return;
+  }
+  /** The chat session's row and store, or the error response: 404 unknown, 409 tmux or ending. */
+  const chat = (c: Context, id: string): { s: SessionRow; store: ThreadStore } | { res: Response } => {
+    const s = getSession(d.db, id);
+    if (!s) return { res: c.json({ error: "unknown session" }, 404) };
+    if (storedRuntime(s) !== "chat") return { res: c.json({ error: "not-a-chat-session" }, 409) };
+    // threads() refuses an ending session (its store is being archived); say so instead of a 500.
+    if (d.mgr.isEnding(id)) return { res: c.json({ error: "session-ending" }, 409) };
+    return { s, store: d.threads(id) };
+  };
+
+  app.get("/api/sessions/:id/thread", (c) => {
+    const r = chat(c, c.req.param("id"));
+    if ("res" in r) return r.res;
+    const opts: { afterSeq?: number; limit?: number } = {};
+    for (const key of ["afterSeq", "limit"] as const) {
+      const raw = c.req.query(key);
+      if (raw === undefined) continue;
+      const n = nonNegInt(raw);
+      if (n === null) return c.json({ error: `${key} must be a non-negative integer` }, 400);
+      opts[key] = n;
+    }
+    return c.json(r.store.snapshot(opts));
+  });
+
+  app.post("/api/sessions/:id/thread/messages", async (c) => {
+    const id = c.req.param("id");
+    const r = chat(c, id);
+    if ("res" in r) return r.res;
+    const body = await c.req.json().catch(() => null);
+    // Attachments are not supported yet: only {text}.
+    if (!isRecord(body) || Object.keys(body).some((k) => k !== "text")) return c.json({ error: "body must be {text}" }, 400);
+    if (typeof body.text !== "string" || body.text.trim() === "") return c.json({ error: "text must be a non-empty string" }, 400);
+    try { await d.links.send(id, { kind: "startTurn", text: body.text }); }
+    catch (e) { return commandError(c, e); }
+    return c.json({ queued: true }, 202);
+  });
+
+  app.post("/api/sessions/:id/thread/interrupt", async (c) => {
+    const id = c.req.param("id");
+    const r = chat(c, id);
+    if ("res" in r) return r.res;
+    try { await d.links.send(id, { kind: "interrupt" }); }
+    catch (e) { return commandError(c, e); }
+    return c.body(null, 202);
+  });
+
+  app.post("/api/sessions/:id/thread/requests/:requestId", async (c) => {
+    const id = c.req.param("id");
+    const requestId = c.req.param("requestId");
+    const r = chat(c, id);
+    if ("res" in r) return r.res;
+    const body = await c.req.json().catch(() => null);
+    // Forwarded verbatim: plan approval is the exact string "Approve", anything else is the user's reply.
+    if (!isRecord(body) || typeof body.answer !== "string" || body.answer === "") return c.json({ error: "answer must be a non-empty string" }, 400);
+    if (!r.store.snapshot({ limit: 0 }).pending.some((p) => p.requestId === requestId)) return c.json({ error: "request-not-open" }, 409);
+    try { await d.links.send(id, { kind: "answer", requestId, answer: body.answer }); }
+    catch (e) { return commandError(c, e); }
+    return c.body(null, 202);
+  });
+
+  app.post("/api/sessions/:id/thread/seen", async (c) => {
+    const id = c.req.param("id");
+    const r = chat(c, id);
+    if ("res" in r) return r.res;
+    const body = await c.req.json().catch(() => null);
+    const seq = isRecord(body) ? body.seq : undefined;
+    if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 0 || seq > r.store.lastSeq()) {
+      return c.json({ error: "seq must be an integer between 0 and the thread's lastSeq" }, 400);
+    }
+    r.store.markSeen(seq);
+    d.inbox.changed(id);
+    return c.body(null, 204);
+  });
+
+  app.get("/api/inbox", (c) => c.json({ items: d.inbox.list() }));
+
+  // Server-sent events: `inbox` (InboxItem, coalesced per session by Inbox), `ping` every 25 s and, with
+  // `?session=<id>`, `thread` (LoggedEvent, `id: <seq>`) for that chat session only. A reconnect with
+  // `Last-Event-ID: <seq>` first gets one `thread-snapshot` event {afterSeq, snapshot} (the store keeps state, not
+  // raw events: `snapshot({afterSeq})` holds every item and run changed after that seq, whole), with
+  // `id: snapshot.lastSeq`, then live `thread` events above it. text/event-stream is not compressed (hono's
+  // compress skips it); the ping keeps the connection under Bun's idleTimeout.
+  app.get("/api/stream", (c) => {
+    const sessionId = c.req.query("session");
+    let store: ThreadStore | null = null;
+    if (sessionId !== undefined) {
+      const r = chat(c, sessionId);
+      if ("res" in r) return r.res;
+      store = r.store;
+    }
+    const lastId = c.req.header("last-event-id");
+    let replayAfter: number | null = null;
+    if (lastId !== undefined) {
+      if (!store) return c.json({ error: "Last-Event-ID needs ?session=" }, 400);
+      replayAfter = nonNegInt(lastId);
+      if (replayAfter === null) return c.json({ error: "Last-Event-ID must be a non-negative integer" }, 400);
+    }
+
+    const enc = new TextEncoder();
+    let stop = () => {};
+    const body = new ReadableStream<Uint8Array>({
+      start(ctrl) {
+        let closed = false;
+        const send = (s: string) => { if (!closed) ctrl.enqueue(enc.encode(s)); };
+        // Every thread event sent has a seq above this: drops what the replay snapshot already holds
+        // and any duplicate delivery.
+        let sentSeq = -1;
+        const topics: BusTopic[] = sessionId === undefined ? ["inbox"] : ["inbox", `thread:${sessionId}`];
+        // Subscribed BEFORE the store is read, so nothing published in between is lost.
+        const unsubscribe = d.bus.subscribe(topics, (topic, data) => {
+          if (topic === "inbox") { send(sseFrame("inbox", data)); return; }
+          const e = data as LoggedEvent;
+          if (e.seq <= sentSeq) return;
+          sentSeq = e.seq;
+          send(sseFrame("thread", e, e.seq));
+        });
+        const ping = setInterval(() => send(sseFrame("ping", {})), SSE_PING_MS);
+        stop = () => {
+          if (closed) return;
+          closed = true;
+          clearInterval(ping);
+          unsubscribe();
+        };
+        c.req.raw.signal.addEventListener("abort", stop);
+        if (store && replayAfter !== null) {
+          const snapshot = store.snapshot({ afterSeq: replayAfter });
+          sentSeq = Math.max(sentSeq, snapshot.lastSeq);
+          send(sseFrame("thread-snapshot", { afterSeq: replayAfter, snapshot }, snapshot.lastSeq));
+        }
+      },
+      cancel() { stop(); },
+    });
+    return new Response(body, {
+      headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache, no-transform", "x-accel-buffering": "no" },
+    });
+  });
+}
