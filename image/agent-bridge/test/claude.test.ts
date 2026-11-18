@@ -61,8 +61,11 @@ describe("runClaudeTurn", () => {
       model: opts.model,
       cwd: opts.cwd,
       includePartialMessages: true,
+      systemPrompt: { type: "preset", preset: "claude_code" },
     });
     expect("resume" in seen.options!).toBe(false);
+    // omitted = all filesystem sources, like the CLI; [] would drop CLAUDE.md and settings.json
+    expect("settingSources" in seen.options!).toBe(false);
 
     await collect(runClaudeTurn({ ...opts, resume: "sess-9" }, fakeQuery(fixture, seen)));
     expect(seen.options!.resume).toBe("sess-9");

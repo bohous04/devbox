@@ -60,6 +60,10 @@ export async function* runClaudeTurn(o: ClaudeTurnOptions, queryFn: QueryFn = qu
         cwd: o.cwd,
         env: claudeEnv(process.env, o),
         includePartialMessages: true,
+        // Without it the SDK sends an empty system prompt, not the CLI's; the TUI always sends
+        // Claude Code's, so the two paths would not cost or behave the same.
+        systemPrompt: { type: "preset", preset: "claude_code" },
+        // settingSources is left out on purpose: omitted means user, project and local, as in the CLI.
         ...(o.resume ? { resume: o.resume } : {}),
       },
     });
