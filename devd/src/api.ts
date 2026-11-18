@@ -1543,6 +1543,7 @@ export function createApp(d: ApiDeps): Hono {
 
   // Claude hook events from containers (image/vendor/devd-hooks). No auth, like
   // /v1/metrics — reachable only from the docker bridge / tailnet.
+  const chatHookLogged = new Set<string>();
   app.post("/api/agent-event", async (c) => {
     if (!d.agentEvents) return c.json({ error: "agent events are not enabled" }, 503);
     const body = (await c.req.json().catch(() => null)) as (Record<string, unknown> & { sessionId?: string; event?: string }) | null;
@@ -1588,6 +1589,15 @@ export function createApp(d: ApiDeps): Hono {
     }
     const s = getSession(d.db, body.sessionId);
     if (!s) return c.json({ error: `unknown session ${body.sessionId}` }, 404);
+    // The hooks live in the shared config homes, so a chat session's headless agent fires them too. Its turns
+    // reach the hub through the bridge (ChatHub); counting them here again would send early or double "done".
+    if (storedRuntime(s) === "chat") {
+      if (!chatHookLogged.has(s.id)) {
+        chatHookLogged.add(s.id);
+        console.warn(`agent-event: ignoring hook events of chat session ${s.id} (first: ${body.event})`);
+      }
+      return c.json({ ok: true, ignored: "chat-runtime" });
+    }
     // Critic: prompt starts the turn (baseline + task), stop is the gate before "done".
     if (d.critic && body.event === "user_prompt_submit") {
       d.critic.onPrompt(s, typeof body.prompt === "string" ? body.prompt : "");

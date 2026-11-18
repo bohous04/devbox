@@ -99,3 +99,41 @@ test("session_start antigravity: an old record without history is taken over as 
   const e = getHarvestState<Record<string, { models?: { from: number; model: string }[] }>>(db, "agy-sids")!["ab32-01"];
   expect(e.models).toEqual([{ from: 1000, model: "gemini-3.8-flash-low" }, { from: expect.any(Number), model: "claude-sonnet-5-5-low" }]);
 });
+
+test("hook events of a chat session are ignored before metrics, critic and the hub (logged once per session)", async () => {
+  const CHAT_ROW: SessionRow = { ...ROW, id: "dev-c-d", container: "dev-c-d", project: "c", repo: "d", port_base: 40400, runtime: "chat" };
+  const db = openDb(":memory:");
+  insertSession(db, ROW);
+  insertSession(db, CHAT_ROW);
+  const hub = new AgentEventHub({ db, notify: () => {} });
+  const handled: string[] = [];
+  const origHandle = hub.handle.bind(hub);
+  hub.handle = ((s: SessionRow, ...rest: unknown[]) => { handled.push(s.id); return (origHandle as any)(s, ...rest); }) as typeof hub.handle;
+  const critic: string[] = [];
+  const logs: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...a: unknown[]) => { logs.push(a.join(" ")); };
+  try {
+    const a = createApp({
+      db, mgr: {} as never, cfg: { version: 1, settings: { autoStopHours: 4, portRangeStart: 40100, portsPerSession: 10, diskWarnPercent: 80 }, folders: {} },
+      root: "/tmp", tree: async () => [], listener: {} as never, notify: () => {}, stats: () => ({ sessions: [], disk: {} }),
+      cloneQueue: {} as never, configRepo: {} as never, dashboardDir: "/tmp", agentEvents: hub,
+      critic: { onPrompt: (s: SessionRow) => critic.push(`prompt ${s.id}`), onStop: async (s: SessionRow) => { critic.push(`stop ${s.id}`); return { block: true, reason: "x" }; } },
+    } as never);
+    for (const event of ["user_prompt_submit", "stop"]) {
+      const r = await a.fetch(post("/api/agent-event", { sessionId: "dev-c-d", event, prompt: "hello" }));
+      expect(r.status).toBe(200);
+      expect(await r.json()).toEqual({ ok: true, ignored: "chat-runtime" });
+    }
+    expect(handled).toEqual([]);
+    expect(critic).toEqual([]);
+    expect(db.query("SELECT COUNT(*) AS n FROM metrics WHERE session_id='dev-c-d'").get()).toEqual({ n: 0 });
+    expect(logs.filter((l) => l.includes("dev-c-d") && l.includes("chat"))).toHaveLength(1);
+    // A tmux session is unaffected.
+    const r = await a.fetch(post("/api/agent-event", { sessionId: "dev-shop-cms", event: "tool_start" }));
+    expect(await r.json()).toEqual({ ok: true });
+    expect(handled).toEqual(["dev-shop-cms"]);
+  } finally {
+    console.warn = origWarn;
+  }
+});
