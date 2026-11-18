@@ -11,8 +11,10 @@ export interface CommandHandler {
 interface Client {
   socket: Socket<Client>;
   buffer: string;
-  /** Bytes the socket did not accept yet; flushed on drain. */
-  outbound: Buffer;
+  /** Encoded frames the socket did not accept yet; flushed on drain. */
+  outbound: Buffer[];
+  outboundHead: number;
+  decoder: TextDecoder;
   /** True from hello until its replay is written; live events wait in `pending`. */
   replaying: boolean;
   hello: boolean;
@@ -20,20 +22,29 @@ interface Client {
   commands: Promise<void>;
 }
 
-export function startServer(o: { socketPath: string; log: EventLog; onCommand: CommandHandler }): {
+export function startServer(o: { socketPath: string; log: EventLog; onCommand: CommandHandler; logError?: (msg: string) => void }): {
   publish(e: BridgeEvent): LoggedEvent;
   close(): Promise<void>;
 } {
   rmSync(o.socketPath, { force: true });
   const clients = new Set<Client>();
+  const logError = o.logError ?? ((msg: string) => console.error(msg));
 
   const flush = (c: Client) => {
-    if (!c.outbound.length) return;
-    const n = c.socket.write(c.outbound);
-    c.outbound = c.outbound.subarray(Math.max(n, 0));
+    while (c.outboundHead < c.outbound.length) {
+      const frame = c.outbound[c.outboundHead];
+      const n = Math.max(c.socket.write(frame), 0);
+      if (n < frame.length) {
+        c.outbound[c.outboundHead] = frame.subarray(n);
+        return;
+      }
+      c.outboundHead++;
+    }
+    c.outbound = [];
+    c.outboundHead = 0;
   };
   const send = (c: Client, f: ServerFrame) => {
-    c.outbound = Buffer.concat([c.outbound, Buffer.from(encodeFrame(f))]);
+    c.outbound.push(Buffer.from(encodeFrame(f)));
     flush(c);
   };
 
@@ -56,7 +67,7 @@ export function startServer(o: { socketPath: string; log: EventLog; onCommand: C
   const handleLine = (c: Client, line: string) => {
     const frame = parseClientFrame(line);
     if (frame.t === "cmd") return runCommand(c, frame.id, frame.cmd);
-    if (c.hello) return;
+    if (c.hello) throw new Error("duplicate hello");
     c.hello = true;
     c.replaying = true;
     const replay = o.log.readFrom(frame.afterSeq);
@@ -73,13 +84,14 @@ export function startServer(o: { socketPath: string; log: EventLog; onCommand: C
     unix: o.socketPath,
     socket: {
       open(socket) {
-        const c: Client = { socket, buffer: "", outbound: Buffer.alloc(0), replaying: false, hello: false, pending: [], commands: Promise.resolve() };
+        const c: Client = { socket, buffer: "", outbound: [], outboundHead: 0, decoder: new TextDecoder(), replaying: false, hello: false, pending: [], commands: Promise.resolve() };
         socket.data = c;
         clients.add(c);
       },
       data(socket, chunk) {
         const c = socket.data;
-        c.buffer += chunk.toString("utf8");
+        // stream:true keeps a multibyte character split across reads intact.
+        c.buffer += c.decoder.decode(chunk, { stream: true });
         let nl: number;
         while ((nl = c.buffer.indexOf("\n")) >= 0) {
           const line = c.buffer.slice(0, nl);
@@ -88,7 +100,7 @@ export function startServer(o: { socketPath: string; log: EventLog; onCommand: C
           try {
             handleLine(c, line);
           } catch (err) {
-            console.error(`agent-bridge: closing client: ${err instanceof Error ? err.message : String(err)}`);
+            logError(`agent-bridge: closing client: ${err instanceof Error ? err.message : String(err)}`);
             drop(c);
             return;
           }
@@ -101,7 +113,7 @@ export function startServer(o: { socketPath: string; log: EventLog; onCommand: C
         clients.delete(socket.data);
       },
       error(socket, err) {
-        console.error(`agent-bridge: socket error: ${err.message}`);
+        logError(`agent-bridge: socket error: ${err.message}`);
         clients.delete(socket.data);
       },
     },

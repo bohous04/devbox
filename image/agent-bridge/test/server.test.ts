@@ -26,7 +26,7 @@ const ev = (text: string): BridgeEvent => ({ type: "message.delta", runId: "r1",
 interface TestClient {
   frames: ServerFrame[];
   closed: Promise<void>;
-  send(f: ClientFrame | string): void;
+  send(f: ClientFrame | string | Uint8Array): void;
   waitFor(n: number): Promise<ServerFrame[]>;
 }
 
@@ -57,7 +57,7 @@ async function connect(): Promise<TestClient> {
   return {
     frames,
     closed,
-    send: (f) => void socket.write(typeof f === "string" ? f : encodeFrame(f)),
+    send: (f) => void socket.write(typeof f === "string" || f instanceof Uint8Array ? f : encodeFrame(f)),
     async waitFor(n) {
       const deadline = Date.now() + 3000;
       while (frames.length < n) {
@@ -72,8 +72,10 @@ async function connect(): Promise<TestClient> {
   };
 }
 
+let errors: string[] = [];
 function start(onCommand: CommandHandler = async () => {}, log = new EventLog(logPath)) {
-  const server = startServer({ socketPath, log, onCommand });
+  errors = [];
+  const server = startServer({ socketPath, log, onCommand, logError: (m) => errors.push(m) });
   closers.push(() => server.close());
   return server;
 }
@@ -148,6 +150,7 @@ test("a malformed line closes only that client", async () => {
   await good.waitFor(1);
   bad.send("not json\n");
   await bad.closed;
+  expect(errors).toEqual(["agent-bridge: closing client: frame is not valid JSON"]);
   server.publish(ev("x"));
   expect(seqs(await good.waitFor(2))).toEqual(["ready0", 1]);
 });
@@ -161,4 +164,44 @@ test("replay after a torn last log line skips it", async () => {
   c.send({ t: "hello", afterSeq: 0 });
   expect(seqs(await c.waitFor(2))).toEqual([1, "ready1"]);
   expect(server.publish(ev("b")).seq).toBe(2);
+});
+
+test("a second hello closes that client", async () => {
+  start();
+  const c = await connect();
+  c.send({ t: "hello", afterSeq: 0 });
+  await c.waitFor(1);
+  c.send({ t: "hello", afterSeq: 0 });
+  await c.closed;
+  expect(errors).toEqual(["agent-bridge: closing client: duplicate hello"]);
+});
+
+test("multibyte text split across socket writes reaches the handler intact", async () => {
+  const text = "Příliš žluťoučký kůň 🐎";
+  const got: string[] = [];
+  start(async (cmd) => {
+    if (cmd.kind === "startTurn") got.push(cmd.text);
+  });
+  const c = await connect();
+  const bytes = Buffer.from(encodeFrame({ t: "cmd", id: "1", cmd: { kind: "startTurn", text } }));
+  // Cut inside the 4-byte horse emoji.
+  const cut = bytes.indexOf(Buffer.from("🐎")) + 2;
+  c.send(bytes.subarray(0, cut));
+  await new Promise((r) => setTimeout(r, 50));
+  c.send(bytes.subarray(cut));
+  await c.waitFor(1);
+  expect(got).toEqual([text]);
+});
+
+test("a large replay completes in order", async () => {
+  const log = new EventLog(logPath);
+  const N = 20000;
+  for (let i = 0; i < N; i++) log.append(ev("x".repeat(100)));
+  start(undefined, log);
+  const c = await connect();
+  c.send({ t: "hello", afterSeq: 0 });
+  await c.waitFor(N + 1);
+  const s = seqs(c.frames);
+  expect(s.slice(0, N)).toEqual(Array.from({ length: N }, (_, i) => i + 1));
+  expect(s[N]).toBe(`ready${N}`);
 });
