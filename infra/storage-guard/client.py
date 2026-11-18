@@ -132,6 +132,53 @@ def acquire_checkout(prefix, state):
         return None, ('the disk is busy with other worktree checkouts of this repository; retry in a few minutes.')
 
 
+def sparse_patterns(prefix):
+    """Sparse-checkout patterns for new worktrees of this repository, from `devbox-sparse-checkout`
+    in its shared Git dir (one non-cone pattern per line), or None. A full checkout of a large
+    repository (13 GB, mostly game assets) is what saturates the host disk."""
+    if os.environ.get('DEVBOX_FULL_CHECKOUT') == '1':
+        return None
+    r = subprocess.run(['/usr/bin/git', *prefix, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                       capture_output=True, text=True)
+    if r.returncode:
+        return None
+    try:
+        text = (Path(r.stdout.strip()) / 'devbox-sparse-checkout').read_text()
+    except FileNotFoundError:
+        return None
+    return [l.strip() for l in text.splitlines() if l.strip() and not l.lstrip().startswith('#')] or None
+
+
+def worktree_add_path(rest, base):
+    """The target directory of `worktree add [options] <path> [<commit-ish>]`, or None."""
+    args = iter(rest[2:])
+    for a in args:
+        if a == '--':
+            a = next(args, None)
+        elif a in ('-b', '-B', '--reason'):
+            next(args, None)
+            continue
+        elif a.startswith('-'):
+            continue
+        return str((base / a).resolve()) if a else None
+    return None
+
+
+def sparsify(path, patterns):
+    """Fill a worktree made with --no-checkout with only the files `patterns` select."""
+    for cmd in (['sparse-checkout', 'set', '--no-cone', *patterns], ['read-tree', '-mu', 'HEAD']):
+        if subprocess.run(['/usr/bin/git', '-C', path, *cmd]).returncode:
+            print(f'devbox storage: sparse checkout of {path} failed and its files are not checked out; '
+                  f'run `git -C {path} sparse-checkout disable && git -C {path} read-tree -mu HEAD` '
+                  f'before anything else.', file=sys.stderr)
+            return 1
+    skipped = ' '.join(p[1:] for p in patterns if p.startswith('!'))
+    print(f'devbox storage: {path} is a sparse checkout without {skipped} (large assets). If you need them: '
+          f'`git -C {path} sparse-checkout add <path>`, or `sparse-checkout disable` for everything '
+          f'(DEVBOX_FULL_CHECKOUT=1 makes the next worktree full).', file=sys.stderr)
+    return 0
+
+
 def event(kind, **values):
     # Each record is separate, so concurrent agents never interleave JSON writes.
     root = Path('/run/devd/storage-events')
@@ -164,9 +211,13 @@ def scratch(args):
         print('devbox storage: ' + busy, file=sys.stderr)
         return 75
     # Linked worktrees share Git objects. They do not copy dependencies or build output.
-    r = subprocess.run(['/usr/bin/git', 'worktree', 'add', '--detach', str(path), *(args[2:] or ['HEAD'])])
+    patterns = sparse_patterns([])
+    r = subprocess.run(['/usr/bin/git', 'worktree', 'add', '--detach', *(['--no-checkout'] if patterns else []),
+                        str(path), *(args[2:] or ['HEAD'])])
     if r.returncode == 0:
         event('created', path=str(path), purpose=os.environ.get('DEVBOX_SCRATCH_PURPOSE', 'auxiliary worktree'))
+        if patterns:
+            return sparsify(str(path), patterns)
     return r.returncode
 
 
@@ -193,6 +244,8 @@ def main():
             return 75
         before = set()
         prefix = []
+        patterns = None
+        target = None
         rest = list(args)
         if tool == 'git':
             base=Path.cwd()
@@ -208,6 +261,12 @@ def main():
                 if busy:
                     print('devbox storage: ' + busy, file=sys.stderr)
                     return 75
+                # --orphan has no files; --checkout asks for a full one explicitly.
+                target = worktree_add_path(rest, base)
+                if target and not {'--no-checkout', '--checkout', '--orphan'} & set(rest):
+                    patterns = sparse_patterns(prefix)
+                    if patterns:
+                        args.insert(len(prefix) + 2, '--no-checkout')
             query = ['/usr/bin/git', *prefix, 'worktree', 'list', '--porcelain']
             r = subprocess.run(query, capture_output=True, text=True)
             before = {l[9:] for l in r.stdout.splitlines() if l.startswith('worktree ')}
@@ -227,6 +286,10 @@ def main():
             for line in r.stdout.splitlines():
                 if line.startswith('worktree ') and line[9:] not in before:
                     event('created', path=line[9:], purpose=os.environ.get('DEVBOX_SCRATCH_PURPOSE', 'git worktree'))
+            # From argv, not the listing: `-f` reuses a stale registration that is already listed,
+            # and another session may add a worktree meanwhile.
+            if patterns:
+                return sparsify(target, patterns)
         return result.returncode
     os.execv('/usr/bin/' + tool, [tool, *args])
 

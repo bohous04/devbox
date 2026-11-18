@@ -49,6 +49,11 @@ Docker daemon or active session restart is needed to install this protection.
 * At most `checkout_slots` (default 2) `git worktree add` / `devbox-scratch create` run at
   once per repository (a lock in the shared Git common dir); a further one waits up to 90 s,
   then exits 75 with a retry message instead of outliving an agent's tool timeout.
+* A repository opts into sparse worktrees with a `devbox-sparse-checkout` file in its shared
+  Git dir (non-cone patterns, one per line, e.g. `/*` and `!/props/`). New worktrees from
+  `git worktree add` / `devbox-scratch create` then check out only those files and print how
+  to widen them; `DEVBOX_FULL_CHECKOUT=1` skips it. The session's main worktree (made by
+  devd) stays full. The fast sweep accepts files the sparse checkout left out.
 * `git worktree prune` is refused inside sessions: the bare clone is shared, and the
   container cannot see sibling sessions' paths, so prune unregistered their worktrees.
 * Explicit session End/removal is intercepted at host Docker CLI level: stop the

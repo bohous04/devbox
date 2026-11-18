@@ -873,13 +873,17 @@ class Guard:
 
     def in_git(self, p):
         """True when the files of the worktree are all in Git: no changes (also hidden by
-        skip-worktree/assume-unchanged), no untracked files, no submodules, HEAD on a remote,
+        skip-worktree/assume-unchanged; sparse-checkout gaps are fine), no untracked files, no submodules, HEAD on a remote,
         ignored only regenerable dirs. Its commit history is kept by pin_history()."""
         if (Path(p)/'.gitmodules').exists():
             return False
         try:
-            if any(l[:1].islower() or l[:1]=='S' for l in self.owner_git(p,['ls-files','-v']).decode(errors='replace').splitlines()):
-                return False
+            for entry in filter(None,self.owner_git(p,['ls-files','-v','-z']).split(b'\0')):
+                tag,name=entry[:1],entry[2:]
+                # Skip-worktree hides edits, except on files a sparse checkout left out of the
+                # tree (client.py): absent from disk, they hold nothing that is not in Git.
+                if tag.islower() or (tag==b'S' and os.path.lexists(os.path.join(os.fsencode(p),name))):
+                    return False
             status=self.owner_git(p,['status','--porcelain=v1','-z','--untracked-files=all','--ignored=matching'])
             if self.owner_git(p,['rev-list','--max-count=1','HEAD','--not','--remotes']).strip():
                 return False
