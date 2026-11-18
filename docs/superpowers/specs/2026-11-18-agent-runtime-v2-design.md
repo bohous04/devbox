@@ -305,7 +305,7 @@ T3 references: `ClaudeAdapterV2.ts` and every other T3 path are pinned to t3code
 
 - **One agent per session (owner).** One chat per container. Parallel agents in other tmux windows are not
   supported in v2. A session has exactly one thread in v1.
-- **Metering gate (designer's call, owner may adjust).**
+- **Metering gate (owner-approved).**
   - Method: on one account, run the same task 5× through the TUI and 5× through the v2 runtime, and compare
     the rise in `fiveHourPct` from the account poller.
   - Gate: if v2 is more than 15 % more expensive on average, stop and report before step 2.
