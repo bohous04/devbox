@@ -1,0 +1,1 @@
+Read devd/src/accountPolicy.ts and devd/test/accountPolicy.test.ts. Write /tmp/out.md explaining every exported function, each with one example derived from the tests. Do not modify any repository file.

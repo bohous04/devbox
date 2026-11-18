@@ -1,0 +1,3 @@
+{"type":"user","message":{"role":"user","content":"task"}}
+{"type":"assistant","message":{"id":"m1","model":"claude-opus-5-5","stop_reason":"tool_use","content":[{"type":"tool_use","name":"Read"}],"usage":{"input_tokens":100,"output_tokens":20,"cache_creation_input_tokens":400,"cache_read_input_tokens":1000}}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result"}]}}
