@@ -5,6 +5,17 @@ import { encodeFrame, type BridgeCommand, type ServerFrame } from "./protocol";
 
 export const DEFAULT_SOCKET = "/run/devd/agent.sock";
 
+const THREAD_READ_DEFAULT = 20;
+const THREAD_READ_MAX = 50;
+/** Items fetched from devd per request while scanning for `query` matches. */
+const THREAD_PAGE = 100;
+const THREAD_TOOL_OUTPUT_BYTES = 2048;
+const DEVD_TIMEOUT_MS = 30_000;
+
+export interface DevdAccess { url: string; sessionId: string; fetch?: typeof fetch }
+
+interface ThreadItemView { seq: number; kind: string; text: string; tool?: string; input?: unknown; output?: string }
+
 const TOOLS = [
   {
     name: "devbox_wait",
@@ -25,6 +36,20 @@ const TOOLS = [
     name: "devbox_wait_done",
     description: "Clear the wait declared with devbox_wait; call it when you stop waiting.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "devbox_thread_read",
+    description:
+      "Read older messages of this session's conversation (after a context handoff left history out). Newest first, as `[seq] role: text`. Pass nextBeforeSeq from the previous result as beforeSeq to page further back.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        beforeSeq: { type: "integer", minimum: 0, description: "Only items older than this seq." },
+        limit: { type: "integer", minimum: 1, maximum: THREAD_READ_MAX, description: `Items to return, default ${THREAD_READ_DEFAULT}, max ${THREAD_READ_MAX}.` },
+        query: { type: "string", minLength: 1, description: "Only items whose text contains this (case-insensitive)." },
+      },
+      additionalProperties: false,
+    },
   },
 ];
 
@@ -68,9 +93,63 @@ export function sendCommand(socketPath: string, cmd: BridgeCommand): Promise<unk
   });
 }
 
+function renderItem(i: ThreadItemView): string {
+  if (i.kind !== "tool") return `[${i.seq}] ${i.kind}: ${i.text}`;
+  const input = i.input as { command?: unknown } | string | undefined;
+  const cmd = typeof input === "string" ? input : typeof input?.command === "string" ? input.command : JSON.stringify(input ?? {});
+  const bytes = new TextEncoder().encode(i.output ?? "");
+  const out = bytes.length > THREAD_TOOL_OUTPUT_BYTES
+    ? `${new TextDecoder().decode(bytes.slice(0, THREAD_TOOL_OUTPUT_BYTES))}\n[output truncated, ${bytes.length} bytes]`
+    : i.output ?? "";
+  return `[${i.seq}] tool ${i.tool ?? ""}: ${cmd}${out ? `\n${out}` : ""}`;
+}
+
+/** Newest-first page of the thread through devd. Scans back in pages of THREAD_PAGE for `query` matches; ends a
+ *  result on a seq boundary (devd notices share the seq of the item before them) so paging by seq loses nothing. */
+export async function readThread(devd: DevdAccess, args: { beforeSeq?: number; limit: number; query?: string }) {
+  const doFetch = devd.fetch ?? fetch;
+  const needle = args.query?.toLowerCase();
+  const matches: ThreadItemView[] = [];
+  let cursor = args.beforeSeq;
+  let more = false;
+  for (;;) {
+    const qs = new URLSearchParams({ limit: String(THREAD_PAGE) });
+    if (cursor !== undefined) qs.set("beforeSeq", String(cursor));
+    const res = await doFetch(`${devd.url.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(devd.sessionId)}/thread?${qs}`, {
+      headers: { "x-devbox-session": devd.sessionId },
+      signal: AbortSignal.timeout(DEVD_TIMEOUT_MS),
+    });
+    if (!res.ok) throw new Error(`devd answered ${res.status} for the thread: ${(await res.text()).slice(0, 200)}`);
+    let items = ((await res.json()) as { items: ThreadItemView[] }).items;
+    const full = items.length === THREAD_PAGE;
+    if (full) {
+      // The oldest seq of a full page may continue on the next one: hold it back and refetch it with that page.
+      const oldest = items[0]!.seq;
+      items = items.filter((i) => i.seq !== oldest);
+      if (items.length === 0) throw new Error(`thread page of ${THREAD_PAGE} items all share seq ${oldest}`);
+      cursor = oldest + 1;
+    }
+    for (const i of items.reverse()) {
+      if (needle && !`${i.text}\n${i.output ?? ""}`.toLowerCase().includes(needle)) continue;
+      matches.push(i);
+    }
+    if (matches.length >= args.limit) {
+      const lastSeq = matches[args.limit - 1]!.seq;
+      let end = args.limit;
+      while (end < matches.length && matches[end]!.seq === lastSeq) end++;
+      more = end < matches.length || full;
+      matches.length = end;
+      break;
+    }
+    if (!full) break;
+  }
+  const nextBeforeSeq = more && matches.length ? matches[matches.length - 1]!.seq : null;
+  return { items: matches.map(renderItem), nextBeforeSeq };
+}
+
 const text = (t: string, isError = false) => ({ content: [{ type: "text" as const, text: t }], isError });
 
-export function createMcpServer(socketPath: string): Server {
+export function createMcpServer(socketPath: string, devd?: DevdAccess): Server {
   const server = new Server({ name: "devbox", version: "1.0.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
@@ -88,6 +167,15 @@ export function createMcpServer(socketPath: string): Server {
         await sendCommand(socketPath, { kind: "endWait" });
         return text(JSON.stringify({ ok: true }));
       }
+      if (req.params.name === "devbox_thread_read") {
+        if (!devd) return text("DEVD_URL and DEVD_SESSION_ID are not set; the thread cannot be read", true);
+        const { beforeSeq, limit = THREAD_READ_DEFAULT, query } = args;
+        if (beforeSeq !== undefined && !(Number.isSafeInteger(beforeSeq) && (beforeSeq as number) >= 0)) return text("beforeSeq must be a non-negative integer", true);
+        if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > THREAD_READ_MAX) return text(`limit must be an integer between 1 and ${THREAD_READ_MAX}`, true);
+        if (query !== undefined && (typeof query !== "string" || query === "")) return text("query must be a non-empty string", true);
+        const r = await readThread(devd, { beforeSeq: beforeSeq as number | undefined, limit, query });
+        return text(JSON.stringify(r));
+      }
       return text(`unknown tool: ${req.params.name}`, true);
     } catch (err) {
       return text(err instanceof Error ? err.message : String(err), true);
@@ -98,5 +186,7 @@ export function createMcpServer(socketPath: string): Server {
 
 /** Entry for `agent-bridge mcp`: stdio MCP server talking to the bridge socket. */
 export async function runMcp(): Promise<void> {
-  await createMcpServer(process.env.DEVD_AGENT_SOCK ?? DEFAULT_SOCKET).connect(new StdioServerTransport());
+  const { DEVD_URL, DEVD_SESSION_ID } = process.env;
+  const devd = DEVD_URL && DEVD_SESSION_ID ? { url: DEVD_URL, sessionId: DEVD_SESSION_ID } : undefined;
+  await createMcpServer(process.env.DEVD_AGENT_SOCK ?? DEFAULT_SOCKET, devd).connect(new StdioServerTransport());
 }

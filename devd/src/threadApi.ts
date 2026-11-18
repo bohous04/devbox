@@ -64,8 +64,8 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
   app.get("/api/sessions/:id/thread", (c) => {
     const r = chat(c, c.req.param("id"));
     if ("res" in r) return r.res;
-    const opts: { afterSeq?: number; limit?: number } = {};
-    for (const key of ["afterSeq", "limit"] as const) {
+    const opts: { afterSeq?: number; beforeSeq?: number; limit?: number } = {};
+    for (const key of ["afterSeq", "beforeSeq", "limit"] as const) {
       const raw = c.req.query(key);
       if (raw === undefined) continue;
       const n = nonNegInt(raw);

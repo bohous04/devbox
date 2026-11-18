@@ -101,6 +101,18 @@ test("GET thread returns the snapshot, honours afterSeq and limit", async () => 
   expect(after.items.map((i) => i.text)).toEqual(["two"]);
 });
 
+test("GET thread beforeSeq pages back and leaves the rest of the snapshot as it was", async () => {
+  const t = setup();
+  t.feed(CHAT.id, [started("r1"), said("r1", "m1", "one"), said("r1", "m2", "two"), said("r1", "m3", "three")]);
+  const get = async (q: string) => (await (await t.a.fetch(req("GET", `/api/sessions/${CHAT.id}/thread?${q}`))).json()) as ThreadSnapshot;
+  expect((await get("beforeSeq=4")).items.map((i) => i.text)).toEqual(["one", "two"]);
+  expect((await get("beforeSeq=4&limit=1")).items.map((i) => i.text)).toEqual(["two"]);
+  expect((await get("beforeSeq=2")).items).toEqual([]);
+  const full = await get("");
+  expect(full.items.map((i) => i.text)).toEqual(["one", "two", "three"]);
+  expect((await t.a.fetch(req("GET", `/api/sessions/${CHAT.id}/thread?beforeSeq=-1`))).status).toBe(400);
+});
+
 test("GET thread: unknown session 404, tmux 409, bad afterSeq/limit 400, ending session 409", async () => {
   const t = setup();
   expect((await t.a.fetch(req("GET", "/api/sessions/dev-nope/thread"))).status).toBe(404);

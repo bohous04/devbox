@@ -240,6 +240,8 @@ const RULES: { methods: readonly string[]; re: RegExp; session: "required" | "no
   { methods: ["GET"], re: /^\/api\/prod-db\/requests\/[1-9][0-9]*$/, session: "required" },
   { methods: ["POST"], re: /^\/api\/prod-db\/requests\/[1-9][0-9]*\/(prepare|resume)$/, session: "required" },
   { methods: ["GET"], re: /^\/api\/accounts\/lease$/, session: "required" },
+  // devbox_thread_read (image/agent-bridge/src/mcp.ts): the agent reads its own thread; the id in the path is the claim.
+  { methods: ["GET"], re: /^\/api\/sessions\/[^/]+\/thread$/, session: "required" },
   { methods: ["GET"], re: /^\/api\/codex-accounts\/select$/, session: "none" },
   // Git proxy: the token placeholder in Basic auth is per-session (git_placeholders) — claimedSessions
   // translates it to a session, and that must be the caller. Git's first request goes without auth (401 challenge).
@@ -308,6 +310,7 @@ export class SharedSessions {
 }
 
 const JSON_BODY_SESSION = /^\/api\/(agent-event|preview|open|ssh-approvals)$/;
+const THREAD_PATH = /^\/api\/sessions\/([^/]+)\/thread$/;
 const APPROVAL_ID = /^\/api\/ssh-approvals\/([A-Za-z0-9-]+)(\/activate)?$/;
 
 /** All sessions the request claims to act for — each must be the caller. */
@@ -337,6 +340,8 @@ async function claimedSessions(c: Context, db: Database): Promise<string[]> {
       if (row) claims.push(row.session_id);
     }
   }
+  const thread = THREAD_PATH.exec(path);
+  if (thread) add(thread[1]!);
   const approval = APPROVAL_ID.exec(path);
   if (approval) {
     const row = getApproval(db, approval[1]!);

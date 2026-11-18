@@ -255,13 +255,15 @@ export class ThreadStore {
     this.insertItem(seq, ts, { runId: null, itemId: null, kind: "notice", text, status: "done" });
   }
 
-  /** Without `limit` all items; with it the newest `limit` ones, oldest first. */
-  snapshot(opts: { afterSeq?: number; limit?: number } = {}): ThreadSnapshot {
+  /** Without `limit` all items; with it the newest `limit` ones, oldest first. `beforeSeq` keeps only items
+   *  created before that seq (paging back through history); runs, pending requests etc. are not affected. */
+  snapshot(opts: { afterSeq?: number; beforeSeq?: number; limit?: number } = {}): ThreadSnapshot {
     const after = opts.afterSeq ?? 0;
     const limit = opts.limit ?? -1;
+    const before = opts.beforeSeq ?? Number.MAX_SAFE_INTEGER;
     const itemRows = this.db.query(
-      `SELECT * FROM (SELECT * FROM items WHERE updated_seq > ? ORDER BY id DESC LIMIT ?) ORDER BY id`,
-    ).all(after, limit) as Record<string, any>[];
+      `SELECT * FROM (SELECT * FROM items WHERE updated_seq > ? AND seq < ? ORDER BY id DESC LIMIT ?) ORDER BY id`,
+    ).all(after, before, limit) as Record<string, any>[];
     const items: ThreadItem[] = itemRows.map((r) => {
       const it: ThreadItem = { seq: r.seq, runId: r.run_id, itemId: r.item_id, kind: r.kind, text: r.text, ts: r.ts };
       if (r.tool !== null) it.tool = r.tool;
