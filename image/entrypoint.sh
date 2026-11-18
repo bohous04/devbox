@@ -60,9 +60,21 @@ fi
 # `docker start` re-runs this, so a restarted container gets a fresh session
 # (and agent-launch re-checks /run/devd/prompt — the conflict-prompt channel).
 if [ "$chat" = 1 ]; then
+  # Inner Docker first: the bridge's continuation run may need those containers.
+  recovery_ok=0
+  if [ -x /usr/local/bin/devbox-recovery ]; then
+    if /usr/local/bin/devbox-recovery restore-chat; then
+      recovery_ok=1
+    else
+      echo "devbox: recovery of the inner Docker failed; the session continues without it" >&2
+    fi
+  fi
   # The bridge owns the agent; tmux keeps only a shell for the terminal tab.
   /usr/local/bin/agent-bridge-launch &
   tmux new-session -d -s main -c /workspace zsh || true
+  if [ "$recovery_ok" = 1 ]; then
+    /usr/local/bin/devbox-recovery monitor &
+  fi
 elif [ -x /usr/local/bin/devbox-recovery ]; then
   recovery_status=0
   /usr/local/bin/devbox-recovery restore || recovery_status=$?

@@ -296,6 +296,87 @@ m.launch(sys.argv[2],int(sys.argv[3]))
         self.assertEqual((self.root / 'latest.json').read_bytes(), previous)
 
 
+class RestoreChatTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='devbox-recovery-chat-')
+        self.root = Path(self.temp.name) / 'journal'
+        self.gen = 'b' * 24
+        self.patches = [
+            patch.dict(os.environ, {'DEVD_SESSION_ID': 'dev-chat'}),
+            patch.object(r, 'ROOT', self.root),
+            patch.object(r, 'generation', side_effect=lambda: self.gen),
+        ]
+        for p in self.patches:
+            p.start()
+        self.root.mkdir(parents=True)
+        self.journal = {'version': 1, 'session': 'dev-chat', 'generation': 'a' * 24, 'panes': [],
+                        'docker': {'daemon': 'd', 'ids': ['1' * 64]}}
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        self.temp.cleanup()
+
+    def stop_intent(self):
+        r.atomic(self.root / 'manual-stop', {'stopped': True})
+
+    def check_ready_pending(self):
+        latest = r.read(self.root / 'latest.json')
+        return bool((self.root / 'restore-incomplete').exists() or (self.root / 'pending-docker.json').exists()
+                    or (latest and latest.get('generation') != r.generation()
+                        and not (self.root / ('plan-' + r.generation() + '.json.ready')).exists()))
+
+    def test_older_generation_restores_docker_and_marks_ready(self):
+        r.atomic(self.root / 'latest.json', self.journal)
+        self.stop_intent()
+        self.assertTrue(self.check_ready_pending())
+        with patch.object(r, 'restore_docker') as docker:
+            r.restore_chat()
+        docker.assert_called_once_with(self.journal)
+        self.assertTrue((self.root / ('plan-' + self.gen + '.json.ready')).exists())
+        self.assertEqual(r.read(self.root / ('plan-' + self.gen + '.json')), self.journal)
+        self.assertFalse((self.root / 'restore-incomplete').exists())
+        self.assertFalse((self.root / 'manual-stop').exists())
+        self.assertFalse((self.root / 'pending-docker.json').exists())
+        self.assertFalse(self.check_ready_pending())
+
+    def test_docker_failure_is_pending_but_still_ready(self):
+        r.atomic(self.root / 'latest.json', self.journal)
+        with patch.object(r, 'restore_docker', side_effect=ValueError('DinD not up')):
+            r.restore_chat()
+        self.assertEqual(r.read(self.root / 'pending-docker.json'), self.journal)
+        self.assertTrue((self.root / ('plan-' + self.gen + '.json.ready')).exists())
+        self.assertFalse((self.root / 'restore-incomplete').exists())
+
+    def test_no_journal_only_clears_manual_stop(self):
+        self.stop_intent()
+        with patch.object(r, 'restore_docker') as docker:
+            r.restore_chat()
+        docker.assert_not_called()
+        self.assertEqual(sorted(p.name for p in self.root.iterdir() if p.suffix != '.lock'), [])
+
+    def test_current_generation_does_no_docker_restore(self):
+        self.gen = 'a' * 24
+        r.atomic(self.root / 'latest.json', self.journal)
+        self.stop_intent()
+        with patch.object(r, 'restore_docker') as docker:
+            r.restore_chat()
+        docker.assert_not_called()
+        self.assertFalse((self.root / 'manual-stop').exists())
+        self.assertFalse(list(self.root.glob('plan-*')))
+
+    def test_journal_of_another_session_is_refused_and_untouched(self):
+        self.journal['session'] = 'dev-other'
+        r.atomic(self.root / 'latest.json', self.journal)
+        before = (self.root / 'latest.json').read_bytes()
+        with patch.object(r, 'restore_docker') as docker:
+            with self.assertRaises(ValueError):
+                r.restore_chat()
+        docker.assert_not_called()
+        self.assertEqual((self.root / 'latest.json').read_bytes(), before)
+        self.assertFalse(list(self.root.glob('plan-*')))
+
+
 class AgyRecovery(unittest.TestCase):
     def agy_pane(self, event='prompt_submit', profile='antigravity', sid=SID):
         return {'state': {'agent': 'agy', 'session_id': sid, 'event': event},
