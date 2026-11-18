@@ -9,6 +9,8 @@ const THREAD_READ_DEFAULT = 20;
 const THREAD_READ_MAX = 50;
 /** Items fetched from devd per request while scanning for `query` matches. */
 const THREAD_PAGE = 100;
+/** A `query` scan stops after this many items and hands back a cursor to continue from. */
+const THREAD_SCAN_MAX = 2000;
 const THREAD_TOOL_OUTPUT_BYTES = 2048;
 const DEVD_TIMEOUT_MS = 30_000;
 
@@ -111,7 +113,8 @@ export async function readThread(devd: DevdAccess, args: { beforeSeq?: number; l
   const needle = args.query?.toLowerCase();
   const matches: ThreadItemView[] = [];
   let cursor = args.beforeSeq;
-  let more = false;
+  let next: number | null = null;
+  let scanned = 0;
   for (;;) {
     const qs = new URLSearchParams({ limit: String(THREAD_PAGE) });
     if (cursor !== undefined) qs.set("beforeSeq", String(cursor));
@@ -129,6 +132,7 @@ export async function readThread(devd: DevdAccess, args: { beforeSeq?: number; l
       if (items.length === 0) throw new Error(`thread page of ${THREAD_PAGE} items all share seq ${oldest}`);
       cursor = oldest + 1;
     }
+    scanned += items.length;
     for (const i of items.reverse()) {
       if (needle && !`${i.text}\n${i.output ?? ""}`.toLowerCase().includes(needle)) continue;
       matches.push(i);
@@ -137,14 +141,15 @@ export async function readThread(devd: DevdAccess, args: { beforeSeq?: number; l
       const lastSeq = matches[args.limit - 1]!.seq;
       let end = args.limit;
       while (end < matches.length && matches[end]!.seq === lastSeq) end++;
-      more = end < matches.length || full;
+      if (end < matches.length || full) next = lastSeq;
       matches.length = end;
       break;
     }
     if (!full) break;
+    // Scan budget spent: return what was found; `cursor` re-includes the held-back seq group.
+    if (scanned >= THREAD_SCAN_MAX) { next = cursor!; break; }
   }
-  const nextBeforeSeq = more && matches.length ? matches[matches.length - 1]!.seq : null;
-  return { items: matches.map(renderItem), nextBeforeSeq };
+  return { items: matches.map(renderItem), nextBeforeSeq: next };
 }
 
 const text = (t: string, isError = false) => ({ content: [{ type: "text" as const, text: t }], isError });
