@@ -1,0 +1,223 @@
+import { Database } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import type { BackgroundWork, LoggedEvent, PendingRequest, RunRow, ThreadItem, ThreadSnapshot } from "../../shared/thread";
+
+/** Per-session conversation store: `<root>/_threads/<id>.sqlite`. Conversation data stays out of the
+ *  main devd DB on purpose. Items are ordered by `seq` (the log seq that created them); `updated_seq`
+ *  is the seq of their last change, so `snapshot({afterSeq})` also returns items that kept streaming. */
+export class ThreadStore {
+  private constructor(private db: Database) {}
+
+  static path(root: string, sessionId: string): string {
+    return join(root, "_threads", `${sessionId}.sqlite`);
+  }
+
+  static open(root: string, sessionId: string): ThreadStore {
+    mkdirSync(join(root, "_threads"), { recursive: true });
+    const db = new Database(ThreadStore.path(root, sessionId));
+    db.run("PRAGMA busy_timeout = 5000");
+    db.run("PRAGMA journal_mode = WAL");
+    db.run("PRAGMA synchronous = NORMAL");
+    db.run(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)`);
+    db.run(`CREATE TABLE IF NOT EXISTS runs (
+      run_id TEXT PRIMARY KEY, origin TEXT NOT NULL, status TEXT NOT NULL, harness TEXT NOT NULL,
+      native_thread_id TEXT, model TEXT, started_at INTEGER, ended_at INTEGER, usage TEXT, error TEXT,
+      updated_seq INTEGER NOT NULL)`);
+    db.run(`CREATE TABLE IF NOT EXISTS items (
+      seq INTEGER PRIMARY KEY, run_id TEXT, item_id TEXT, kind TEXT NOT NULL, text TEXT NOT NULL,
+      tool TEXT, input TEXT, output TEXT, is_error INTEGER, status TEXT, ts INTEGER NOT NULL,
+      updated_seq INTEGER NOT NULL)`);
+    db.run(`CREATE INDEX IF NOT EXISTS items_key ON items (run_id, item_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS items_updated ON items (updated_seq)`);
+    db.run(`CREATE TABLE IF NOT EXISTS requests (
+      request_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, kind TEXT NOT NULL, prompt TEXT NOT NULL,
+      options TEXT, multi_select INTEGER, opened_at INTEGER NOT NULL, status TEXT NOT NULL)`);
+    db.run(`CREATE TABLE IF NOT EXISTS background (id INTEGER PRIMARY KEY CHECK (id = 1), work TEXT NOT NULL)`);
+    db.run(`CREATE TABLE IF NOT EXISTS native (
+      id INTEGER PRIMARY KEY CHECK (id = 1), harness TEXT NOT NULL, native_thread_id TEXT NOT NULL,
+      account TEXT, model TEXT)`);
+    return new ThreadStore(db);
+  }
+
+  lastSeq(): number { return this.meta("last_seq"); }
+
+  private meta(key: string): number {
+    const r = this.db.query("SELECT value FROM meta WHERE key=?").get(key) as { value: number } | null;
+    return r ? r.value : 0;
+  }
+
+  private setMeta(key: string, value: number) {
+    this.db.query("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, value);
+  }
+
+  markSeen(seq: number): void {
+    if (seq > this.meta("seen_seq")) this.setMeta("seen_seq", seq);
+  }
+
+  /** False when the event was already applied (`seq <= lastSeq`). A gap is accepted: the log may be trimmed. */
+  apply(e: LoggedEvent): boolean {
+    if (e.seq <= this.lastSeq()) return false;
+    this.db.transaction(() => {
+      this.dispatch(e);
+      this.setMeta("last_seq", e.seq);
+    })();
+    return true;
+  }
+
+  private dispatch({ seq, ts, event: ev }: LoggedEvent) {
+    const db = this.db;
+    switch (ev.type) {
+      case "thread.native":
+        db.query(`INSERT INTO native (id, harness, native_thread_id, account, model) VALUES (1, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET harness=excluded.harness, native_thread_id=excluded.native_thread_id,
+          account=excluded.account, model=excluded.model`).run(ev.harness, ev.nativeThreadId, ev.account, ev.model);
+        return;
+      case "run.queued":
+        this.insertRun(seq, ev.runId, "user", "queued", null, null, null);
+        this.insertItem(seq, ts, { runId: ev.runId, itemId: `user:${ev.runId}`, kind: "user", text: ev.text, status: "done" });
+        return;
+      case "run.started": {
+        const row = db.query("SELECT status FROM runs WHERE run_id=?").get(ev.runId) as { status: string } | null;
+        if (!row) this.insertRun(seq, ev.runId, ev.origin, "running", ev.nativeThreadId, ev.model, ts);
+        else if (row.status === "queued") {
+          db.query(`UPDATE runs SET origin=?, status='running', native_thread_id=?, model=?, started_at=?, updated_seq=? WHERE run_id=?`)
+            .run(ev.origin, ev.nativeThreadId, ev.model, ts, seq, ev.runId);
+        }
+        // A start for a run that already ended or runs is a replay artefact: do not regress it.
+        return;
+      }
+      case "message.delta": {
+        const it = this.findItem(ev.runId, ev.itemId);
+        if (!it) this.insertItem(seq, ts, { runId: ev.runId, itemId: ev.itemId, kind: "assistant", text: ev.text, status: "streaming" });
+        else db.query(`UPDATE items SET text=text||?, status='streaming', updated_seq=? WHERE seq=?`).run(ev.text, seq, it.seq);
+        return;
+      }
+      case "message.final": {
+        if (ev.role === "user") {
+          // The user's text already came with run.queued; a harness echo must not duplicate it.
+          const has = db.query("SELECT 1 FROM items WHERE run_id=? AND kind='user'").get(ev.runId);
+          if (!has) this.insertItem(seq, ts, { runId: ev.runId, itemId: ev.itemId, kind: "user", text: ev.text, status: "done" });
+          return;
+        }
+        const it = this.findItem(ev.runId, ev.itemId);
+        if (!it) this.insertItem(seq, ts, { runId: ev.runId, itemId: ev.itemId, kind: "assistant", text: ev.text, status: "done" });
+        else db.query(`UPDATE items SET text=?, status='done', updated_seq=? WHERE seq=?`).run(ev.text, seq, it.seq);
+        return;
+      }
+      case "tool.started":
+        this.insertItem(seq, ts, { runId: ev.runId, itemId: ev.itemId, kind: "tool", text: "", tool: ev.tool, input: ev.input, status: "streaming" });
+        return;
+      case "tool.finished": {
+        const it = this.findItem(ev.runId, ev.itemId);
+        if (!it) {
+          // The start was trimmed from the log: show the result, marked as an unknown tool.
+          this.insertItem(seq, ts, { runId: ev.runId, itemId: ev.itemId, kind: "tool", text: "", tool: "(unknown)", output: ev.output, isError: ev.isError, status: "done" });
+        } else {
+          db.query(`UPDATE items SET output=?, is_error=?, status='done', updated_seq=? WHERE seq=?`).run(ev.output, ev.isError ? 1 : 0, seq, it.seq);
+        }
+        return;
+      }
+      case "request.opened":
+        db.query(`INSERT OR REPLACE INTO requests (request_id, run_id, kind, prompt, options, multi_select, opened_at, status)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'open')`)
+          .run(ev.requestId, ev.runId, ev.kind, ev.prompt, ev.options ? JSON.stringify(ev.options) : null, ev.multiSelect === undefined ? null : ev.multiSelect ? 1 : 0, ts);
+        this.insertItem(seq, ts, { runId: ev.runId, itemId: ev.requestId, kind: "request", text: ev.prompt, status: "open" });
+        return;
+      case "request.resolved": {
+        const status = ev.by === "expired" ? "expired" : "answered";
+        db.query(`UPDATE requests SET status=? WHERE request_id=?`).run(status, ev.requestId);
+        // The request may predate this store's items (trimmed log): then there is nothing to flip.
+        db.query(`UPDATE items SET status=?, output=?, updated_seq=? WHERE kind='request' AND item_id=?`)
+          .run(status, ev.answer, seq, ev.requestId);
+        return;
+      }
+      case "background.changed":
+        db.query(`INSERT INTO background (id, work) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET work=excluded.work`).run(JSON.stringify(ev.work));
+        return;
+      case "run.completed":
+        this.terminal(seq, ts, ev.runId, "completed", { nativeThreadId: ev.nativeThreadId, usage: ev.usage, error: null });
+        return;
+      case "run.interrupted":
+        this.terminal(seq, ts, ev.runId, "interrupted", { error: null });
+        return;
+      case "run.failed":
+        this.terminal(seq, ts, ev.runId, "failed", { error: ev.error });
+        this.insertItem(seq, ts, { runId: ev.runId, itemId: null, kind: "notice", text: ev.error, status: "done" });
+        return;
+      case "bridge.started":
+        if (ev.resumed) this.insertItem(seq, ts, { runId: null, itemId: null, kind: "notice", text: `Agent bridge restarted (v${ev.version})`, status: "done" });
+        return;
+    }
+  }
+
+  private insertRun(seq: number, runId: string, origin: string, status: string, nativeThreadId: string | null, model: string | null, startedAt: number | null) {
+    const n = this.db.query("SELECT harness FROM native WHERE id=1").get() as { harness: string } | null;
+    // harness is "" until the bridge has announced its native thread.
+    this.db.query(`INSERT OR IGNORE INTO runs (run_id, origin, status, harness, native_thread_id, model, started_at, updated_seq)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(runId, origin, status, n?.harness ?? "", nativeThreadId, model, startedAt, seq);
+  }
+
+  private terminal(seq: number, ts: number, runId: string, status: RunRow["status"],
+    f: { nativeThreadId?: string; usage?: unknown; error: string | null }) {
+    const row = this.db.query("SELECT 1 FROM runs WHERE run_id=?").get(runId);
+    if (!row) {
+      this.insertItem(seq, ts, { runId, itemId: null, kind: "notice", text: `${status} event for unknown run ${runId}`, status: "done" });
+      return;
+    }
+    // The later terminal event wins, also over an earlier terminal status.
+    this.db.query(`UPDATE runs SET status=?, ended_at=?, error=?,
+      native_thread_id=COALESCE(?, native_thread_id), usage=?, updated_seq=? WHERE run_id=?`)
+      .run(status, ts, f.error, f.nativeThreadId ?? null, f.usage ? JSON.stringify(f.usage) : null, seq, runId);
+  }
+
+  private findItem(runId: string, itemId: string): { seq: number } | null {
+    return this.db.query("SELECT seq FROM items WHERE run_id=? AND item_id=?").get(runId, itemId) as { seq: number } | null;
+  }
+
+  private insertItem(seq: number, ts: number, i: Omit<ThreadItem, "seq" | "ts">) {
+    this.db.query(`INSERT INTO items (seq, run_id, item_id, kind, text, tool, input, output, is_error, status, ts, updated_seq)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      seq, i.runId, i.itemId, i.kind, i.text, i.tool ?? null, i.input === undefined ? null : JSON.stringify(i.input),
+      i.output ?? null, i.isError === undefined ? null : i.isError ? 1 : 0, i.status ?? null, ts, seq);
+  }
+
+  /** Without `limit` all items; with it the newest `limit` ones, oldest first. */
+  snapshot(opts: { afterSeq?: number; limit?: number } = {}): ThreadSnapshot {
+    const after = opts.afterSeq ?? 0;
+    const limit = opts.limit ?? -1;
+    const itemRows = this.db.query(
+      `SELECT * FROM (SELECT * FROM items WHERE updated_seq > ? ORDER BY seq DESC LIMIT ?) ORDER BY seq`,
+    ).all(after, limit) as Record<string, any>[];
+    const items: ThreadItem[] = itemRows.map((r) => {
+      const it: ThreadItem = { seq: r.seq, runId: r.run_id, itemId: r.item_id, kind: r.kind, text: r.text, ts: r.ts };
+      if (r.tool !== null) it.tool = r.tool;
+      if (r.input !== null) it.input = JSON.parse(r.input);
+      if (r.output !== null) it.output = r.output;
+      if (r.is_error !== null) it.isError = r.is_error === 1;
+      if (r.status !== null) it.status = r.status;
+      return it;
+    });
+    const runs = (this.db.query(`SELECT * FROM runs WHERE updated_seq > ? ORDER BY updated_seq, rowid`).all(after) as Record<string, any>[])
+      .map((r): RunRow => ({
+        runId: r.run_id, origin: r.origin, status: r.status, harness: r.harness, nativeThreadId: r.native_thread_id,
+        model: r.model, startedAt: r.started_at, endedAt: r.ended_at, usage: r.usage === null ? null : JSON.parse(r.usage), error: r.error,
+      }));
+    const pending = (this.db.query(`SELECT * FROM requests WHERE status='open' ORDER BY opened_at, rowid`).all() as Record<string, any>[])
+      .map((r): PendingRequest => {
+        const p: PendingRequest = { requestId: r.request_id, runId: r.run_id, kind: r.kind, prompt: r.prompt, openedAt: r.opened_at };
+        if (r.options !== null) p.options = JSON.parse(r.options);
+        if (r.multi_select !== null) p.multiSelect = r.multi_select === 1;
+        return p;
+      });
+    const bg = this.db.query("SELECT work FROM background WHERE id=1").get() as { work: string } | null;
+    const n = this.db.query("SELECT * FROM native WHERE id=1").get() as Record<string, any> | null;
+    return {
+      lastSeq: this.lastSeq(), seenSeq: this.meta("seen_seq"), runs, items, pending,
+      background: bg ? (JSON.parse(bg.work) as BackgroundWork[]) : [],
+      native: n ? { harness: n.harness, nativeThreadId: n.native_thread_id, account: n.account, model: n.model } : null,
+    };
+  }
+
+  close(): void { this.db.close(); }
+}

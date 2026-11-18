@@ -25,3 +25,25 @@ test("archiveChats drops an empty or missing directory instead of archiving it",
   expect(existsSync(join(root, "_claude-projects", "dev-empty"))).toBe(false);
   expect(existsSync(join(root, "_chat-archive"))).toBe(false);
 });
+
+test("archiveChats moves the thread store (with -wal/-shm) next to the transcripts", () => {
+  const root = mkdtempSync(join(tmpdir(), "chats-"));
+  const src = join(root, "_claude-projects", "dev-t");
+  mkdirSync(src, { recursive: true });
+  writeFileSync(join(src, "x.jsonl"), "{}\n");
+  mkdirSync(join(root, "_threads"));
+  for (const x of ["", "-wal"]) writeFileSync(join(root, "_threads", `dev-t.sqlite${x}`), "db" + x);
+  const dest = archiveChats(root, "dev-t", new Date("2026-11-17T12:30:05Z"))!;
+  expect(readFileSync(join(dest, "dev-t.sqlite"), "utf8")).toBe("db");
+  expect(readFileSync(join(dest, "dev-t.sqlite-wal"), "utf8")).toBe("db-wal");
+  expect(existsSync(join(dest, "dev-t.sqlite-shm"))).toBe(false);
+  expect(existsSync(join(root, "_threads", "dev-t.sqlite"))).toBe(false);
+});
+
+test("archiveChats archives a thread store even when there are no transcripts", () => {
+  const root = mkdtempSync(join(tmpdir(), "chats-"));
+  mkdirSync(join(root, "_threads"));
+  writeFileSync(join(root, "_threads", "dev-u.sqlite"), "db");
+  const dest = archiveChats(root, "dev-u", new Date("2026-11-17T12:30:05Z"))!;
+  expect(readFileSync(join(dest, "dev-u.sqlite"), "utf8")).toBe("db");
+});
