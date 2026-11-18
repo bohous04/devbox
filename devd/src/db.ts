@@ -1,5 +1,6 @@
 import { migrateWeeklyUsage } from "./weeklyUsage";
 import { Database } from "bun:sqlite";
+import { existsSync, renameSync, rmSync } from "node:fs";
 import { migrateLiveActivities } from "./liveActivitiesDb";
 // The agent a session launches — today a "profile", see agents.ts. The re-export (via
 // import + export, not a bare `export ... from`) keeps today's import paths
@@ -132,6 +133,16 @@ function attrExprs(src: string): string[] {
 
 export function openDb(path: string): Database {
   const db = new Database(path);
+  // WAL + synchronous=NORMAL: a commit no longer waits for fsync. devd serves every request from
+  // one thread, so under disk saturation (agents' 13 GB checkouts) each rollback-journal commit
+  // blocked the whole dashboard for minutes (18 Nov 2026). The checkpoint, the only fsync left,
+  // runs in startCheckpointer's worker, never here. busy_timeout: the worker and backups now
+  // share the file with this connection.
+  db.run("PRAGMA busy_timeout = 5000"); // first: the one-time switch to WAL needs a brief exclusive lock
+  db.run("PRAGMA journal_mode = WAL");
+  db.run("PRAGMA synchronous = NORMAL");
+  db.run("PRAGMA wal_autocheckpoint = 0");
+  db.run("PRAGMA journal_size_limit = 67108864"); // shrink the WAL back to 64 MB after it resets
   db.run(`CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY, folder TEXT NOT NULL, project TEXT NOT NULL, repo TEXT NOT NULL,
     container TEXT NOT NULL, port_base INTEGER NOT NULL UNIQUE, status TEXT NOT NULL,
@@ -1379,4 +1390,40 @@ export function touchPushAlert(db: Database, alertId: string, ts: number): void 
 // value here.
 export function prunePushAlerts(db: Database, keepMs = 7 * 86_400_000): void {
   db.query(`DELETE FROM push_alerts WHERE created_at < ?`).run(Date.now() - keepMs);
+}
+
+/** Checkpoints the WAL of `path` every `intervalMs` in a worker thread (see openDb). Without it
+ *  nothing checkpoints (wal_autocheckpoint=0) and the WAL grows forever, so a worker that dies is
+ *  logged and started again. */
+export function startCheckpointer(path: string, intervalMs = 15_000): Worker {
+  const worker = new Worker(new URL("./dbCheckpointWorker.ts", import.meta.url));
+  worker.onerror = (e) => {
+    console.error(`devd db checkpoint worker died: ${e.message}; restarting in 60 s`);
+    worker.terminate();
+    setTimeout(() => startCheckpointer(path, intervalMs), 60_000).unref();
+  };
+  worker.postMessage({ path, intervalMs });
+  return worker;
+}
+
+/** Folds the whole WAL into the main file, so the file alone is a complete copy. Throws instead of
+ *  letting a caller copy a file that misses the latest commits. */
+export function checkpointFully(db: Database): void {
+  const r = db.query("PRAGMA wal_checkpoint(TRUNCATE)").get() as { busy: number; log: number; checkpointed: number };
+  if (r.busy || r.log !== r.checkpointed) {
+    throw new Error(`database checkpoint incomplete (busy=${r.busy}, ${r.checkpointed}/${r.log} frames); retry in a minute`);
+  }
+}
+
+/** A restore cannot replace the file under open WAL connections (their cached pages would be
+ *  written back over it), so restoreBackup leaves it next to the DB and devd restarts; this swaps
+ *  it in before the DB is opened; the old DB and its WAL are kept as devd.sqlite.pre-restore. */
+export function applyPendingRestore(path: string): boolean {
+  const pending = `${path}.restore`;
+  if (!existsSync(pending)) return false;
+  // The replaced DB (with its WAL folded in by the next open of it) stays as a way back.
+  if (existsSync(path)) renameSync(path, `${path}.pre-restore`);
+  for (const ext of ["-wal", "-shm"]) if (existsSync(path + ext)) renameSync(path + ext, `${path}.pre-restore${ext}`);
+  renameSync(pending, path);
+  return true;
 }

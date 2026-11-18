@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildBackupTar, restoreBackup, type Runner } from "../src/backup";
@@ -28,6 +28,16 @@ test("buildBackupTar throws on a failed docker export", async () => {
   // can't create on a read-only root filesystem regardless of this test's intent).
   const tmpDir = join(tmpdir(), "devd-backup-fail-test");
   await expect(buildBackupTar({ volume: "v", secretsPath: "/s", dbPath: "/d", tmpDir, run })).rejects.toThrow(/backup failed/);
+});
+
+test("restoreBackup leaves the DB next to the live one for devd to swap in on restart", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "rs-db-"));
+  writeFileSync(join(tmp, "devd.sqlite"), "restored"); writeFileSync(join(tmp, "claude-home.tgz"), "x");
+  const run = () => ({ code: 0, stdout: "", stderr: "" });
+  const dbPath = join(tmp, "live.sqlite"); writeFileSync(dbPath, "live");
+  await restoreBackup({ volume: "v", secretsPath: join(tmp, "s.json"), dbPath, tmpDir: tmp, run }, "/in.tgz");
+  expect(readFileSync(dbPath, "utf8")).toBe("live");
+  expect(readFileSync(`${dbPath}.restore`, "utf8")).toBe("restored");
 });
 
 test("restoreBackup throws on a real write failure to secrets dest", async () => {
@@ -102,4 +112,24 @@ test("extra volumes are restored only from an archive that is present", async ()
   const mounts = calls.filter((c) => c[0] === "docker").map((c) => c.find((a) => a.endsWith(":/vol")));
   expect(mounts).toContain("antigravity-home:/vol");
   expect(mounts).not.toContain("grok-home:/vol");
+});
+
+test("the backup copies a DB file that holds every commit, not just those already checkpointed", async () => {
+  const { openDb } = await import("../src/db");
+  const { Database } = await import("bun:sqlite");
+  const { copyFileSync } = await import("node:fs");
+  const dir = mkdtempSync(join(tmpdir(), "bk-wal-"));
+  const dbPath = join(dir, "devd.sqlite");
+  const db = openDb(dbPath);
+  db.run("CREATE TABLE t (v TEXT)"); db.run("INSERT INTO t VALUES ('latest')");
+  const staged = join(dir, "staged-copy.sqlite");
+  const run = (_cwd: string, ...cmd: string[]) => {
+    if (cmd[0] === "tar" && cmd.includes("czf")) copyFileSync(join(dir, "tmp", "devd.sqlite"), staged);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  await buildBackupTar({ volume: "v", secretsPath: "/none", dbPath, tmpDir: join(dir, "tmp"), run,
+    checkpointDb: () => db.run("PRAGMA wal_checkpoint(TRUNCATE)") });
+  const copy = new Database(staged);
+  expect(copy.query("SELECT v FROM t").get()).toEqual({ v: "latest" });
+  copy.close(); db.close();
 });
