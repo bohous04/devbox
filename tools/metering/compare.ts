@@ -67,8 +67,16 @@ async function main() {
   const report = { account: "<redacted>", model: a.model, commit, entrypoint: a.entrypoint ?? null, gate: g, runs: records };
   writeFileSync(a.out, JSON.stringify(report, null, 2) + "\n");
   console.log(JSON.stringify(report, null, 2));
-  console.log(`${g.pass ? "PASS" : "FAIL"}: bridge/tui cost ratio ${g.ratio.toFixed(3)} (limit 1.15)` +
-    (g.lowSignal ? " - LOW SIGNAL: total delta under 10%, ratio unreliable, rerun with more runs" : ""));
+  const ratios = `per-token ${g.ratio.toFixed(3)}, per-task ${g.perTaskRatio.toFixed(3)} (limit 1.15)`;
+  if (g.lowSignal) {
+    console.log(`INCONCLUSIVE (low signal): total delta under 10%, ${ratios}; rerun with more runs`);
+    process.exitCode = 3;
+  } else if (g.pass) {
+    console.log(`PASS: bridge/tui ${ratios}`);
+  } else {
+    console.log(`FAIL: bridge/tui ${ratios}`);
+    process.exitCode = 1;
+  }
 }
 
 if (import.meta.main) {

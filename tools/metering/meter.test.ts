@@ -46,6 +46,10 @@ describe("validateRun", () => {
     const r = validateRun(run("tui", -1), "claude-opus-5-5");
     expect(r.reason).toBe("negative-delta");
   });
+  test("rejects when any main-transcript message used another model", () => {
+    const r = validateRun(run("tui", 3, { models: ["claude-opus-5-5", "claude-haiku-x"] }), "claude-opus-5-5");
+    expect(r.reason).toBe("model-mismatch");
+  });
   test("keeps the reason of a run the runner already failed", () => {
     const r = validateRun(run("tui", 3, { ok: false, reason: "timeout" }), "claude-opus-5-5");
     expect(r.reason).toBe("timeout");
@@ -97,6 +101,7 @@ describe("gate", () => {
   test("passes at equal cost", () => {
     const g = gate([...runs("tui", 3), ...runs("bridge", 3)]);
     expect(g.ratio).toBe(1);
+    expect(g.perTaskRatio).toBe(1);
     expect(g.pass).toBe(true);
     expect(g.tuiDeltaPct).toBe(15);
   });
@@ -104,6 +109,18 @@ describe("gate", () => {
     const g = gate([...runs("tui", 3), ...runs("bridge", 3.5)]);
     expect(g.ratio).toBeCloseTo(1.1667, 3);
     expect(g.pass).toBe(false);
+  });
+  test("fails when per-token cost is equal but the bridge uses 1.3x tokens per task", () => {
+    const heavy = { input: 1_300_000, output: 0, cacheCreation: 0, cacheRead: 0 };
+    const bridge = Array.from({ length: 5 }, () => run("bridge", 3.9, { usage: heavy }));
+    const g = gate([...runs("tui", 3), ...bridge]);
+    expect(g.ratio).toBeCloseTo(1, 6);
+    expect(g.perTaskRatio).toBeCloseTo(1.3, 6);
+    expect(g.bridgeMeanWeighted).toBeCloseTo(1_300_000);
+    expect(g.pass).toBe(false);
+  });
+  test("low signal is never a pass", () => {
+    expect(gate([...runs("tui", 1), ...runs("bridge", 1)]).pass).toBe(false);
   });
   test("ignores failed runs", () => {
     const bad = run("bridge", 50, { ok: false, reason: "timeout" });

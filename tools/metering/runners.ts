@@ -10,7 +10,10 @@ export interface Deps {
   exec: Exec; fetch: typeof fetch; now: () => number; sleep: (ms: number) => Promise<void>;
 }
 export interface RunHandle { name: string; cloneDir: string; account: string }
-export interface RunOutcome { ok: boolean; reason?: string; usage: TokenUsage | null; model: string | null }
+export interface RunOutcome {
+  ok: boolean; reason?: string; usage: TokenUsage | null; model: string | null;
+  models?: string[]; bridgeReportedUsage?: TokenUsage | null;
+}
 
 export const IMAGE = "devbox:latest";
 export const POLL_MS = 10_000;
@@ -72,6 +75,20 @@ async function checkOutput(d: Deps, h: RunHandle): Promise<boolean> {
   return (await d.exec(execIn(h, "test", "-s", "/tmp/out.md"))).code === 0;
 }
 
+async function readTranscripts(d: Deps, h: RunHandle) {
+  // The volume keeps transcripts of earlier runs; only files newer than the marker are ours.
+  const r = await d.exec(execIn(h, "sh", "-c",
+    `find "$CLAUDE_CONFIG_DIR/projects" -name '*.jsonl' -newer ${MARKER} -print0 | xargs -0 -r -n1 sh -c 'echo "${FILE_MARK}$0"; cat "$0"'`));
+  if (r.code !== 0) throw new Error(`transcript read failed (exit ${r.code}): ${r.stderr.trim()}`);
+  return sessionUsage(r.stdout);
+}
+
+// Both paths are counted from the transcripts claude itself writes (main + subagents), so they
+// are measured the same way; the bridge summary's usage is not comparable (it includes side calls).
+function fromTranscripts(t: ReturnType<typeof sessionUsage>): Pick<RunOutcome, "usage" | "model" | "models"> {
+  return { usage: t.usage, model: t.model, models: t.models };
+}
+
 export async function runTui(d: Deps, h: RunHandle, model: string): Promise<RunOutcome> {
   await must(d, execIn(h, "touch", MARKER), "marker");
   await must(d, execIn(h, "tmux", "new-session", "-d", "-s", "m", "-c", "/workspace",
@@ -80,35 +97,41 @@ export async function runTui(d: Deps, h: RunHandle, model: string): Promise<RunO
   const start = d.now();
   let lines = -1;
   let lastChange = start;
-  // The volume keeps transcripts of earlier runs; only files newer than the marker are ours.
-  const poll = execIn(h, "sh", "-c",
-    `find "$CLAUDE_CONFIG_DIR/projects" -name '*.jsonl' -newer ${MARKER} -print0 | xargs -0 -r -n1 sh -c 'echo "${FILE_MARK}$0"; cat "$0"'`);
+  // Stop claude before the usage settle wait: a live process could make background requests
+  // that count against the window but not against the transcript tokens.
+  const stop = () => must(d, execIn(h, "tmux", "kill-server"), "stopping claude");
   for (;;) {
     await d.sleep(POLL_MS);
-    const r = await d.exec(poll);
-    if (r.code !== 0) throw new Error(`transcript poll failed (exit ${r.code}): ${r.stderr.trim()}`);
-    const t = sessionUsage(r.stdout);
+    const t = await readTranscripts(d, h);
     if (t.lines !== lines) { lines = t.lines; lastChange = d.now(); }
     if (t.done && d.now() - lastChange >= QUIET_MS) {
-      if (!(await checkOutput(d, h))) return { ok: false, reason: "no-output", usage: t.usage, model: t.model };
-      return { ok: true, usage: t.usage, model: t.model };
+      await stop();
+      if (!(await checkOutput(d, h))) return { ok: false, reason: "no-output", ...fromTranscripts(t) };
+      return { ok: true, ...fromTranscripts(t) };
     }
-    if (d.now() - start >= RUN_TIMEOUT_MS) return { ok: false, reason: "timeout", usage: null, model: t.model };
+    if (d.now() - start >= RUN_TIMEOUT_MS) {
+      await stop();
+      return { ok: false, reason: "timeout", usage: null, model: t.model };
+    }
   }
 }
 
 export async function runBridge(d: Deps, h: RunHandle, model: string, entrypoint?: string): Promise<RunOutcome> {
+  await must(d, execIn(h, "touch", MARKER), "marker");
   const cmd = execIn(h, "agent-bridge", "once", "--prompt-file", "/task.md", "--cwd", "/workspace",
     "--model", model, "--log", "/tmp/ev.jsonl", ...(entrypoint ? ["--entrypoint", entrypoint] : []));
   const r = await d.exec(cmd, { timeoutMs: RUN_TIMEOUT_MS });
   if (r.code === 124) return { ok: false, reason: "timeout", usage: null, model: null };
   if (r.code !== 0) return { ok: false, reason: `bridge-exit-${r.code}`, usage: null, model: null };
   const last = r.stdout.split("\n").filter((l) => l.trim()).pop() ?? "";
-  let s: { status?: string; model?: string | null; usage?: TokenUsage | null };
+  let s: { status?: string; usage?: TokenUsage | null };
   try { s = JSON.parse(last); } catch { return { ok: false, reason: "bad-summary", usage: null, model: null }; }
   if (s.status !== "completed") return { ok: false, reason: "bridge-not-completed", usage: null, model: null };
-  if (!(await checkOutput(d, h))) return { ok: false, reason: "no-output", usage: s.usage ?? null, model: s.model ?? null };
-  return { ok: true, usage: s.usage ?? null, model: s.model ?? null };
+  const t = await readTranscripts(d, h);
+  const base = { ...fromTranscripts(t), bridgeReportedUsage: s.usage ?? null };
+  if (t.lines === 0) return { ok: false, reason: "no-transcript", ...base };
+  if (!(await checkOutput(d, h))) return { ok: false, reason: "no-output", ...base };
+  return { ok: true, ...base };
 }
 
 export interface MeasureOpts {

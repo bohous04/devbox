@@ -95,6 +95,8 @@ describe("runTui", () => {
     expect(launch.join(" ")).toContain(
       `claude --dangerously-skip-permissions --model claude-opus-5-5 "$(cat /task.md)"`);
     expect(launch.join(" ")).not.toContain("remote-control");
+    // claude is stopped before runTui returns, i.e. before the settle wait
+    expect(seen.some((c) => c.includes("kill-server"))).toBe(true);
   });
   test("TUI usage includes subagent transcripts", async () => {
     const both = main(fx("transcript-end-turn.jsonl")) +
@@ -114,11 +116,13 @@ describe("runTui", () => {
     expect(d.now() - t0).toBeGreaterThanOrEqual(60_000);
   });
   test("times out after 30 minutes", async () => {
-    const d = deps(tuiExec([fx("transcript-in-progress.jsonl")]));
+    const seen2: string[][] = [];
+    const d = deps(tuiExec([fx("transcript-in-progress.jsonl")], seen2));
     const t0 = d.now();
     const r = await runTui(d, handle, "claude-opus-5-5");
     expect(r.ok).toBe(false);
     expect(r.reason).toBe("timeout");
+    expect(seen2.some((c) => c.includes("kill-server"))).toBe(true);
     expect(d.now() - t0).toBeGreaterThanOrEqual(30 * 60_000);
   });
   test("a missing /tmp/out.md fails the run", async () => {
@@ -133,21 +137,32 @@ describe("runBridge", () => {
   const summary = { status: "completed", nativeThreadId: "t", model: "claude-opus-5-5",
     usage: { input: 5, output: 6, cacheCreation: 7, cacheRead: 8 } };
 
-  test("runs agent-bridge once and takes usage and model from the summary line", async () => {
+  const transcript = main(fx("transcript-end-turn.jsonl")) +
+    `${FILE_MARK}/c/projects/-workspace/s/subagents/agent-1.jsonl\n${fx("transcript-subagent.jsonl")}\n`;
+  const bridgeExec = (seen: string[][] = [], poll = transcript): Exec => async (c) => {
+    seen.push(c);
+    const j = c.join(" ");
+    if (j.includes("agent-bridge")) return ok(`noise\n${JSON.stringify(summary)}\n`);
+    if (j.includes("projects")) return ok(poll);
+    return ok();
+  };
+
+  test("runs agent-bridge once; usage and model come from the transcripts, summary kept as info", async () => {
     const seen: string[][] = [];
-    const d = deps(async (c) => {
-      seen.push(c);
-      return c.includes("agent-bridge") ? ok(`noise\n${JSON.stringify(summary)}\n`) : ok();
-    });
+    const d = deps(bridgeExec(seen));
     const r = await runBridge(d, handle, "claude-opus-5-5", "sdk-cli");
-    expect(r).toMatchObject({ ok: true, model: "claude-opus-5-5", usage: summary.usage });
+    expect(r).toMatchObject({
+      ok: true, model: "claude-opus-5-5", models: ["claude-opus-5-5"],
+      usage: { input: 118, output: 112, cacheCreation: 450, cacheRead: 3450 },
+      bridgeReportedUsage: summary.usage,
+    });
     const cmd = seen.find((c) => c.includes("agent-bridge"))!.join(" ");
     expect(cmd).toContain(
       "agent-bridge once --prompt-file /task.md --cwd /workspace --model claude-opus-5-5 --log /tmp/ev.jsonl --entrypoint sdk-cli");
   });
   test("omits --entrypoint when not given", async () => {
     const seen: string[][] = [];
-    const d = deps(async (c) => { seen.push(c); return c.includes("agent-bridge") ? ok(JSON.stringify(summary)) : ok(); });
+    const d = deps(bridgeExec(seen));
     await runBridge(d, handle, "claude-opus-5-5");
     expect(seen.find((c) => c.includes("agent-bridge"))!.join(" ")).not.toContain("--entrypoint");
   });
@@ -157,6 +172,15 @@ describe("runBridge", () => {
     const r = await runBridge(d, handle, "claude-opus-5-5");
     expect(r.ok).toBe(false);
     expect(r.reason).toBe("bridge-exit-1");
+  });
+  test("no transcript written is a failed run", async () => {
+    const r = await runBridge(deps(bridgeExec([], "")), handle, "claude-opus-5-5");
+    expect(r.reason).toBe("no-transcript");
+  });
+  test("a side-call model in the main transcript is reported for the model check", async () => {
+    const other = fx("transcript-end-turn.jsonl").replace('"id":"m2","model":"claude-opus-5-5"', '"id":"m2","model":"claude-haiku-x"');
+    const r = await runBridge(deps(bridgeExec([], main(other))), handle, "claude-opus-5-5");
+    expect(r.models).toEqual(["claude-opus-5-5", "claude-haiku-x"]);
   });
   test("an unparseable summary is a failed run", async () => {
     const d = deps(async (c) => c.includes("agent-bridge") ? ok("not json") : ok());
