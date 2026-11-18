@@ -42,6 +42,14 @@ export function instaboxAgentBlock(agent: AgentName): string | null {
   return null;
 }
 
+// Mirrors chatRuntimeBlock from devd/src/agents.ts: the chat bridge speaks only to the Claude and Codex
+// harnesses and runs only in VPS containers (devd refuses anything else with this same message).
+export function chatRuntimeBlock(agent: AgentName, host: "vps" | "instabox"): string | null {
+  if (host === "instabox") return "Chat sessions run only on the VPS";
+  if (agent !== "claude" && agent !== "codex") return `${AGENT_PROFILES[agent].label} is not available in chat sessions yet`;
+  return null;
+}
+
 /** Normalizes text to a profile — mirrors `agentNameFor` from devd/src/agents.ts
  *  (it cannot be imported here — this is a vite bundle for the browser). `agent` comes
  *  from the API as a plain string; the fallback to claude is the same as in devd and

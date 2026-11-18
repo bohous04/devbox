@@ -1,4 +1,4 @@
-import { LayoutDashboard, Terminal, ChartNoAxesCombined, Gauge, Server, Folder, List, Bell, Settings, CalendarClock, ListChecks, Wrench, KeyRound, GitCommitHorizontal } from "lucide-react";
+import { LayoutDashboard, Inbox, Terminal, ChartNoAxesCombined, Gauge, Server, Folder, List, Bell, Settings, CalendarClock, ListChecks, Wrench, KeyRound, GitCommitHorizontal } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
@@ -9,7 +9,7 @@ import { useNow, useStore } from "../store";
 import { StatusDot } from "./primitives";
 import { ModeToggle } from "./theme";
 
-const NAV_ICONS = { "/": LayoutDashboard, "/sessions": Terminal, "/stats": ChartNoAxesCombined, "/subscriptions": Gauge, "/hardware": Server, "/folders": Folder, "/log": List, "/notifications": Bell, "/settings": Settings, "/cron": CalendarClock, "/prod-writes": ListChecks, "/operations": Wrench, "/ssh-approvals": KeyRound, "/unpushed": GitCommitHorizontal, "/upkeep": Wrench };
+const NAV_ICONS = { "/": LayoutDashboard, "/inbox": Inbox, "/sessions": Terminal, "/stats": ChartNoAxesCombined, "/subscriptions": Gauge, "/hardware": Server, "/folders": Folder, "/log": List, "/notifications": Bell, "/settings": Settings, "/cron": CalendarClock, "/prod-writes": ListChecks, "/operations": Wrench, "/ssh-approvals": KeyRound, "/unpushed": GitCommitHorizontal, "/upkeep": Wrench };
 function NavIcon({ to }: { to: string }) { const Icon = NAV_ICONS[to as keyof typeof NAV_ICONS] ?? List; return <Icon aria-hidden="true" className="size-4 shrink-0" strokeWidth={1.7} />; }
 
 function BrandMark() {

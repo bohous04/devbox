@@ -11,9 +11,12 @@ export function terminalTabUrl(id: string): string {
 
 /** The deep link from Pushover notifications has the PATH form `/sessions?terminal=<id>` (built by
  *  devd, see index.ts + pushChannel.sessionFromUrl — the format is kept for parsing
- *  on the server). HashRouter does not see a query OUTSIDE the hash, so before the router mounts it is
- *  translated to the terminal hash address. Returns null when the URL has no deep link. */
+ *  on the server), or `?thread=<id>` for a chat session. HashRouter does not see a query OUTSIDE the hash,
+ *  so before the router mounts it is translated to the hash address. Returns null when the URL has no deep link. */
 export function deepLinkHash(search: string): string | null {
-  const id = new URLSearchParams(search).get("terminal");
-  return id ? `/#/terminal/${encodeURIComponent(id)}` : null;
+  const q = new URLSearchParams(search);
+  const id = q.get("terminal");
+  if (id) return `/#/terminal/${encodeURIComponent(id)}`;
+  const thread = q.get("thread");
+  return thread ? `/#/s/${encodeURIComponent(thread)}` : null;
 }

@@ -29,6 +29,8 @@ const Operations = lazy(() => import("./pages/Operations").then((m) => ({ defaul
 const SshApprovals = lazy(() => import("./pages/SshApprovals").then((m) => ({ default: m.SshApprovals })));
 const Unpushed = lazy(() => import("./pages/Unpushed").then((m) => ({ default: m.Unpushed })));
 const TerminalPage = lazy(() => import("./pages/TerminalPage").then((m) => ({ default: m.TerminalPage })));
+const Inbox = lazy(() => import("./pages/Inbox").then((m) => ({ default: m.Inbox })));
+const SessionPage = lazy(() => import("./pages/SessionPage").then((m) => ({ default: m.SessionPage })));
 
 function OfflineBar() {
   const { connected, attempted } = useStore();
@@ -77,6 +79,9 @@ export function App() {
         <Suspense fallback={<PageSkeleton delayed />}>
         <Routes location={location} key={location.pathname}>
           <Route path="/" element={<Overview />} />
+          <Route path="/inbox" element={<Inbox />} />
+          {/* A chat session: conversation + terminal tab. */}
+          <Route path="/s/:id" element={<SessionPage />} />
           <Route path="/upkeep" element={<AgentUpkeep />} />
           <Route path="/sessions" element={<Sessions />} />
           <Route path="/stats" element={<Stats />} />

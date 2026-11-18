@@ -14,3 +14,8 @@ test("deepLinkHash: ?terminal=<id> → terminal hash, otherwise null", () => {
   expect(deepLinkHash("")).toBeNull();
   expect(deepLinkHash("?open=dev-x")).toBeNull();
 });
+
+test("deepLinkHash: ?thread=<id> → the chat session page", () => {
+  expect(deepLinkHash("?thread=x")).toBe("/#/s/x");
+  expect(deepLinkHash("?thread=dev%20a")).toBe("/#/s/dev%20a");
+});

@@ -12,10 +12,12 @@ export interface NavItem {
 // by width would mean the menu is in a different place on every phone.
 export const NAV: NavItem[] = [
   { to: "/", label: "Overview", glyph: "◈", primary: true, end: true },
+  { to: "/inbox", label: "Inbox", glyph: "◉", primary: true },
   { to: "/sessions", label: "Sessions", glyph: "▣", primary: true },
   { to: "/stats", label: "Statistics", glyph: "▦", primary: true },
   { to: "/subscriptions", label: "AI limits", glyph: "◇" },
-  { to: "/hardware", label: "Hardware", glyph: "▚", primary: true },
+  // Not in the mobile bar since Inbox took its place there (the bar holds four items).
+  { to: "/hardware", label: "Hardware", glyph: "▚" },
   { to: "/folders", label: "Folders", glyph: "▤" },
   { to: "/log", label: "Activity", glyph: "≡" },
   { to: "/notifications", label: "Notifications", glyph: "◐" },
@@ -57,7 +59,7 @@ export function activeLabel(pathname: string): string {
 
 /** Visual groups share the route inventory, so no page disappears from navigation. */
 export const NAV_GROUPS = [
-  { label: "Workspace", routes: ["/", "/sessions", "/folders", "/stats", "/subscriptions", "/unpushed"] },
+  { label: "Workspace", routes: ["/", "/inbox", "/sessions", "/folders", "/stats", "/subscriptions", "/unpushed"] },
   { label: "Operations", routes: ["/cron", "/upkeep", "/prod-writes", "/operations", "/ssh-approvals"] },
   { label: "System", routes: ["/hardware", "/log", "/notifications", "/settings"] },
 ];
