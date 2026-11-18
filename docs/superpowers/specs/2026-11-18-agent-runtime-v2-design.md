@@ -35,6 +35,9 @@ conversation itself. This design does the same for devbox.
 11. Schedules (cron prompts) on the new runtime.
 12. Settled: auto-settle after a merged PR or 7 days idle; snooze until a usage limit resets.
 13. Images pasted into the chat.
+14. A native Mac app: the iOS SwiftUI app built for a macOS target (chat, inbox, terminal via SwiftTerm).
+    The owner does not use the CLI for overview (`dev ls`), so the Mac app is the primary desktop client;
+    Warp is only for an optional shell.
 
 ## Non-goals
 
@@ -257,9 +260,12 @@ The bridge serves the devbox MCP server (`devbox_wait`, `devbox_thread_read`) to
   - A native SwiftUI chat screen and inbox on the same REST and event stream.
   - Answering a question or approval from the app.
   - Push and Live Activity as today, driven by the new state.
-- **Terminal tab / `dev` CLI:** tmux in a v2 container contains shells only. `dev <repo>` attaches a shell
-  and prints the chat URL. `dev ls` shows the inbox section.
-- **Mac notifications:** for v2 sessions a click opens the thread in the dashboard instead of focusing a Warp tab.
+- **Mac app:** a macOS target of the iOS app (SwiftUI multiplatform), with the same screens laid out for a large
+  window. It handles notifications natively, and a click opens the thread.
+- **Terminal tab / `dev` CLI:** tmux in a v2 container contains shells only. `dev <repo>` attaches a shell (Warp
+  stays optional for that). No inbox in the CLI: `dev ls` is not extended.
+- **Mac notifications:** for v2 sessions a click opens the thread in the Mac app (dashboard as fallback) instead
+  of focusing a Warp tab.
 - **Schedules:** start a run through the bridge instead of the prompt file. The rest is unchanged: a new session
   per schedule, skip if the repo has a running session, `autoEnd` on completion.
 
@@ -291,7 +297,7 @@ Each step ships to `main` once verified. tmux remains available throughout.
 3. Switching: model, account (Claude resume, Codex shadow home), harness with handoff, and `devbox_thread_read`.
 4. ACP adapter, then Grok, Vibe, Antigravity and OpenCode, each verified live.
 5. Rest of the first release:
-   - iOS chat
+   - iOS chat, then the macOS target of the same app
    - schedules
    - settled + PR watch + snooze
    - images
@@ -309,8 +315,9 @@ T3 references: `ClaudeAdapterV2.ts` and every other T3 path are pinned to t3code
   - Method: on one account, run the same task 5× through the TUI and 5× through the v2 runtime, and compare
     the rise in `fiveHourPct` from the account poller.
   - Gate: if v2 is more than 15 % more expensive on average, stop and report before step 2.
-- **InstaBox (designer's call).** v2 runs on the VPS only in the first release. Creating a `chat` session on
-  InstaBox is blocked the same way `instaboxAgentBlock` blocks proxy profiles. InstaBox sessions stay on tmux.
+- **InstaBox (owner).** Out of scope: v2 does not support it. The owner plans to remove InstaBox from devbox
+  altogether as a separate task. Until then, creating a `chat` session on InstaBox is blocked the same way
+  `instaboxAgentBlock` blocks proxy profiles.
 - **tmux sessions in the inbox (designer's call).** The inbox lists every session. tmux sessions carry a
   "tmux" badge and are placed by today's hook-derived hub state. The inbox becomes the default view in step 2.
 - **Codex homes (designer's call).**
