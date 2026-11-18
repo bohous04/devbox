@@ -95,7 +95,10 @@
       "cache_creation_input_tokens": 1500,
       "cache_read_input_tokens": 800
     },
-    "modelUsage": {},
+    "modelUsage": {
+      "claude-sonnet-4-5": { "inputTokens": 40, "outputTokens": 32, "cacheReadInputTokens": 800, "cacheCreationInputTokens": 1500, "webSearchRequests": 0, "costUSD": 0.01, "contextWindow": 200000, "maxOutputTokens": 64000 },
+      "claude-haiku-4-5": { "inputTokens": 100, "outputTokens": 50, "cacheReadInputTokens": 200, "cacheCreationInputTokens": 300, "webSearchRequests": 0, "costUSD": 0.0023, "contextWindow": 200000, "maxOutputTokens": 64000 }
+    },
     "permission_denials": []
   }
 ]

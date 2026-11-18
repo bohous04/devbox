@@ -94,13 +94,15 @@ export async function* runClaudeTurn(o: ClaudeTurnOptions, queryFn: QueryFn = qu
         }
       } else if (msg.type === "result") {
         if (msg.subtype === "success" && !msg.is_error) {
-          const u = msg.usage;
-          const usage: TokenUsage = {
-            input: u.input_tokens,
-            output: u.output_tokens,
-            cacheCreation: u.cache_creation_input_tokens ?? 0,
-            cacheRead: u.cache_read_input_tokens ?? 0,
-          };
+          // result.usage covers the main loop only; modelUsage includes subagents and compaction.
+          // It is cumulative across turns, so with `resume` it may include earlier turns (step 2 owns multi-turn accounting).
+          const usage: TokenUsage = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
+          for (const m of Object.values(msg.modelUsage)) {
+            usage.input += m.inputTokens;
+            usage.output += m.outputTokens;
+            usage.cacheCreation += m.cacheCreationInputTokens;
+            usage.cacheRead += m.cacheReadInputTokens;
+          }
           yield { type: "run.completed", runId: o.runId, nativeThreadId: msg.session_id, usage, costUsd: msg.total_cost_usd };
         } else {
           const errors = "errors" in msg ? msg.errors : [];

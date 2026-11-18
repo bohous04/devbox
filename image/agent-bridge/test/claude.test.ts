@@ -46,7 +46,8 @@ describe("runClaudeTurn", () => {
     expect(events.find((e) => e.type === "tool.finished")).toMatchObject({ isError: false, output: "package.json\nsrc\n" });
     expect(events.at(-1)).toMatchObject({
       type: "run.completed",
-      usage: { input: 40, output: 32, cacheCreation: 1500, cacheRead: 800 },
+      // summed over both models in modelUsage, deliberately larger than result.usage (main loop only)
+      usage: { input: 140, output: 82, cacheCreation: 1800, cacheRead: 1000 },
       costUsd: 0.0123,
     });
   });
