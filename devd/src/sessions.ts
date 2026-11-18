@@ -78,6 +78,9 @@ export interface SessionDeps {
    *  cover expiring grants, so without this a permanent grant's agent (decrypted key in RAM)
    *  would outlive the session forever. */
   killSshAgent?: (session: string) => Promise<void>;
+  /** Drops the chat session's bridge link and closes its thread store. Runs inside the session lock at the
+   *  start of stop() and end(), so no handle is open when end() archives `_threads/<id>.sqlite`. */
+  releaseThread?: (session: string) => void;
   /** Sidecar with its own docker daemon instead of the host socket. Opt-in. */
   dind?: boolean;
   /** Is the session shared or tainted (shareTaint.ts) RIGHT NOW, relative to the container that
@@ -1049,6 +1052,7 @@ export class SessionManager {
   async stop(id: string, reason: "manual" | "idle" = "manual") {
     return this.locked([id], "stop", async () => {
       const s = getSession(this.d.db, id);
+      this.d.releaseThread?.(id);
       if (s?.host === "instabox") {
         await this.instaboxOrThrow().pause(s, reason);
         try { releaseLeasesForSession(this.d.db, id, this.now()); }
@@ -1330,6 +1334,7 @@ export class SessionManager {
     return this.locked([id], "end", async () => {
       const s = getSession(this.d.db, id);
       if (!s) throw new Error(`Unknown session ${id}`);
+      this.d.releaseThread?.(id);
       // Sharing belongs to the session, not the container — it ends with it (end/delete), but survives
       // stop/restart (that goes through stop(), not end()).
       this.revokeShares(id);

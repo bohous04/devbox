@@ -50,3 +50,6 @@ export interface ThreadSnapshot {
   background: BackgroundWork[];
   native: { harness: string; nativeThreadId: string; account: string | null; model: string | null } | null;
 }
+
+/** devd's connection to a chat session's agent bridge socket. */
+export type LinkStatus = "connecting" | "connected" | "disconnected";

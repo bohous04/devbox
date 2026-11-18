@@ -70,7 +70,9 @@ import { guardedTick } from "./tick";
 import { createPushover, type Pushover } from "./pushover";
 import { createApnsChannel, tickPushAlerts, type RunFn } from "./pushChannel";
 import { predictDisk } from "./aggregate";
-import { DEFAULT_CONTROL_ROOT, DEFAULT_DEVD_URL, DEFAULT_OPENROUTER_URL, SessionManager, upstreamKey } from "./sessions";
+import { DEFAULT_CONTROL_ROOT, DEFAULT_DEVD_URL, DEFAULT_OPENROUTER_URL, SessionManager, storedRuntime, upstreamKey } from "./sessions";
+import { BridgeLinks } from "./bridgeLink";
+import { ThreadStore } from "./threadStore";
 import { contextLengthCached } from "./openrouterModels";
 import { parseMeminfo, resourceBreakdown } from "./resources";
 import { classifyClaudeState, collectDiskUsage, collectDockerStatsAsync, collectGitStats, collectSessionGitStat, type DockerStat, type Runner } from "./stats";
@@ -370,6 +372,46 @@ const credentialsForUrl = (url: string): Record<string, string> => {
 // Shared with sshAgents below: the ssh-agent socket lives in the same per-session
 // directory that SessionManager mounts into the container as /run/devd.
 const controlRoot = env("DEVD_CONTROL_ROOT", DEFAULT_CONTROL_ROOT);
+// Chat sessions: ONE thread store per session, opened lazily and shared by the bridge link and its readers,
+// and a link to the session's agent bridge (<controlDir>/agent.sock). SessionManager calls
+// releaseThread at the start of stop()/end(), so end() archives a store nobody holds open.
+const threadStores = new Map<string, ThreadStore>();
+const threadStore = (id: string): ThreadStore => {
+  const open = threadStores.get(id);
+  if (open) return open;
+  // An ending or ended session's store is (being) archived; reopening it would leave a fresh empty file behind.
+  // `mgr` is late-bound: no store is opened before startup finishes.
+  if (mgr.isEnding(id)) throw new Error(`session ${id} is ending`);
+  const s = getSession(db, id);
+  if (!s || storedRuntime(s) !== "chat") throw new Error(`session ${id} is not a chat session`);
+  const store = ThreadStore.open(root, id);
+  threadStores.set(id, store);
+  return store;
+};
+const bridgeLinks = new BridgeLinks({
+  controlDir: (id) => join(controlRoot, id),
+  store: threadStore,
+  // TODO(Task 10/11): attention and the SSE thread stream consume these.
+  onEvent: () => {},
+  onStatus: () => {},
+});
+const releaseThread = (id: string) => {
+  bridgeLinks.drop(id);
+  threadStores.get(id)?.close();
+  threadStores.delete(id);
+};
+// Links follow the DB: a running chat session gets one (at boot, after open, after a restart recovery),
+// any other chat session loses it. The link itself retries while its bridge is unreachable. A session
+// under a lifecycle operation is left alone: stop/end released it and must not get it back mid-way.
+const syncBridgeLinks = () => {
+  try {
+    for (const s of listSessions(db)) {
+      if (storedRuntime(s) !== "chat" || accountSwitchInFlight.has(s.id)) continue;
+      if (s.status === "running") bridgeLinks.ensure(s.id);
+      else bridgeLinks.drop(s.id);
+    }
+  } catch (e) { console.error("bridge link sync failed:", e); }
+};
 // Git token placeholders. Created BEFORE SessionManager — it hands them out when creating a session.
 // dind is opt-in: without DEVD_DIND the host socket stays where it was, and a code deploy
 // by itself does not change the behavior of a running box. Enabling it is a deliberate step — new
@@ -411,6 +453,7 @@ const mgr = new SessionManager({
   revokePlaceholder: (session) => placeholders.revoke(session),
   // Late-bound: sshAgents is created below; end() never runs before startup finishes.
   killSshAgent: (session) => sshAgents.kill(session),
+  releaseThread,
   giteaInstances: getGiteaInstances,
   db, cfg, root,
   image: env("DEVD_IMAGE", "devbox:latest"),
@@ -692,10 +735,9 @@ const ccUpkeepDeps = (): UpkeepDeps => ({
   exec: dockerExec,
   host: (cmd, timeoutMs) => spawnWithTimeout(cmd, timeoutMs),
   turnInProgress: (id) => agentEvents.turnInProgress(id),
-  // TODO(Task 9): wire both to the chat runtime link ({kind:"restartAgent"} over the bridge socket
-  // and the session's attention). Until then chat sessions count as busy (skipped) and a restart attempt fails visibly.
+  // TODO(Task 10): attention decides "working". Until then chat sessions count as busy (skipped).
   isChatWorking: () => true,
-  restartChatAgent: async () => { throw new Error("chat runtime link not wired"); },
+  restartChatAgent: (id) => bridgeLinks.send(id, { kind: "restartAgent" }),
   notify,
   sleep: realSleep,
   repoDir: process.cwd(),
@@ -1075,6 +1117,8 @@ const startupRecovery = startRecovery({
   failed: (id, error) => console.error(`restart recovery ${id}:`, (error as Error).message),
 });
 void mgr.recordBranches().catch(e => console.error("writing session branches failed:", e));
+syncBridgeLinks();
+setInterval(syncBridgeLinks, 5_000);
 startupRecovery.done.then(failed => {
   if (failed.length) logEvent(db, null, "restart-recovery-pending", { sessions: failed });
 });
