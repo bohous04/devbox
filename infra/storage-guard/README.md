@@ -31,7 +31,8 @@ Docker daemon or active session restart is needed to install this protection.
   `__pycache__`/`node_modules`) is removed right away without an archive, re-checked just
   before removal. Its HEAD and the commits only its HEAD reflog still references (rebased,
   amended, left on a detached HEAD) are pinned first as `refs/devbox/released/<sha>` in the
-  shared repo. Git for this check runs as the worktree's owner; root-owned worktrees and
+  shared repo; a pin is dropped once a branch or tag holds the commit, or after
+  `released_pin_days` (default 90). Git for this check runs as the worktree's owner; root-owned worktrees and
   failed removals take the archive path. Every other one needs an encrypted offsite archive including the Git
   common directories, an unchanged signature per worktree and a full Borg integrity
   read; a worktree that changed meanwhile is kept. Archives are made in batches of
