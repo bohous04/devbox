@@ -69,7 +69,7 @@ export async function* runClaudeTurn(o: ClaudeTurnOptions, queryFn: QueryFn = qu
     });
     for await (const msg of stream as AsyncIterable<SDKMessage>) {
       if (msg.type === "system" && msg.subtype === "init") {
-        yield { type: "run.started", runId: o.runId, nativeThreadId: msg.session_id, model: msg.model };
+        yield { type: "run.started", runId: o.runId, origin: "user", nativeThreadId: msg.session_id, model: msg.model };
       } else if (msg.type === "stream_event") {
         const ev = msg.event;
         if (ev.type === "message_start") currentMessageId = ev.message.id;
