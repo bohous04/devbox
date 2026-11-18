@@ -1,4 +1,4 @@
-import { query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type SDKMessage, type SDKResultMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { BridgeEvent, TokenUsage } from "./events.ts";
 
 export interface ClaudeTurnOptions {
@@ -20,7 +20,7 @@ const MAX_OUTPUT_BYTES = 64 * 1024;
 // believe it is nested and change its behaviour.
 const HOST_SESSION_VARS = ["CLAUDECODE", "CLAUDE_CODE_SESSION_ID"];
 
-export function claudeEnv(base: Record<string, string | undefined>, o: ClaudeTurnOptions): Record<string, string> {
+export function claudeEnv(base: Record<string, string | undefined>, o: { configDir: string; entrypoint?: string }): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(base)) {
     if (v !== undefined && !HOST_SESSION_VARS.includes(k)) env[k] = v;
@@ -34,12 +34,12 @@ async function* singleUserMessage(prompt: string): AsyncIterable<SDKUserMessage>
   yield { type: "user", message: { role: "user", content: prompt }, parent_tool_use_id: null };
 }
 
-function capText(text: string): string {
+export function capText(text: string): string {
   const bytes = Buffer.from(text);
   return bytes.length <= MAX_OUTPUT_BYTES ? text : bytes.subarray(0, MAX_OUTPUT_BYTES).toString();
 }
 
-function toolResultText(content: unknown): string {
+export function toolResultText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
@@ -47,71 +47,97 @@ function toolResultText(content: unknown): string {
     .join("");
 }
 
+export type ClaudeSdkOptions = NonNullable<Parameters<QueryFn>[0]["options"]>;
+
+// Options shared by the one-shot turn and the long-lived session.
+export function claudeQueryOptions(o: { cwd: string; model: string | null; claudeExecutable: string; configDir: string; entrypoint?: string; resume?: string | null }): ClaudeSdkOptions {
+  return {
+    pathToClaudeCodeExecutable: o.claudeExecutable,
+    permissionMode: "bypassPermissions",
+    allowDangerouslySkipPermissions: true,
+    ...(o.model !== null ? { model: o.model } : {}),
+    cwd: o.cwd,
+    env: claudeEnv(process.env, o),
+    includePartialMessages: true,
+    // Without it the SDK sends an empty system prompt, not the CLI's; the TUI always sends
+    // Claude Code's, so the two paths would not cost or behave the same.
+    systemPrompt: { type: "preset", preset: "claude_code" },
+    // settingSources is left out on purpose: omitted means user, project and local, as in the CLI.
+    ...(o.resume ? { resume: o.resume } : {}),
+  };
+}
+
+// result.usage covers the main loop only; modelUsage includes subagents and compaction.
+export function sumModelUsage(modelUsage: SDKResultMessage["modelUsage"]): TokenUsage {
+  const usage: TokenUsage = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
+  for (const m of Object.values(modelUsage)) {
+    usage.input += m.inputTokens;
+    usage.output += m.outputTokens;
+    usage.cacheCreation += m.cacheCreationInputTokens;
+    usage.cacheRead += m.cacheReadInputTokens;
+  }
+  return usage;
+}
+
+// null for a successful result, else the error text for run.failed.
+export function resultError(msg: SDKResultMessage): string | null {
+  if (msg.subtype === "success" && !msg.is_error) return null;
+  const errors = "errors" in msg ? msg.errors : [];
+  return errors.join("; ") || `run ended with ${msg.subtype}`;
+}
+
+// Content frames of a run (text deltas, final text, tool calls and results). Run boundaries
+// (init, result) differ between the one-shot turn and the session and are handled by the callers.
+export function mapSdkMessage(msg: SDKMessage, runId: string, cursor: { messageId: string }): BridgeEvent[] {
+  const out: BridgeEvent[] = [];
+  if (msg.type === "stream_event") {
+    const ev = msg.event;
+    if (ev.type === "message_start") cursor.messageId = ev.message.id;
+    else if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") {
+      out.push({ type: "message.delta", runId, itemId: cursor.messageId, text: ev.delta.text });
+    }
+  } else if (msg.type === "assistant") {
+    for (const block of msg.message.content) {
+      if (block.type === "text" && block.text) {
+        out.push({ type: "message.final", runId, itemId: msg.message.id, role: "assistant", text: block.text });
+      } else if (block.type === "tool_use") {
+        out.push({ type: "tool.started", runId, itemId: block.id, tool: block.name, input: block.input });
+      }
+    }
+  } else if (msg.type === "user" && Array.isArray(msg.message.content)) {
+    for (const block of msg.message.content) {
+      if (block.type === "tool_result") {
+        out.push({
+          type: "tool.finished",
+          runId,
+          itemId: block.tool_use_id,
+          isError: block.is_error === true,
+          output: capText(toolResultText(block.content)),
+        });
+      }
+    }
+  }
+  return out;
+}
+
 export async function* runClaudeTurn(o: ClaudeTurnOptions, queryFn: QueryFn = query): AsyncIterable<BridgeEvent> {
-  let currentMessageId = "";
+  const cursor = { messageId: "" };
   try {
-    const stream = queryFn({
-      prompt: singleUserMessage(o.prompt),
-      options: {
-        pathToClaudeCodeExecutable: o.claudeExecutable,
-        permissionMode: "bypassPermissions",
-        allowDangerouslySkipPermissions: true,
-        model: o.model,
-        cwd: o.cwd,
-        env: claudeEnv(process.env, o),
-        includePartialMessages: true,
-        // Without it the SDK sends an empty system prompt, not the CLI's; the TUI always sends
-        // Claude Code's, so the two paths would not cost or behave the same.
-        systemPrompt: { type: "preset", preset: "claude_code" },
-        // settingSources is left out on purpose: omitted means user, project and local, as in the CLI.
-        ...(o.resume ? { resume: o.resume } : {}),
-      },
-    });
+    const stream = queryFn({ prompt: singleUserMessage(o.prompt), options: claudeQueryOptions(o) });
     for await (const msg of stream as AsyncIterable<SDKMessage>) {
       if (msg.type === "system" && msg.subtype === "init") {
         yield { type: "run.started", runId: o.runId, origin: "user", nativeThreadId: msg.session_id, model: msg.model };
-      } else if (msg.type === "stream_event") {
-        const ev = msg.event;
-        if (ev.type === "message_start") currentMessageId = ev.message.id;
-        else if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") {
-          yield { type: "message.delta", runId: o.runId, itemId: currentMessageId, text: ev.delta.text };
-        }
-      } else if (msg.type === "assistant") {
-        for (const block of msg.message.content) {
-          if (block.type === "text" && block.text) {
-            yield { type: "message.final", runId: o.runId, itemId: msg.message.id, role: "assistant", text: block.text };
-          } else if (block.type === "tool_use") {
-            yield { type: "tool.started", runId: o.runId, itemId: block.id, tool: block.name, input: block.input };
-          }
-        }
-      } else if (msg.type === "user" && Array.isArray(msg.message.content)) {
-        for (const block of msg.message.content) {
-          if (block.type === "tool_result") {
-            yield {
-              type: "tool.finished",
-              runId: o.runId,
-              itemId: block.tool_use_id,
-              isError: block.is_error === true,
-              output: capText(toolResultText(block.content)),
-            };
-          }
-        }
       } else if (msg.type === "result") {
-        if (msg.subtype === "success" && !msg.is_error) {
-          // result.usage covers the main loop only; modelUsage includes subagents and compaction.
-          // It is cumulative across turns, so with `resume` it may include earlier turns (step 2 owns multi-turn accounting).
-          const usage: TokenUsage = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
-          for (const m of Object.values(msg.modelUsage)) {
-            usage.input += m.inputTokens;
-            usage.output += m.outputTokens;
-            usage.cacheCreation += m.cacheCreationInputTokens;
-            usage.cacheRead += m.cacheReadInputTokens;
-          }
-          yield { type: "run.completed", runId: o.runId, nativeThreadId: msg.session_id, usage, costUsd: msg.total_cost_usd };
+        const error = resultError(msg);
+        if (error === null) {
+          // modelUsage is cumulative across turns, so with `resume` it may include earlier turns;
+          // the long-lived session (claudeSession.ts) reports per-run deltas instead.
+          yield { type: "run.completed", runId: o.runId, nativeThreadId: msg.session_id, usage: sumModelUsage(msg.modelUsage), costUsd: msg.total_cost_usd };
         } else {
-          const errors = "errors" in msg ? msg.errors : [];
-          yield { type: "run.failed", runId: o.runId, error: errors.join("; ") || `run ended with ${msg.subtype}` };
+          yield { type: "run.failed", runId: o.runId, error };
         }
+      } else {
+        yield* mapSdkMessage(msg, o.runId, cursor);
       }
     }
   } catch (e) {
