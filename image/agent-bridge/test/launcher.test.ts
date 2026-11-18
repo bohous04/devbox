@@ -71,6 +71,18 @@ test("a long run resets the failure counter and the delay", () => {
   expect(r).toMatchObject({ status: 0, runs: 7, delays: [2, 4, 8, 2, 2, 4] });
 }, 15_000);
 
+test("a proxy profile starts serve on the image's claude home (serve translates the profile env)", () => {
+  writeFileSync(join(dir, "agent-bridge"), `#!/usr/bin/env bash\necho "$DEVD_AGENT|$CLAUDE_CONFIG_DIR" > "${dir}/env"\nexit 0\n`);
+  chmodSync(join(dir, "agent-bridge"), 0o755);
+  const p = Bun.spawnSync(["bash", LAUNCHER], {
+    env: { PATH: `${dir}:/usr/bin:/bin`, DEVD_AGENT: "claude-gpt", CLAUDE_CONFIG_DIR: "/home/dev/.claude" },
+    stderr: "pipe",
+  });
+  expect(p.stderr.toString()).toBe("");
+  expect(p.exitCode).toBe(0);
+  expect(readFileSync(join(dir, "env"), "utf8").trim()).toBe("claude-gpt|/home/dev/.claude");
+});
+
 test("codex chat runs on the shadow home reported by `agent-bridge codex-home`", () => {
   writeFileSync(
     join(dir, "agent-bridge"),

@@ -32,11 +32,12 @@ test("insertSession stores the runtime", () => {
   expect(getSession(db, "dev-a-b")!.runtime).toBe("chat");
 });
 
-test("chatRuntimeBlock: vps claude/codex allowed, instabox and other agents blocked", () => {
+test("chatRuntimeBlock: vps claude/codex and proxy profiles allowed, instabox and other agents blocked", () => {
   expect(chatRuntimeBlock("claude", "vps")).toBeNull();
   expect(chatRuntimeBlock("codex", "vps")).toBeNull();
   expect(chatRuntimeBlock("claude", "instabox")).toBe("Chat sessions run only on the VPS");
-  expect(chatRuntimeBlock("claude-gpt", "vps")).toBe("Claude Code + GPT is not available in chat sessions yet");
+  for (const proxy of ["claude-gpt", "claude-grok", "claude-gemini", "claude-openrouter"] as const) expect(chatRuntimeBlock(proxy, "vps")).toBeNull();
+  expect(chatRuntimeBlock("grok", "vps")).toBe("Grok Build is not available in chat sessions yet");
   expect(chatRuntimeBlock("antigravity", "vps")).toContain("is not available in chat sessions yet");
 });
 
@@ -67,12 +68,12 @@ test("POST /api/sessions without runtime passes none (tmux default)", async () =
   expect(seen[0]!.runtime).toBeUndefined();
 });
 
-test("POST /api/sessions chat with a proxy agent, on instabox, with solo or bogus runtime → 400", async () => {
+test("POST /api/sessions chat with a non-chat agent, on instabox, with solo or bogus runtime → 400", async () => {
   let calls = 0;
   const a = appWith(async () => { calls++; return { created: true }; });
-  const gpt = await post(a, { ...BASE, runtime: "chat", agent: "claude-gpt" });
-  expect(gpt.status).toBe(400);
-  expect((await gpt.json() as { error: string }).error).toBe("Claude Code + GPT is not available in chat sessions yet");
+  const grok = await post(a, { ...BASE, runtime: "chat", agent: "grok" });
+  expect(grok.status).toBe(400);
+  expect((await grok.json() as { error: string }).error).toBe("Grok Build is not available in chat sessions yet");
   const ibx = await post(a, { ...BASE, cloneUrl: "https://git.example/x.git", runtime: "chat", host: "instabox" });
   expect(ibx.status).toBe(400);
   expect((await ibx.json() as { error: string }).error).toBe("Chat sessions run only on the VPS");
@@ -110,15 +111,15 @@ function appOn(db: ReturnType<typeof openDb>, open: () => Promise<unknown>) {
   } as never);
 }
 
-test("reopening a chat session by sessionId with a proxy agent (given or remembered) → 400, mgr.open not called", async () => {
+test("reopening a chat session by sessionId with a non-chat agent (given or remembered) → 400, mgr.open not called", async () => {
   let calls = 0;
   const db = openDb(":memory:");
   chatSession(db);
   const a = appOn(db, async () => { calls++; return { created: false }; });
-  const given = await post(a, { ...BASE, sessionId: "dev-p-r", agent: "claude-gpt" });
+  const given = await post(a, { ...BASE, sessionId: "dev-p-r", agent: "grok" });
   expect(given.status).toBe(400);
-  expect((await given.json() as { error: string }).error).toBe("Claude Code + GPT is not available in chat sessions yet");
-  setRepoAgent(db, "f", "p", "r", "claude-grok", 1);
+  expect((await given.json() as { error: string }).error).toBe("Grok Build is not available in chat sessions yet");
+  setRepoAgent(db, "f", "p", "r", "antigravity", 1);
   const remembered = await post(a, { ...BASE, sessionId: "dev-p-r" });
   expect(remembered.status).toBe(400);
   expect(calls).toBe(0);
@@ -131,8 +132,8 @@ test("SessionManager.open refuses an agent chat cannot run on a stored chat sess
     db, cfg: structuredClone(DEFAULT_CONFIG), root: mkdtempSync(join(tmpdir(), "rt-root-")), image: "devbox:latest",
     controlRoot: mkdtempSync(join(tmpdir(), "rt-ctl-")), extraMounts: [],
   });
-  await expect(mgr.open({ folder: "f", project: "p", repo: "r", agent: "claude-gpt", sessionId: "dev-p-r", runtime: "chat" }))
-    .rejects.toThrow("Claude Code + GPT is not available in chat sessions yet");
+  await expect(mgr.open({ folder: "f", project: "p", repo: "r", agent: "grok", sessionId: "dev-p-r", runtime: "chat" }))
+    .rejects.toThrow("Grok Build is not available in chat sessions yet");
   expect(getSession(db, "dev-p-r")!.agent).toBe("claude");
   expect(getRepoAgent(db, "f", "p", "r")).toBeNull();
 });

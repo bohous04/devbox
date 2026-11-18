@@ -181,6 +181,7 @@ export interface ApiDeps { mgr: SessionManager; db: Database; cfg: DevConfig; ro
   threads?: ThreadApiDeps["threads"];
   bus?: ThreadApiDeps["bus"];
   inbox?: ThreadApiDeps["inbox"];
+  switcher?: ThreadApiDeps["switcher"];
   // "Update now": status of the server checkout vs origin/main and a manual start of devbox-update.service
   // (the nightly unit). `run` returns null when an update is already running.
   selfUpdate?: { status: () => Promise<SelfUpdateStatus>; run: () => Promise<{ ok: true } | null> };
@@ -351,7 +352,7 @@ export function createApp(d: ApiDeps): Hono {
   });
   app.route("/api/live-activities", liveActivitiesRoutes(d.db, d.liveActivities));
   registerThreadRoutes(app, d.links && d.threads && d.bus && d.inbox
-    ? { db: d.db, mgr: d.mgr, links: d.links, threads: d.threads, bus: d.bus, inbox: d.inbox } : null);
+    ? { db: d.db, mgr: d.mgr, links: d.links, threads: d.threads, bus: d.bus, inbox: d.inbox, switcher: d.switcher } : null);
 
   // The git proxy MUST be registered first: further down the file is a catch-all that
   // serves the dashboard SPA, and Hono matches in registration order — otherwise requests

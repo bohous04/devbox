@@ -108,10 +108,12 @@ export function usesProxy(a: AgentName): boolean {
  *  CLIProxyAPI/an upstream key on the VPS (unreachable from the VM, keys must not go into the VM); Antigravity
  *  depends on VPS-only login and the harvester (M10). Applies to create and to a live swap (I4). */
 /** Why a chat-runtime session cannot use this agent/host (null = it may). The chat bridge speaks only
- *  to the Claude and Codex harnesses and runs only in VPS containers. */
+ *  to the Claude and Codex harnesses (proxy profiles are the Claude harness with another upstream) and runs
+ *  only in VPS containers. */
 export function chatRuntimeBlock(a: AgentName, host: "vps" | "instabox"): string | null {
   if (host === "instabox") return "Chat sessions run only on the VPS";
-  if (a !== "claude" && a !== "codex") return `${AGENTS[a].label} is not available in chat sessions yet`;
+  const runtime = AGENTS[a].runtime;
+  if (runtime !== "claude" && runtime !== "codex") return `${AGENTS[a].label} is not available in chat sessions yet`;
   return null;
 }
 

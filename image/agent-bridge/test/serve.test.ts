@@ -14,6 +14,7 @@ import {
   ConfigError,
   EXIT_HARNESS_ENDED,
   EXIT_STOPPED,
+  harnessEnv,
   NO_THREAD_ERROR,
   RESTART_LOOP_ERROR,
   serve,
@@ -743,5 +744,34 @@ describe("launch env", () => {
       bridgeDir: "/run/devd/bridge",
       socketPath: "/run/devd/agent.sock",
     });
+  });
+
+  const proxyInputs = { DEVD_UPSTREAM_URL: "http://proxy:8317", DEVD_UPSTREAM_KEY: "k-secret", DEVD_AGENT_MODEL: "gpt-x" };
+
+  test("a proxy profile launches the claude harness with the profile env", () => {
+    const env = { DEVD_RUNTIME: "chat", DEVD_AGENT: "claude-gpt", CLAUDE_CONFIG_DIR: "/home/dev/.claude", ...proxyInputs };
+    const c = serveConfigFromEnv(env);
+    expect(c).toMatchObject({ harness: "claude", model: "gpt-x", account: null });
+    expect(c.targetEnv).toMatchObject({ ANTHROPIC_BASE_URL: "http://proxy:8317", ANTHROPIC_AUTH_TOKEN: "k-secret", ANTHROPIC_MODEL: "gpt-x", DEVBOX_PROXY_PROFILE: "1" });
+    expect(serveConfigFromEnv({ ...env, DEVD_AGENT: "claude" }).targetEnv).toEqual({});
+    // agent-launch.sh refuses a profile without key or model; so does the bridge, as a configuration error.
+    expect(() => serveConfigFromEnv({ ...env, DEVD_UPSTREAM_KEY: "" })).toThrow(ConfigError);
+    expect(() => serveConfigFromEnv({ ...env, DEVD_AGENT_MODEL: "" })).toThrow("no model");
+  });
+
+  test("the launch harness opens with the launch target env", async () => {
+    const f = fakeHarness();
+    const bridge = await serve({
+      bridgeDir: dir, socketPath, harness: "claude", account: null, model: "gpt-x", targetEnv: { ANTHROPIC_MODEL: "gpt-x" },
+      openHarness: (o) => f.open(o), resolveTarget: (t) => t, now: () => NOW, logError: () => {},
+    });
+    closers.push(() => bridge.close());
+    expect(f.opens[0].target).toEqual({ harness: "claude", account: null, model: "gpt-x", env: { ANTHROPIC_MODEL: "gpt-x" } });
+  });
+
+  test("a harness never inherits proxy profile keys or ANTHROPIC_API_KEY from the launch env", () => {
+    const launch = { PATH: "/bin", ANTHROPIC_BASE_URL: "http://old", ANTHROPIC_AUTH_TOKEN: "old", ANTHROPIC_API_KEY: "api", DEVBOX_PROXY_PROFILE: "1" };
+    expect(harnessEnv(launch, { CLAUDE_CONFIG_DIR: "/a" })).toEqual({ PATH: "/bin", CLAUDE_CONFIG_DIR: "/a" });
+    expect(harnessEnv(launch, { ANTHROPIC_BASE_URL: "http://new" })).toEqual({ PATH: "/bin", ANTHROPIC_BASE_URL: "http://new" });
   });
 });

@@ -21,6 +21,10 @@ case "${DEVD_AGENT:-}" in
       if [ -n "$pool_dir" ]; then export CLAUDE_CONFIG_DIR="$pool_dir"; fi
     fi
     ;;
+  claude-gpt|claude-grok|claude-gemini|claude-openrouter)
+    # Claude Code against a third-party upstream: no Anthropic account, so no lease (agent-launch takes none either);
+    # the image's CLAUDE_CONFIG_DIR stays. `agent-bridge serve` turns the DEVD_* inputs into the profile env.
+    ;;
   codex)
     # Installed next to this script, as for `co`.
     . "$(dirname -- "${BASH_SOURCE[0]}")/codex-account-env.sh"
@@ -46,7 +50,7 @@ case "${DEVD_AGENT:-}" in
     export CODEX_HOME=$codex_shadow CODEX_SQLITE_HOME=$codex_shadow/sqlite DEVD_CODEX_ACCOUNT_ID=$codex_id
     ;;
   *)
-    echo "agent-bridge-launch: unknown DEVD_AGENT \"${DEVD_AGENT:-}\" (chat sessions support claude and codex)" >&2
+    echo "agent-bridge-launch: unknown DEVD_AGENT \"${DEVD_AGENT:-}\" (chat sessions support claude, codex and the claude proxy profiles)" >&2
     exit 2
     ;;
 esac

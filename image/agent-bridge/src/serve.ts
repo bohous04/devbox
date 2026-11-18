@@ -9,6 +9,7 @@ import type { BackgroundWork, BridgeEvent, UsageBaseline } from "./events";
 import { DEFAULT_SOCKET } from "./mcp";
 import { APPENDED_SYSTEM_PROMPT, claudeMcpServers, codexMcpArgs } from "./prompts";
 import type { BridgeCommand, HandoffDelivery, SwitchTarget } from "./protocol";
+import { INHERITED_STRIP, isProxyProfile, proxyProfileEnv } from "./proxyProfile";
 import { startServer } from "./server";
 import { loadState, saveState, type BridgeState, type PersistedTarget } from "./state";
 import { DeclaredWaits } from "./waits";
@@ -55,6 +56,8 @@ export interface ServeOptions {
   harness: Harness;
   account: string | null;
   model: string | null;
+  /** Env of the launch harness (a proxy profile's upstream); none for a subscription launch. */
+  targetEnv?: Record<string, string>;
   openHarness: OpenHarness;
   /** Checks a switch target's account is usable and returns it with the env its harness needs; throws if not. */
   resolveTarget: (t: SwitchTarget) => SwitchTarget;
@@ -151,6 +154,8 @@ function fileSize(p: string): number {
 
 export interface ServeConfig {
   harness: Harness;
+  /** The launch harness's own env: a proxy profile's (DEVD_AGENT=claude-gpt, …), else empty. */
+  targetEnv: Record<string, string>;
   /** CLAUDE_CONFIG_DIR or CODEX_HOME. */
   configHome: string;
   account: string | null;
@@ -161,13 +166,23 @@ export interface ServeConfig {
 
 export function serveConfigFromEnv(env: Env): ServeConfig {
   if (env.DEVD_RUNTIME !== "chat") throw new ConfigError(`agent-bridge serve needs DEVD_RUNTIME=chat (got ${JSON.stringify(env.DEVD_RUNTIME ?? null)})`);
-  const harness = env.DEVD_AGENT;
-  if (harness !== "claude" && harness !== "codex") throw new ConfigError(`DEVD_AGENT must be claude or codex (got ${JSON.stringify(harness ?? null)})`);
+  const agent = env.DEVD_AGENT;
+  // A proxy profile is Claude Code against another upstream: the claude harness with the profile's env.
+  const harness = isProxyProfile(agent) ? "claude" : agent;
+  if (harness !== "claude" && harness !== "codex") {
+    throw new ConfigError(`DEVD_AGENT must be claude, codex or a proxy profile (got ${JSON.stringify(agent ?? null)})`);
+  }
+  let targetEnv: Record<string, string> = {};
+  if (isProxyProfile(agent)) {
+    try { targetEnv = proxyProfileEnv(agent, env); }
+    catch (e) { throw new ConfigError(e instanceof Error ? e.message : String(e)); }
+  }
   const homeVar = harness === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
   const configHome = env[homeVar];
   if (!configHome) throw new ConfigError(`${homeVar} is not set`);
   return {
     harness,
+    targetEnv,
     configHome,
     account: accountFromEnv(harness, env),
     model: env.DEVD_AGENT_MODEL ? env.DEVD_AGENT_MODEL : null,
@@ -176,11 +191,19 @@ export function serveConfigFromEnv(env: Env): ServeConfig {
   };
 }
 
+/** The env a harness process starts with: the launch env without anything a proxy profile sets (and without
+ *  ANTHROPIC_API_KEY), overlaid with the target's env. */
+export function harnessEnv(launchEnv: Env, targetEnv: Record<string, string>): Env {
+  const env: Env = { ...launchEnv };
+  for (const k of INHERITED_STRIP) delete env[k];
+  return { ...env, ...targetEnv };
+}
+
 /** Opens the target's harness on the launch env overlaid with the target's env; the bridge's own process.env
  *  is never changed, so one harness's account env cannot leak into the other's. */
 function harnessOpener(launchEnv: Env, logError: (msg: string) => void): OpenHarness {
   return (o) => {
-    const env: Env = { ...launchEnv, ...o.target.env };
+    const env = harnessEnv(launchEnv, o.target.env);
     if (o.target.harness === "codex") {
       if (!env.CODEX_HOME) throw new Error("CODEX_HOME is not set for the Codex harness");
       return openCodexSession({
@@ -260,7 +283,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   // A persisted target whose secret env values were dropped cannot be opened until devd sends it again.
   const awaitingTarget = state.target !== null && state.target.droppedEnvKeys.length > 0;
   let current: SwitchTarget | null = state.target === null
-    ? { harness: o.harness, account: o.account, model: o.model, env: {} }
+    ? { harness: o.harness, account: o.account, model: o.model, env: o.targetEnv ?? {} }
     : awaitingTarget ? null : { harness: state.target.harness, account: state.target.account, model: state.target.model, env: state.target.env };
   // Interrupted and queued runs of the previous bridge wait for a harness: from the start, or the next switchTarget.
   let recoveryPending = true;

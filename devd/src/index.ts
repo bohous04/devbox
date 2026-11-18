@@ -74,6 +74,7 @@ import { DEFAULT_CONTROL_ROOT, DEFAULT_DEVD_URL, DEFAULT_OPENROUTER_URL, Session
 import { BridgeLinks } from "./bridgeLink";
 import { ThreadStore } from "./threadStore";
 import { ChatHub } from "./chatHub";
+import { ChatSwitch } from "./chatSwitch";
 import { EventBus } from "./eventBus";
 import { Inbox } from "./sessionInbox";
 import { chatAttention, chatBusy } from "./attention";
@@ -415,6 +416,7 @@ const bridgeLinks = new BridgeLinks({
   onEvent: (id, e) => {
     bus.publish(`thread:${id}`, e);
     chatHub.onEvent(id, e, () => chatSnapshot(id));
+    chatSwitch.onEvent(id, e);
     inbox.changed(id);
   },
   onStatus: (id, s) => {
@@ -426,6 +428,7 @@ const bridgeLinks = new BridgeLinks({
 const releaseThread = (id: string) => {
   bridgeLinks.drop(id);
   chatHub.drop(id);
+  chatSwitch.drop(id);
   threadStores.get(id)?.close();
   threadStores.delete(id);
   // Dropping a link fires no status callback: the inbox learns of the stop here (an ending session is removed).
@@ -835,6 +838,17 @@ const accountSwitchDeps = () => ({
   inFlight: accountSwitchInFlight,
 });
 
+// Chat sessions: model/account/harness switching through the agent bridge (late-bound into the link callbacks
+// above; no bridge event arrives before startup finishes). Account choice and profile attachment as accountSwitch.
+const chatSwitch = new ChatSwitch({
+  db, links: bridgeLinks, threads: threadStore,
+  claudePool: () => resolveAccountPool(freshCfg().settings),
+  codexAccounts,
+  ensureClaudeProfile: accountSwitchDeps().ensureProfile,
+  proxyInputs: (a) => mgr.proxyEnvFor(a),
+  now: () => Date.now(),
+});
+
 // Live agent (harness) swap: shares `inFlight` with accountSwitch — both operations
 // restart the same panels and concurrency on one session would discard each other's
 // in-progress turns. proxyEnvFor goes through SessionManager so that the key/model/window
@@ -985,7 +999,7 @@ const apiDeps: ApiDeps = {
     },
   },
   agentEvents, liveActivities, gitea, spawnPty: realSpawnPty, scheduler, critic, codexAuth,
-  links: bridgeLinks, threads: threadStore, bus, inbox,
+  links: bridgeLinks, threads: threadStore, bus, inbox, switcher: chatSwitch,
   codexUsage: { view: () => buildCodexView(db) },
   codexAccounts,
   codexSessionAccounts: new CodexSessionAccounts({
