@@ -397,11 +397,12 @@ const bridgeLinks = new BridgeLinks({
   controlDir: (id) => join(controlRoot, id),
   store: threadStore,
   // TODO(Task 11): the SSE thread stream consumes these too.
-  onEvent: (id, e) => chatHub.onEvent(id, e, chatSnapshot(id)),
-  onStatus: (id, s) => chatHub.onStatus(id, s),
+  onEvent: (id, e) => chatHub.onEvent(id, e, () => chatSnapshot(id)),
+  onStatus: (id, s) => chatHub.onStatus(id, s, () => chatSnapshot(id)),
 });
 const releaseThread = (id: string) => {
   bridgeLinks.drop(id);
+  chatHub.drop(id);
   threadStores.get(id)?.close();
   threadStores.delete(id);
 };

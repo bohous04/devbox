@@ -1,4 +1,4 @@
-import type { BridgeEvent, LinkStatus, LoggedEvent, RequestKind, ThreadSnapshot } from "../../shared/thread";
+import type { LinkStatus, LoggedEvent, RequestKind, ThreadSnapshot } from "../../shared/thread";
 import type { AgentEventHub, HookMeta } from "./agentEvents";
 import type { LinkState } from "./attention";
 import type { SessionRow } from "./db";
@@ -6,21 +6,25 @@ import type { SessionRow } from "./db";
 /** The tool name the hub's QUESTION_TOOLS treats as "waiting for input"; questions and plans pose as it. */
 const QUESTION_TOOL = "AskUserQuestion";
 
-/** Bridge events with nothing to tell the hub (the thread store keeps them). */
-const NOT_FOR_HUB = new Set<BridgeEvent["type"]>(["thread.native", "run.queued", "message.delta", "message.final", "bridge.started"]);
-
 interface ChatState {
   /** The run whose `stop` was deferred by holding work; its `stop` is re-sent once, when holding drops to 0. */
   heldRun: string | null;
   /** Open requests by id, so their resolution can clear the hub's wait for the same call. */
   requests: Map<string, { runId: string; kind: RequestKind }>;
+  /** Ids of subagent background work the hub was told about (its `inflight` counter). */
+  subagents: Set<string>;
   link: LinkState | null;
+  /** The held run and subagents were taken over from the store at the first connect (devd restart). */
+  seeded: boolean;
 }
+
+const holdingCount = (t: ThreadSnapshot) => t.background.filter((w) => w.holding).length;
+const subagentIds = (t: ThreadSnapshot) => new Set(t.background.filter((w) => w.kind === "subagent").map((w) => w.id));
 
 /** Feeds a chat session's bridge events into the AgentEventHub as the hook events a tmux session sends, so
  *  notify_log, Live Activity, stuck detection and notifications keep working. `promptId` is the run id: the hub
- *  then drops events of an older run as stale. State is in memory: after a devd restart the hub starts from zero
- *  as well. */
+ *  then drops events of an older run as stale. State is in memory; what a "done" depends on (a completion held by
+ *  background work, running subagents) is taken over from the thread store at the first connect after a restart. */
 export class ChatHub {
   private state = new Map<string, ChatState>();
   private unknownLogged = new Set<string>();
@@ -40,14 +44,27 @@ export class ChatHub {
   private stateOf(sessionId: string): ChatState {
     let st = this.state.get(sessionId);
     if (!st) {
-      st = { heldRun: null, requests: new Map(), link: null };
+      st = { heldRun: null, requests: new Map(), subagents: new Set(), link: null, seeded: false };
       this.state.set(sessionId, st);
     }
     return st;
   }
 
-  onStatus(sessionId: string, status: LinkStatus): void {
-    this.stateOf(sessionId).link = { status, since: this.now() };
+  /** `snapshot` is read only at the first `connected` of a session: before the bridge replays what devd missed. */
+  onStatus(sessionId: string, status: LinkStatus, snapshot: () => ThreadSnapshot): void {
+    const st = this.stateOf(sessionId);
+    st.link = { status, since: this.now() };
+    if (status !== "connected" || st.seeded) return;
+    st.seeded = true;
+    const t = snapshot();
+    const last = t.runs.at(-1);
+    if (last?.status === "completed" && holdingCount(t) > 0) st.heldRun = last.runId;
+    const s = this.d.session(sessionId);
+    if (!s) {
+      this.log(`chat hub: no session ${sessionId} to restore subagents for`);
+      return;
+    }
+    for (const id of subagentIds(t)) this.subagentStart(s, st, id);
   }
 
   /** The link while the session runs; null when it does not (devd dropped the link on purpose) or before the
@@ -57,10 +74,45 @@ export class ChatHub {
     return this.state.get(sessionId)?.link ?? null;
   }
 
-  /** `t` is the store's snapshot after `e` was applied; only `background` is read. */
-  onEvent(sessionId: string, e: LoggedEvent, t: ThreadSnapshot): void {
+  /** The session stopped or ended: its next link starts from the store again. */
+  drop(sessionId: string): void {
+    this.state.delete(sessionId);
+  }
+
+  private subagentStart(s: SessionRow, st: ChatState, id: string) {
+    st.subagents.add(id);
+    this.d.hub.handle(s, "subagent_start");
+  }
+
+  /** `snapshot` returns the store's state after `e` was applied; it is read only for events the hub uses. */
+  onEvent(sessionId: string, e: LoggedEvent, snapshot: () => ThreadSnapshot): void {
     const ev = e.event;
-    if (NOT_FOR_HUB.has(ev.type)) return;
+    switch (ev.type) {
+      case "thread.native":
+      case "run.queued":
+      case "message.delta":
+      case "message.final":
+      case "bridge.started":
+        return; // nothing for the hub; the thread store keeps them
+      case "run.started":
+      case "tool.started":
+      case "tool.finished":
+      case "request.opened":
+      case "request.resolved":
+      case "run.completed":
+      case "background.changed":
+      case "run.failed":
+      case "run.interrupted":
+        break;
+      default: {
+        const unknown: never = ev;
+        const type = String((unknown as { type?: unknown }).type);
+        if (this.unknownLogged.has(type)) return;
+        this.unknownLogged.add(type);
+        this.log(`chat hub: ignoring unknown event type ${type}`);
+        return;
+      }
+    }
     const s = this.d.session(sessionId);
     if (!s) {
       this.log(`chat hub: no session ${sessionId} for event ${ev.type} (seq ${e.seq})`);
@@ -68,11 +120,12 @@ export class ChatHub {
     }
     const st = this.stateOf(sessionId);
     const hub = this.d.hub;
-    const holding = t.background.filter((w) => w.holding).length;
     switch (ev.type) {
       case "run.started":
         st.heldRun = null;
         hub.handle(s, "user_prompt_submit", { promptId: ev.runId });
+        // A new turn resets the hub's subagent counter; subagents still running keep counting.
+        for (let i = 0; i < st.subagents.size; i++) hub.handle(s, "subagent_start");
         return;
       case "tool.started":
         hub.handle(s, "tool_start", { promptId: ev.runId, toolName: ev.tool, toolCallId: ev.itemId });
@@ -82,9 +135,10 @@ export class ChatHub {
         return;
       case "request.opened": {
         st.requests.set(ev.requestId, { runId: ev.runId, kind: ev.kind });
-        const meta: HookMeta = { promptId: ev.runId, toolCallId: ev.requestId };
+        // The hub turns `question` into the Live Activity reason ("Allow: …" for a permission).
+        const meta: HookMeta = { promptId: ev.runId, toolCallId: ev.requestId, question: ev.prompt };
         if (ev.kind === "approval") hub.handle(s, "permission_request", meta);
-        else hub.handle(s, "tool_start", { ...meta, toolName: QUESTION_TOOL, question: ev.prompt });
+        else hub.handle(s, "tool_start", { ...meta, toolName: QUESTION_TOOL });
         return;
       }
       case "request.resolved": {
@@ -96,17 +150,28 @@ export class ChatHub {
         hub.handle(s, "tool_complete", r.kind === "approval" ? meta : { ...meta, toolName: QUESTION_TOOL });
         return;
       }
-      case "run.completed":
+      case "run.completed": {
+        const holding = holdingCount(snapshot());
         st.heldRun = holding > 0 ? ev.runId : null;
         hub.handle(s, "stop", { promptId: ev.runId, backgroundTasks: holding });
         return;
-      case "background.changed":
-        if (st.heldRun !== null && holding === 0) {
+      }
+      case "background.changed": {
+        const t = snapshot();
+        const now = subagentIds(t);
+        for (const id of now) if (!st.subagents.has(id)) this.subagentStart(s, st, id);
+        for (const id of st.subagents) {
+          if (now.has(id)) continue;
+          st.subagents.delete(id);
+          hub.handle(s, "subagent_stop");
+        }
+        if (st.heldRun !== null && holdingCount(t) === 0) {
           const runId = st.heldRun;
           st.heldRun = null;
           hub.handle(s, "stop", { promptId: runId, backgroundTasks: 0 });
         }
         return;
+      }
       case "run.failed":
         st.heldRun = null;
         hub.handle(s, "stop_failure", { promptId: ev.runId });
@@ -115,12 +180,6 @@ export class ChatHub {
         st.heldRun = null;
         hub.handle(s, "interrupted", { promptId: ev.runId });
         return;
-      default: {
-        const type = String((ev as { type?: unknown }).type);
-        if (this.unknownLogged.has(type)) return;
-        this.unknownLogged.add(type);
-        this.log(`chat hub: ignoring unknown event type ${type}`);
-      }
     }
   }
 }

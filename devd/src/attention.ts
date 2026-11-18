@@ -21,22 +21,32 @@ export function chatAttention(t: ThreadSnapshot, link: LinkState | null, now: nu
   }
   // Before "working": a run the store still calls running may be dead with the bridge.
   if (link?.status === "disconnected") return { section: "needs_you", reason: "disconnected", since: link.since };
+  // No link = the session is not running: a run the store still calls running or queued, and background work,
+  // died with the container (the bridge resolves them on its next start), so none of it is work in progress.
+  const live = link !== null;
   const running = t.runs.find((r) => r.status === "running");
-  if (running) return { section: "working", reason: "running", since: required(running.startedAt, "startedAt", running) };
   const queued = t.runs.find((r) => r.status === "queued");
-  if (queued) return { section: "working", reason: "queued", since: required(queued.queuedAt, "queuedAt", queued) };
+  if (running) {
+    const since = required(running.startedAt, "startedAt", running);
+    return live ? { section: "working", reason: "running", since } : { section: "idle", reason: null, since };
+  }
+  if (queued) {
+    const since = required(queued.queuedAt, "queuedAt", queued);
+    return live ? { section: "working", reason: "queued", since } : { section: "idle", reason: null, since };
+  }
 
   const last = t.runs.at(-1);
-  const holding = t.background.some((w) => w.holding);
+  const holding = live && t.background.some((w) => w.holding);
   if (!last) {
     if (holding) throw new Error("holding background work without any run: is the snapshot partial?");
     return { section: "idle", reason: null, since: 0 };
   }
   const endedAt = required(last.endedAt, "endedAt", last);
-  if (last.status === "failed") return { section: "needs_you", reason: "failed", since: endedAt };
+  const unseen = t.seenSeq < required(last.endedSeq, "endedSeq", last);
+  if (last.status === "failed" && unseen) return { section: "needs_you", reason: "failed", since: endedAt };
   if (holding) return { section: "working", reason: "background", since: endedAt };
   if (now - endedAt < WORKING_GRACE_MS) return { section: "working", reason: "running", since: endedAt };
-  if (last.status === "completed" && t.seenSeq < required(last.endedSeq, "endedSeq", last)) {
+  if (last.status === "completed" && unseen) {
     return { section: "needs_you", reason: "completed", since: endedAt };
   }
   return { section: "idle", reason: null, since: endedAt };

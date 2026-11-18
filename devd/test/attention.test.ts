@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { afterEach, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chatAttention, chatBusy, tmuxAttention, WORKING_GRACE_MS, type LinkState } from "../src/attention";
@@ -8,8 +8,12 @@ import type { AgentLiveSnapshot } from "../src/agentEvents";
 import type { BackgroundWork, BridgeEvent } from "../../shared/thread";
 
 // Events are stamped ts = 1000 * seq, so `now` below is easy to place relative to a run's end.
+const cleanups: (() => void)[] = [];
+afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
 function thread(events: BridgeEvent[]) {
-  const s = ThreadStore.open(mkdtempSync(join(tmpdir(), "attention-")), "dev-a-b-1");
+  const dir = mkdtempSync(join(tmpdir(), "attention-"));
+  const s = ThreadStore.open(dir, "dev-a-b-1");
+  cleanups.push(() => { s.close(); rmSync(dir, { recursive: true, force: true }); });
   events.forEach((event, i) => s.apply({ seq: i + 1, ts: 1000 * (i + 1), event }));
   return s;
 }
@@ -66,10 +70,21 @@ test("running and queued runs are working", () => {
     .toEqual({ section: "working", reason: "queued", since: 1000 });
 });
 
-test("a failed last run is needs-you even after it was seen", () => {
+test("a failed last run is needs-you until it was seen, then idle", () => {
   const s = thread([started("r1"), { type: "run.failed", runId: "r1", error: "boom" }]);
-  s.markSeen(s.lastSeq());
   expect(chatAttention(s.snapshot(), connected, LATER)).toEqual({ section: "needs_you", reason: "failed", since: 2000 });
+  s.markSeen(s.lastSeq());
+  expect(chatAttention(s.snapshot(), connected, LATER)).toEqual({ section: "idle", reason: null, since: 2000 });
+});
+
+test("a session that is not running is not working on runs or background work the store still holds", () => {
+  const running = thread([started("r1"), { type: "background.changed", work: [wakeup] }]);
+  expect(chatAttention(running.snapshot(), null, LATER)).toEqual({ section: "idle", reason: null, since: 1000 });
+  const queued = thread([{ type: "run.queued", runId: "r1", text: "hi", attachments: [] }]);
+  expect(chatAttention(queued.snapshot(), null, LATER)).toEqual({ section: "idle", reason: null, since: 1000 });
+  const held = thread([started("r1"), { type: "background.changed", work: [wakeup] }, completed("r1")]);
+  held.markSeen(held.lastSeq());
+  expect(chatAttention(held.snapshot(), null, LATER)).toEqual({ section: "idle", reason: null, since: 3000 });
 });
 
 test("an interrupted run and an empty thread are idle", () => {

@@ -65,7 +65,8 @@ export interface HookMeta {
   // (see detailJson) — the critic however gets this untruncated text directly from api.ts.
   prompt?: string;
   toolName?: string; toolCallId?: string; promptId?: string;
-  // The question text (only tool_start of a question tool) — the reason for waiting in the Live Activity.
+  // The question text (tool_start of a question tool; a chat approval's prompt on permission_request) — the reason
+  // for waiting in the Live Activity. Hooks never send it with permission_request.
   question?: string;
   // Number of subagent/cloud session items in `background_tasks` from the Stop payload (devd-hook.sh
   // has already filtered them to running/pending). `teammate` is DELIBERATELY NOT among them — its items
@@ -560,10 +561,12 @@ export class AgentEventHub {
         log("armed", st.mainAgentSessionId === null ? "unknown-main-id" : undefined);
         return;
       }
-      case "permission_request":
-        wait(tool ? `Allow: ${tool}` : GENERIC_REASON);
+      case "permission_request": {
+        const q = meta.question?.trim();
+        wait(q ? clipReason(`Allow: ${q}`) : tool ? `Allow: ${tool}` : GENERIC_REASON);
         this.blocked(st, "permission", now, log);
         return;
+      }
       case "notification": {
         const nt = meta.notificationType ?? "";
         if (["elicitation_response", "elicitation_complete", "quota_auto_resume_fired"].includes(nt)) {
