@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { FILE_MARK } from "./meter.ts";
 import {
   assertAccountDisabled, readUsage, runBridge, runTui, measureRun,
   type Deps, type Exec, type ExecResult, type RunHandle,
 } from "./runners.ts";
 
 const fx = (n: string) => readFileSync(new URL(`./fixtures/${n}`, import.meta.url), "utf8");
+const main = (body: string) => `${FILE_MARK}/c/projects/-workspace/s.jsonl\n${body}\n`;
 const ok = (stdout = ""): ExecResult => ({ code: 0, stdout, stderr: "" });
 const ACCT = "acct-test";
 const handle: RunHandle = { name: "metering-tui-1-abc", cloneDir: "/clone", account: ACCT };
@@ -72,7 +74,7 @@ describe("runTui", () => {
     return async (c) => {
       seen.push(c);
       const joined = c.join(" ");
-      if (joined.includes("projects")) return ok(polls[Math.min(i++, polls.length - 1)]);
+      if (joined.includes("projects")) return ok(main(polls[Math.min(i++, polls.length - 1)]));
       return ok();
     };
   }
@@ -93,6 +95,13 @@ describe("runTui", () => {
     expect(launch.join(" ")).toContain(
       `claude --dangerously-skip-permissions --model claude-opus-5-5 "$(cat /task.md)"`);
     expect(launch.join(" ")).not.toContain("remote-control");
+  });
+  test("TUI usage includes subagent transcripts", async () => {
+    const both = main(fx("transcript-end-turn.jsonl")) +
+      `${FILE_MARK}/c/projects/-workspace/s/subagents/agent-1.jsonl\n${fx("transcript-subagent.jsonl")}\n`;
+    const d = deps(async (c) => c.join(" ").includes("projects") ? ok(both) : ok());
+    const r = await runTui(d, handle, "claude-opus-5-5");
+    expect(r.usage).toEqual({ input: 118, output: 112, cacheCreation: 450, cacheRead: 3450 });
   });
   test("a transcript that keeps growing is not done yet", async () => {
     const done = fx("transcript-end-turn.jsonl");

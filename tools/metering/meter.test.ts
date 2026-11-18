@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { gate, transcriptUsage, validateRun, weightedTokens, type RunRecord } from "./meter.ts";
+import { FILE_MARK, gate, sessionUsage, transcriptUsage, validateRun, weightedTokens, type RunRecord } from "./meter.ts";
 
 const fx = (n: string) => readFileSync(new URL(`./fixtures/${n}`, import.meta.url), "utf8");
 
@@ -65,6 +65,31 @@ describe("transcriptUsage", () => {
   test("a half-written last line is ignored", () => {
     const t = transcriptUsage(fx("transcript-in-progress.jsonl") + '{"type":"assis');
     expect(t.done).toBe(false);
+  });
+});
+
+describe("sessionUsage", () => {
+  const section = (path: string, body: string) => `${FILE_MARK}${path}\n${body}\n`;
+  const proj = "/c/projects/-workspace";
+
+  test("sums the main transcript and subagent transcripts; done and model come from main", () => {
+    const out =
+      section(`${proj}/sess.jsonl`, fx("transcript-end-turn.jsonl")) +
+      section(`${proj}/sess/subagents/agent-1.jsonl`, fx("transcript-subagent.jsonl"));
+    const s = sessionUsage(out);
+    expect(s.done).toBe(true);
+    expect(s.model).toBe("claude-opus-5-5");
+    // main 110/100/400/2400 + subagent (s1 once, s2) 8/12/50/1050
+    expect(s.usage).toEqual({ input: 118, output: 112, cacheCreation: 450, cacheRead: 3450 });
+  });
+  test("a finished subagent does not make an unfinished main session done", () => {
+    const out =
+      section(`${proj}/sess.jsonl`, fx("transcript-in-progress.jsonl")) +
+      section(`${proj}/sess/subagents/agent-1.jsonl`, fx("transcript-subagent.jsonl"));
+    expect(sessionUsage(out).done).toBe(false);
+  });
+  test("no transcript yet is not done", () => {
+    expect(sessionUsage("").done).toBe(false);
   });
 });
 

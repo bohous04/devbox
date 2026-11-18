@@ -60,6 +60,30 @@ export function transcriptUsage(jsonl: string): { done: boolean; usage: TokenUsa
   return { done: lastStop === "end_turn", usage, model };
 }
 
+/** Poll output: one `FILE_MARK<path>` line per transcript, followed by its content. */
+export const FILE_MARK = "##FILE ";
+
+/** Subagent transcripts are separate files (`<session>/subagents/*.jsonl`); their usage counts
+ *  against the same window and the bridge sums it, so the TUI side must too. Completion and
+ *  model are judged on the main session only. */
+export function sessionUsage(polled: string): { done: boolean; usage: TokenUsage; model: string | null; lines: number } {
+  const files: { path: string; body: string }[] = [];
+  for (const line of polled.split("\n")) {
+    if (line.startsWith(FILE_MARK)) files.push({ path: line.slice(FILE_MARK.length), body: "" });
+    else if (files.length) files[files.length - 1].body += line + "\n";
+  }
+  const usage: TokenUsage = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
+  let lines = 0;
+  for (const f of files) {
+    const u = transcriptUsage(f.body).usage;
+    usage.input += u.input; usage.output += u.output;
+    usage.cacheCreation += u.cacheCreation; usage.cacheRead += u.cacheRead;
+    lines += f.body.split("\n").filter((l) => l.trim()).length;
+  }
+  const main = transcriptUsage(files.filter((f) => !f.path.includes("/subagents/")).map((f) => f.body).join("\n"));
+  return { done: main.done, usage, model: main.model, lines };
+}
+
 function pctPerMTok(runs: RunRecord[], path: "tui" | "bridge"): { rate: number; delta: number } {
   const ok = runs.filter((r) => r.ok && r.path === path && r.usage);
   if (ok.length === 0) throw new Error(`no valid ${path} runs; cannot compute the gate`);

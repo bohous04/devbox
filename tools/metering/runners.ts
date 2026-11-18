@@ -1,7 +1,7 @@
 import { accessTokenExpired, parseCredentials } from "../../devd/src/accountTokens.ts";
 import { fetchUsage } from "../../devd/src/accountUsage.ts";
 import type { TokenUsage } from "../../image/agent-bridge/src/events.ts";
-import { transcriptUsage, validateRun, type RunRecord, type UsageRead } from "./meter.ts";
+import { FILE_MARK, sessionUsage, validateRun, type RunRecord, type UsageRead } from "./meter.ts";
 
 export interface ExecResult { code: number; stdout: string; stderr: string }
 /** Every docker/git/tmux side effect goes through this so tests never touch them. */
@@ -82,14 +82,13 @@ export async function runTui(d: Deps, h: RunHandle, model: string): Promise<RunO
   let lastChange = start;
   // The volume keeps transcripts of earlier runs; only files newer than the marker are ours.
   const poll = execIn(h, "sh", "-c",
-    `find "$CLAUDE_CONFIG_DIR/projects" -maxdepth 2 -name '*.jsonl' -newer ${MARKER} -print0 | xargs -0 -r cat`);
+    `find "$CLAUDE_CONFIG_DIR/projects" -name '*.jsonl' -newer ${MARKER} -print0 | xargs -0 -r -n1 sh -c 'echo "${FILE_MARK}$0"; cat "$0"'`);
   for (;;) {
     await d.sleep(POLL_MS);
     const r = await d.exec(poll);
     if (r.code !== 0) throw new Error(`transcript poll failed (exit ${r.code}): ${r.stderr.trim()}`);
-    const n = r.stdout.split("\n").filter((l) => l.trim()).length;
-    if (n !== lines) { lines = n; lastChange = d.now(); }
-    const t = transcriptUsage(r.stdout);
+    const t = sessionUsage(r.stdout);
+    if (t.lines !== lines) { lines = t.lines; lastChange = d.now(); }
     if (t.done && d.now() - lastChange >= QUIET_MS) {
       if (!(await checkOutput(d, h))) return { ok: false, reason: "no-output", usage: t.usage, model: t.model };
       return { ok: true, usage: t.usage, model: t.model };
