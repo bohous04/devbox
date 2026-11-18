@@ -50,6 +50,8 @@ function deps(over: Partial<UpkeepDeps> = {}): UpkeepDeps {
     exec: async () => ok(),
     host: async () => ok(),
     turnInProgress: () => false,
+    isChatWorking: () => false,
+    restartChatAgent: async () => {},
     notify: () => {},
     sleep: async () => {},
     repoDir: "/opt/vps-dev-infra",

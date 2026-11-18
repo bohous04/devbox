@@ -5,7 +5,7 @@ import type { Database } from "bun:sqlite";
 import { chmodSync, chownSync, existsSync, mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { liveAgentPresent, staleAccountMounts } from "./accountMountRepair";
-import { specFor, usesProxy, type Upstream } from "./agents";
+import { chatRuntimeBlock, specFor, usesProxy, type Upstream } from "./agents";
 import { parseProcTree, PS_TREE_CMD } from "./ccUpkeep";
 import { insteadOfEnv } from "./gitProxy";
 import { dindCleanupPlan, dindEnsurePlan, dindName, dindNetwork, dindNetworkCreate, dindSubnetCandidates, dockerHostFor } from "./dind";
@@ -141,6 +141,12 @@ export function credentialMounts(ghConfigDir?: string, giteaTokensPath?: string)
 
 // Which agent will run: explicit choice (picker, API) → the remembered choice for the repo
 // (repo_prefs) → claude. Pure, so it can be tested without docker.
+/** The runtime of a row read from the DB (always set there; optional in the type only for insert literals). */
+export function storedRuntime(s: SessionRow): SessionRuntime {
+  if (!s.runtime) throw new Error(`session ${s.id} has no runtime`);
+  return s.runtime;
+}
+
 export function resolveAgent(explicit: AgentName | undefined, remembered: AgentName | null | undefined): AgentName {
   return explicit ?? remembered ?? "claude";
 }
@@ -692,7 +698,7 @@ export class SessionManager {
   // does not have it and gets exactly the same mounts as before.
   // `remote` = the container will run on an InstaBox VM: no dind (R2), no prod-db keys, no
   // local mkdir of transcripts and with a devd address reachable from the VM (Tailscale).
-  private async runOpts(id: string, ws: string, portBase: number, project: string, repo: string, agent: AgentName, bare?: string | null, remote?: { devdUrl: string }): Promise<RunOpts> {
+  private async runOpts(id: string, ws: string, portBase: number, project: string, repo: string, agent: AgentName, runtime: SessionRuntime, bare?: string | null, remote?: { devdUrl: string }): Promise<RunOpts> {
     const projectsDir = remote ? this.claudeProjectsDir(id) : await this.ensureClaudeProjectsDir(id);
     const prod = remote ? [] : await this.prodMounts(project, repo);
     const dind = !!this.d.dind && !remote;
@@ -723,9 +729,8 @@ export class SessionManager {
         // The agent default for this container: read by agent-launch when the tmux
         // session starts, when the container restarts and in the web terminal.
         DEVD_AGENT: agent,
-        // How the agent runs in this container (tmux pane or chat bridge). From the session row, which
-        // every (re)create path has already inserted; fixed at creation.
-        DEVD_RUNTIME: getSession(this.d.db, id)?.runtime ?? "tmux",
+        // How the agent runs in this container (tmux pane or chat bridge); fixed at session creation.
+        DEVD_RUNTIME: runtime,
         DEVD_URL: devdUrl,
         CLAUDE_CODE_ENABLE_TELEMETRY: "1",
         OTEL_METRICS_EXPORTER: "otlp",
@@ -740,7 +745,7 @@ export class SessionManager {
 
   /** RunOpts for an InstaBox session container: paths inside the VM, no dind, with a desktop. */
   async remoteRunOpts(id: string, portBase: number, project: string, repo: string, agent: AgentName, devdUrl: string): Promise<RunOpts> {
-    const base = await this.runOpts(id, IBX_PATHS.ws(id), portBase, project, repo, agent, null, { devdUrl });
+    const base = await this.runOpts(id, IBX_PATHS.ws(id), portBase, project, repo, agent, "tmux" /* InstaBox sessions are tmux-only (chatRuntimeBlock) */, null, { devdUrl });
     return toRemoteRunOpts(base, { id, controlDir: this.controlDir(id), claudeProjectsDir: this.claudeProjectsDir(id), ghConfigDir: this.d.ghConfigDir });
   }
 
@@ -798,10 +803,16 @@ export class SessionManager {
       throw new Error(`Unknown session ${t.sessionId} for ${t.folder}/${t.project}/${t.repo}`);
     }
     if (existing?.host === "instabox") return this.openInstabox(existing, t);
+    const agent = resolveAgent(t.agent, getRepoAgent(this.d.db, t.folder, t.project, t.repo));
+    // The stored runtime wins over the request: a chat session must not be handed an agent the chat
+    // bridge cannot run (given or remembered). Before any agent write or container action.
+    if (existing && storedRuntime(existing) === "chat") {
+      const blocked = chatRuntimeBlock(agent, "vps");
+      if (blocked) throw new Error(blocked);
+    }
     const observed: CanonicalWorkspaceContainer = existing ? await inspectCanonicalWorkspace(id) : { state: "missing" };
     const state = observed.state === "stopped" ? "exited" : observed.state;
 
-    const agent = resolveAgent(t.agent, getRepoAgent(this.d.db, t.folder, t.project, t.repo));
     if (t.agent) setRepoAgent(this.d.db, t.folder, t.project, t.repo, t.agent, this.now());
 
     // One `docker inspect` on the existing container — the env is read ONCE and serves
@@ -959,7 +970,7 @@ export class SessionManager {
           await removeContainer(id);
         }
         await this.ensureDind(id);
-        await runContainer(await this.runOpts(id, dir, existing.port_base, t.project, t.repo, agent, worktree ? bare : null));
+        await runContainer(await this.runOpts(id, dir, existing.port_base, t.project, t.repo, agent, storedRuntime(existing), worktree ? bare : null));
         // Audit log: an agent switch is always logged, even when the container was missing and would
         // have to be created again anyway — "agent-switch" carries more information than a plain "recreate".
         if (switching) logEvent(this.d.db, id, "agent-switch", { from: existing.agent ?? "claude", to: agent });
@@ -982,7 +993,7 @@ export class SessionManager {
     try {
       progress({ step: "container", detail: "waiting for the docker sidecar" });
       const [opts] = await Promise.all([
-        this.runOpts(id, dir, port_base, t.project, t.repo, agent, worktree ? bare : null),
+        this.runOpts(id, dir, port_base, t.project, t.repo, agent, row.runtime!, worktree ? bare : null),
         earlyDind ?? this.ensureDind(id),
       ]);
       progress({ step: "container", detail: "starting the container" });
@@ -1022,7 +1033,7 @@ export class SessionManager {
         await this.ensureOwned(ws); // git init ran as root → chown to dev (uid 1000)
         try {
           await this.ensureDind(id);
-          await runContainer(await this.runOpts(id, ws, port_base, project, repo, chosen));
+          await runContainer(await this.runOpts(id, ws, port_base, project, repo, chosen, "tmux" /* solo is tmux-only: the API refuses chat+solo */));
         } catch (e) {
           deleteSession(this.d.db, id);
           throw e;
@@ -1101,7 +1112,7 @@ export class SessionManager {
     await this.checkpointRecovery(id);
     await removeContainer(id);
     await this.ensureDind(id);
-    await runContainer(await this.runOpts(id, dir, s.port_base, s.project, s.repo, agent, s.worktree ? bare : null));
+    await runContainer(await this.runOpts(id, dir, s.port_base, s.project, s.repo, agent, storedRuntime(s), s.worktree ? bare : null));
     updateSession(this.d.db, id, { status: "running", last_active_at: this.now() });
     logEvent(this.d.db, id, "recreate", { reason });
     return getSession(this.d.db, id)!;
@@ -1185,7 +1196,7 @@ export class SessionManager {
         create: async s => {
           this.revokeShares(id); // this create() = a missing container is being created again
           await runContainer(await this.runOpts(id, workspace(s), s.port_base, s.project, s.repo,
-            s.agent ?? "claude", s.worktree ? barePath(this.d.root, s.folder, s.project, s.repo) : null));
+            s.agent ?? "claude", storedRuntime(s), s.worktree ? barePath(this.d.root, s.folder, s.project, s.repo) : null));
         },
         start: s => startContainer(s.container),
         ready: () => this.requireRecoveryReady(id),
@@ -1219,7 +1230,7 @@ export class SessionManager {
         create: async (row) => {
           this.revokeShares(id); // no-op if the session did not have a row yet (fresh Remote resume)
           await runContainer(await this.runOpts(id, route.cwd, row.port_base,
-            row.project, row.repo, row.agent ?? "codex", route.restore.bare));
+            row.project, row.repo, row.agent ?? "codex", storedRuntime(getSession(this.d.db, id)!) /* inserted before create */, route.restore.bare));
         },
         allocatePort: () => allocatePortBase(this.d.db, this.d.cfg.settings),
         insert: (row) => insertSession(this.d.db, row),
@@ -1301,7 +1312,7 @@ export class SessionManager {
         if (staleCanonicalMount) await removeStoppedWorkspaceContainer(observed);
         else await removeContainer(id);
         await this.ensureDind(id);
-        await runContainer(await this.runOpts(id, ws, s.port_base, s.project, s.repo, agent));
+        await runContainer(await this.runOpts(id, ws, s.port_base, s.project, s.repo, agent, storedRuntime(s)));
         logEvent(this.d.db, id, "recreate", { reason: staleCanonicalMount ? "canonical-workspace" : "proxy-env" });
       } else {
         await startContainer(id);

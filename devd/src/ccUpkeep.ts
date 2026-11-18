@@ -9,6 +9,7 @@
 import type { Database } from "bun:sqlite";
 import type { NotifyFn } from "./agentEvents";
 import type { Settings } from "./config";
+import { specFor } from "./agents";
 import { listSessions, logEvent, type SessionRow } from "./db";
 
 // `claude --version` returns "2.1.202 (Claude Code)", `npm view … version` a bare "2.1.220".
@@ -60,9 +61,8 @@ export interface UpkeepDeps {
   host: (cmd: string[], timeoutMs: number) => Promise<ExecResult>;
   turnInProgress: (sessionId: string) => boolean;
   // Chat sessions (runtime='chat') have no panes: the agent restart goes through the chat link.
-  // Both are needed for any chat session; a missing one is reported as a failed restart, not skipped.
-  isChatWorking?: (sessionId: string) => boolean;
-  restartChatAgent?: (sessionId: string) => Promise<void>;
+  isChatWorking: (sessionId: string) => boolean;
+  restartChatAgent: (sessionId: string) => Promise<void>;
   notify: NotifyFn;
   sleep: (ms: number) => Promise<void>;
   repoDir: string;   // /opt/vps-dev-infra — the image is built from here
@@ -910,12 +910,8 @@ export async function runCcUpkeep(deps: UpkeepDeps, only?: string[]): Promise<Up
       const have = cur.code === 0 ? parseCcVersion(cur.stdout) : null;
       let installed = false;
       const chat = s.runtime === "chat";
-      if (chat && (!deps.isChatWorking || !deps.restartChatAgent)) {
-        logEvent(deps.db, s.id, "cc_restart_failed", { reason: "chat-link-missing" });
-        continue;
-      }
       // Quiet = no pane busy, or for a chat the run is not active. Never probes panes for a chat.
-      const quiet = async () => chat ? !deps.isChatWorking!(s.id) : await isQuiet(deps, s);
+      const quiet = async () => chat ? !deps.isChatWorking(s.id) : await isQuiet(deps, s);
 
       // Install and restart are TWO independent conditions. The disk may have long been
       // up to date (upgraded by cc's auto-updater), and the panes still run old code.
@@ -971,14 +967,16 @@ export async function runCcUpkeep(deps: UpkeepDeps, only?: string[]): Promise<Up
       if (chat) {
         // Only after an install: with no panes there is no way to tell whether a running bridge lags
         // behind the binary, so a chat agent is restarted exactly when this run upgraded the binary.
-        if (!installed) continue;
+        // Only a Claude Code agent: a Codex chat is unaffected by a Claude Code install (as tmux only
+        // restarts panes running claude).
+        if (!installed || specFor(s.agent).runtime !== "claude") continue;
         if (!await quiet()) {
           res.skipped.push(s.id);
           logEvent(deps.db, s.id, "cc_skipped", { reason: "busy", phase: "restart", chat: true });
           continue;
         }
         try {
-          await deps.restartChatAgent!(s.id);
+          await deps.restartChatAgent(s.id);
         } catch (e) {
           console.error(`cc upkeep: chat agent restart failed in ${s.id}:`, e);
           logEvent(deps.db, s.id, "cc_restart_failed", { reason: "chat-restart-error", error: (e as Error).message });

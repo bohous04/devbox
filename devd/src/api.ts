@@ -993,6 +993,11 @@ export function createApp(d: ApiDeps): Hono {
         if (typeof body.sessionId !== "string" || body.fresh) return c.json({ error: "sessionId must be a string and cannot be combined with fresh" }, 400);
         const s = getSession(d.db, body.sessionId);
         if (!s || s.folder !== body.folder || s.project !== body.project || s.repo !== body.repo) return c.json({ error: `unknown session ${body.sessionId} for this repo` }, 404);
+        // The stored runtime wins over the body: a chat session never gets an agent chat cannot run.
+        if (s.runtime === "chat") {
+          const blocked = chatRuntimeBlock(resolveAgent(agent, getRepoAgent(d.db, body.folder, body.project, body.repo)), "vps");
+          if (blocked) return c.json({ error: blocked }, 400);
+        }
       }
       const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, runtime, fresh: body.fresh, sessionId: body.sessionId });
       return c.json(r, r.created ? 201 : 200);

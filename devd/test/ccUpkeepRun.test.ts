@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { insertSession, listEvents, openDb } from "../src/db";
 import { runCcUpkeep, type ExecResult, type UpkeepDeps } from "../src/ccUpkeep";
 
@@ -106,7 +106,7 @@ function containerRunner(
 function deps(over: Partial<UpkeepDeps>): UpkeepDeps {
   return {
     db: openDb(":memory:"), exec: async () => ok(), host: async () => ok(),
-    turnInProgress: () => false, notify: () => {}, sleep: async () => {},
+    turnInProgress: () => false, isChatWorking: () => false, restartChatAgent: async () => {}, notify: () => {}, sleep: async () => {},
     repoDir: "/opt/vps-dev-infra", image: "devbox:latest", ...over,
   };
 }
@@ -597,6 +597,7 @@ test("chat session that is working is skipped as busy: no install, no restart", 
 });
 
 test("chat restart failure is logged as cc_restart_failed, not swallowed", async () => {
+  const muted = spyOn(console, "error").mockImplementation(() => {});
   const db = openDb(":memory:");
   insertSession(db, chatRow("a"));
   const cont = containerRunner({ "dev-a": "2.1.202" });
@@ -608,4 +609,34 @@ test("chat restart failure is logged as cc_restart_failed, not swallowed", async
   const ev = listEvents(db, { type: "cc_restart_failed" });
   expect(ev.length).toBe(1);
   expect(ev[0]!.data).toContain("chat runtime link not wired");
+  expect(muted).toHaveBeenCalled();
+  muted.mockRestore();
+});
+
+test("chat session with nothing to install: no restart, no pane probes", async () => {
+  const db = openDb(":memory:");
+  insertSession(db, chatRow("a"));
+  const cont = containerRunner({ "dev-a": "2.1.220" }, { "dev-a": PANE_A });
+  const restarted: string[] = [];
+  const res = await runCcUpkeep(deps({
+    db, host: hostRunner("2.1.220", "2.1.220").run, exec: cont.exec,
+    isChatWorking: () => false, restartChatAgent: async (id) => { restarted.push(id); },
+  }));
+  expect(restarted).toEqual([]);
+  expect(res.restarted).toEqual([]);
+  expect(paneCalls(cont.calls)).toEqual([]);
+});
+
+test("codex chat session is not restarted after a Claude Code install", async () => {
+  const db = openDb(":memory:");
+  insertSession(db, { ...chatRow("a"), agent: "codex" as const });
+  const cont = containerRunner({ "dev-a": "2.1.202" });
+  const restarted: string[] = [];
+  const res = await runCcUpkeep(deps({
+    db, host: hostRunner("2.1.220", "2.1.220").run, exec: cont.exec,
+    isChatWorking: () => false, restartChatAgent: async (id) => { restarted.push(id); },
+  }));
+  expect(res.updated).toEqual(["a"]);
+  expect(restarted).toEqual([]);
+  expect(res.restarted).toEqual([]);
 });

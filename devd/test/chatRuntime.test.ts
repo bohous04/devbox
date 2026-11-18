@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createApp } from "../src/api";
 import { chatRuntimeBlock } from "../src/agents";
 import { DEFAULT_CONFIG } from "../src/config";
-import { getSession, insertSession, openDb, type SessionRow } from "../src/db";
+import { getRepoAgent, getSession, insertSession, openDb, setRepoAgent, type SessionRow } from "../src/db";
 import { runArgs } from "../src/docker";
 import { SessionManager } from "../src/sessions";
 
@@ -92,7 +92,47 @@ test("a chat session's container env carries DEVD_RUNTIME=chat (tmux row: tmux)"
     created_at: 0, last_active_at: 0, important: 0, runtime });
   mk("dev-p-chat", "chat", 40100); mk("dev-p-tmux", "tmux", 40200);
   // runOpts is private; element access keeps the test type-checked against its real signature.
-  const args = async (id: string, repo: string) => runArgs(await mgr["runOpts"](id, "/srv/dev/p/r", 40100, "p", repo, "claude"));
-  expect(await args("dev-p-chat", "chat")).toContain("DEVD_RUNTIME=chat");
-  expect(await args("dev-p-tmux", "tmux")).toContain("DEVD_RUNTIME=tmux");
+  const args = async (id: string, repo: string, runtime: "tmux" | "chat") => runArgs(await mgr["runOpts"](id, "/srv/dev/p/r", 40100, "p", repo, "claude", runtime));
+  expect(await args("dev-p-chat", "chat", "chat")).toContain("DEVD_RUNTIME=chat");
+  expect(await args("dev-p-tmux", "tmux", "tmux")).toContain("DEVD_RUNTIME=tmux");
+});
+
+function chatSession(db: ReturnType<typeof openDb>, agent: "claude" | "codex" = "claude") {
+  insertSession(db, { id: "dev-p-r", folder: "f", project: "p", repo: "r", container: "dev-p-r", port_base: 40100,
+    status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0, agent, runtime: "chat" });
+}
+function appOn(db: ReturnType<typeof openDb>, open: () => Promise<unknown>) {
+  return createApp({
+    mgr: { open } as never, db, cfg: DEFAULT_CONFIG, root: "/tmp", tree: async () => [],
+    listener: {} as never, notify: () => {}, stats: () => ({}),
+    cloneQueue: {} as never, configRepo: {} as never, dashboardDir: "/tmp",
+    backup: { build: async () => "/tmp/x", restore: async () => {} },
+  } as never);
+}
+
+test("reopening a chat session by sessionId with a proxy agent (given or remembered) → 400, mgr.open not called", async () => {
+  let calls = 0;
+  const db = openDb(":memory:");
+  chatSession(db);
+  const a = appOn(db, async () => { calls++; return { created: false }; });
+  const given = await post(a, { ...BASE, sessionId: "dev-p-r", agent: "claude-gpt" });
+  expect(given.status).toBe(400);
+  expect((await given.json() as { error: string }).error).toBe("Claude Code + GPT is not available in chat sessions yet");
+  setRepoAgent(db, "f", "p", "r", "claude-grok", 1);
+  const remembered = await post(a, { ...BASE, sessionId: "dev-p-r" });
+  expect(remembered.status).toBe(400);
+  expect(calls).toBe(0);
+});
+
+test("SessionManager.open refuses an agent chat cannot run on a stored chat session, before any agent write", async () => {
+  const db = openDb(":memory:");
+  chatSession(db);
+  const mgr = new SessionManager({
+    db, cfg: structuredClone(DEFAULT_CONFIG), root: mkdtempSync(join(tmpdir(), "rt-root-")), image: "devbox:latest",
+    controlRoot: mkdtempSync(join(tmpdir(), "rt-ctl-")), extraMounts: [],
+  });
+  await expect(mgr.open({ folder: "f", project: "p", repo: "r", agent: "claude-gpt", sessionId: "dev-p-r", runtime: "chat" }))
+    .rejects.toThrow("Claude Code + GPT is not available in chat sessions yet");
+  expect(getSession(db, "dev-p-r")!.agent).toBe("claude");
+  expect(getRepoAgent(db, "f", "p", "r")).toBeNull();
 });

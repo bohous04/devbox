@@ -60,7 +60,7 @@ test("storage guard flag: set for local sessions on a guarded host, never carrie
     controlRoot: mkdtempSync(join(tmpdir(), "sg-ctl-")), extraMounts: [], storageGuard: () => guarded,
   });
   // runOpts is private; element access keeps the test type-checked against its real signature.
-  const local = (m: SessionManager) => m["runOpts"]("dev-p-r", "/srv/dev/p/r", 40100, "p", "r", "claude");
+  const local = (m: SessionManager) => m["runOpts"]("dev-p-r", "/srv/dev/p/r", 40100, "p", "r", "claude", "tmux");
   expect((await local(mk(true))).env!.DEVBOX_STORAGE_GUARD).toBe("1");
   expect((await local(mk(false))).env!.DEVBOX_STORAGE_GUARD).toBeUndefined();
   const remote = await mk(true).remoteRunOpts("dev-p-r", 40100, "p", "r", "claude", "http://100.1.1.1:4300");
