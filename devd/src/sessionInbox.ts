@@ -30,6 +30,8 @@ export class Inbox {
   private lastPublished = new Map<string, string>();
   private windows = new Map<string, { dirty: boolean }>();
   private rechecks = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Last logged store error per session, so a broken store is logged once per message, not per inbox read. */
+  private brokenLogged = new Map<string, string>();
   private coalesceMs: number;
   private log: (msg: string) => void;
 
@@ -59,12 +61,28 @@ export class Inbox {
   /** `recheckAt`: a chat run that just ended counts as working for WORKING_GRACE_MS; no event marks the end
    *  of that window, so the item has to be rebuilt then. */
   private build(s: SessionRow): { item: InboxItem; recheckAt: number | null } {
-    if (!s.agent) throw new Error(`session ${s.id} has no agent`);
     const runtime = storedRuntime(s);
-    const base = { sessionId: s.id, runtime, title: s.name || `${s.project}/${s.repo}`, project: s.project, repo: s.repo, agent: s.agent };
+    // `agent` is optional in SessionRow only for insert literals; the column is NOT NULL.
+    const base = { sessionId: s.id, runtime, title: s.name || `${s.project}/${s.repo}`, project: s.project, repo: s.repo, agent: s.agent! };
     if (runtime === "tmux") {
       return { item: { ...base, attention: tmuxAttention(this.d.tmuxLive(s.id)), lastText: null }, recheckAt: null };
     }
+    try { return this.buildChat(s, base); }
+    catch (e) {
+      // One broken store must not take the whole inbox down; the session shows up as needing the user.
+      const msg = (e as Error).message;
+      if (this.brokenLogged.get(s.id) !== msg) {
+        this.brokenLogged.set(s.id, msg);
+        this.log(`inbox: thread store of ${s.id} unreadable: ${msg}`);
+      }
+      return {
+        item: { ...base, attention: { section: "needs_you", reason: "failed", since: this.now() }, lastText: `thread store unreadable: ${msg}` },
+        recheckAt: null,
+      };
+    }
+  }
+
+  private buildChat(s: SessionRow, base: Omit<InboxItem, "attention" | "lastText">): { item: InboxItem; recheckAt: number | null } {
     const store = this.d.threads(s.id);
     const t = store.snapshot({ limit: 0 }); // attention reads runs, pending and background only
     const now = this.now();
@@ -85,13 +103,14 @@ export class Inbox {
     this.windows.set(sessionId, win);
     setTimeout(() => {
       this.windows.delete(sessionId);
-      if (win.dirty) this.changedLogged(sessionId);
+      if (win.dirty) this.changedSafe(sessionId);
     }, this.coalesceMs);
     this.publish(sessionId);
   }
 
-  /** From a timer: nobody above would see a throw (e.g. the store of a session that is ending). */
-  private changedLogged(sessionId: string) {
+  /** `changed` for callers whose own work is done (a handled request, a timer, the sweep): a throw is logged,
+   *  it must not fail them. */
+  changedSafe(sessionId: string): void {
     try { this.changed(sessionId); }
     catch (e) { this.log(`inbox: cannot publish ${sessionId}: ${(e as Error).message}`); }
   }
@@ -105,7 +124,7 @@ export class Inbox {
     if (recheckAt !== null) {
       this.rechecks.set(sessionId, setTimeout(() => {
         this.rechecks.delete(sessionId);
-        this.changedLogged(sessionId);
+        this.changedSafe(sessionId);
       }, recheckAt - this.now() + 1));
     }
     const json = JSON.stringify(item);

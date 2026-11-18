@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -336,7 +336,7 @@ test("SSE reconnect with Last-Event-ID gets everything after it exactly once: a 
 test("SSE replay boundary: a live event already in the snapshot is not sent twice", async () => {
   const t = setup();
   t.feed(CHAT.id, [started("r1")]);
-  // A subscriber that runs before the stream's: publishes an event the stream's snapshot will already contain.
+  // The snapshot sent on connect already holds seq 1.
   const res = await t.a.fetch(req("GET", `/api/stream?session=${CHAT.id}`, undefined, { "last-event-id": "0" }));
   const events = readEvents(res, 3, 300);
   await Bun.sleep(10);
@@ -354,4 +354,57 @@ test("SSE unsubscribes from the bus when the client goes away", async () => {
   expect(t.bus.subscriberCount()).toBe(before + 1);
   await res.body!.cancel();
   expect(t.bus.subscriberCount()).toBe(before);
+});
+
+test("SSE ?afterSeq replays like Last-Event-ID: load the thread at K, stream from K, everything after K exactly once", async () => {
+  const t = setup();
+  t.feed(CHAT.id, [started("r1"), said("r1", "m1", "loaded")]);
+  const k = ((await (await t.a.fetch(req("GET", `/api/sessions/${CHAT.id}/thread`))).json()) as ThreadSnapshot).lastSeq;
+  t.feed(CHAT.id, [said("r1", "m2", "in between")]); // after the GET, before the stream opens
+  const res = await t.a.fetch(req("GET", `/api/stream?session=${CHAT.id}&afterSeq=${k}`));
+  const events = readEvents(res, 3);
+  await Bun.sleep(10);
+  const live = t.feed(CHAT.id, [said("r1", "m3", "live"), completed("r1")]);
+  const got = await events;
+  expect(got[0].event).toBe("thread-snapshot");
+  expect(got[0].id).toBe(String(k + 1));
+  const { afterSeq, snapshot } = got[0].data as { afterSeq: number; snapshot: ThreadSnapshot };
+  expect(afterSeq).toBe(k);
+  expect(snapshot.items.map((i) => i.text)).toEqual(["in between"]);
+  expect(got.slice(1)).toEqual(live.map((e) => ({ event: "thread", id: String(e.seq), data: e })));
+});
+
+test("SSE: the Last-Event-ID header wins over ?afterSeq; an invalid afterSeq is 400", async () => {
+  const t = setup();
+  t.feed(CHAT.id, [started("r1"), said("r1", "m1", "one"), said("r1", "m2", "two")]);
+  const res = await t.a.fetch(req("GET", `/api/stream?session=${CHAT.id}&afterSeq=0`, undefined, { "last-event-id": "2" }));
+  const [first] = await readEvents(res, 1);
+  expect((first.data as { afterSeq: number }).afterSeq).toBe(2);
+  for (const q of ["afterSeq=-1", "afterSeq=x", "afterSeq=1.5"]) {
+    expect((await t.a.fetch(req("GET", `/api/stream?session=${CHAT.id}&${q}`))).status).toBe(400);
+  }
+  expect((await t.a.fetch(req("GET", "/api/stream?afterSeq=1"))).status).toBe(400);
+});
+
+test("a failing inbox update does not fail a handled seen request", async () => {
+  const t = setup();
+  t.feed(CHAT.id, [started("r1"), completed("r1")]);
+  t.bus.subscribe(["inbox"], () => { throw new Error("subscriber"); }); // the bus logs this itself
+  (t.inbox as unknown as { publish: () => void }).publish = () => { throw new Error("inbox broke"); };
+  const err = spyOn(console, "error").mockImplementation(() => {});
+  cleanups.push(() => err.mockRestore());
+  const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/seen`, { seq: 2 }));
+  expect(r.status).toBe(204);
+  expect(String(err.mock.calls[0]?.[0])).toContain("inbox broke");
+  expect(t.threads(CHAT.id).snapshot({ limit: 0 }).seenSeq).toBe(2);
+});
+
+test("a chat session whose link cannot start still opens", async () => {
+  const t = setup({ open: async () => ({ session: CHAT, created: true }) });
+  (t as unknown as { ensured: string[] }).ensured.push = () => { throw new Error("link broke"); };
+  const err = spyOn(console, "error").mockImplementation(() => {});
+  cleanups.push(() => err.mockRestore());
+  const r = await t.a.fetch(req("POST", "/api/sessions", { folder: CHAT.folder, project: CHAT.project, repo: CHAT.repo }));
+  expect(r.status).toBe(201);
+  expect(String(err.mock.calls[0]?.[0])).toContain("bridge link of opened session");
 });

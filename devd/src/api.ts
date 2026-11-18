@@ -303,7 +303,7 @@ export function createApp(d: ApiDeps): Hono {
     if (!session || !d.agentEvents) return;
     d.agentEvents.setSshWaiting(session, pendingSshLabel(d.db, session));
     d.liveActivities?.request();
-    d.inbox?.changed(session);
+    d.inbox?.changedSafe(session);
   };
   const app = new Hono();
   // Only /api/*: static files are served by StaticFiles with precomputed gzip (see static.ts),
@@ -952,6 +952,12 @@ export function createApp(d: ApiDeps): Hono {
     return c.json({ progress: d.mgr.openProgressFor({ folder, project, repo }) });
   });
 
+  // Link the bridge of an opened chat session now instead of at the next 5 s link sync in index.ts. The session
+  // did open, so a failure here is logged, not answered: that sync retries.
+  const linkOpenedChat = (s: SessionRow) => {
+    try { if (storedRuntime(s) === "chat" && s.status === "running") d.links?.ensure(s.id); }
+    catch (e) { console.error(`bridge link of opened session ${s.id} failed:`, e); }
+  };
   app.post("/api/sessions", async (c) => {
     noIdleTimeout(c);
     const body = (await c.req.json().catch(() => null)) as { folder: string; project: string; repo?: string; cloneUrl?: string; solo?: boolean; agent?: string; fresh?: boolean; host?: string; sessionId?: string; runtime?: unknown } | null;
@@ -1010,8 +1016,7 @@ export function createApp(d: ApiDeps): Hono {
         }
       }
       const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, runtime, fresh: body.fresh, sessionId: body.sessionId });
-      // Link the bridge now instead of at the next 5 s link sync in index.ts.
-      if (storedRuntime(r.session) === "chat" && r.session.status === "running") d.links?.ensure(r.session.id);
+      linkOpenedChat(r.session);
       return c.json(r, r.created ? 201 : 200);
     } catch (e) {
       return busy(c, e) ?? c.json({ error: (e as Error).message }, 400);
@@ -1620,7 +1625,7 @@ export function createApp(d: ApiDeps): Hono {
     }
     d.agentEvents.handle(s, body.event as AgentEvent, hookMeta(body));
     d.liveActivities?.request();
-    d.inbox?.changed(s.id);
+    d.inbox?.changedSafe(s.id);
     return c.json({ ok: true });
   });
 

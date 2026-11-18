@@ -1188,9 +1188,7 @@ setInterval(() => {
   let done: string[] = [];
   try { done = agentEvents.sweep(); liveActivities.request(); } catch (e) { console.error("agent-event sweep failed:", e); }
   // Sessions the sweep just marked done: the hub has no change hook, the inbox follows its callers.
-  for (const id of done) {
-    try { inbox.changed(id); } catch (e) { console.error(`inbox update of ${id} failed:`, e); }
-  }
+  for (const id of done) inbox.changedSafe(id);
   // Cleanup after scheduled runs: the "finished work" notification just went out, the session
   // flagged auto_end has served its purpose. Await is not possible here (interval), hence its own
   // catch — an uncaught rejected promise would bring down all of devd.

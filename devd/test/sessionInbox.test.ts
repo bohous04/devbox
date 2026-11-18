@@ -165,3 +165,22 @@ test("event bus: a throwing subscriber is logged and does not stop the others", 
   expect(logs.length).toBe(1);
   expect(logs[0]).toContain("boom");
 });
+
+test("a broken chat store is one needs-you item, logged once per message, not a failed inbox", () => {
+  const logs: string[] = [];
+  const t = setup();
+  insertSession(t.db, BASE);
+  insertSession(t.db, TMUX);
+  const inbox = new Inbox({
+    sessions: () => listSessions(t.db), session: (id) => getSession(t.db, id),
+    threads: () => { throw new Error("disk I/O error"); },
+    chatLink: () => null, tmuxLive: () => null, bus: t.bus, now: () => 42, log: (m) => logs.push(m),
+  });
+  const items = inbox.list();
+  inbox.list();
+  expect(items.map((i) => i.sessionId)).toEqual([BASE.id, TMUX.id]);
+  expect(items[0].attention).toEqual({ section: "needs_you", reason: "failed", since: 42 });
+  expect(items[0].lastText).toBe("thread store unreadable: disk I/O error");
+  expect(logs.length).toBe(1);
+  expect(logs[0]).toContain("disk I/O error");
+});
