@@ -476,7 +476,7 @@ export class SessionManager {
   private keepChats(id: string) {
     // A failed move leaves the transcripts in place (and logged) — never deletes them.
     try { archiveChats(this.d.root, id, new Date(this.now())); }
-    catch (e) { console.error(`archiving chats of ${id} failed, left in _claude-projects:`, e); }
+    catch (e) { console.error(`archiving chats of ${id} failed, what did not move is left in _claude-projects / _threads:`, e); }
   }
 
   private claudeProjectsDir(id: string) {

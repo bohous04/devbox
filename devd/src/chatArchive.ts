@@ -8,7 +8,8 @@ import { join } from "node:path";
  *  throws: the transcripts then stay where they are rather than being deleted.
  *
  *  A chat session's thread store (`_threads/<id>.sqlite` plus `-wal`/`-shm`) moves into the same
- *  archive directory; the caller closes the store first. Without a store file nothing changes. */
+ *  archive directory after the transcripts (a failed move leaves it in `_threads`); the caller closes the store
+ *  first. Without a store file nothing changes. */
 export function archiveChats(root: string, id: string, now: Date): string | null {
   const src = join(root, "_claude-projects", id);
   let entries: string[];
@@ -20,10 +21,14 @@ export function archiveChats(root: string, id: string, now: Date): string | null
   }
   const stamp = now.toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
   const dest = join(root, "_chat-archive", `${id}-${stamp}`);
-  mkdirSync(dest, { recursive: true });
-  // Thread files first, so a partial failure leaves only transcripts in _claude-projects (as keepChats logs).
+  if (entries.length) {
+    // One rename of the whole directory: a failure cannot split the transcripts between two places.
+    mkdirSync(join(root, "_chat-archive"), { recursive: true });
+    renameSync(src, dest);
+  } else {
+    mkdirSync(dest, { recursive: true });
+    rmSync(src, { recursive: true, force: true });
+  }
   for (const f of threadFiles) renameSync(f, join(dest, f.slice(f.lastIndexOf("/") + 1)));
-  for (const e of entries) renameSync(join(src, e), join(dest, e));
-  rmSync(src, { recursive: true, force: true });
   return dest;
 }
