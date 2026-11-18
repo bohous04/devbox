@@ -86,7 +86,7 @@ import { setUntrustedGitRoots } from "./safeGit";
 import { memoAsync, memoAsyncStrict } from "./cache";
 import { selfUpdateStatus, startSelfUpdate, type SelfUpdateDeps } from "./selfUpdate";
 import { buildUnpushedReport, unpushedOps } from "./unpushed";
-import { ApiErrorRetry, sweep429 } from "./apiErrorRetry";
+import { ApiErrorRetry, retryContainers, sweep429 } from "./apiErrorRetry";
 import { defaultProbe, sweepIdleSessions } from "./watchdog";
 import { getConnInfo, websocket } from "hono/bun";
 import { vmFetch } from "./vmListener";
@@ -1235,7 +1235,7 @@ setInterval(() => {
 const apiErrorRetry = new ApiErrorRetry();
 setInterval(() => {
   sweep429({
-    containers: () => listSessions(db).filter((x) => x.status === "running").map((x) => x.container),
+    containers: () => retryContainers(listSessions(db)),
     exec: (c, cmd) => execInContainerAsync(c, cmd, 10_000),
     retry: apiErrorRetry,
   }, Date.now())

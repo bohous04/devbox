@@ -4,6 +4,7 @@ import {
   CONTINUE_DELAY_MS,
   detectStuck429,
   parsePanes,
+  retryContainers,
   sweep429,
 } from "../src/apiErrorRetry";
 
@@ -217,4 +218,12 @@ test("sweep429 sends continue to a stuck pane after 5 minutes", async () => {
   expect(tail[0]).toContain("continue");
   expect(tail[0]).toContain("%0");
   expect(tail[1]).toContain("Enter");
+});
+
+test("retryContainers: running tmux sessions only; a chat session's panes are the user's shells", () => {
+  const row = (id: string, status: "running" | "stopped", runtime: "tmux" | "chat") => ({
+    id, folder: "f", project: "p", repo: id, container: `c-${id}`, port_base: 0, status, solo: 0 as const,
+    created_at: 0, last_active_at: 0, important: 0 as const, runtime,
+  });
+  expect(retryContainers([row("a", "running", "tmux"), row("b", "running", "chat"), row("c", "stopped", "tmux")])).toEqual(["c-a"]);
 });

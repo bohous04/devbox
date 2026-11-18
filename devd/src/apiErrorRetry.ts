@@ -1,3 +1,6 @@
+import type { SessionRow } from "./db";
+import { storedRuntime } from "./sessions";
+
 // Auto-"continue" after API 429: when a cc session dies on "API Error: Request rejected
 // (429) · Provider returned error" (typically a transient 429 from cliproxy, see AI subs),
 // devd sends "continue" into the panel after 5 minutes of quiet — and repeats it every ~5 min
@@ -14,6 +17,12 @@
 //    so it is sent ONLY into an empty input.
 
 export const CONTINUE_DELAY_MS = 5 * 60_000;
+
+/** Containers the sweep scans: running tmux sessions. A chat session's agent is headless and its panes are the
+ *  user's shells: "continue⏎" typed there would be a command. */
+export function retryContainers(sessions: SessionRow[]): string[] {
+  return sessions.filter((s) => s.status === "running" && storedRuntime(s) === "tmux").map((s) => s.container);
+}
 
 const API_ERROR_RE = /API Error.*\(429\)/;
 // Turn summary after a finished/died turn: "✻ Baked for 10m 28s", "✻ Worked for 9m7s".
