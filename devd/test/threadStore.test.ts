@@ -2,11 +2,11 @@ import { expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+let n = 0;
 import { ThreadStore } from "../src/threadStore";
 import type { BridgeEvent } from "../../shared/thread";
 
-function store() { return ThreadStore.open(mkdtempSync(join(tmpdir(), "threads-")), "dev-a-b-1"); }
-let n = 0;
+function store() { n = 0; return ThreadStore.open(mkdtempSync(join(tmpdir(), "threads-")), "dev-a-b-1"); }
 const ev = (event: BridgeEvent, seq = ++n) => ({ seq, ts: 1000 + seq, event });
 
 test("deltas then final produce one assistant item with the final text", () => {
@@ -87,6 +87,7 @@ test("background.changed replaces the set", () => {
 
 test("markSeen never moves backwards", () => {
   const s = store();
+  for (let i = 0; i < 5; i++) s.apply(ev({ type: "message.delta", runId: "r", itemId: "a", text: "x" }));
   s.markSeen(5); s.markSeen(3);
   expect(s.snapshot().seenSeq).toBe(5);
 });
@@ -108,4 +109,88 @@ test("state survives reopening the store", () => {
   const b = ThreadStore.open(root, "x");
   expect(b.lastSeq()).toBe(1);
   expect(b.snapshot().items[0].text).toBe("hi");
+});
+
+test("run.failed for an unknown run applies, advances lastSeq and shows notices", () => {
+  const s = store();
+  expect(s.apply(ev({ type: "run.failed", runId: "ghost", error: "boom" }))).toBe(true);
+  expect(s.lastSeq()).toBe(1);
+  expect(s.apply(ev({ type: "message.delta", runId: "r", itemId: "a", text: "x" }))).toBe(true);
+  const notices = s.snapshot().items.filter((i) => i.kind === "notice");
+  expect(notices.map((i) => i.text)).toEqual(["failed event for unknown run ghost", "boom"]);
+});
+
+test("an unknown event type becomes a visible notice and is logged", () => {
+  const s = store();
+  const orig = console.error; const logged: string[] = [];
+  console.error = (m: string) => { logged.push(m); };
+  try { s.apply(ev({ type: "future.thing" } as unknown as BridgeEvent)); } finally { console.error = orig; }
+  expect(logged[0]).toContain("future.thing");
+  expect(s.snapshot().items[0]).toMatchObject({ kind: "notice", text: "unknown event future.thing" });
+  expect(s.lastSeq()).toBe(1);
+});
+
+test("interrupted run closes its streaming items", () => {
+  const s = store();
+  s.apply(ev({ type: "run.started", runId: "r", origin: "user", nativeThreadId: null, model: null }));
+  s.apply(ev({ type: "message.delta", runId: "r", itemId: "m", text: "par" }));
+  s.apply(ev({ type: "tool.started", runId: "r", itemId: "t", tool: "Bash", input: {} }));
+  s.apply(ev({ type: "run.interrupted", runId: "r" }));
+  expect(s.snapshot().items.map((i) => i.status)).toEqual(["done", "done"]);
+  expect(s.snapshot({ afterSeq: 3 }).items).toHaveLength(2);
+});
+
+test("an interrupted or failed run keeps the usage recorded by completed", () => {
+  const s = store();
+  const usage = { input: 1, output: 2, cacheCreation: 3, cacheRead: 4 };
+  s.apply(ev({ type: "run.started", runId: "r", origin: "user", nativeThreadId: null, model: null }));
+  s.apply(ev({ type: "run.completed", runId: "r", nativeThreadId: "nt", usage, costUsd: null }));
+  s.apply(ev({ type: "run.interrupted", runId: "r" }));
+  expect(s.snapshot().runs[0]).toMatchObject({ status: "interrupted", usage });
+});
+
+test("runs are listed in creation order and harness is null before thread.native", () => {
+  const s = store();
+  s.apply(ev({ type: "run.started", runId: "a", origin: "user", nativeThreadId: null, model: null }));
+  s.apply(ev({ type: "run.started", runId: "b", origin: "agent", nativeThreadId: null, model: null }));
+  s.apply(ev({ type: "run.completed", runId: "a", nativeThreadId: "nt", usage: null, costUsd: null }));
+  const runs = s.snapshot().runs;
+  expect(runs.map((r) => r.runId)).toEqual(["a", "b"]);
+  expect(runs[0].harness).toBeNull();
+});
+
+test("markSeen above lastSeq throws", () => {
+  const s = store();
+  s.apply(ev({ type: "message.delta", runId: "r", itemId: "a", text: "x" }));
+  expect(() => s.markSeen(2)).toThrow();
+  s.markSeen(1);
+  expect(s.snapshot().seenSeq).toBe(1);
+});
+
+test("re-announced request.opened and tool.started do not duplicate or reset", () => {
+  const s = store();
+  s.apply(ev({ type: "request.opened", runId: "r", requestId: "q", kind: "approval", prompt: "ok?" }));
+  s.apply(ev({ type: "request.resolved", requestId: "q", answer: "yes", by: "user" }));
+  s.apply(ev({ type: "request.opened", runId: "r", requestId: "q", kind: "approval", prompt: "ok?" }));
+  s.apply(ev({ type: "tool.started", runId: "r", itemId: "t", tool: "Bash", input: {} }));
+  s.apply(ev({ type: "tool.finished", runId: "r", itemId: "t", isError: false, output: "o" }));
+  s.apply(ev({ type: "tool.started", runId: "r", itemId: "t", tool: "Bash", input: {} }));
+  const snap = s.snapshot();
+  expect(snap.pending).toEqual([]);
+  expect(snap.items).toHaveLength(2);
+  expect(snap.items[0]).toMatchObject({ status: "answered" });
+  expect(snap.items[1]).toMatchObject({ status: "done", output: "o" });
+});
+
+test("run.started for an unknown run creates it; resumed bridge.started adds a notice; tool.finished without start", () => {
+  const s = store();
+  s.apply(ev({ type: "run.started", runId: "c", origin: "continuation", nativeThreadId: "nt", model: "m" }));
+  expect(s.snapshot().runs[0]).toMatchObject({ runId: "c", origin: "continuation", status: "running", model: "m" });
+  s.apply(ev({ type: "bridge.started", version: "1", resumed: false }));
+  s.apply(ev({ type: "bridge.started", version: "2", resumed: true }));
+  s.apply(ev({ type: "tool.finished", runId: "c", itemId: "x", isError: false, output: "out" }));
+  const items = s.snapshot().items;
+  expect(items).toHaveLength(2);
+  expect(items[0]).toMatchObject({ kind: "notice", text: "Agent bridge restarted (v2)" });
+  expect(items[1]).toMatchObject({ kind: "tool", tool: "(unknown)", output: "out" });
 });

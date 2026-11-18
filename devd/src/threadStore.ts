@@ -4,7 +4,8 @@ import { join } from "node:path";
 import type { BackgroundWork, LoggedEvent, PendingRequest, RunRow, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
 /** Per-session conversation store: `<root>/_threads/<id>.sqlite`. Conversation data stays out of the
- *  main devd DB on purpose. Items are ordered by `seq` (the log seq that created them); `updated_seq`
+ *  main devd DB on purpose. Items are ordered by their own `id`; `seq` is the log seq of the event that created them (one event can create
+ *  several items); `updated_seq`
  *  is the seq of their last change, so `snapshot({afterSeq})` also returns items that kept streaming. */
 export class ThreadStore {
   private constructor(private db: Database) {}
@@ -21,11 +22,11 @@ export class ThreadStore {
     db.run("PRAGMA synchronous = NORMAL");
     db.run(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)`);
     db.run(`CREATE TABLE IF NOT EXISTS runs (
-      run_id TEXT PRIMARY KEY, origin TEXT NOT NULL, status TEXT NOT NULL, harness TEXT NOT NULL,
+      run_id TEXT PRIMARY KEY, origin TEXT NOT NULL, status TEXT NOT NULL, harness TEXT,
       native_thread_id TEXT, model TEXT, started_at INTEGER, ended_at INTEGER, usage TEXT, error TEXT,
       updated_seq INTEGER NOT NULL)`);
     db.run(`CREATE TABLE IF NOT EXISTS items (
-      seq INTEGER PRIMARY KEY, run_id TEXT, item_id TEXT, kind TEXT NOT NULL, text TEXT NOT NULL,
+      id INTEGER PRIMARY KEY AUTOINCREMENT, seq INTEGER NOT NULL, run_id TEXT, item_id TEXT, kind TEXT NOT NULL, text TEXT NOT NULL,
       tool TEXT, input TEXT, output TEXT, is_error INTEGER, status TEXT, ts INTEGER NOT NULL,
       updated_seq INTEGER NOT NULL)`);
     db.run(`CREATE INDEX IF NOT EXISTS items_key ON items (run_id, item_id)`);
@@ -52,6 +53,7 @@ export class ThreadStore {
   }
 
   markSeen(seq: number): void {
+    if (seq > this.lastSeq()) throw new Error(`markSeen(${seq}) is above lastSeq ${this.lastSeq()}`);
     if (seq > this.meta("seen_seq")) this.setMeta("seen_seq", seq);
   }
 
@@ -90,7 +92,7 @@ export class ThreadStore {
       case "message.delta": {
         const it = this.findItem(ev.runId, ev.itemId);
         if (!it) this.insertItem(seq, ts, { runId: ev.runId, itemId: ev.itemId, kind: "assistant", text: ev.text, status: "streaming" });
-        else db.query(`UPDATE items SET text=text||?, status='streaming', updated_seq=? WHERE seq=?`).run(ev.text, seq, it.seq);
+        else db.query(`UPDATE items SET text=text||?, status='streaming', updated_seq=? WHERE id=?`).run(ev.text, seq, it.id);
         return;
       }
       case "message.final": {
@@ -102,10 +104,11 @@ export class ThreadStore {
         }
         const it = this.findItem(ev.runId, ev.itemId);
         if (!it) this.insertItem(seq, ts, { runId: ev.runId, itemId: ev.itemId, kind: "assistant", text: ev.text, status: "done" });
-        else db.query(`UPDATE items SET text=?, status='done', updated_seq=? WHERE seq=?`).run(ev.text, seq, it.seq);
+        else db.query(`UPDATE items SET text=?, status='done', updated_seq=? WHERE id=?`).run(ev.text, seq, it.id);
         return;
       }
       case "tool.started":
+        if (this.findItem(ev.runId, ev.itemId)) return; // re-announcement
         this.insertItem(seq, ts, { runId: ev.runId, itemId: ev.itemId, kind: "tool", text: "", tool: ev.tool, input: ev.input, status: "streaming" });
         return;
       case "tool.finished": {
@@ -114,12 +117,13 @@ export class ThreadStore {
           // The start was trimmed from the log: show the result, marked as an unknown tool.
           this.insertItem(seq, ts, { runId: ev.runId, itemId: ev.itemId, kind: "tool", text: "", tool: "(unknown)", output: ev.output, isError: ev.isError, status: "done" });
         } else {
-          db.query(`UPDATE items SET output=?, is_error=?, status='done', updated_seq=? WHERE seq=?`).run(ev.output, ev.isError ? 1 : 0, seq, it.seq);
+          db.query(`UPDATE items SET output=?, is_error=?, status='done', updated_seq=? WHERE id=?`).run(ev.output, ev.isError ? 1 : 0, seq, it.id);
         }
         return;
       }
       case "request.opened":
-        db.query(`INSERT OR REPLACE INTO requests (request_id, run_id, kind, prompt, options, multi_select, opened_at, status)
+        if (db.query("SELECT 1 FROM requests WHERE request_id=?").get(ev.requestId)) return; // re-announcement
+        db.query(`INSERT INTO requests (request_id, run_id, kind, prompt, options, multi_select, opened_at, status)
           VALUES (?, ?, ?, ?, ?, ?, ?, 'open')`)
           .run(ev.requestId, ev.runId, ev.kind, ev.prompt, ev.options ? JSON.stringify(ev.options) : null, ev.multiSelect === undefined ? null : ev.multiSelect ? 1 : 0, ts);
         this.insertItem(seq, ts, { runId: ev.runId, itemId: ev.requestId, kind: "request", text: ev.prompt, status: "open" });
@@ -136,7 +140,7 @@ export class ThreadStore {
         db.query(`INSERT INTO background (id, work) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET work=excluded.work`).run(JSON.stringify(ev.work));
         return;
       case "run.completed":
-        this.terminal(seq, ts, ev.runId, "completed", { nativeThreadId: ev.nativeThreadId, usage: ev.usage, error: null });
+        this.terminal(seq, ts, ev.runId, "completed", { nativeThreadId: ev.nativeThreadId, usage: ev.usage, error: null }, true);
         return;
       case "run.interrupted":
         this.terminal(seq, ts, ev.runId, "interrupted", { error: null });
@@ -148,31 +152,39 @@ export class ThreadStore {
       case "bridge.started":
         if (ev.resumed) this.insertItem(seq, ts, { runId: null, itemId: null, kind: "notice", text: `Agent bridge restarted (v${ev.version})`, status: "done" });
         return;
+      default: {
+        const unknown: never = ev;
+        const type = (unknown as { type?: unknown }).type;
+        console.error(`thread store: unknown event type ${String(type)} at seq ${seq}`);
+        this.insertItem(seq, ts, { runId: null, itemId: null, kind: "notice", text: `unknown event ${String(type)}`, status: "done" });
+      }
     }
   }
 
   private insertRun(seq: number, runId: string, origin: string, status: string, nativeThreadId: string | null, model: string | null, startedAt: number | null) {
     const n = this.db.query("SELECT harness FROM native WHERE id=1").get() as { harness: string } | null;
-    // harness is "" until the bridge has announced its native thread.
+    // harness stays null until the bridge has announced its native thread.
     this.db.query(`INSERT OR IGNORE INTO runs (run_id, origin, status, harness, native_thread_id, model, started_at, updated_seq)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(runId, origin, status, n?.harness ?? "", nativeThreadId, model, startedAt, seq);
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(runId, origin, status, n?.harness ?? null, nativeThreadId, model, startedAt, seq);
   }
 
   private terminal(seq: number, ts: number, runId: string, status: RunRow["status"],
-    f: { nativeThreadId?: string; usage?: unknown; error: string | null }) {
+    f: { nativeThreadId?: string; usage?: unknown; error: string | null }, setUsage = false) {
     const row = this.db.query("SELECT 1 FROM runs WHERE run_id=?").get(runId);
     if (!row) {
       this.insertItem(seq, ts, { runId, itemId: null, kind: "notice", text: `${status} event for unknown run ${runId}`, status: "done" });
       return;
     }
     // The later terminal event wins, also over an earlier terminal status.
+    // Only run.completed reports usage; a later interrupted/failed keeps it.
     this.db.query(`UPDATE runs SET status=?, ended_at=?, error=?,
-      native_thread_id=COALESCE(?, native_thread_id), usage=?, updated_seq=? WHERE run_id=?`)
-      .run(status, ts, f.error, f.nativeThreadId ?? null, f.usage ? JSON.stringify(f.usage) : null, seq, runId);
+      native_thread_id=COALESCE(?, native_thread_id), usage=CASE WHEN ? THEN ? ELSE usage END, updated_seq=? WHERE run_id=?`)
+      .run(status, ts, f.error, f.nativeThreadId ?? null, setUsage ? 1 : 0, f.usage ? JSON.stringify(f.usage) : null, seq, runId);
+    this.db.query(`UPDATE items SET status='done', updated_seq=? WHERE run_id=? AND status='streaming'`).run(seq, runId);
   }
 
-  private findItem(runId: string, itemId: string): { seq: number } | null {
-    return this.db.query("SELECT seq FROM items WHERE run_id=? AND item_id=?").get(runId, itemId) as { seq: number } | null;
+  private findItem(runId: string, itemId: string): { id: number } | null {
+    return this.db.query("SELECT id FROM items WHERE run_id=? AND item_id=?").get(runId, itemId) as { id: number } | null;
   }
 
   private insertItem(seq: number, ts: number, i: Omit<ThreadItem, "seq" | "ts">) {
@@ -187,7 +199,7 @@ export class ThreadStore {
     const after = opts.afterSeq ?? 0;
     const limit = opts.limit ?? -1;
     const itemRows = this.db.query(
-      `SELECT * FROM (SELECT * FROM items WHERE updated_seq > ? ORDER BY seq DESC LIMIT ?) ORDER BY seq`,
+      `SELECT * FROM (SELECT * FROM items WHERE updated_seq > ? ORDER BY id DESC LIMIT ?) ORDER BY id`,
     ).all(after, limit) as Record<string, any>[];
     const items: ThreadItem[] = itemRows.map((r) => {
       const it: ThreadItem = { seq: r.seq, runId: r.run_id, itemId: r.item_id, kind: r.kind, text: r.text, ts: r.ts };
@@ -198,7 +210,7 @@ export class ThreadStore {
       if (r.status !== null) it.status = r.status;
       return it;
     });
-    const runs = (this.db.query(`SELECT * FROM runs WHERE updated_seq > ? ORDER BY updated_seq, rowid`).all(after) as Record<string, any>[])
+    const runs = (this.db.query(`SELECT * FROM runs WHERE updated_seq > ? ORDER BY rowid`).all(after) as Record<string, any>[])
       .map((r): RunRow => ({
         runId: r.run_id, origin: r.origin, status: r.status, harness: r.harness, nativeThreadId: r.native_thread_id,
         model: r.model, startedAt: r.started_at, endedAt: r.ended_at, usage: r.usage === null ? null : JSON.parse(r.usage), error: r.error,

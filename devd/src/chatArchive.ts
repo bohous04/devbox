@@ -20,12 +20,10 @@ export function archiveChats(root: string, id: string, now: Date): string | null
   }
   const stamp = now.toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
   const dest = join(root, "_chat-archive", `${id}-${stamp}`);
-  mkdirSync(join(root, "_chat-archive"), { recursive: true });
-  if (entries.length) renameSync(src, dest);
-  else {
-    rmSync(src, { recursive: true, force: true });
-    mkdirSync(dest, { recursive: true });
-  }
+  mkdirSync(dest, { recursive: true });
+  // Thread files first, so a partial failure leaves only transcripts in _claude-projects (as keepChats logs).
   for (const f of threadFiles) renameSync(f, join(dest, f.slice(f.lastIndexOf("/") + 1)));
+  for (const e of entries) renameSync(join(src, e), join(dest, e));
+  rmSync(src, { recursive: true, force: true });
   return dest;
 }

@@ -47,3 +47,10 @@ test("archiveChats archives a thread store even when there are no transcripts", 
   const dest = archiveChats(root, "dev-u", new Date("2026-11-17T12:30:05Z"))!;
   expect(readFileSync(join(dest, "dev-u.sqlite"), "utf8")).toBe("db");
 });
+
+test("archiveChats creates nothing when there is nothing to move", () => {
+  const root = mkdtempSync(join(tmpdir(), "chats-"));
+  mkdirSync(join(root, "_threads"));
+  expect(archiveChats(root, "dev-v", new Date())).toBeNull();
+  expect(existsSync(join(root, "_chat-archive"))).toBe(false);
+});

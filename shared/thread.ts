@@ -20,7 +20,8 @@ export interface RunRow {
   runId: string;
   origin: RunOrigin;
   status: "queued" | "running" | "completed" | "interrupted" | "failed";
-  harness: string;
+  /** null until the bridge has announced its native thread. */
+  harness: string | null;
   nativeThreadId: string | null;
   model: string | null;
   startedAt: number | null;
