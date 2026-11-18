@@ -143,14 +143,14 @@ export function credentialMounts(ghConfigDir?: string, giteaTokensPath?: string)
   return m;
 }
 
-// Which agent will run: explicit choice (picker, API) → the remembered choice for the repo
-// (repo_prefs) → claude. Pure, so it can be tested without docker.
 /** The runtime of a row read from the DB (always set there; optional in the type only for insert literals). */
 export function storedRuntime(s: SessionRow): SessionRuntime {
   if (!s.runtime) throw new Error(`session ${s.id} has no runtime`);
   return s.runtime;
 }
 
+// Which agent will run: explicit choice (picker, API) → the remembered choice for the repo
+// (repo_prefs) → claude. Pure, so it can be tested without docker.
 export function resolveAgent(explicit: AgentName | undefined, remembered: AgentName | null | undefined): AgentName {
   return explicit ?? remembered ?? "claude";
 }
@@ -776,7 +776,7 @@ export class SessionManager {
       // Nor does a request attach to a session of the other runtime: a tmux `dev <repo>` has nothing
       // to attach to in a chat session, and a chat request must not silently land in a tmux one.
       const wanted = t.runtime ?? "tmux";
-      const accept = (s: SessionRow) => (s.runtime ?? "tmux") === wanted && (t.prompt === undefined || (s.host ?? "vps") === "vps");
+      const accept = (s: SessionRow) => storedRuntime(s) === wanted && (t.prompt === undefined || (s.host ?? "vps") === "vps");
       const id = t.sessionId ?? (t.fresh
         ? nextSessionId(this.d.db, t.project, t.repo, leftover)
         : (existingSessionId(this.d.db, t.project, t.repo, accept) ?? nextSessionId(this.d.db, t.project, t.repo, leftover)));
