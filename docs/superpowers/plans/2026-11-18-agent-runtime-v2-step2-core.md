@@ -67,7 +67,7 @@ Step 1 result: `docs/superpowers/reports/2026-11-agent-runtime-v2-metering.md` (
   (`test.skipIf`), never failed. Live checks run on the VPS as root.
 - No silent fallbacks (global instructions): a missing socket, an unknown event type, a store write error are
   surfaced (logged + visible state), never replaced by a default.
-- Commits as `LNRT <misalenert@gmail.com>`; merge PRs locally (`git merge --no-ff`), never `gh pr merge`.
+- Commits use the repository's configured identity; PRs are merged locally (`git merge --no-ff`), never `gh pr merge`.
 
 ## Review Focus
 
@@ -558,7 +558,7 @@ Rules (spec "Attention model"):
 - [ ] **Step 1: Write the failing tests:** `applyThreadEvent` "deltas then final", "duplicate seq ignored",
   "request resolved updates the item"; `groupInbox` ordering; deep link `?thread=x` → `/s/x`.
 - [ ] **Step 2–4:** FAIL → implement → PASS (`bun test dashboard`, `bun run typecheck`).
-- [ ] **Step 5:** Visual check headless (skill `lnrt-skills:visual-qa` or Playwright in a container) against a
+- [ ] **Step 5:** Visual check headless (Playwright in a container) against a
   devd with a fake thread: Inbox, SessionPage chat with a tool call and an open question, mobile width 390 px.
   Attach screenshots to the task report.
 - [ ] **Step 6: Commit** `feat(dashboard): inbox, chat view and terminal tab`.
