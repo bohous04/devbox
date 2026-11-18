@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Non-privileged command guard. The real commands are never replaced in /usr/bin."""
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,8 @@ import uuid
 from urllib.parse import urlsplit
 
 STATE = Path(os.environ.get('DEVBOX_STORAGE_STATE', '/run/devd/storage-state.json'))
+# Below the ~2 min tool timeout of agents, so they get a clear message instead of a kill.
+CHECKOUT_WAIT_SECONDS = 90
 
 
 def clone_destination(args, cwd):
@@ -87,6 +90,48 @@ def preflight(state, now=None):
     return None
 
 
+def checkout_slot(prefix, slots, wait):
+    """Hold one of `slots` per-repository slots for a new worktree checkout. Five parallel
+    13 GB checkouts saturated the host disk and devd hung on fsync for 12 minutes. The lock
+    lives in the shared Git common dir, which every session of the repository mounts.
+    Returns the open lock file (released when the process exits), or None outside a repo."""
+    r = subprocess.run(['/usr/bin/git', *prefix, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                       capture_output=True, text=True)
+    if r.returncode:
+        return None  # not a repository: git itself reports that
+    root = Path(r.stdout.strip()) / 'devbox-checkout-slots'
+    try:
+        root.mkdir(exist_ok=True)
+    except OSError as e:
+        print(f'devbox storage: checkout limit unavailable ({e}); continuing without it.', file=sys.stderr)
+        return None
+    deadline = time.time() + wait
+    announced = False
+    while True:
+        for i in range(slots):
+            f = open(root / f'{i}.lock', 'a')
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return f
+            except BlockingIOError:
+                f.close()
+        if time.time() >= deadline:
+            raise TimeoutError
+        if not announced:
+            print(f'devbox storage: {slots} worktree checkouts of this repository are running; waiting for a free slot...',
+                  file=sys.stderr)
+            announced = True
+        time.sleep(2)
+
+
+def acquire_checkout(prefix, state):
+    try:
+        return checkout_slot(prefix, max(1, state.get('checkout_slots', 2)), CHECKOUT_WAIT_SECONDS), None
+    except TimeoutError:
+        # Fail with a clear message instead of outliving the caller's tool timeout (agents: ~2 min).
+        return None, ('the disk is busy with other worktree checkouts of this repository; retry in a few minutes.')
+
+
 def event(kind, **values):
     # Each record is separate, so concurrent agents never interleave JSON writes.
     root = Path('/run/devd/storage-events')
@@ -113,6 +158,10 @@ def scratch(args):
     reason = preflight(state)
     if reason:
         print(reason, file=sys.stderr)
+        return 75
+    slot, busy = acquire_checkout([], state)
+    if busy:
+        print('devbox storage: ' + busy, file=sys.stderr)
         return 75
     # Linked worktrees share Git objects. They do not copy dependencies or build output.
     r = subprocess.run(['/usr/bin/git', 'worktree', 'add', '--detach', str(path), *(args[2:] or ['HEAD'])])
@@ -154,6 +203,11 @@ def main():
                     value=rest.pop(0)
                     prefix.append(value)
                     if flag=='-C':base=(base/value).resolve()
+            if rest[:2] == ['worktree', 'add']:
+                slot, busy = acquire_checkout(prefix, state)
+                if busy:
+                    print('devbox storage: ' + busy, file=sys.stderr)
+                    return 75
             query = ['/usr/bin/git', *prefix, 'worktree', 'list', '--porcelain']
             r = subprocess.run(query, capture_output=True, text=True)
             before = {l[9:] for l in r.stdout.splitlines() if l.startswith('worktree ')}

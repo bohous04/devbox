@@ -46,6 +46,9 @@ Docker daemon or active session restart is needed to install this protection.
   starts). They go into the sweep's archive first, then the directory and its (often locked)
   Git registration are removed. An unreachable devd removes nothing. Claude chats are not
   there: devd moves them to `/srv/dev/_chat-archive/<id>-<time>` when a session ends.
+* At most `checkout_slots` (default 2) `git worktree add` / `devbox-scratch create` run at
+  once per repository (a lock in the shared Git common dir); a further one waits up to 90 s,
+  then exits 75 with a retry message instead of outliving an agent's tool timeout.
 * `git worktree prune` is refused inside sessions: the bare clone is shared, and the
   container cannot see sibling sessions' paths, so prune unregistered their worktrees.
 * Explicit session End/removal is intercepted at host Docker CLI level: stop the
