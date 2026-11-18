@@ -326,6 +326,7 @@ class Safety(unittest.TestCase):
         with patch.object(guard,'run',side_effect=fake_run), \
              patch.object(guard,'referenced',return_value=False), \
              patch.object(self.g,'in_git',side_effect=lambda p:p.name=='pushed'), \
+             patch.object(self.g,'pin_history',return_value=0), \
              patch.object(self.g,'git_storage',return_value=[]), \
              patch.object(self.g,'archive',side_effect=fake_archive):
             self.g.sweep()
@@ -384,6 +385,15 @@ class Safety(unittest.TestCase):
         self.assertIn(left,pinned)
         git('worktree','remove',str(w),cwd=repo);git('gc','--prune=now',cwd=repo)
         git('cat-file','-e',left,cwd=repo)
+        pins=lambda:subprocess.run(['git','for-each-ref','--format=%(objectname)','refs/devbox/released/'],cwd=repo,capture_output=True,text=True).stdout.split()
+        git('branch','keep',left,cwd=repo)
+        self.assertEqual(self.g.expire_pins(repo),2,'a branch now holds both (the second is its parent)')
+        self.assertEqual(pins(),[])
+        git('update-ref','refs/devbox/released/x',left,cwd=repo);git('branch','-D','keep',cwd=repo)
+        self.assertEqual(self.g.expire_pins(repo),0,'unreachable and recent: kept')
+        self.g.c['released_pin_days']=-1
+        self.assertEqual(self.g.expire_pins(repo),1,'older than the limit')
+        self.assertEqual(pins(),[])
 
     def test_archive_batches_persist_progress_and_stop_at_budget(self):
         self.g.c.update(sweep_batch_size=2,sweep_budget_seconds=0)
@@ -519,6 +529,16 @@ class Safety(unittest.TestCase):
                           (['worktree','add','-f','--detach','-q','/abs/p'],'/abs/p'),(['worktree','add','--reason','r','--lock','p'],'/w/p'),
                           (['worktree','add','--','-p'],'/w/-p'),(['worktree','add','-b','x'],None)):
             self.assertEqual(client.worktree_add_path(rest,base),want,rest)
+
+    def test_lost_worktree_registration_is_detected(self):
+        ws=self.root/'ws';ws.mkdir();reg=self.root/'repo.git'/'worktrees'/'ws';reg.mkdir(parents=True)
+        (ws/'.git').write_text(f'gitdir: {reg}\n')
+        self.assertFalse(guard.lost_registration(ws))
+        reg.rmdir()
+        self.assertTrue(guard.lost_registration(ws))
+        (ws/'.git').unlink();(ws/'.git').mkdir()
+        self.assertFalse(guard.lost_registration(ws),'a plain clone has a .git directory')
+        self.assertFalse(guard.lost_registration(self.root/'missing'))
 
     def test_checkout_slot_outside_a_repository_is_left_to_git(self):
         self.assertIsNone(client.checkout_slot(['-C',str(self.root)],slots=2,wait=0))
