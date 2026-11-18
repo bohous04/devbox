@@ -25,10 +25,19 @@ Docker daemon or active session restart is needed to install this protection.
   started by the 5-minute sample at most once an hour. It only removes explicitly
   released worktrees after their owning container no longer exists, or after a
   release grace period (`release_grace_hours`, default 1) for a live owner. It requires
-  fresh inventory, no references/mounts (including container namespace aliases,
-  checked by device/inode), one encrypted offsite archive per sweep including the Git
+  fresh inventory and no references/mounts (including container namespace aliases,
+  checked by device/inode). A released worktree that is already in Git (clean, no
+  untracked files, HEAD on a remote ref, ignored files only regenerable output such as
+  `__pycache__`/`node_modules`) is removed right away without an archive, re-checked just
+  before removal. Its HEAD and the commits only its HEAD reflog still references (rebased,
+  amended, left on a detached HEAD) are pinned first as `refs/devbox/released/<sha>` in the
+  shared repo. Git for this check runs as the worktree's owner; root-owned worktrees and
+  failed removals take the archive path. Every other one needs an encrypted offsite archive including the Git
   common directories, an unchanged signature per worktree and a full Borg integrity
-  read; a worktree that changed meanwhile is kept. A released worktree whose Git
+  read; a worktree that changed meanwhile is kept. Archives are made in batches of
+  `sweep_batch_size` (default 8), each removed and recorded before the next; no new batch
+  starts after `sweep_budget_seconds` (default 9000, below the 4 h unit timeout) and the
+  backlog is notified and continues in the next run. A released worktree whose Git
   registration was pruned is archived and then deleted directly, together with a
   leftover registration that still names it. Unknown copies need review.
 * The same sweep removes session directories (`/srv/dev/_sessions/<id>`) that no session
@@ -77,7 +86,8 @@ cat /var/lib/devbox-storage/review.json
 Per-session overrides live in `session_limits` in `/etc/devbox-storage/config.json`.
 Alerts use the existing devd notification endpoint, with six-hour cooldown per
 category/session. Operational failures retry automatically after ten minutes;
-notify only after three failures in two hours, never instructing the user to run
+notify only after three failures in two hours (the maintenance sweep, which runs for
+hours, on its first failure), never instructing the user to run
 commands. Deliberate service stops do not notify. `notify_enabled=false` mutes
 deployment tests. Notification failure never authorizes cleanup.
 

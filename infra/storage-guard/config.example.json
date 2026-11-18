@@ -11,6 +11,8 @@
   "notify_enabled": true,
   "inventory_max_age_seconds": 10800,
   "release_grace_hours": 1,
+  "sweep_batch_size": 8,
+  "sweep_budget_seconds": 9000,
   "history_local_days": 30,
   "recovery_local_days": 30,
   "offsite_keep_days": 180,
