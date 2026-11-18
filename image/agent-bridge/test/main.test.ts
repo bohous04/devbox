@@ -78,7 +78,7 @@ describe("live smoke", () => {
     writeFileSync(promptFile, "Reply with the single word: pong");
     const log = join(dir, "events.jsonl");
     const summary = await runOnce({
-      promptFile, cwd: dir, model: process.env.AGENT_BRIDGE_MODEL ?? "claude-sonnet-4-5", log,
+      promptFile, cwd: dir, model: process.env.AGENT_BRIDGE_MODEL ?? "claude-sonnet-5-5", log,
       configDir: process.env.CLAUDE_CONFIG_DIR!, claudeExecutable: claudePath!,
     });
     expect(summary.status).toBe("completed");

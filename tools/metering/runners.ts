@@ -212,6 +212,8 @@ export async function runBridge(d: Deps, h: RunHandle, model: string, entrypoint
 export interface MeasureOpts {
   account: string; path: "tui" | "bridge"; n: number; model: string; expectedModel: string;
   commit: string; repo: string; entrypoint?: string; taskFile?: string;
+  /** Skip the usage reads and settle wait: the account has no 5-hour meter to read. */
+  tokensOnly?: boolean;
 }
 
 /** Cleanup must not replace the error of the run itself, so a failed step only warns. */
@@ -248,10 +250,13 @@ export async function measureRun(d: Deps, o: MeasureOpts): Promise<RunRecord> {
         "-v", `${cloneDir}:/workspace`, "-v", `${taskFile}:/task.md:ro`,
         IMAGE, "infinity",
       ], "docker run");
-      const before = await readUsage(d, o.account);
+      const before = o.tokensOnly ? null : await readUsage(d, o.account);
       const outcome = o.path === "tui"
         ? await runTui(d, handle, o.model)
         : await runBridge(d, handle, o.model, o.entrypoint);
+      if (o.tokensOnly) {
+        return validateRun({ path: o.path, ...outcome, before: null, after: null }, o.expectedModel, { tokensOnly: true });
+      }
       await d.sleep(SETTLE_MS);
       const after = await readUsage(d, o.account);
       return validateRun({ path: o.path, ...outcome, before, after }, o.expectedModel);
