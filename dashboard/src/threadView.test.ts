@@ -191,3 +191,16 @@ test("a run that starts at once has its user item", () => {
   expect(t.items.map((i) => [i.kind, i.itemId, i.text])).toEqual([["user", "user:r1", "hello"], ["assistant", "m1", "hi"]]);
   expect(t.runs).toEqual([expect.objectContaining({ runId: "r1", status: "completed", origin: "user" })]);
 });
+
+test("deltas after a run's terminal event are ignored: the item stays done", () => {
+  seq = 0;
+  const t = run(emptyThread(), [
+    { type: "run.started", runId: "r1", origin: "user", nativeThreadId: null, model: null },
+    { type: "message.delta", runId: "r1", itemId: "m1", text: "Hel" },
+    { type: "run.interrupted", runId: "r1" },
+    { type: "message.delta", runId: "r1", itemId: "m1", text: "lo" },
+    { type: "message.delta", runId: "r1", itemId: "m2", text: "late" },
+  ]);
+  expect(t.items.map((i) => [i.itemId, i.text, i.status])).toEqual([["m1", "Hel", "done"]]);
+  expect(t.lastSeq).toBe(5);
+});

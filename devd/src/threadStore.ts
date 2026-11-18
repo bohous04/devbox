@@ -3,6 +3,8 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { BackgroundWork, LoggedEvent, PendingRequest, RunRow, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
+const TERMINAL: ReadonlySet<string> = new Set(["completed", "interrupted", "failed"]);
+
 /** Per-session conversation store: `<root>/_threads/<id>.sqlite`. Conversation data stays out of the
  *  main devd DB on purpose. Items are ordered by their own `id`; `seq` is the log seq of the event that created them (one event can create
  *  several items); `updated_seq`
@@ -90,6 +92,9 @@ export class ThreadStore {
         return;
       }
       case "message.delta": {
+        // The harness may keep streaming after an interrupt until its result: the run is over, the item stays done.
+        const run = db.query("SELECT status FROM runs WHERE run_id=?").get(ev.runId) as { status: string } | null;
+        if (run && TERMINAL.has(run.status)) return;
         const it = this.findItem(ev.runId, ev.itemId);
         if (!it) this.insertItem(seq, ts, { runId: ev.runId, itemId: ev.itemId, kind: "assistant", text: ev.text, status: "streaming" });
         else db.query(`UPDATE items SET text=text||?, status='streaming', updated_seq=? WHERE id=?`).run(ev.text, seq, it.id);

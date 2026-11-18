@@ -14,6 +14,8 @@ export function applyThreadEvent(t: ThreadSnapshot, e: LoggedEvent): ThreadSnaps
   return n;
 }
 
+const TERMINAL: ReadonlySet<string> = new Set(["completed", "interrupted", "failed"]);
+
 const findItem = (n: ThreadSnapshot, runId: string, itemId: string) =>
   n.items.findIndex((i) => i.runId === runId && i.itemId === itemId);
 
@@ -67,6 +69,8 @@ function dispatch(n: ThreadSnapshot, { seq, ts, event: ev }: LoggedEvent) {
       return;
     }
     case "message.delta": {
+      // The harness may keep streaming after an interrupt until its result: the run is over, the item stays done.
+      if (n.runs.some((r) => r.runId === ev.runId && TERMINAL.has(r.status))) return;
       const idx = findItem(n, ev.runId, ev.itemId);
       if (idx < 0) insertItem(n, seq, ts, { runId: ev.runId, itemId: ev.itemId, kind: "assistant", text: ev.text, status: "streaming" });
       else n.items[idx] = { ...n.items[idx], text: n.items[idx].text + ev.text, status: "streaming" };
