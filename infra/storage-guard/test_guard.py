@@ -4,6 +4,7 @@ import os
 import shutil
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -364,6 +365,10 @@ class Safety(unittest.TestCase):
         self.assertFalse(self.g.in_git(w),'edits hidden by skip-worktree')
         git('update-index','--no-skip-worktree','a',cwd=w);git('checkout','a',cwd=w)
         self.assertTrue(self.g.in_git(w))
+        git('sparse-checkout','set','--no-cone','/*','!/a',cwd=w)
+        self.assertFalse((w/'a').exists())
+        self.assertTrue(self.g.in_git(w),'a file a sparse checkout left out holds no work')
+        git('sparse-checkout','disable',cwd=w)
         (w/'new').write_text('n')
         self.assertFalse(self.g.in_git(w),'untracked file');(w/'new').unlink()
         (w/'a').write_text('changed')
@@ -478,6 +483,42 @@ class Safety(unittest.TestCase):
             client.checkout_slot(['-C',str(repo)],slots=2,wait=0)
         held[0].close()
         self.assertIsNotNone(client.checkout_slot(['-C',str(repo)],slots=2,wait=0),'a freed slot is reused')
+
+    def test_worktree_add_is_sparse_when_the_repository_asks_for_it(self):
+        git=lambda *a,cwd:subprocess.run(['git','-c','user.name=t','-c','user.email=t@t','-c','init.defaultBranch=main',*a],cwd=cwd,check=True,capture_output=True)
+        src=self.root/'src';src.mkdir();git('init',cwd=src)
+        (src/'props').mkdir();(src/'props'/'big.bin').write_text('x');(src/'code.lua').write_text('c')
+        git('add','.',cwd=src);git('commit','-m','a',cwd=src)
+        bare=self.root/'r.git';git('clone','--bare',str(src),str(bare),cwd=self.root)
+        git('update-ref','refs/remotes/origin/main','main',cwd=bare)  # HEAD is pushed
+        main=self.root/'main';git('worktree','add',str(main),'main',cwd=bare)
+        add=lambda path,**env:subprocess.run([sys.executable,str(Path(client.__file__)),'git','-C',str(main),'worktree','add','--detach',str(path)],
+                                             env={**os.environ,'DEVBOX_STORAGE_STATE':str(self.root/'none.json'),**env},capture_output=True,text=True)
+        r=add(self.root/'full');self.assertEqual(r.returncode,0,r.stderr)
+        self.assertTrue((self.root/'full'/'props'/'big.bin').exists(),'no pattern file: full checkout')
+        (bare/'devbox-sparse-checkout').write_text('# assets\n/*\n!/props/\n')
+        r=add(self.root/'sparse');self.assertEqual(r.returncode,0,r.stderr)
+        self.assertTrue((self.root/'sparse'/'code.lua').exists())
+        self.assertFalse((self.root/'sparse'/'props').exists())
+        self.assertIn('sparse-checkout disable',r.stderr)
+        self.assertEqual(subprocess.run(['git','status','--porcelain'],cwd=self.root/'sparse',capture_output=True,text=True).stdout,'')
+        self.assertTrue(self.g.in_git(self.root/'sparse'),'the fast sweep accepts it')
+        self.assertTrue((main/'props'/'big.bin').exists(),'other worktrees keep their files')
+        r=add(self.root/'optout',DEVBOX_FULL_CHECKOUT='1');self.assertEqual(r.returncode,0,r.stderr)
+        self.assertTrue((self.root/'optout'/'props'/'big.bin').exists())
+        shutil.rmtree(self.root/'sparse')  # a stale registration, as prune is refused in sessions
+        r=subprocess.run([sys.executable,str(Path(client.__file__)),'git','-C',str(main),'worktree','add','-f','--detach','../sparse'],
+                         env={**os.environ,'DEVBOX_STORAGE_STATE':str(self.root/'none.json')},capture_output=True,text=True)
+        self.assertEqual(r.returncode,0,r.stderr)
+        self.assertTrue((self.root/'sparse'/'code.lua').exists(),'a reused registration is filled too')
+        self.assertEqual(subprocess.run(['git','status','--porcelain'],cwd=self.root/'sparse',capture_output=True,text=True).stdout,'')
+
+    def test_worktree_add_path_from_argv(self):
+        base=Path('/w')
+        for rest,want in ((['worktree','add','p'],'/w/p'),(['worktree','add','-b','x','p','main'],'/w/p'),
+                          (['worktree','add','-f','--detach','-q','/abs/p'],'/abs/p'),(['worktree','add','--reason','r','--lock','p'],'/w/p'),
+                          (['worktree','add','--','-p'],'/w/-p'),(['worktree','add','-b','x'],None)):
+            self.assertEqual(client.worktree_add_path(rest,base),want,rest)
 
     def test_checkout_slot_outside_a_repository_is_left_to_git(self):
         self.assertIsNone(client.checkout_slot(['-C',str(self.root)],slots=2,wait=0))
