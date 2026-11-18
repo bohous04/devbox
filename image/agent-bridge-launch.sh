@@ -6,7 +6,7 @@
 # Exit statuses of `agent-bridge serve` (src/serve.ts):
 #   0  stopped on request (`stop` command)      -> the launcher exits
 #   3  configuration error a restart cannot fix -> the launcher logs it once and exits
-#   anything else (1 harness ended, 2 usage error, crash) -> restart after 2 s
+#   anything else (1 harness ended, 2 usage error, crash) -> restart with backoff (below)
 set -u
 
 # Chat sessions get their state from the bridge; hooks would report the same agent a second time.
@@ -33,7 +33,15 @@ case "${DEVD_AGENT:-}" in
     ;;
 esac
 
+# Restart backoff: a run that fails within quick_secs is a quick failure; the delay doubles from 2 s to 60 s
+# on consecutive quick failures and the launcher gives up after max_fails of them (e.g. a resume that fails on
+# every start). A run that lasted longer resets both. The overrides exist for the launcher test.
+quick_secs=${DEVBOX_BRIDGE_QUICK_SECS:-30}
+max_fails=${DEVBOX_BRIDGE_MAX_FAILS:-5}
+fails=0
+delay=2
 while :; do
+  started=$SECONDS
   agent-bridge serve
   status=$?
   [ "$status" = 0 ] && exit 0
@@ -41,6 +49,20 @@ while :; do
     echo "agent-bridge-launch: agent-bridge serve has a configuration error (see above); not restarting" >&2
     exit 3
   fi
-  echo "agent-bridge-launch: agent-bridge serve exited with $status; restarting in 2 s" >&2
-  sleep 2
+  if [ $((SECONDS - started)) -ge "$quick_secs" ]; then
+    fails=0
+    delay=2
+  else
+    fails=$((fails + 1))
+    if [ "$fails" -ge "$max_fails" ]; then
+      echo "agent-bridge-launch: agent-bridge failed $fails times in a row; giving up — the session shows as disconnected" >&2
+      exit 1
+    fi
+  fi
+  echo "agent-bridge-launch: agent-bridge serve exited with $status; restarting in $delay s" >&2
+  sleep "$delay"
+  if [ "$fails" -gt 0 ]; then
+    delay=$((delay * 2))
+    [ "$delay" -gt 60 ] && delay=60
+  fi
 done

@@ -364,7 +364,8 @@ describe("openClaudeSession", () => {
       { type: "run.failed", runId: "run-1", error: "Claude session ended" },
       { type: "run.failed", runId: "run-2", error: "Claude session ended" },
     ]);
-    await expect(session.startTurn("run-3", "z", "user")).rejects.toThrow("Claude session ended");    expect(await session.ended).toEqual({});
+    await expect(session.startTurn("run-3", "z", "user")).rejects.toThrow("Claude session ended");
+    expect(await session.ended).toEqual({});
   });
 
   test("ended carries the error when the SDK stream throws", async () => {
