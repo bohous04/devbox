@@ -194,6 +194,13 @@ export class ThreadStore {
       i.output ?? null, i.isError === undefined ? null : i.isError ? 1 : 0, i.status ?? null, ts, seq);
   }
 
+  /** A notice devd itself adds (not a bridge event): it carries the current seq, so it shows on the next full
+   *  load of the thread. */
+  addNotice(text: string, ts: number): void {
+    const seq = this.lastSeq();
+    this.insertItem(seq, ts, { runId: null, itemId: null, kind: "notice", text, status: "done" });
+  }
+
   /** Without `limit` all items; with it the newest `limit` ones, oldest first. */
   snapshot(opts: { afterSeq?: number; limit?: number } = {}): ThreadSnapshot {
     const after = opts.afterSeq ?? 0;

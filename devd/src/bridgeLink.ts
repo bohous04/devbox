@@ -27,6 +27,8 @@ interface Link {
   dropped: boolean;
   /** The current outage was logged; reset once a connection opens. */
   outageLogged: boolean;
+  /** Since when the bridge's log is behind the store (its `ready.lastSeq` was below `store.lastSeq()`). */
+  behindSince: number | null;
 }
 
 class MalformedFrame extends Error {}
@@ -72,6 +74,8 @@ export class BridgeLinks {
     store: (id: string) => ThreadStore;
     onEvent: (sessionId: string, e: LoggedEvent) => void;
     onStatus: (sessionId: string, s: LinkStatus) => void;
+    /** `behind(sessionId)` changed. */
+    onBehind: (sessionId: string) => void;
     retryMs?: number;
     log?: (msg: string) => void;
   }) {
@@ -84,7 +88,7 @@ export class BridgeLinks {
     if (this.links.has(sessionId)) return;
     const link: Link = {
       status: "connecting", socket: null, buffer: "", decoder: new TextDecoder(), outbound: [],
-      pending: new Map(), retry: null, dropped: false, outageLogged: false,
+      pending: new Map(), retry: null, dropped: false, outageLogged: false, behindSince: null,
     };
     this.links.set(sessionId, link);
     this.notifyStatus(sessionId, "connecting");
@@ -106,6 +110,12 @@ export class BridgeLinks {
 
   status(sessionId: string): LinkStatus {
     return this.links.get(sessionId)?.status ?? "disconnected";
+  }
+
+  /** Since when the bridge's event log has been behind the thread store, or null. While it is, the bridge reuses
+   *  seqs the store already holds, and the store drops those events as duplicates. */
+  behind(sessionId: string): number | null {
+    return this.links.get(sessionId)?.behindSince ?? null;
   }
 
   send(sessionId: string, cmd: BridgeCommand, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<void> {
@@ -257,7 +267,29 @@ export class BridgeLinks {
         return;
       }
       case "ready":
+        this.checkBehind(sessionId, link, f.lastSeq);
         return;
     }
+  }
+
+  /** A host crash can lose the unsynced tail of the bridge's log after devd stored it. Detection only: the link
+   *  carries on, the thread gets a notice and the inbox shows the session as needing the user. */
+  private checkBehind(sessionId: string, link: Link, bridgeSeq: number) {
+    const store = this.d.store(sessionId);
+    const storeSeq = store.lastSeq();
+    if (bridgeSeq >= storeSeq) {
+      if (link.behindSince === null) return;
+      link.behindSince = null;
+      this.log(`bridge link ${sessionId}: bridge log caught up with devd's store (bridge ${bridgeSeq}, devd ${storeSeq})`);
+    } else {
+      // Once per episode: a reconnect while still behind says nothing new.
+      if (link.behindSince !== null) return;
+      const text = `bridge log is behind devd's store (bridge ${bridgeSeq}, devd ${storeSeq}); new events may be missing`;
+      this.log(`bridge link ${sessionId}: ${text}`);
+      store.addNotice(text, Date.now());
+      link.behindSince = Date.now();
+    }
+    try { this.d.onBehind(sessionId); }
+    catch (err) { this.log(`bridge link ${sessionId}: onBehind failed: ${err instanceof Error ? err.message : String(err)}`); }
   }
 }

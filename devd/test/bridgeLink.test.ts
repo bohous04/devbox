@@ -77,12 +77,14 @@ function setup(prior: LoggedEvent[] = []) {
   const logs: string[] = [];
   const onEvent: (id: string, e: LoggedEvent) => void = (_id, e) => { seen.push(e); };
   const onStatus: (id: string, s: LinkStatus) => void = (_id, s) => { statuses.push(s); };
-  const t = { onEvent, onStatus };
+  const onBehind: (id: string) => void = () => {};
+  const t = { onEvent, onStatus, onBehind };
   const links = new BridgeLinks({
     controlDir: (id) => join(root, id),
     store: () => store,
     onEvent: (id, e) => t.onEvent(id, e),
     onStatus: (id, s) => t.onStatus(id, s),
+    onBehind: (id) => t.onBehind(id),
     retryMs: RETRY,
     log: (m) => { logs.push(m); },
   });
@@ -240,7 +242,7 @@ test("a store write error drops the connection and the reconnect replays the eve
   } as unknown as ThreadStore;
   const seen: number[] = [];
   const logs: string[] = [];
-  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: (_id, e) => { seen.push(e.seq); }, onStatus: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
+  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: (_id, e) => { seen.push(e.seq); }, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
   const s = fakeBridge(join(root, ID, "agent.sock"), { events: [ev(1)] });
   cleanups.push(() => { links.drop(ID); s.close(); real.close(); rmSync(root, { recursive: true, force: true }); });
   links.ensure(ID);
@@ -256,7 +258,7 @@ test("an unreadable store keeps the link disconnected and retrying, without cras
   const real = ThreadStore.open(root, ID);
   const store = () => { if (broken) throw new Error("session is ending"); return real; };
   const logs: string[] = [];
-  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store, onEvent: () => {}, onStatus: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
+  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
   const s = fakeBridge(join(root, ID, "agent.sock"));
   cleanups.push(() => { links.drop(ID); s.close(); real.close(); rmSync(root, { recursive: true, force: true }); });
   links.ensure(ID);
@@ -280,4 +282,23 @@ test("a throwing onStatus is logged and the link keeps working", async () => {
   await waitFor(() => seen.length === 2, "live event");
   expect(logs).toContain(`bridge link ${ID}: onStatus failed for connecting: store unreadable while connecting`);
   expect(logs).toContain(`bridge link ${ID}: onStatus failed for connected: store unreadable while connected`);
+});
+
+test("a bridge log behind the store is logged, shown as a notice and reported, until a ready catches up", async () => {
+  const { links, store, logs, serve, t } = setup([ev(1), ev(2), ev(3), ev(4), ev(5)]);
+  const behind: string[] = [];
+  t.onBehind = (id) => { behind.push(id); };
+  // The unsynced tail of events.jsonl was lost: the bridge restarts at seq 2.
+  const a = serve({ events: [ev(1), ev(2)] });
+  links.ensure(ID);
+  await waitFor(() => links.behind(ID) !== null, "behind detected");
+  expect(behind).toEqual([ID]);
+  expect(logs.some((l) => l.includes("behind") && l.includes("bridge 2") && l.includes("devd 5"))).toBe(true);
+  const notice = store.snapshot().items.filter((i) => i.kind === "notice");
+  expect(notice.map((i) => i.text)).toEqual(["bridge log is behind devd's store (bridge 2, devd 5); new events may be missing"]);
+  a.close();
+  await waitFor(() => links.status(ID) === "disconnected", "disconnect");
+  serve({ events: [ev(1), ev(2), ev(3), ev(4), ev(5), ev(6)] });
+  await waitFor(() => store.lastSeq() === 6 && links.behind(ID) === null, "caught up");
+  expect(behind).toEqual([ID, ID]);
 });

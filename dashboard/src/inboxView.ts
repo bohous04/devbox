@@ -31,6 +31,7 @@ const REASON: Record<NonNullable<Attention["reason"]>, string> = {
   failed: "run failed",
   completed: "finished",
   disconnected: "agent not connected",
+  "bridge-behind": "bridge log behind — events may be missing",
   running: "running",
   background: "background work",
   queued: "queued",

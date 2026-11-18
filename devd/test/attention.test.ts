@@ -114,3 +114,9 @@ test("tmux attention follows the hub's live state", () => {
   expect(tmuxAttention(live("unknown"))).toEqual({ section: "idle", reason: null, since: 5 });
   expect(tmuxAttention(null)).toEqual({ section: "idle", reason: null, since: 0 });
 });
+
+test("a bridge log behind the store is needs-you", () => {
+  const s = thread([started("r1"), completed("r1")]);
+  s.markSeen(2);
+  expect(chatAttention(s.snapshot(), { ...connected, behindSince: 7000 }, LATER)).toEqual({ section: "needs_you", reason: "bridge-behind", since: 7000 });
+});

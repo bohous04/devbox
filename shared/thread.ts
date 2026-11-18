@@ -62,7 +62,7 @@ export type InboxSection = "needs_you" | "working" | "idle";
 /** Where a session belongs in the inbox and why; `since` is when that state began (0 = nothing happened yet). */
 export interface Attention {
   section: InboxSection;
-  reason: "request" | "failed" | "completed" | "disconnected" | "running" | "background" | "queued" | null;
+  reason: "request" | "failed" | "completed" | "disconnected" | "bridge-behind" | "running" | "background" | "queued" | null;
   since: number;
 }
 

@@ -4,8 +4,9 @@ import type { AgentLiveSnapshot } from "./agentEvents";
 /** A run that ended this recently still counts as working, so a run that is about to continue does not flicker. */
 export const WORKING_GRACE_MS = 2000;
 
-/** devd's link to a running chat session's bridge and since when it has that status. */
-export interface LinkState { status: LinkStatus; since: number }
+/** devd's link to a running chat session's bridge and since when it has that status; `behindSince` when the
+ *  bridge's log is behind the thread store (BridgeLinks.behind). */
+export interface LinkState { status: LinkStatus; since: number; behindSince?: number }
 
 function required(v: number | null, what: string, run: RunRow): number {
   if (v === null) throw new Error(`run ${run.runId} (${run.status}) has no ${what}`);
@@ -21,6 +22,8 @@ export function chatAttention(t: ThreadSnapshot, link: LinkState | null, now: nu
   }
   // Before "working": a run the store still calls running may be dead with the bridge.
   if (link?.status === "disconnected") return { section: "needs_you", reason: "disconnected", since: link.since };
+  // New events may be dropped as duplicates: nothing below can be trusted to be current.
+  if (link?.behindSince !== undefined) return { section: "needs_you", reason: "bridge-behind", since: link.behindSince };
   // No link = the session is not running: a run the store still calls running or queued, and background work,
   // died with the container (the bridge resolves them on its next start), so none of it is work in progress.
   const live = link !== null;

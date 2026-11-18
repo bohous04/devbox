@@ -401,7 +401,11 @@ const inbox = new Inbox({
   sessions: () => listSessions(db).filter((s) => !mgr.isEnding(s.id)),
   session: (id) => (mgr.isEnding(id) ? null : getSession(db, id)),
   threads: threadStore,
-  chatLink: (id) => chatHub.link(id),
+  chatLink: (id) => {
+    const link = chatHub.link(id);
+    const behindSince = bridgeLinks.behind(id);
+    return link && behindSince !== null ? { ...link, behindSince } : link;
+  },
   tmuxLive: (id) => agentEvents.liveSnapshot(id),
   bus,
 });
@@ -417,6 +421,7 @@ const bridgeLinks = new BridgeLinks({
     chatHub.onStatus(id, s, () => chatSnapshot(id));
     inbox.changed(id);
   },
+  onBehind: (id) => inbox.changed(id),
 });
 const releaseThread = (id: string) => {
   bridgeLinks.drop(id);
