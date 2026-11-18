@@ -118,7 +118,7 @@ RUN cd /opt/agent-bridge && bun install --production
 RUN userdel -r ubuntu 2>/dev/null || true \
     && useradd -m -u 1000 -s /bin/zsh dev \
     && echo "dev ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dev \
-    && install -d -o dev -g dev /home/dev/.claude /home/dev/.codex /home/dev/.grok /home/dev/.gemini /home/dev/.vscode-server /workspace /run/devd \
+    && install -d -o dev -g dev /home/dev/.claude /home/dev/.codex /home/dev/.codex-v2 /home/dev/.codex-v2/shared /home/dev/.grok /home/dev/.gemini /home/dev/.vscode-server /workspace /run/devd \
     && touch /home/dev/.zshrc && chown dev:dev /home/dev/.zshrc
 
 COPY entrypoint.sh /usr/local/bin/devbox-entrypoint

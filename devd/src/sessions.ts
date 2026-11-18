@@ -116,6 +116,12 @@ export interface SessionDeps {
   preserveForEnd?: (container: string) => Promise<void>;
 }
 
+/** Chat sessions share Codex threads, history and sqlite across accounts through one volume; tmux sessions keep
+ *  their per-account volumes untouched. */
+export function codexV2Mounts(runtime: SessionRuntime): string[] {
+  return runtime === "chat" ? ["codex-v2-shared:/home/dev/.codex-v2"] : [];
+}
+
 // Read-only bind mounts that give the container git credentials: the host's gh
 // config (for github.com, via `gh auth setup-git`) and a token file materialized
 // from secrets.giteaTokens (consumed by image/git-credential-devbox).
@@ -718,7 +724,7 @@ export class SessionManager {
       ...(dind ? { network: dindNetwork(id) } : {}),
       portBase, portsPerSession: this.d.cfg.settings.portsPerSession,
       bindIp: this.d.bindIp,
-      extraMounts: [...(this.d.extraMounts ?? []), `${this.controlDir(id)}:/run/devd`, `${this.d.root}/_inbox:/inbox:ro`, `${projectsDir}:/home/dev/.claude/projects/-workspace`, ...(bare ? worktreeMounts(canonical(bare), canonical(ws)) : []), ...credentialMounts(this.d.ghConfigDir && existsSync(this.d.ghConfigDir) ? this.d.ghConfigDir : undefined, this.gitTokensFor(id, remote?.devdUrl)), ...prod, ...this.accountMounts()],
+      extraMounts: [...(this.d.extraMounts ?? []), `${this.controlDir(id)}:/run/devd`, `${this.d.root}/_inbox:/inbox:ro`, `${projectsDir}:/home/dev/.claude/projects/-workspace`, ...(bare ? worktreeMounts(canonical(bare), canonical(ws)) : []), ...credentialMounts(this.d.ghConfigDir && existsSync(this.d.ghConfigDir) ? this.d.ghConfigDir : undefined, this.gitTokensFor(id, remote?.devdUrl)), ...prod, ...this.accountMounts(), ...codexV2Mounts(runtime)],
       cmd: this.d.cmd,
       env: {
         DEVD_SESSION_ID: id,

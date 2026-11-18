@@ -26,6 +26,18 @@ case "${DEVD_AGENT:-}" in
     . "$(dirname -- "${BASH_SOURCE[0]}")/codex-account-env.sh"
     # Exports CODEX_HOME for a standalone account; the default account keeps the image's CODEX_HOME.
     codex_account_prepare || { echo "agent-bridge-launch: Codex account preparation failed" >&2; exit 1; }
+    # Chat sessions run on a per-account shadow home that shares threads/history/sqlite with every account
+    # (so an account switch is a restart with thread/resume); auth.json stays the account's own, linked in place.
+    codex_id=${DEVD_CODEX_ACCOUNT_ID:-}
+    if [ -z "$codex_id" ]; then
+      case "${CODEX_HOME:-}" in
+        /home/dev/.codex-accounts/*) codex_id=$(basename -- "$CODEX_HOME") ;;
+        *) codex_id=default ;;
+      esac
+    fi
+    codex_shadow=$(agent-bridge codex-home "$codex_id") \
+      || { echo "agent-bridge-launch: Codex shadow home for the account failed" >&2; exit 1; }
+    export CODEX_HOME=$codex_shadow CODEX_SQLITE_HOME=$codex_shadow/sqlite DEVD_CODEX_ACCOUNT_ID=$codex_id
     ;;
   *)
     echo "agent-bridge-launch: unknown DEVD_AGENT \"${DEVD_AGENT:-}\" (chat sessions support claude and codex)" >&2

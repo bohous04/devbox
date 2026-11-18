@@ -70,3 +70,22 @@ test("a long run resets the failure counter and the delay", () => {
   const r = launch([[1, 0], [1, 0], [1, 0], [1, 3], [1, 0], [1, 0], [0, 0]]);
   expect(r).toMatchObject({ status: 0, runs: 7, delays: [2, 4, 8, 2, 2, 4] });
 }, 15_000);
+
+test("codex chat runs on the shadow home reported by `agent-bridge codex-home`", () => {
+  writeFileSync(
+    join(dir, "agent-bridge"),
+    `#!/usr/bin/env bash
+if [ "$1" = codex-home ]; then echo "/shadow/$2"; exit 0; fi
+echo "$CODEX_HOME|$CODEX_SQLITE_HOME|$DEVD_CODEX_ACCOUNT_ID|$DEVD_CODEX_REMOTE" > "${dir}/env"
+exit 0
+`,
+  );
+  chmodSync(join(dir, "agent-bridge"), 0o755);
+  const p = Bun.spawnSync(["bash", LAUNCHER], {
+    env: { PATH: `${dir}:/usr/bin:/bin`, DEVD_AGENT: "codex", CODEX_HOME: "/home/dev/.codex", DEVD_CODEX_ACCOUNTS_DIR: dir },
+    stderr: "pipe",
+  });
+  expect(p.stderr.toString()).toBe("");
+  expect(p.exitCode).toBe(0);
+  expect(readFileSync(join(dir, "env"), "utf8").trim()).toBe("/shadow/default|/shadow/default/sqlite|default|");
+});

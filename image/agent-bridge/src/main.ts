@@ -3,7 +3,8 @@ import { runClaudeTurn, type QueryFn } from "./claude.ts";
 import { EventLog } from "./eventLog.ts";
 import type { TokenUsage } from "./events.ts";
 import { runMcp } from "./mcp.ts";
-import { ConfigError, EXIT_CONFIG, runServe } from "./serve.ts";
+import { prepareShadowHome } from "./codexHomes.ts";
+import { CODEX_ACCOUNTS_ROOT, ConfigError, EXIT_CONFIG, runServe } from "./serve.ts";
 
 export interface OnceArgs {
   promptFile: string;
@@ -34,7 +35,7 @@ const OPTIONAL: Record<string, keyof OnceArgs> = {
 };
 
 export function parseArgs(argv: string[]): OnceArgs {
-  if (argv[0] !== "once") throw new Error("usage: agent-bridge serve | mcp | once --prompt-file <path> --cwd <dir> --model <m> --log <path>");
+  if (argv[0] !== "once") throw new Error("usage: agent-bridge serve | mcp | codex-home <accountId> | once --prompt-file <path> --cwd <dir> --model <m> --log <path>");
   const values: Partial<Record<keyof OnceArgs, string>> = {};
   for (let i = 1; i < argv.length; i += 2) {
     const key = REQUIRED[argv[i]] ?? OPTIONAL[argv[i]];
@@ -86,6 +87,9 @@ if (import.meta.main) {
   try {
     if (argv[0] === "serve") {
       process.exit(await runServe());
+    } else if (argv[0] === "codex-home") {
+      if (!argv[1] || argv.length > 2) throw new Error("usage: agent-bridge codex-home <accountId>");
+      console.log(prepareShadowHome(argv[1], CODEX_ACCOUNTS_ROOT));
     } else if (argv[0] === "mcp") {
       // Stays alive on stdio until the MCP client closes it.
       await runMcp();
