@@ -560,3 +560,52 @@ test("a broken install where cc did not run even before: no rollback is attempte
   const data = JSON.parse(listEvents(db, { type: "cc_upgrade_failed" })[0]!.data!);
   expect(data.rolledBack).toBe(false);
 });
+
+// Chat sessions: panes are never touched; the agent restart goes through the injected chat link.
+const paneCalls = (calls: { cmd: string[] }[]) =>
+  calls.filter((c) => c.cmd[1] === "list-panes" || c.cmd[1] === "send-keys" || c.cmd[0] === "ps" || c.cmd[0] === "sh");
+const chatRow = (id: string) => ({ ...row(id), runtime: "chat" as const });
+
+test("chat session: installs, restarts the agent through the link, never touches panes", async () => {
+  const db = openDb(":memory:");
+  insertSession(db, chatRow("a"));
+  const cont = containerRunner({ "dev-a": "2.1.202" }, { "dev-a": PANE_A });
+  const restarted: string[] = [];
+  const res = await runCcUpkeep(deps({
+    db, host: hostRunner("2.1.220", "2.1.220").run, exec: cont.exec,
+    isChatWorking: () => false, restartChatAgent: async (id) => { restarted.push(id); },
+  }));
+  expect(restarted).toEqual(["a"]);
+  expect(res.updated).toEqual(["a"]);
+  expect(res.restarted).toEqual(["a"]);
+  expect(paneCalls(cont.calls)).toEqual([]);
+});
+
+test("chat session that is working is skipped as busy: no install, no restart", async () => {
+  const db = openDb(":memory:");
+  insertSession(db, chatRow("a"));
+  const cont = containerRunner({ "dev-a": "2.1.202" }, { "dev-a": PANE_A });
+  const restarted: string[] = [];
+  const res = await runCcUpkeep(deps({
+    db, host: hostRunner("2.1.220", "2.1.220").run, exec: cont.exec,
+    isChatWorking: () => true, restartChatAgent: async (id) => { restarted.push(id); },
+  }));
+  expect(restarted).toEqual([]);
+  expect(res.skipped).toEqual(["a"]);
+  expect(cont.calls.some((c) => c.cmd[0] === "sudo")).toBe(false);
+  expect(listEvents(db, { type: "cc_skipped" }).length).toBe(1);
+});
+
+test("chat restart failure is logged as cc_restart_failed, not swallowed", async () => {
+  const db = openDb(":memory:");
+  insertSession(db, chatRow("a"));
+  const cont = containerRunner({ "dev-a": "2.1.202" });
+  const res = await runCcUpkeep(deps({
+    db, host: hostRunner("2.1.220", "2.1.220").run, exec: cont.exec,
+    isChatWorking: () => false, restartChatAgent: async () => { throw new Error("chat runtime link not wired"); },
+  }));
+  expect(res.restarted).toEqual([]);
+  const ev = listEvents(db, { type: "cc_restart_failed" });
+  expect(ev.length).toBe(1);
+  expect(ev[0]!.data).toContain("chat runtime link not wired");
+});

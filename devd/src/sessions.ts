@@ -11,7 +11,7 @@ import { insteadOfEnv } from "./gitProxy";
 import { dindCleanupPlan, dindEnsurePlan, dindName, dindNetwork, dindNetworkCreate, dindSubnetCandidates, dockerHostFor } from "./dind";
 import { IBX_PATHS, toRemoteRunOpts } from "./instabox/runOpts";
 import type { DevConfig, Settings } from "./config";
-import { deleteGitStat, deleteSession, getRepoAgent, getSession, insertSession, listSessions, logEvent, releaseLeasesForSession, setAutoEnd, setRepoAgent, setSessionAgent, setSessionBranch, updateSession, type AgentName, type SessionRow } from "./db";
+import { deleteGitStat, deleteSession, getRepoAgent, getSession, insertSession, listSessions, logEvent, releaseLeasesForSession, setAutoEnd, setRepoAgent, setSessionAgent, setSessionBranch, updateSession, type AgentName, type SessionRow, type SessionRuntime } from "./db";
 import { containerEnv, containerMountDestinations, containerState, execInContainer, removeContainer, runContainer, startContainer, stopContainer, type RunOpts } from "./docker";
 import { dockerArgv } from "./dockerTarget";
 import { inspectCanonicalWorkspace, removeStoppedWorkspaceContainer, type CanonicalWorkspaceContainer } from "./canonicalWorkspace";
@@ -723,6 +723,9 @@ export class SessionManager {
         // The agent default for this container: read by agent-launch when the tmux
         // session starts, when the container restarts and in the web terminal.
         DEVD_AGENT: agent,
+        // How the agent runs in this container (tmux pane or chat bridge). From the session row, which
+        // every (re)create path has already inserted; fixed at creation.
+        DEVD_RUNTIME: getSession(this.d.db, id)?.runtime ?? "tmux",
         DEVD_URL: devdUrl,
         CLAUDE_CODE_ENABLE_TELEMETRY: "1",
         OTEL_METRICS_EXPORTER: "otlp",
@@ -744,7 +747,7 @@ export class SessionManager {
   /** `sessionId`: open (resume/attach) EXACTLY this existing session of the repo, not the one
    *  existingSessionId would pick — e.g. a paused InstaBox session when the repo also has a VPS
    *  session (smoke test, M8). Never creates a new one. */
-  async open(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; fresh?: boolean; sessionId?: string }) {
+  async open(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string }) {
     // The repo key while the id is not known (a new session only gets it here); then also the id,
     // so open does not collide with stop/end/recreate of the same existing session.
     return this.locked([openKey(t)], "open", async () => {
@@ -755,7 +758,10 @@ export class SessionManager {
       const leftover = (id: string) => existsSync(sessionWorktreePath(this.d.root, id));
       // A scheduled run (prompt) never attaches to an InstaBox session: its prompt channel
       // is in the VM and resume does not write the prompt — the work would silently not get done. The scheduler is VPS-only.
-      const accept = t.prompt !== undefined ? (s: SessionRow) => (s.host ?? "vps") === "vps" : undefined;
+      // Nor does a request attach to a session of the other runtime: a tmux `dev <repo>` has nothing
+      // to attach to in a chat session, and a chat request must not silently land in a tmux one.
+      const wanted = t.runtime ?? "tmux";
+      const accept = (s: SessionRow) => (s.runtime ?? "tmux") === wanted && (t.prompt === undefined || (s.host ?? "vps") === "vps");
       const id = t.sessionId ?? (t.fresh
         ? nextSessionId(this.d.db, t.project, t.repo, leftover)
         : (existingSessionId(this.d.db, t.project, t.repo, accept) ?? nextSessionId(this.d.db, t.project, t.repo, leftover)));
@@ -773,7 +779,7 @@ export class SessionManager {
   // repo: 14 s → the sidecar alone ~3 s of it). openUnlocked still awaits it before the session
   // container runs, so "docker works from the first command" holds. When the open fails before
   // the container exists, the sidecar would be an orphaned privileged container — removed here.
-  private async openWithEarlyDind(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; fresh?: boolean; sessionId?: string }, id: string) {
+  private async openWithEarlyDind(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string }, id: string) {
     const fresh = !t.sessionId && !getSession(this.d.db, id);   // sessionId never creates (see open)
     const dind = fresh && this.d.dind ? this.ensureDind(id).catch((e) => { console.error(`dind for ${id} failed:`, e); }) : undefined;
     try {
@@ -784,7 +790,7 @@ export class SessionManager {
     }
   }
 
-  private async openUnlocked(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; fresh?: boolean; sessionId?: string }, id: string, earlyDind?: Promise<void>) {
+  private async openUnlocked(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string }, id: string, earlyDind?: Promise<void>) {
     const ws = workspacePath(this.d.root, t.folder, t.project, t.repo);
     const existing = getSession(this.d.db, id);
     // The session ended in the meantime (or belongs to another repo) → an error, not a silent new session with the same id.
@@ -970,7 +976,7 @@ export class SessionManager {
     const row: SessionRow = {
       id, folder: t.folder, project: t.project, repo: t.repo, container: id, port_base,
       status: "running", solo: 0, created_at: this.now(), last_active_at: this.now(), important: 0, agent,
-      worktree, branch: settledBranch,
+      worktree, branch: settledBranch, runtime: t.runtime ?? "tmux",
     };
     insertSession(this.d.db, row);
     try {

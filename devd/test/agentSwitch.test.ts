@@ -239,3 +239,12 @@ test("tmux env switches for future windows too (set-environment -g)", async () =
   await switchAgent(deps({ exec }), ROW.id, "codex");
   expect(scripts.some((s) => s.includes("set-environment -g DEVD_AGENT 'codex'"))).toBe(true);
 });
+
+test("chat session → wrong-runtime, no exec", async () => {
+  const db = openDb(":memory:");
+  insertSession(db, { ...ROW, runtime: "chat" });
+  let calls = 0;
+  const d = deps({ db, exec: async () => { calls++; return ok(); } });
+  expect(await switchAgent(d, ROW.id, "claude")).toEqual({ status: "wrong-runtime" });
+  expect(calls).toBe(0);
+});

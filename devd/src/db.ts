@@ -35,6 +35,9 @@ export function migrateScheduleImportance(db: Database): void {
   db.run(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 
+/** How the agent runs in the container: a tmux pane (TUI) or the chat bridge. Fixed at creation. */
+export type SessionRuntime = "tmux" | "chat";
+
 export interface SessionRow {
   id: string; folder: string; project: string; repo: string; container: string;
   port_base: number; status: "running" | "stopped"; solo: 0 | 1;
@@ -68,6 +71,8 @@ export interface SessionRow {
   // Tailnet IPv4 of the InstaBox machine (`tailscale ip -4` after `tailscale up`). Approval
   // gates (network.ts addInstaboxIp) never let a decision through from it (C1 final review).
   instabox_ts_ip?: string | null;
+  // Optional only because of insert literals; DB has a NOT NULL default 'tmux'.
+  runtime?: SessionRuntime;
 }
 
 // Cleans a user-supplied session name: collapses whitespace (incl. \n/\t) to spaces, trims,
@@ -182,6 +187,9 @@ export function openDb(path: string): Database {
   }
   if (!sessionCols().includes("instabox_ts_ip")) {
     db.run(`ALTER TABLE sessions ADD COLUMN instabox_ts_ip TEXT`); // 100.x stroje u host='instabox'
+  }
+  if (!sessionCols().includes("runtime")) {
+    db.run(`ALTER TABLE sessions ADD COLUMN runtime TEXT NOT NULL DEFAULT 'tmux'`); // 'tmux' | 'chat'
   }
   // Current InstaBox base snapshot (single row). image_digest = `docker image inspect` of the
   // devbox image the snapshot was made from — the dashboard uses it to detect a stale base.
@@ -557,9 +565,9 @@ export function metricHourlyCells(db: Database, names: string[], from: number, t
 }
 
 export function insertSession(db: Database, r: SessionRow): void {
-  db.query(`INSERT INTO sessions (id,folder,project,repo,container,port_base,status,solo,created_at,last_active_at,important,agent,worktree,branch,host,instabox_machine_id)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(r.id, r.folder, r.project, r.repo, r.container, r.port_base, r.status, r.solo, r.created_at, r.last_active_at, r.important, r.agent ?? "claude", r.worktree ?? null, r.branch ?? null, r.host ?? "vps", r.instabox_machine_id ?? null);
+  db.query(`INSERT INTO sessions (id,folder,project,repo,container,port_base,status,solo,created_at,last_active_at,important,agent,worktree,branch,host,instabox_machine_id,runtime)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(r.id, r.folder, r.project, r.repo, r.container, r.port_base, r.status, r.solo, r.created_at, r.last_active_at, r.important, r.agent ?? "claude", r.worktree ?? null, r.branch ?? null, r.host ?? "vps", r.instabox_machine_id ?? null, r.runtime ?? "tmux");
 }
 
 export function setSessionInstabox(db: Database, id: string, machineId: string | null): void {

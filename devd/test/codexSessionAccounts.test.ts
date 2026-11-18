@@ -602,3 +602,11 @@ describe("Codex session account switching", () => {
     expect((await f.service.view(ROW.id)).currentAccountId).toBe(EXTRA);
   });
 });
+
+describe("chat runtime", () => {
+  test("switching the account of a chat session is refused before any exec", async () => {
+    const f = fixture(["default"], { runtime: "chat" });
+    await expect(f.service.switch(ROW.id, EXTRA)).rejects.toMatchObject({ status: 409 });
+    expect(f.calls).toEqual([]);
+  });
+});

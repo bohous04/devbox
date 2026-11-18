@@ -692,6 +692,10 @@ const ccUpkeepDeps = (): UpkeepDeps => ({
   exec: dockerExec,
   host: (cmd, timeoutMs) => spawnWithTimeout(cmd, timeoutMs),
   turnInProgress: (id) => agentEvents.turnInProgress(id),
+  // TODO(Task 9): wire both to the chat runtime link ({kind:"restartAgent"} over the bridge socket
+  // and the session's attention). Until then chat sessions count as busy (skipped) and a restart attempt fails visibly.
+  isChatWorking: () => true,
+  restartChatAgent: async () => { throw new Error("chat runtime link not wired"); },
   notify,
   sleep: realSleep,
   repoDir: process.cwd(),
