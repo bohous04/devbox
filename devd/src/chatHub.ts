@@ -1,6 +1,6 @@
 import type { LinkStatus, LoggedEvent, RequestKind, ThreadSnapshot } from "../../shared/thread";
 import type { AgentEventHub, HookMeta } from "./agentEvents";
-import type { LinkState } from "./attention";
+import { lastEndedRun, type LinkState } from "./attention";
 import type { SessionRow } from "./db";
 
 /** The tool name the hub's QUESTION_TOOLS treats as "waiting for input"; questions and plans pose as it. */
@@ -57,8 +57,9 @@ export class ChatHub {
     if (status !== "connected" || st.seeded) return;
     const t = snapshot(); // a throw leaves the state unseeded, so the next connect tries again
     st.seeded = true;
-    const last = t.runs.at(-1);
-    if (last?.status === "completed" && holdingCount(t) > 0) st.heldRun = last.runId;
+    const last = lastEndedRun(t);
+    const active = t.runs.some((r) => r.endedSeq === null);
+    if (!active && last?.status === "completed" && holdingCount(t) > 0) st.heldRun = last.runId;
     const s = this.d.session(sessionId);
     if (!s) {
       this.log(`chat hub: no session ${sessionId} to restore subagents for`);

@@ -1,6 +1,6 @@
 import type { InboxItem, InboxRemoved, InboxSection } from "../../shared/thread";
 import type { AgentLiveSnapshot } from "./agentEvents";
-import { chatAttention, tmuxAttention, WORKING_GRACE_MS, type LinkState } from "./attention";
+import { chatAttention, lastEndedRun, tmuxAttention, WORKING_GRACE_MS, type LinkState } from "./attention";
 import type { SessionRow } from "./db";
 import type { EventBus } from "./eventBus";
 import { storedRuntime } from "./sessions";
@@ -88,7 +88,7 @@ export class Inbox {
     const now = this.now();
     const attention = chatAttention(t, this.d.chatLink(s.id), now);
     const text = store.lastMessageText();
-    const last = t.runs.at(-1);
+    const last = lastEndedRun(t);
     const graceEnd = last && last.endedAt !== null ? last.endedAt + WORKING_GRACE_MS : null;
     return {
       item: { ...base, attention, lastText: text === null ? null : clip(text) },

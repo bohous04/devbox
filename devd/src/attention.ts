@@ -8,6 +8,14 @@ export const WORKING_GRACE_MS = 2000;
  *  bridge's log is behind the thread store (BridgeLinks.behind). */
 export interface LinkState { status: LinkStatus; since: number; behindSince?: number }
 
+/** The run that ended last (highest `endedSeq`). Not the last row: a continuation run is inserted after a run that
+ *  was queued before the restart, but runs and ends first. */
+export function lastEndedRun(t: ThreadSnapshot): RunRow | undefined {
+  let last: RunRow | undefined;
+  for (const r of t.runs) if (r.endedSeq !== null && (last === undefined || r.endedSeq > last.endedSeq!)) last = r;
+  return last;
+}
+
 function required(v: number | null, what: string, run: RunRow): number {
   if (v === null) throw new Error(`run ${run.runId} (${run.status}) has no ${what}`);
   return v;
@@ -38,7 +46,8 @@ export function chatAttention(t: ThreadSnapshot, link: LinkState | null, now: nu
     return live ? { section: "working", reason: "queued", since } : { section: "idle", reason: null, since };
   }
 
-  const last = t.runs.at(-1);
+  // Every run has ended here (running and queued returned above).
+  const last = lastEndedRun(t);
   const holding = live && t.background.some((w) => w.holding);
   if (!last) {
     if (holding) throw new Error("holding background work without any run: is the snapshot partial?");

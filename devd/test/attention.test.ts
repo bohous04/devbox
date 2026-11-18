@@ -120,3 +120,18 @@ test("a bridge log behind the store is needs-you", () => {
   s.markSeen(2);
   expect(chatAttention(s.snapshot(), { ...connected, behindSince: 7000 }, LATER)).toEqual({ section: "needs_you", reason: "bridge-behind", since: 7000 });
 });
+
+test("the last run is the one that ended last, not the last one inserted", () => {
+  // A runs, B is queued, the bridge restarts: A is interrupted, the continuation C runs first, then B.
+  const s = thread([
+    started("A"),
+    { type: "run.queued", runId: "B", text: "next", attachments: [] },
+    { type: "run.interrupted", runId: "A" },
+    { type: "run.started", runId: "C", origin: "continuation", nativeThreadId: null, model: null },
+    completed("C"),
+    started("B"),
+    completed("B"),
+  ]);
+  s.markSeen(5); // C's end was seen, B's was not
+  expect(chatAttention(s.snapshot(), connected, LATER)).toEqual({ section: "needs_you", reason: "completed", since: 7000 });
+});
