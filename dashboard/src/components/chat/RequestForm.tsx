@@ -2,7 +2,6 @@ import { useState } from "react";
 import type { PendingRequest } from "../../../../shared/thread";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { cn } from "@/lib/utils";
 import { ApiError } from "../../api";
 import { composerErrorText } from "../../threadView";
 import { Markdown } from "./Markdown";
@@ -50,13 +49,14 @@ export function RequestForm({ request, onAnswer }: { request: PendingRequest; on
             <div className="flex flex-wrap gap-2" role={request.multiSelect ? "group" : undefined} aria-label="Options">
               {request.options.map((o) => (
                 <Button
-                  key={o.label} type="button" title={o.description} disabled={busy}
+                  key={o.label} type="button" disabled={busy}
                   variant={request.multiSelect && picked.includes(o.label) ? "default" : "outline"}
                   aria-pressed={request.multiSelect ? picked.includes(o.label) : undefined}
-                  className={cn("h-auto min-h-9 max-w-full whitespace-normal text-left")}
+                  className="h-auto min-h-9 max-w-full flex-col items-start gap-0.5 whitespace-normal py-1.5 text-left"
                   onClick={() => (request.multiSelect ? toggle(o.label) : void send(o.label))}
                 >
-                  {o.label}
+                  <span>{o.label}</span>
+                  {o.description && <span className="text-xs font-normal opacity-70">{o.description}</span>}
                 </Button>
               ))}
               {/* Claude's AskUserQuestion takes the picked labels of a multi-select question comma-separated. */}

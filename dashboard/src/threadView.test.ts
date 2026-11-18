@@ -158,6 +158,20 @@ test("mergeSnapshot: changed rows replace the client's copies, new ones append, 
   expect(merged.pending).toEqual([]);
 });
 
+test("mergeSnapshot: a notice already applied from a live frame is not added twice; lastSeq never goes back", () => {
+  seq = 0;
+  const t = run(emptyThread(), [
+    { type: "run.started", runId: "r1", origin: "user", nativeThreadId: null, model: null },
+    { type: "run.failed", runId: "r1", error: "boom" },
+  ]);
+  const merged = mergeSnapshot(t, {
+    afterSeq: 1,
+    snapshot: { ...t, lastSeq: 2, items: t.items.filter((i) => i.seq > 1) },
+  });
+  expect(merged.items.filter((i) => i.kind === "notice")).toHaveLength(1);
+  expect(mergeSnapshot(t, { afterSeq: 0, snapshot: { ...emptyThread(), lastSeq: 1 } }).lastSeq).toBe(2);
+});
+
 test("composerErrorText: the three command failures, the rest by message", () => {
   expect(composerErrorText(409, { error: "agent-disconnected" })).toBe("agent not connected — message not sent");
   expect(composerErrorText(504, { error: "agent-timeout" })).toBe("no reply from the agent — check the thread before resending");

@@ -40,7 +40,7 @@ export function MessageList({ items, pending, queued, onAnswer }: {
           ) : it.kind === "assistant" ? (
             <div className="text-sm leading-relaxed">
               <Markdown text={it.text} />
-              {it.status === "streaming" && <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-muted-foreground/60 align-text-bottom" aria-label="writing" />}
+              {it.status === "streaming" && <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-muted-foreground/60 align-text-bottom" role="img" aria-label="writing" />}
             </div>
           ) : it.kind === "tool" ? (
             <ToolCall item={it} />

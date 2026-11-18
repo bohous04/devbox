@@ -156,6 +156,9 @@ export function mergeSnapshot(t: ThreadSnapshot, m: { afterSeq: number; snapshot
   const s = m.snapshot;
   const items = [...t.items];
   for (const it of s.items) {
+    // An item without an item id never changes, so one at or below our seq is already here (a live frame got
+    // ahead of the snapshot).
+    if (it.itemId === null && it.seq <= t.lastSeq) continue;
     const idx = it.itemId === null ? -1 : items.findIndex((x) => x.runId === it.runId && x.itemId === it.itemId);
     if (idx >= 0) items[idx] = it;
     else items.push(it);
@@ -166,7 +169,7 @@ export function mergeSnapshot(t: ThreadSnapshot, m: { afterSeq: number; snapshot
     if (idx >= 0) runs[idx] = r;
     else runs.push(r);
   }
-  return { lastSeq: s.lastSeq, seenSeq: s.seenSeq, items, runs, pending: s.pending, background: s.background, native: s.native };
+  return { lastSeq: Math.max(t.lastSeq, s.lastSeq), seenSeq: s.seenSeq, items, runs, pending: s.pending, background: s.background, native: s.native };
 }
 
 /** The run the Stop button interrupts. */

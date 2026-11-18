@@ -41,7 +41,7 @@ function ChatPage({ id }: { id: string }) {
     return () => { alive = false; };
   }, [id]);
 
-  const { paused } = useEventStream({
+  const { paused, badFrame } = useEventStream({
     sessionId: id,
     enabled: thread !== null,
     afterSeq: () => threadRef.current!.lastSeq,
@@ -49,18 +49,24 @@ function ChatPage({ id }: { id: string }) {
     onThread: (e) => setThread((t) => (t ? applyThreadEvent(t, e) : t)),
   });
 
-  // Opening the page marks the thread seen; so does a run ending while the user looks at it.
+  // Opening the page marks the thread seen; so does a run ending while the user looks at it, and coming back to
+  // the tab.
   const loaded = thread !== null;
   const ended = thread ? lastEndedSeq(thread) : 0;
   useEffect(() => {
-    const t = threadRef.current;
-    if (!t || t.lastSeq <= t.seenSeq || document.visibilityState !== "visible") return;
-    api.markSeen(id, t.lastSeq).then(() => setSeenErr(null), (e) => setSeenErr((e as Error).message));
+    const markSeen = () => {
+      const t = threadRef.current;
+      if (!t || t.lastSeq <= t.seenSeq || document.visibilityState !== "visible") return;
+      api.markSeen(id, t.lastSeq).then(() => setSeenErr(null), (e) => setSeenErr((e as Error).message));
+    };
+    markSeen();
+    document.addEventListener("visibilitychange", markSeen);
+    return () => document.removeEventListener("visibilitychange", markSeen);
   }, [id, loaded, ended]);
 
-  // Follow the conversation while the user is at its end; leave them alone when they scrolled up.
-  const itemCount = thread?.items.length ?? 0;
-  const lastText = thread?.items.at(-1)?.text.length ?? 0;
+  // Follow the conversation while the user is at its end (any change: text, tool output, a resolved request);
+  // leave them alone when they scrolled up.
+  const lastSeq = thread?.lastSeq ?? 0;
   const atEnd = useRef(true);
   useEffect(() => {
     const onScroll = () => { atEnd.current = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 160; };
@@ -69,7 +75,7 @@ function ChatPage({ id }: { id: string }) {
   }, []);
   useLayoutEffect(() => {
     if (atEnd.current) bottom.current?.scrollIntoView({ block: "end" });
-  }, [itemCount, lastText]);
+  }, [lastSeq]);
 
   useEffect(() => { document.title = `devbox · ${session?.name?.trim() || id}`; }, [id, session?.name]);
 
@@ -100,9 +106,9 @@ function ChatPage({ id }: { id: string }) {
         </Suspense>
       )}
 
-      {paused && (
+      {(paused || badFrame) && (
         <p role="status" className="mb-3 rounded-md border border-amber-600/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-300">
-          live updates paused — reconnecting
+          {paused ? "live updates paused — reconnecting" : `live update dropped: ${badFrame} — reload to catch up`}
         </p>
       )}
       {seenErr && <p role="alert" className="mb-3 text-sm text-destructive">could not mark the thread as seen: {seenErr}</p>}

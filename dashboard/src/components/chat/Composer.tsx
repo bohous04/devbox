@@ -4,7 +4,8 @@ import { Button } from "@/components/ui/button";
 import { ApiError } from "../../api";
 import { composerErrorText } from "../../threadView";
 
-/** Message input: Enter sends, Shift+Enter is a newline. A message sent while a run is active is queued by the
+/** Message input: with a mouse/trackpad Enter sends and Shift+Enter is a newline; on touch Enter is a newline and
+ *  the Send button sends. A message sent while a run is active is queued by the
  *  bridge and shows as queued in the thread. On a failed send the text stays and nothing is retried. */
 export function Composer({ running, onSend, onStop }: {
   running: boolean;
@@ -21,7 +22,9 @@ export function Composer({ running, onSend, onStop }: {
   async function send() {
     if (busy || text.trim() === "") return;
     setBusy(true); setErr(null);
-    try { await onSend(text); setText(""); }
+    const sent = text;
+    // Text typed while the send was in flight stays.
+    try { await onSend(sent); setText((cur) => (cur === sent ? "" : cur)); }
     catch (e) { setErr(errorText(e)); }
     finally { setBusy(false); }
   }
@@ -44,7 +47,9 @@ export function Composer({ running, onSend, onStop }: {
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); }
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && window.matchMedia("(pointer: fine)").matches) {
+              e.preventDefault(); void send();
+            }
           }}
         />
         {running && (

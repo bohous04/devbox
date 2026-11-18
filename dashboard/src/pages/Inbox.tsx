@@ -44,7 +44,7 @@ export function Inbox() {
   const [items, setItems] = useState<InboxItem[] | null>(null);
   const [workingOpen, setWorkingOpen] = useState(false);
   const now = useNow(15_000);
-  const { paused, pollError } = useEventStream({
+  const { paused, pollError, badFrame } = useEventStream({
     enabled: true,
     onInboxList: setItems,
     // Until the first full list arrives a single item would read as the whole inbox.
@@ -54,9 +54,9 @@ export function Inbox() {
 
   return (
     <AppPage title="Inbox" sub="Sessions that need you first, then the ones at work.">
-      {paused && (
+      {(paused || badFrame) && (
         <p role="status" className="mb-4 rounded-md border border-amber-600/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-300">
-          live updates paused — refreshing every 5 s{pollError ? ` (last refresh failed: ${pollError})` : ""}
+          {paused ? `live updates paused — refreshing every 5 s${pollError ? ` (last refresh failed: ${pollError})` : ""}` : `live update dropped: ${badFrame}`}
         </p>
       )}
       {!g ? (pollError ? <p role="alert" className="text-sm text-destructive">{pollError}</p> : <RowsSkeleton rows={4} />) : (

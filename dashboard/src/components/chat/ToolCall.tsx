@@ -26,9 +26,9 @@ export function ToolCall({ item }: { item: ThreadItem }) {
       <button type="button" className="flex min-h-10 w-full min-w-0 items-center gap-2 px-3 py-2 text-left" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
         <Chevron open={open} />
         {item.status === "streaming"
-          ? <Loader2 className="size-3.5 flex-none animate-spin text-muted-foreground" aria-label="running" />
+          ? <Loader2 role="img" className="size-3.5 flex-none animate-spin text-muted-foreground" aria-label="running" />
           : item.isError
-            ? <CircleAlert className="size-3.5 flex-none text-red-600 dark:text-red-400" aria-label="failed" />
+            ? <CircleAlert role="img" className="size-3.5 flex-none text-red-600 dark:text-red-400" aria-label="failed" />
             : <Wrench className="size-3.5 flex-none text-muted-foreground" aria-hidden="true" />}
         <span className="flex-none font-medium">{item.tool}</span>
         <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">{summary}</span>

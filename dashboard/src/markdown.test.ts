@@ -32,3 +32,14 @@ test("parseInline: code, bold, italic, http(s) links only", () => {
     { type: "text", text: " [g](javascript:alert(1))" },
   ]);
 });
+
+test("parseInline: intra-word _ and * stay literal; delimited emphasis still works", () => {
+  expect(parseInline("set CLAUDE_CONFIG_DIR and my_var_name")).toEqual([{ type: "text", text: "set CLAUDE_CONFIG_DIR and my_var_name" }]);
+  expect(parseInline("my_file_name.ts")).toEqual([{ type: "text", text: "my_file_name.ts" }]);
+  expect(parseInline("2*3*4")).toEqual([{ type: "text", text: "2*3*4" }]);
+  expect(parseInline("a__b__c")).toEqual([{ type: "text", text: "a__b__c" }]);
+  expect(parseInline("_italic_ and *italic*")).toEqual([
+    { type: "italic", text: "italic" }, { type: "text", text: " and " }, { type: "italic", text: "italic" },
+  ]);
+  expect(parseInline("(__bold__)")).toEqual([{ type: "text", text: "(" }, { type: "bold", text: "bold" }, { type: "text", text: ")" }]);
+});

@@ -22,11 +22,14 @@ export interface EventStreamOptions {
 /** devd's SSE stream (`GET /api/stream`, devd/src/threadApi.ts). `paused` is true while it is down; then the inbox
  *  is polled every 5 s instead (`pollError` = the last poll failed, with why). A stream devd closed for good
  *  (an error response) is reopened after 5 s with the caller's current `afterSeq`. */
-export function useEventStream(opts: EventStreamOptions): { paused: boolean; pollError: string | null } {
+/** `badFrame` = the last stream frame that could not be read (logged too); the frame is dropped, so the view may be
+ *  missing that update until the next reload. */
+export function useEventStream(opts: EventStreamOptions): { paused: boolean; pollError: string | null; badFrame: string | null } {
   const h = useRef(opts);
   h.current = opts;
   const [paused, setPaused] = useState(false);
   const [pollError, setPollError] = useState<string | null>(null);
+  const [badFrame, setBadFrame] = useState<string | null>(null);
   const { sessionId, enabled } = opts;
 
   useEffect(() => {
@@ -61,9 +64,19 @@ export function useEventStream(opts: EventStreamOptions): { paused: boolean; pol
       const src = new EventSource(`/api/stream${qs ? `?${qs}` : ""}`);
       es = src;
       src.onopen = () => { setPaused(false); stopPoll(); loadInbox(); };
-      src.addEventListener("thread-snapshot", (m) => h.current.onSnapshot?.(JSON.parse((m as MessageEvent).data)));
-      src.addEventListener("thread", (m) => h.current.onThread?.(JSON.parse((m as MessageEvent).data)));
-      src.addEventListener("inbox", (m) => h.current.onInbox?.(JSON.parse((m as MessageEvent).data)));
+      const on = <T>(type: string, handle: (data: T) => void) => src.addEventListener(type, (m) => {
+        let data: T;
+        try { data = JSON.parse((m as MessageEvent).data); }
+        catch (e) {
+          console.error(`event stream: unreadable ${type} frame`, e);
+          setBadFrame(`unreadable ${type} update: ${(e as Error).message}`);
+          return;
+        }
+        handle(data);
+      });
+      on<{ afterSeq: number; snapshot: ThreadSnapshot }>("thread-snapshot", (d) => h.current.onSnapshot?.(d));
+      on<LoggedEvent>("thread", (d) => h.current.onThread?.(d));
+      on<InboxItem>("inbox", (d) => h.current.onInbox?.(d));
       src.onerror = () => {
         if (disposed) return;
         setPaused(true);
@@ -85,5 +98,5 @@ export function useEventStream(opts: EventStreamOptions): { paused: boolean; pol
     };
   }, [sessionId, enabled]);
 
-  return { paused, pollError };
+  return { paused, pollError, badFrame };
 }

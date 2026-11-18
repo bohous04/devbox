@@ -54,7 +54,8 @@ export function parseMarkdown(src: string): MdBlock[] {
   return out;
 }
 
-const INLINE = /`([^`]+)`|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\s][^*]*)\*|_([^_\s][^_]*)_|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+// `_`, `__` and single `*` only count outside words: `CLAUDE_CONFIG_DIR`, `my_file.ts` and `2*3*4` stay literal.
+const INLINE = /`([^`]+)`|\*\*([^*]+)\*\*|(?<!\w)__([^_]+)__(?!\w)|(?<![\w*])\*([^*\s][^*]*)\*(?![\w*])|(?<!\w)_([^_\s][^_]*)_(?!\w)|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
 
 export function parseInline(src: string): MdInline[] {
   const out: MdInline[] = [];
