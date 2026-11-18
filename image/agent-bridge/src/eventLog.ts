@@ -17,27 +17,26 @@ function parseComplete(path: string): LoggedEvent[] {
 
 export class EventLog {
   private lastSeq: number;
+  // Computed once on open so append() never has to re-read the file.
+  private tailUnterminated: boolean;
 
   constructor(private readonly path: string) {
     const events = parseComplete(path);
     this.lastSeq = events.length ? events[events.length - 1].seq : 0;
+    const text = existsSync(path) ? readFileSync(path, "utf8") : "";
+    this.tailUnterminated = text.length > 0 && !text.endsWith("\n");
   }
 
   append(event: BridgeEvent): LoggedEvent {
     const logged: LoggedEvent = { seq: this.lastSeq + 1, ts: Date.now(), event };
     // Leading newline terminates any torn line left by a crash, so this record starts clean.
-    appendFileSync(this.path, `${this.needsNewline() ? "\n" : ""}${JSON.stringify(logged)}\n`);
+    appendFileSync(this.path, `${this.tailUnterminated ? "\n" : ""}${JSON.stringify(logged)}\n`);
+    this.tailUnterminated = false;
     this.lastSeq = logged.seq;
     return logged;
   }
 
   readFrom(afterSeq: number): LoggedEvent[] {
     return parseComplete(this.path).filter((e) => e.seq > afterSeq);
-  }
-
-  private needsNewline(): boolean {
-    if (!existsSync(this.path)) return false;
-    const text = readFileSync(this.path, "utf8");
-    return text.length > 0 && !text.endsWith("\n");
   }
 }
