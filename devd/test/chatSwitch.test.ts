@@ -8,7 +8,8 @@ import { PROXY_PROFILE_ENV_KEYS, PROXY_PROFILES, proxyProfileEnv } from "../../i
 import type { BridgeEvent, Capabilities } from "../../shared/thread";
 import { PROFILE_ENV } from "../src/agentSwitch";
 import { AgentDisconnected, CommandFailed } from "../src/bridgeLink";
-import { ChatSwitch, type ChatSwitchDeps } from "../src/chatSwitch";
+import { CHAT_MODELS, ChatSwitch, MODEL_WINDOW_ALIASES, type ChatSwitchDeps } from "../src/chatSwitch";
+import { PRICED_MODELS } from "../src/pricing";
 import type { CodexAccountView } from "../src/codexAccounts";
 import { ACCOUNT_POOL_DEFAULTS } from "../src/config";
 import {
@@ -108,11 +109,11 @@ function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; pro
 }
 
 /** A Claude conversation of one completed turn on the `primary` account. */
-function claudeThread(t: ReturnType<typeof setup>, account = "primary") {
+function claudeThread(t: ReturnType<typeof setup>, account = "primary", model = "claude-opus-5-5") {
   t.feed([
     { type: "run.queued", runId: "r1", text: "Fix the login bug", attachments: [] },
     { type: "run.started", runId: "r1", origin: "user", nativeThreadId: null, model: null },
-    { type: "thread.native", harness: "claude", nativeThreadId: "t-claude", account, model: "claude-opus-5-5", caps: CLAUDE_CAPS },
+    { type: "thread.native", harness: "claude", nativeThreadId: "t-claude", account, model, caps: CLAUDE_CAPS },
     { type: "message.final", runId: "r1", itemId: "m1", role: "assistant", text: "Fixed it in auth.ts" },
     { type: "run.completed", runId: "r1", nativeThreadId: "t-claude", usage: null, costUsd: null },
   ]);
@@ -210,21 +211,71 @@ test("account: omitted = the pool's choice (chooseAccount)", async () => {
   expect(activeLeases(t)).toEqual(["backup"]);
 });
 
-test("account: an unusable target (unknown, quarantined, exhausted) is refused before anything is sent", async () => {
+test("account: an unusable target (unknown, quarantined, expired) is refused before anything is sent", async () => {
   const t = setup();
   claudeThread(t);
-  expect(await t.post("account", { accountId: "nope" })).toMatchObject({ status: 400, body: { error: "invalid-account" } });
-  expect(await t.post("account", { accountId: "jailed" })).toMatchObject({ status: 400, body: { error: "invalid-account" } });
-  expect(await t.post("account", { accountId: "full" })).toMatchObject({ status: 409, body: { error: "account-unusable" } });
+  // Expired = its usage fetch fails permanently (toCandidates leaves it out).
+  insertAccount(t.db, { id: "expired", label: "expired", disabled: 0, quarantined_at: null, added_at: 5 });
+  upsertAccountUsage(t.db, usage("expired", 0, { five_hour_pct: null, seven_day_pct: null, error: "HTTP 401" }));
+  for (const id of ["nope", "jailed", "expired"]) {
+    expect(await t.post("account", { accountId: id })).toMatchObject({ status: 400, body: { error: "invalid-account" } });
+  }
   expect((await t.post("account", { accountId: 7 })).status).toBe(400);
   expect(t.sent).toEqual([]);
   expect(activeLeases(t)).toEqual(["primary"]);
 });
 
-test("account: a profile that cannot be attached is 409 before anything is sent", async () => {
-  const t = setup({ ensureProfile: async () => { throw new Error("volume missing"); } });
+test("account: an account over the threshold is allowed and reported as exhausted (accountSwitch parity)", async () => {
+  const t = setup();
   claudeThread(t);
-  expect(await t.post("account", { accountId: "backup" })).toMatchObject({ status: 409, body: { error: "profile-unavailable" } });
+  expect(await t.post("account", { accountId: "full" })).toEqual({ status: 202, body: { kind: "restart-resume", exhausted: true } });
+  expect(activeLeases(t)).toEqual(["full"]);
+});
+
+test("account: with every account over the threshold the pool still chooses one, reported as exhausted", async () => {
+  const t = setup();
+  claudeThread(t);
+  for (const id of ["primary", "backup", "jailed"]) upsertAccountUsage(t.db, usage(id, 99));
+  const r = await t.post("account", {});
+  expect(r.status).toBe(202);
+  expect(r.body.exhausted).toBe(true);
+});
+
+test("account: re-requesting the current account is unchanged, even when it is unusable now", async () => {
+  const t = setup();
+  claudeThread(t, "jailed");
+  expect(await t.post("account", { accountId: "jailed" })).toEqual({ status: 202, body: { kind: "set-model", unchanged: true } });
+  expect(t.sent).toEqual([]);
+});
+
+test("account: the model id the harness reported (effort variant) keeps its window", async () => {
+  const t = setup();
+  claudeThread(t, "primary", "claude-opus-5-5-high");
+  expect(await t.post("account", { accountId: "backup" })).toEqual({ status: 202, body: { kind: "restart-resume" } });
+  expect((t.sent[0] as Extract<BridgeCommand, { kind: "switchTarget" }>).target.model).toBe("claude-opus-5-5-high");
+});
+
+test("account: a reported model without a known window is a visible 409 naming it", async () => {
+  const t = setup();
+  claudeThread(t, "primary", "claude-mystery-1");
+  const r = await t.post("account", { accountId: "backup" });
+  expect(r).toMatchObject({ status: 409, body: { error: "unknown-model-window" } });
+  expect(String(r.body.message)).toContain("claude-mystery-1");
+  expect(t.sent).toEqual([]);
+});
+
+test("every priced Claude/GPT model id has a window; every offered model too", () => {
+  const reported = PRICED_MODELS.filter((m) => /^(claude-|gpt-)/.test(m) && !m.startsWith("gpt-oss"));
+  for (const m of reported) expect([m, MODEL_WINDOW_ALIASES[m]]).toEqual([m, expect.any(String)]);
+  for (const m of [...CHAT_MODELS.claude, ...CHAT_MODELS.codex]) expect(MODEL_WINDOW_ALIASES[m]).toBe(m);
+});
+
+test("account: a profile that cannot be attached is 409 before anything is sent, without the internal cause", async () => {
+  const t = setup({ ensureProfile: async () => { throw new Error("docker: volume /srv/secret-path missing"); } });
+  claudeThread(t);
+  const r = await t.post("account", { accountId: "backup" });
+  expect(r).toMatchObject({ status: 409, body: { error: "profile-unavailable" } });
+  expect(JSON.stringify(r.body)).not.toContain("secret-path");
   expect(t.sent).toEqual([]);
 });
 
@@ -239,7 +290,7 @@ test("account: the bridge refusing the target leaves the lease alone", async () 
 test("account: Codex accounts come from the Codex pool, an unusable one is refused", async () => {
   const t = setup({ agent: "codex", codex: [codexAccount("default"), codexAccount("c-two"), codexAccount("c-out", { usage: { ...codexAccount("x").usage!, state: "signed-out" } })] });
   t.feed([{ type: "thread.native", harness: "codex", nativeThreadId: "t-codex", account: "default", model: "gpt-5.6-sol", caps: CODEX_CAPS }]);
-  expect(await t.post("account", { accountId: "c-out" })).toMatchObject({ status: 409, body: { error: "account-unusable" } });
+  expect(await t.post("account", { accountId: "c-out" })).toMatchObject({ status: 400, body: { error: "invalid-account" } });
   expect(await t.post("account", { accountId: "c-two" })).toEqual({ status: 202, body: { kind: "restart-resume" } });
   expect(t.sent).toEqual([{ kind: "switchTarget", target: { harness: "codex", account: "c-two", model: "gpt-5.6-sol", env: {} }, resume: "t-codex", handoff: null }]);
 });
@@ -276,7 +327,7 @@ test("harness: Claude → Codex hands the conversation over, updates the agent a
 test("harness: the same agent is a no-op", async () => {
   const t = setup();
   claudeThread(t);
-  expect(await t.post("harness", { agent: "claude" })).toMatchObject({ status: 202, body: { unchanged: true } });
+  expect(await t.post("harness", { agent: "claude" })).toEqual({ status: 202, body: { kind: "set-model", unchanged: true } });
   expect(t.sent).toEqual([]);
 });
 
@@ -332,6 +383,57 @@ test("a failed resume is re-planned into a fresh thread with the full handoff", 
   expect(t.store.providerThread("claude")!.resumeFailed).toBe(true);
   expect(t.store.snapshot().items.some((i) => i.text.startsWith("Could not resume the earlier claude thread"))).toBe(true);
   expect(activeLeases(t)).toEqual(["backup"]);
+});
+
+test("a failed re-plan after a failed resume stays visible, but the DB follows the bridge to the target", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.setOnSend((cmd) => {
+    if (cmd.kind !== "switchTarget") return;
+    if (cmd.resume !== null) t.feed([{ type: "run.failed", runId: "never-started", error: "resume-failed" }]);
+    else throw new AgentDisconnected("connection closed");
+  });
+  expect(await t.post("account", { accountId: "backup" })).toEqual({ status: 409, body: { error: "agent-disconnected" } });
+  expect(activeLeases(t)).toEqual(["backup"]);
+  expect(t.store.snapshot().items.some((i) => i.text.startsWith("Could not start the fresh claude thread"))).toBe(true);
+  // What devd sends next is the target the bridge holds: backup, no thread to resume.
+  t.setOnSend(() => {});
+  t.feed([{ type: "bridge.started", version: "1", resumed: true, awaitingTarget: true }]);
+  await Bun.sleep(0);
+  expect((t.sent.at(-1) as Extract<BridgeCommand, { kind: "switchTarget" }>).target.account).toBe("backup");
+});
+
+test("a resume failure with no switch in flight is re-planned from the reported (dated) model", async () => {
+  const t = setup({ agent: "codex" });
+  t.feed([
+    { type: "thread.native", harness: "codex", nativeThreadId: "t-codex", account: "default", model: "gpt-5.5-2026-04-23", caps: CODEX_CAPS },
+    { type: "run.queued", runId: "r1", text: "hello", attachments: [] },
+    { type: "run.started", runId: "r1", origin: "user", nativeThreadId: "t-codex", model: "gpt-5.5-2026-04-23" },
+    { type: "run.completed", runId: "r1", nativeThreadId: "t-codex", usage: null, costUsd: null },
+    { type: "run.failed", runId: "never-started", error: "resume-failed" },
+  ]);
+  await Bun.sleep(0);
+  expect(t.sent).toHaveLength(1);
+  const cmd = t.sent[0] as Extract<BridgeCommand, { kind: "switchTarget" }>;
+  expect(cmd.target).toEqual({ harness: "codex", account: "default", model: "gpt-5.5-2026-04-23", env: {} });
+  expect(cmd.resume).toBeNull();
+  expect(cmd.handoff!.preamble).toContain("[user] hello");
+  expect(t.store.providerThread("codex")!.resumeFailed).toBe(true);
+});
+
+test("a bridge restart during an in-flight switch gets the switch being sent", async () => {
+  const t = setup();
+  claudeThread(t);
+  let restarted = false;
+  t.setOnSend((cmd) => {
+    if (cmd.kind === "switchTarget" && !restarted) {
+      restarted = true;
+      t.feed([{ type: "bridge.started", version: "1", resumed: true, awaitingTarget: true }]);
+    }
+  });
+  expect((await t.post("account", { accountId: "backup" })).status).toBe(202);
+  expect(t.sent).toHaveLength(2);
+  expect(t.sent[1]).toEqual(t.sent[0]);
 });
 
 test("a bridge restarted after a proxy switch gets the target again, with env and the undelivered handoff", async () => {

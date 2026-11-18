@@ -28,14 +28,28 @@ import type { ThreadStore } from "./threadStore";
 
 type Harness = SwitchTarget["harness"];
 
-/** Context windows (tokens) of the models a chat session can be switched to. A model outside this table is refused
- *  (400), never planned with a guessed window. Conservative values: a smaller window only shrinks a handoff. */
-export const CHAT_MODEL_WINDOWS: Record<Harness, Readonly<Record<string, number>>> = {
-  claude: { "claude-opus-5-5": 200_000, "claude-sonnet-5-5": 200_000 },
-  codex: {
-    "gpt-6.1-sol": 272_000, "gpt-6-sol": 272_000, "gpt-5.6-sol": 272_000, "gpt-5.6-terra": 272_000,
-    "gpt-5.6-luna": 272_000, "gpt-5.5": 272_000, "gpt-5.4-mini": 272_000, "gpt-5.3-codex": 272_000,
-  },
+/** The models a chat session can be switched to (the model route refuses anything else with 400). */
+export const CHAT_MODELS: Record<Harness, readonly string[]> = {
+  claude: ["claude-opus-5-5", "claude-sonnet-5-5"],
+  codex: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini", "gpt-5.3-codex"],
+};
+/** Context windows (tokens) of the base models. Conservative values: a smaller window only shrinks a handoff. */
+const BASE_WINDOWS: Readonly<Record<string, number>> = {
+  "claude-opus-5-5": 200_000, "claude-sonnet-5-5": 200_000,
+  "gpt-6-astra": 272_000, "gpt-6.1-sol": 272_000, "gpt-6-sol": 272_000, "gpt-6-luna": 272_000,
+  "gpt-5.6-sol": 272_000, "gpt-5.6-terra": 272_000, "gpt-5.6-luna": 272_000, "gpt-5.5": 272_000,
+  "gpt-5.4-mini": 272_000, "gpt-5.3-codex": 272_000,
+};
+const efforts = (base: string): Record<string, string> => Object.fromEntries(["low", "medium", "high"].map((l) => [`${base}-${l}`, base]));
+/** Every model id a harness reports (thread.native, run.started) → its base model. The same ids pricing.ts prices:
+ *  effort variants (`claude-opus-5-5-high`), dated snapshots and official aliases. An id outside this table has no
+ *  known window and is refused (409 `unknown-model-window`), never given a default. */
+export const MODEL_WINDOW_ALIASES: Readonly<Record<string, string>> = {
+  ...Object.fromEntries(Object.keys(BASE_WINDOWS).map((m) => [m, m])),
+  ...efforts("claude-opus-5-5"), ...efforts("claude-sonnet-5-5"),
+  "gpt-5.6": "gpt-5.6-sol",
+  "gpt-5.5-2026-04-23": "gpt-5.5",
+  "gpt-5.4-mini-2026-03-17": "gpt-5.4-mini",
 };
 /** Tokens kept free for the target model's answer when budgeting a handoff. */
 export const RESERVE_TOKENS = 32_000;
@@ -53,7 +67,10 @@ export class SwitchRefused extends Error {
 }
 
 export type SwitchRequest = { kind: "model"; model: string } | { kind: "account"; accountId?: string } | { kind: "harness"; agent: string };
-export interface SwitchResult { kind: Transition["kind"]; unchanged?: true }
+/** `unchanged`: the target is the current one, nothing was sent (kind `set-model`, the same-target plan of
+ *  transition.ts). `exhausted`: the target account is over its usage threshold (allowed, as for `dev switch`). */
+export interface SwitchResult { kind: Transition["kind"]; unchanged?: true; exhausted?: true }
+const UNCHANGED: SwitchResult = { kind: "set-model", unchanged: true };
 
 export interface ChatSwitchDeps {
   db: Database;
@@ -84,7 +101,7 @@ interface LastSwitch {
   resumeFailed: boolean;
 }
 
-interface Resolved { profile: AgentName; target: SwitchTarget; window: number }
+interface Resolved { profile: AgentName; target: SwitchTarget; window: number; exhausted: boolean }
 
 const handoffDelivery = (h: Handoff): HandoffDelivery | null => (h.preamble === null ? null : { preamble: h.preamble });
 const handoffOf = (t: Transition): Handoff | null => (t.kind === "resume-with-delta" || t.kind === "fresh-with-handoff" ? t.handoff : null);
@@ -124,12 +141,17 @@ export class ChatSwitch {
     // A run or a queued message would be overtaken by the switch: the user stops first.
     if (store.snapshot({ limit: 0 }).runs.some((r) => r.endedSeq === null)) throw new SwitchRefused(409, "run-active");
     const current = this.current(s, store);
+    // The current target again: nothing to check or send.
+    if (req.kind === "harness" && profile === from) return UNCHANGED;
+    if (req.kind === "account" && req.accountId !== undefined && req.accountId === current.account) return UNCHANGED;
+    if (req.kind === "model" && req.model === current.model) return UNCHANGED;
     const r = await this.resolve(s, profile, current, req);
+    const same = profile === from && r.target.harness === current.harness && r.target.account === current.account && r.target.model === current.model;
+    if (same) return r.exhausted ? { ...UNCHANGED, exhausted: true } : UNCHANGED;
+    if (r.target.account !== null && r.target.account !== current.account) await this.attachProfile(s, r.target);
     const opts = { window: r.window, reserve: RESERVE_TOKENS, now: this.d.now() };
     const caps = store.providerThread(r.target.harness)?.caps ?? NO_CAPS;
     const plan = planTransition(current, { harness: r.target.harness, account: r.target.account, model: r.target.model }, store, "", caps, opts);
-    const same = profile === from && r.target.harness === current.harness && r.target.account === current.account && r.target.model === current.model;
-    if (same) return { kind: plan.kind, unchanged: true };
 
     const h = handoffOf(plan);
     const next: LastSwitch = {
@@ -140,21 +162,29 @@ export class ChatSwitch {
       handoff: h ? handoffDelivery(h) : (this.last.get(s.id)?.handoff ?? null),
     };
     this.pending.set(s.id, next);
-    let done: Transition = plan;
     try {
-      if (plan.kind === "set-model") {
-        await this.d.links.send(s.id, { kind: "setModel", model: plan.model }, SWITCH_TIMEOUT_MS);
-      } else {
-        await this.sendTarget(s.id, next);
-        if (next.resumeFailed) done = await this.replanAfterResumeFailure(s.id, store, next);
-        else this.noticeOmitted(store, plan);
-      }
+      if (plan.kind === "set-model") await this.d.links.send(s.id, { kind: "setModel", model: plan.model }, SWITCH_TIMEOUT_MS);
+      else await this.sendTarget(s.id, next);
     } finally {
       this.pending.delete(s.id);
     }
+    // The bridge is on the target now (also after a failed resume: it then holds no thread and no handoff), so the
+    // DB follows before the re-plan, which may fail on its own.
+    const failedResume = next.resumeFailed ? next.resume : null;
+    if (failedResume !== null) {
+      next.resume = null;
+      next.handoff = null;
+      next.resumeFailed = false;
+    }
     this.last.set(s.id, next);
-    this.confirmed(s, from, profile, current, r.target, done.kind);
-    return { kind: done.kind };
+    this.confirmed(s, from, profile, current, r.target, plan.kind);
+    const exhausted = r.exhausted ? { exhausted: true as const } : {};
+    if (failedResume === null) {
+      this.noticeOmitted(store, plan);
+      return { kind: plan.kind, ...exhausted };
+    }
+    const done = await this.replanAfterResumeFailure(s.id, store, next, failedResume);
+    return { kind: done.kind, ...exhausted };
   }
 
   /** The profile the request switches to; 400 for a request this session cannot take. */
@@ -187,26 +217,40 @@ export class ChatSwitch {
     return { harness: specFor(profile).runtime, account, model: null, nativeThreadId: null };
   }
 
+  /** The requested target with its env and window. Accounts are checked as accountSwitch.ts does; the profile is
+   *  attached only once the target is known to differ (attachProfile). */
   private async resolve(s: SessionRow, profile: AgentName, current: Target, req: SwitchRequest): Promise<Resolved> {
     if (isProxyProfile(profile)) return this.proxyTarget(profile);
     const harness = specFor(profile).runtime as Harness;
     // Leaving a proxy profile is not the same Claude: its model and (absent) account do not carry over.
     const keeps = harness === current.harness && !isProxyProfile(agentNameFor(s.agent));
-    const model = req.kind === "model" ? req.model : keeps ? current.model : null;
+    let model: string | null;
+    if (req.kind === "model") {
+      if (!CHAT_MODELS[harness].includes(req.model)) throw new SwitchRefused(400, "unknown-model", `${req.model} is not a ${harness} model chat sessions offer`);
+      model = req.model;
+    } else model = keeps ? current.model : null;
     const window = windowFor(harness, model);
-    let account: string | null;
-    if (req.kind === "account") account = harness === "claude" ? this.claudeAccount(s, req.accountId) : this.codexAccount(req.accountId);
-    else if (keeps) account = current.account;
-    else account = harness === "claude" ? this.claudeAccount(s, undefined) : this.codexAccount(undefined);
+    let choice: { account: string | null; exhausted: boolean };
+    if (req.kind === "account") choice = harness === "claude" ? this.claudeAccount(s, req.accountId) : this.codexAccount(req.accountId);
+    else if (keeps) choice = { account: current.account, exhausted: false };
+    else choice = harness === "claude" ? this.claudeAccount(s, undefined) : this.codexAccount(undefined);
+    const { account, exhausted } = choice;
     if (harness === "codex") {
       if (account === null) throw new SwitchRefused(409, "no-account", "the Codex account of this session is unknown");
-      return { profile, target: { harness, account, model, env: {} }, window };
+      return { profile, target: { harness, account, model, env: {} }, window, exhausted };
     }
-    if (account !== null && account !== current.account) {
-      try { await this.d.ensureClaudeProfile?.(s.container, account); }
-      catch (e) { throw new SwitchRefused(409, "profile-unavailable", `the Claude account could not be attached to this session: ${e instanceof Error ? e.message : String(e)}`); }
+    return { profile, target: { harness, account, model, env: { CLAUDE_CONFIG_DIR: account === null ? CLAUDE_HOME : `${CLAUDE_ACCOUNTS_ROOT}/${account}` } }, window, exhausted };
+  }
+
+  /** A Claude pool account's profile must be attached to the container before the bridge can use it. The cause is
+   *  logged here only: it may carry host paths or docker output. */
+  private async attachProfile(s: SessionRow, t: SwitchTarget): Promise<void> {
+    if (t.harness !== "claude" || t.account === null || !this.d.ensureClaudeProfile) return;
+    try { await this.d.ensureClaudeProfile(s.container, t.account); }
+    catch (e) {
+      this.log(`chat switch ${s.id}: attaching Claude account ${t.account} failed: ${e instanceof Error ? e.message : String(e)}`);
+      throw new SwitchRefused(409, "profile-unavailable", "the Claude account could not be attached to this session");
     }
-    return { profile, target: { harness, account, model, env: { CLAUDE_CONFIG_DIR: account === null ? CLAUDE_HOME : `${CLAUDE_ACCOUNTS_ROOT}/${account}` } }, window };
   }
 
   private async proxyTarget(profile: ProxyProfile): Promise<Resolved> {
@@ -219,63 +263,59 @@ export class ChatSwitch {
       throw new SwitchRefused(409, "profile-unavailable", `the context window of ${profile}'s model is unknown`);
     }
     // The image's shared Claude home, as agent-launch leaves it for a proxy profile (no pool account).
-    return { profile, target: { harness: "claude", account: null, model: inputs.DEVD_AGENT_MODEL, env: { ...env, CLAUDE_CONFIG_DIR: CLAUDE_HOME } }, window };
+    return { profile, target: { harness: "claude", account: null, model: inputs.DEVD_AGENT_MODEL, env: { ...env, CLAUDE_CONFIG_DIR: CLAUDE_HOME } }, window, exhausted: false };
   }
 
-  /** A usable Anthropic pool account: the requested one, or the pool's choice (as /api/accounts/lease, forced like
-   *  a manual `dev switch`). Unknown, disabled, quarantined or permanently failing (expired) is invalid; over the
-   *  threshold is unusable. */
-  private claudeAccount(s: SessionRow, requested: string | undefined): string {
+  /** accountSwitch.ts parity: a requested account is refused only when unknown, disabled, quarantined or permanently
+   *  failing (expired, absent from toCandidates); without one the pool chooses as /api/accounts/lease does for a
+   *  manual switch (force), including its all-exhausted branch. Over the threshold is allowed and reported. */
+  private claudeAccount(s: SessionRow, requested: string | undefined): { account: string; exhausted: boolean } {
     const now = this.d.now();
     const settings = this.d.claudePool();
     const candidates = toCandidates(this.d.db);
-    let id: string;
     if (requested !== undefined) {
       const c = candidates.find((a) => a.id === requested);
       if (!c || c.disabled || c.quarantined) throw new SwitchRefused(400, "invalid-account", "that account does not exist or is disabled/quarantined");
-      id = c.id;
-    } else {
-      const history = leaseHistory(this.d.db, "devbox", s.id);
-      const decision = chooseAccount({
-        candidates, current: currentAccount(history), lastSwitchAt: lastSwitchAt(history),
-        now, force: true, project: s.project, repo: s.repo, settings,
-      });
-      if (decision.accountId === null) throw new SwitchRefused(409, "no-account", "no Anthropic account is available");
-      id = decision.accountId;
+      return { account: c.id, exhausted: isExhausted(c, now, settings.thresholdPct) };
     }
-    if (isExhausted(candidates.find((a) => a.id === id)!, now, settings.thresholdPct)) {
-      throw new SwitchRefused(409, "account-unusable", `account ${id} is over the usage threshold`);
-    }
-    return id;
+    const history = leaseHistory(this.d.db, "devbox", s.id);
+    const decision = chooseAccount({
+      candidates, current: currentAccount(history), lastSwitchAt: lastSwitchAt(history),
+      now, force: true, project: s.project, repo: s.repo, settings,
+    });
+    if (decision.accountId === null) throw new SwitchRefused(409, "no-account", "no Anthropic account is available");
+    return { account: decision.accountId, exhausted: decision.exhausted };
   }
 
-  /** A usable Codex account: the requested one, or the Codex pool's choice. */
-  private codexAccount(requested: string | undefined): string {
+  /** The same rule for Codex: disabled, signed out or a rejected login is refused; a reached limit is reported. */
+  private codexAccount(requested: string | undefined): { account: string; exhausted: boolean } {
     let id = requested;
     if (id === undefined) {
       try { id = this.d.codexAccounts.select().accountId; }
       catch (e) { throw new SwitchRefused(409, "no-account", e instanceof Error ? e.message : String(e)); }
     }
     const a = this.d.codexAccounts.list().accounts.find((x) => x.id === id);
-    if (!a) throw new SwitchRefused(400, "invalid-account", "that Codex account does not exist");
-    if (!codexAccountUsable(a)) throw new SwitchRefused(409, "account-unusable", `Codex account ${a.label} is disabled, signed out or its login was rejected`);
-    if (codexLimitLive(a, this.d.now())) throw new SwitchRefused(409, "account-unusable", `Codex account ${a.label} reached its usage limit`);
-    return a.id;
+    if (!a || !codexAccountUsable(a)) throw new SwitchRefused(400, "invalid-account", "that Codex account does not exist, is disabled, signed out or its login was rejected");
+    return { account: a.id, exhausted: codexLimitLive(a, this.d.now()) };
   }
 
   private sendTarget(sessionId: string, l: LastSwitch): Promise<void> {
     return this.d.links.send(sessionId, { kind: "switchTarget", target: l.target, resume: l.resume, handoff: l.handoff }, SWITCH_TIMEOUT_MS);
   }
 
-  /** The bridge could not resume `last.resume`: a fresh thread with the full handoff on the same target. */
-  private async replanAfterResumeFailure(sessionId: string, store: ThreadStore, l: LastSwitch): Promise<Transition> {
-    if (l.resume === null) throw new Error("the bridge reported a failed resume, but no thread was being resumed");
-    const t = planAfterResumeFailure(l.target, l.resume, store, "", { window: l.window, reserve: RESERVE_TOKENS, now: this.d.now() });
+  /** The bridge could not resume `failed`: a fresh thread with the full handoff on the same target. A failed send is
+   *  said in the thread too (the bridge then holds the target without a thread) and rethrown. */
+  private async replanAfterResumeFailure(sessionId: string, store: ThreadStore, l: LastSwitch, failed: string): Promise<Transition> {
+    const t = planAfterResumeFailure(l.target, failed, store, "", { window: l.window, reserve: RESERVE_TOKENS, now: this.d.now() });
     const h = handoffOf(t);
     l.resume = null;
     l.handoff = h ? handoffDelivery(h) : null;
-    l.resumeFailed = false;
-    await this.sendTarget(sessionId, l);
+    try {
+      await this.sendTarget(sessionId, l);
+    } catch (e) {
+      store.addNotice(`Could not start the fresh ${l.target.harness} thread after the failed resume (${e instanceof Error ? e.message : String(e)}); send your message again or switch once more.`, this.d.now());
+      throw e;
+    }
     return t;
   }
 
@@ -325,7 +365,10 @@ export class ChatSwitch {
         if (ev.error !== "resume-failed") return;
         if (p) { p.resumeFailed = true; return; }
         // No switch of this devd is waiting for it (devd restarted, or a re-sent target failed): re-plan here.
-        void this.recover(sessionId, (store, last) => this.replanAfterResumeFailure(sessionId, store, last).then(() => {}), "resume failure");
+        void this.recover(sessionId, async (store, last) => {
+          if (last.resume === null) throw new Error("the bridge reported a failed resume, but no thread was being resumed");
+          await this.replanAfterResumeFailure(sessionId, store, last, last.resume);
+        }, "resume failure");
         return;
       case "bridge.started":
         if (!ev.awaitingTarget) return;
@@ -337,8 +380,10 @@ export class ChatSwitch {
   private async recover(sessionId: string, act: (store: ThreadStore, l: LastSwitch) => Promise<void>, what: string): Promise<void> {
     try {
       const store = this.d.threads(sessionId);
-      const l = this.last.get(sessionId) ?? await this.rebuild(sessionId, store);
-      this.last.set(sessionId, l);
+      // A switch being sent is what the bridge was told last (a restart mid-switch); it becomes `last` when confirmed.
+      const pending = this.pending.get(sessionId);
+      const l = pending ?? this.last.get(sessionId) ?? await this.rebuild(sessionId, store);
+      if (!pending) this.last.set(sessionId, l);
       await act(store, l);
     } catch (e) {
       this.log(`chat switch ${sessionId}: ${what} failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -366,11 +411,11 @@ export class ChatSwitch {
   }
 }
 
-/** The window of `model`; a null model is the harness default, planned with the smallest window it offers. */
+/** The window of `model` (any id a harness reports, see MODEL_WINDOW_ALIASES); a null model is the harness
+ *  default, planned with the smallest window of the models it offers. */
 function windowFor(harness: Harness, model: string | null): number {
-  const table = CHAT_MODEL_WINDOWS[harness];
-  if (model === null) return Math.min(...Object.values(table));
-  const w = table[model];
-  if (w === undefined) throw new SwitchRefused(400, "unknown-model", `${model} is not a ${harness} model chat sessions offer`);
-  return w;
+  if (model === null) return Math.min(...CHAT_MODELS[harness].map((m) => BASE_WINDOWS[m]!));
+  const base = MODEL_WINDOW_ALIASES[model];
+  if (base === undefined) throw new SwitchRefused(409, "unknown-model-window", `the context window of model ${model} is unknown to devd (MODEL_WINDOW_ALIASES)`);
+  return BASE_WINDOWS[base]!;
 }
