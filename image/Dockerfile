@@ -109,6 +109,11 @@ ARG CC_VERSION=latest
 RUN npm install -g @anthropic-ai/claude-code@${CC_VERSION} \
     && claude --version
 
+# One-shot Claude turn runner (event log + token usage); see agent-bridge/src/main.ts.
+# No lockfile of its own (the lock is the root workspace bun.lock); the exact SDK pin in package.json keeps it reproducible.
+COPY agent-bridge /opt/agent-bridge
+RUN cd /opt/agent-bridge && bun install --production
+
 # dev user (uid 1000): ubuntu:24.04 ships user "ubuntu" with uid 1000 — replace it
 RUN userdel -r ubuntu 2>/dev/null || true \
     && useradd -m -u 1000 -s /bin/zsh dev \
@@ -167,6 +172,8 @@ RUN chmod 755 /usr/local/bin/git-credential-devbox /usr/local/bin/cc /usr/local/
       /usr/local/bin/seed-devd-hooks /usr/local/bin/seed-codex-hooks /usr/local/bin/seed-grok-hooks /usr/local/bin/seed-agy-hooks /opt/devd-hooks/*.sh /usr/local/bin/prod-db /usr/local/bin/seed-devbox-guide
 RUN chmod 755 /usr/local/bin/preview-relay
 RUN chmod 755 /usr/local/bin/preview
+RUN printf '#!/bin/sh\nexec bun /opt/agent-bridge/src/main.ts "$@"\n' > /usr/local/bin/agent-bridge \
+    && chmod 755 /usr/local/bin/agent-bridge
 
 # Vendored MCP servers that on the Mac live as local scripts: the Plane
 # Cloudflare-Access shim (run via `uv run --with plane-mcp-server`). Wired up via
