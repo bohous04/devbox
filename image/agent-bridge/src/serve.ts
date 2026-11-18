@@ -129,14 +129,17 @@ function harnessOpener(c: ServeConfig, env: Env, logError: (msg: string) => void
     });
 }
 
-/** Request ids opened in the log and never resolved: a previous bridge died while they were open. */
-function unresolvedRequests(log: EventLog): string[] {
+/** From the previous bridge's log: request ids opened and never resolved (it died while they were open), and the
+ *  runs whose user message was already announced with `run.queued`. */
+function scanLog(log: EventLog): { unresolved: string[]; announced: Set<string> } {
   const open = new Set<string>();
+  const announced = new Set<string>();
   for (const { event } of log.readFrom(0)) {
     if (event.type === "request.opened") open.add(event.requestId);
     else if (event.type === "request.resolved") open.delete(event.requestId);
+    else if (event.type === "run.queued") announced.add(event.runId);
   }
-  return [...open];
+  return { unresolved: [...open], announced };
 }
 
 export async function serve(o: ServeOptions): Promise<Bridge> {
@@ -185,11 +188,19 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
         persist();
         server.publish({ ...e, account: state.account });
         return;
-      case "run.started":
+      case "run.started": {
+        const entry = state.queue.find((q) => q.runId === e.runId);
         state.activeRunId = e.runId;
         state.queue = state.queue.filter((q) => q.runId !== e.runId);
         persist();
-        break;
+        server.publish(e);
+        // A user run that starts without having been queued carries its text nowhere else: store it right
+        // after its start, before anything the agent says.
+        if (entry && !announced.has(e.runId)) {
+          server.publish({ type: "message.final", runId: e.runId, itemId: `user:${e.runId}`, role: "user", text: entry.text });
+        }
+        return;
+      }
       case "run.completed":
       case "run.failed":
       case "run.interrupted":
@@ -255,8 +266,13 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       throw e;
     }
     // The harness holds the turn (a run is active, or Codex has no thread yet).
-    if (state.queue.some((q) => q.runId === runId)) server.publish({ type: "run.queued", runId, text, attachments: [] });
+    if (state.queue.some((q) => q.runId === runId)) announceQueued(runId, text);
     return { runId };
+  }
+
+  function announceQueued(runId: string, text: string): void {
+    announced.add(runId);
+    server.publish({ type: "run.queued", runId, text, attachments: [] });
   }
 
   async function handle(cmd: BridgeCommand): Promise<unknown> {
@@ -291,7 +307,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     }
   }
 
-  const unresolved = unresolvedRequests(log);
+  const { unresolved, announced } = scanLog(log);
   const server = startServer({ socketPath: o.socketPath, log, onCommand: handle, logError });
   const sweep = setInterval(() => waits.sweep(), SWEEP_MS);
   server.publish({ type: "bridge.started", version: BRIDGE_VERSION, resumed: state.nativeThreadId !== null });
@@ -320,7 +336,11 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     }
   }
   // Messages queued before the restart were accepted; they start after the continuation, in order.
-  for (const q of queued) await harness.session.startTurn(q.runId, q.text, "user");
+  for (const q of queued) {
+    await harness.session.startTurn(q.runId, q.text, "user");
+    // A crash between persist() and the run.queued publish left the message unannounced.
+    if (!announced.has(q.runId) && state.queue.some((x) => x.runId === q.runId)) announceQueued(q.runId, q.text);
+  }
 
   return { closed, close };
 }

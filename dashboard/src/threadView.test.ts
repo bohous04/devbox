@@ -179,3 +179,15 @@ test("composerErrorText: the three command failures, the rest by message", () =>
   expect(composerErrorText(400, { error: "text must be a non-empty string" })).toBe("text must be a non-empty string");
   expect(composerErrorText(500, null)).toBe("HTTP 500");
 });
+
+test("a run that starts at once has its user item", () => {
+  seq = 0;
+  const t = run(emptyThread(), [
+    { type: "run.started", runId: "r1", origin: "user", nativeThreadId: null, model: null },
+    { type: "message.final", runId: "r1", itemId: "user:r1", role: "user", text: "hello" },
+    { type: "message.final", runId: "r1", itemId: "m1", role: "assistant", text: "hi" },
+    { type: "run.completed", runId: "r1", nativeThreadId: "nt", usage: null, costUsd: null },
+  ]);
+  expect(t.items.map((i) => [i.kind, i.itemId, i.text])).toEqual([["user", "user:r1", "hello"], ["assistant", "m1", "hi"]]);
+  expect(t.runs).toEqual([expect.objectContaining({ runId: "r1", status: "completed", origin: "user" })]);
+});

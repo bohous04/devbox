@@ -208,3 +208,16 @@ test("runs carry when they were queued and the seq that ended them", () => {
   const lean = s.snapshot({ limit: 0 });
   expect([lean.items.length, lean.runs.length]).toEqual([0, 2]);
 });
+
+test("a run that starts at once has its user item", () => {
+  // What the bridge sends for a message on an idle session: no run.queued, the text comes as message.final.
+  const s = store(); n = 0;
+  s.apply(ev({ type: "run.started", runId: "r1", origin: "user", nativeThreadId: null, model: null }));
+  s.apply(ev({ type: "message.final", runId: "r1", itemId: "user:r1", role: "user", text: "hello" }));
+  s.apply(ev({ type: "message.final", runId: "r1", itemId: "m1", role: "assistant", text: "hi" }));
+  s.apply(ev({ type: "run.completed", runId: "r1", nativeThreadId: "nt", usage: null, costUsd: null }));
+  const snap = s.snapshot();
+  expect(snap.items.map((i) => [i.kind, i.itemId, i.text])).toEqual([["user", "user:r1", "hello"], ["assistant", "m1", "hi"]]);
+  expect(snap.runs).toEqual([expect.objectContaining({ runId: "r1", status: "completed", origin: "user" })]);
+  expect(s.lastMessageText()).toBe("hi");
+});

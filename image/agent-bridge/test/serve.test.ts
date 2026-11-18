@@ -296,11 +296,54 @@ describe("serve", () => {
     expect(state()).toMatchObject({ activeRunId: r.runId, queue: [] });
   });
 
-  test("a turn that starts at once is not announced as queued", async () => {
+  test("a turn that starts at once is not announced as queued but stores the user's message", async () => {
+    const f = fakeHarness();
+    await start(f);
+    const r = (await cmd({ kind: "startTurn", text: "one" })) as { runId: string };
+    expect(events().some((e) => e.type === "run.queued")).toBe(false);
+    expect(events().slice(2)).toEqual([
+      { type: "run.started", runId: r.runId, origin: "user", nativeThreadId: null, model: null },
+      { type: "message.final", runId: r.runId, itemId: `user:${r.runId}`, role: "user", text: "one" },
+    ]);
+  });
+
+  test("a queued turn's user message comes once, with run.queued", async () => {
     const f = fakeHarness();
     await start(f);
     await cmd({ kind: "startTurn", text: "one" });
-    expect(events().some((e) => e.type === "run.queued")).toBe(false);
+    const second = (await cmd({ kind: "startTurn", text: "two" })) as { runId: string };
+    f.complete();
+    const user = events().filter((e) => (e.type === "message.final" && e.role === "user") || e.type === "run.queued");
+    expect(user.filter((e) => "runId" in e && e.runId === second.runId)).toEqual([
+      { type: "run.queued", runId: second.runId, text: "two", attachments: [] },
+    ]);
+  });
+
+  test("a re-sent queued entry never announced before gets its user message", async () => {
+    // Crash between persist() and the run.queued publish: the log has no trace of the message.
+    saveState(join(dir, "state.json"), baseState({ nativeThreadId: "thread-1", queue: [{ runId: "r-q", text: "lost?", attachments: [] }] }));
+    const f = fakeHarness();
+    await start(f);
+    expect(events()).toContainEqual({ type: "message.final", runId: "r-q", itemId: "user:r-q", role: "user", text: "lost?" });
+  });
+
+  test("a re-sent queued entry that stays queued is announced once, then not repeated at start", async () => {
+    saveState(join(dir, "state.json"), baseState({ nativeThreadId: "thread-1", activeRunId: "r-old", queue: [{ runId: "r-q", text: "next", attachments: [] }] }));
+    const f = fakeHarness();
+    await start(f);
+    f.complete();
+    const user = events().filter((e) => (e.type === "message.final" && e.role === "user") || e.type === "run.queued");
+    expect(user).toEqual([{ type: "run.queued", runId: "r-q", text: "next", attachments: [] }]);
+  });
+
+  test("a re-sent queued entry already announced in the log is not announced again", async () => {
+    const log = new EventLog(join(dir, "events.jsonl"));
+    log.append({ type: "run.queued", runId: "r-q", text: "next", attachments: [] });
+    saveState(join(dir, "state.json"), baseState({ nativeThreadId: "thread-1", queue: [{ runId: "r-q", text: "next", attachments: [] }] }));
+    const f = fakeHarness();
+    await start(f);
+    const user = events().filter((e) => (e.type === "message.final" && e.role === "user") || e.type === "run.queued");
+    expect(user).toEqual([{ type: "run.queued", runId: "r-q", text: "next", attachments: [] }]);
   });
 
   test("the harness ending by itself saves state and ends serve with the restart status", async () => {
