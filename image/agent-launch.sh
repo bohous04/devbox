@@ -40,6 +40,10 @@ case "$profile" in
   *) echo "devbox: unknown profile \"${profile}\" — starting claude." >&2; bin=cc; profile=claude ;;
 esac
 if [ "$print" = 1 ]; then echo "$profile"; exit 0; fi
+# A chat session (DEVD_RUNTIME=chat) runs its agent headless under agent-bridge; its tmux holds shells only.
+# Every path that re-creates a tmux window (web terminal, CLI attach, main-N) ends here, so this one check
+# keeps a second, TUI agent out of the same workspace and conversation.
+if [ "${DEVD_RUNTIME:-}" = chat ]; then exec zsh; fi
 
 # Profiles with a third-party model: Claude Code runs against a foreign upstream. Either against
 # CLIProxyAPI on the host (holds OAuth to the subscriptions, billed to them), or directly

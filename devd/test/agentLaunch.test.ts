@@ -586,3 +586,22 @@ test("cc, co and gr use yolo even on recovery after a restart (DEVD_RECOVERY_LAU
     expect(src).toContain(flag);
   }
 });
+
+// A chat session's agent runs headless under agent-bridge; its tmux holds shells only. Re-creating `main` after
+// the shell exited (web terminal, CLI attach, main-N) must not start a second, TUI agent in the same workspace.
+test("agent-launch in a chat session execs a plain zsh: no agent, the prompt file is left alone", async () => {
+  const bin = fakeBin("cc");
+  writeFileSync(join(bin, "zsh"), `#!/bin/sh\necho "zsh-argv: $@"\n`);
+  chmodSync(join(bin, "zsh"), 0o755);
+  const promptFile = join(bin, "prompt");
+  writeFileSync(promptFile, "resolve the conflict");
+  const p = Bun.spawn(["bash", join(IMAGE, "agent-launch.sh")], {
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, DEVD_AGENT: "claude", DEVD_RUNTIME: "chat", DEVD_PROMPT_FILE: promptFile },
+    stdin: "ignore", stdout: "pipe", stderr: "ignore",
+  });
+  const out = await new Response(p.stdout).text();
+  await p.exited;
+  expect(out).toContain("zsh-argv:");
+  expect(out).not.toContain("cc-argv");
+  expect(existsSync(promptFile)).toBe(true);
+});
