@@ -30,6 +30,9 @@ Settled/Snoozed/PR watch; Clients). Requires steps 2–4.
 - Images: Claude image blocks, Codex data-URL items, ACP image content, else a path under `/inbox`.
 - The critic block becomes an automatic follow-up message (replacing the Stop hook's `{"decision":"block"}`).
 - iOS bundle prefix and signing stay as in `ios/project.yml`; nothing personal is committed.
+- Mac app restart (owner requirement, 2026-11-18): after the app quits or the Mac restarts, the app reopens
+  every window and thread that was open and reconnects each stream from its last seq (`afterSeq`), with no user
+  action. Launch at login is on by default.
 
 ## Review Focus
 
@@ -82,8 +85,14 @@ differs (push registration, `UIApplication` → `NSApplication`, terminal view);
 Layout: `NavigationSplitView` (sidebar = inbox sections, detail = chat with a Terminal tab), notifications via
 `UNUserNotificationCenter` (APNs for macOS with the same `/api/push/register`, `platform:"macos"`), a click opens the
 thread. Menu bar extra with the needs-you count.
+State restoration: the open windows and their selected threads are saved (SwiftUI `@SceneStorage` per window plus
+the list of open thread ids with their last seq) and restored on launch; every restored thread refetches
+`afterSeq` and resubscribes to `/api/stream`. A `SMAppService.mainApp` login item is registered on first launch
+(a toggle in Settings turns it off).
 - [ ] **Step 1:** Make the shared tests compile and pass for macOS (`xcodebuild test -scheme DevboxMac`).
 - [ ] **Step 2:** Implement the target and layout. **Step 3:** Owner signs and runs it once; screenshot evidence.
+- [ ] **Step 3b:** Test "restored windows reconnect": two open threads saved with seqs 10 and 20 → after a relaunch
+  both windows exist and each `EventStream` resubscribes with `afterSeq` 10 and 20.
 - [ ] **Step 4:** devd `apns.ts`/`pushChannel.ts` accept `platform:"macos"` (test). Commit `feat(mac): macOS app target`.
 
 ### Task 3: Mac notification click opens the thread
@@ -157,7 +166,8 @@ shows critic runs as working; tests `devd/test/chatHub.test.ts`.
 
 ### Task 9: Live verification and report
 
-- [ ] Deploy; scenarios: iOS chat + question answered from the phone; Mac app inbox + notification click; a chat
+- [ ] Deploy; scenarios: iOS chat + question answered from the phone; Mac app inbox + notification click; Mac
+  restart with two threads open (both windows come back and stream again without a click); a chat
   schedule end-to-end with autoEnd; snooze until reset; a PR with pending CI (working) then merged (settled); a pasted
   screenshot read by Claude and Codex; a critic block with a follow-up run.
 - [ ] Report `docs/superpowers/reports/2026-11-agent-runtime-v2-step5.md`, Plane update, commit.
