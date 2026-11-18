@@ -6,7 +6,8 @@
     "devd",
     "cli",
     "listener",
-    "dashboard"
+    "dashboard",
+    "image/agent-bridge"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit && bun run --cwd dashboard typecheck",
