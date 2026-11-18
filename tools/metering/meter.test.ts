@@ -27,6 +27,9 @@ describe("validateRun", () => {
   test("accepts a clean run", () => {
     expect(validateRun(run("tui", 3), "claude-opus-5-5").ok).toBe(true);
   });
+  test("rejects a run without both usage reads", () => {
+    expect(validateRun(run("tui", 3, { after: null }), "claude-opus-5-5").reason).toBe("missing-usage-read");
+  });
   test("rejects a window reset", () => {
     const r = validateRun(run("tui", 3, { after: { pct: 2, resetsAt: 2000 } }), "claude-opus-5-5");
     expect(r.ok).toBe(false);

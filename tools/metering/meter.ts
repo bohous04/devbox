@@ -2,8 +2,11 @@ import type { TokenUsage } from "../../image/agent-bridge/src/events.ts";
 
 export interface UsageRead { pct: number; resetsAt: number | null }
 export interface RunRecord {
+  /** Pair number; with the alternating order it tells which path ran first in its pair. */
+  n?: number;
   path: "tui" | "bridge"; ok: boolean; reason?: string;
-  before: UsageRead; after: UsageRead; usage: TokenUsage | null; model: string | null;
+  /** null only on a `run-error` record, where the run broke before both reads. */
+  before: UsageRead | null; after: UsageRead | null; usage: TokenUsage | null; model: string | null;
   /** Distinct models of the main transcript's assistant messages (both paths). */
   models?: string[];
   /** The bridge summary's own usage (all models); informational, the gate uses transcripts. */
@@ -24,6 +27,7 @@ export function validateRun(r: RunRecord, expectedModel: string): RunRecord {
   if (!r.ok) return r;
   const fail = (reason: string): RunRecord => ({ ...r, ok: false, reason });
   if (!r.usage) return fail("missing-usage");
+  if (!r.before || !r.after) return fail("missing-usage-read");
   if (r.before.resetsAt !== r.after.resetsAt) return fail("window-reset");
   if (r.after.pct < r.before.pct) return fail("negative-delta");
   if (r.model !== expectedModel || r.models?.some((x) => x !== expectedModel)) return fail("model-mismatch");
@@ -93,9 +97,9 @@ export function sessionUsage(polled: string): { done: boolean; usage: TokenUsage
 }
 
 function pctPerMTok(runs: RunRecord[], path: "tui" | "bridge"): { rate: number; delta: number; n: number; tokens: number } {
-  const ok = runs.filter((r) => r.ok && r.path === path && r.usage);
+  const ok = runs.filter((r) => r.ok && r.path === path && r.usage && r.before && r.after);
   if (ok.length === 0) throw new Error(`no valid ${path} runs; cannot compute the gate`);
-  const delta = ok.reduce((s, r) => s + (r.after.pct - r.before.pct), 0);
+  const delta = ok.reduce((s, r) => s + (r.after!.pct - r.before!.pct), 0);
   const tokens = ok.reduce((s, r) => s + weightedTokens(r.usage!), 0);
   if (tokens <= 0) throw new Error(`${path} runs have zero weighted tokens`);
   return { rate: delta / (tokens / 1e6), delta, n: ok.length, tokens };
