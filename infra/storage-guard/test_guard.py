@@ -326,6 +326,7 @@ class Safety(unittest.TestCase):
         with patch.object(guard,'run',side_effect=fake_run), \
              patch.object(guard,'referenced',return_value=False), \
              patch.object(self.g,'in_git',side_effect=lambda p:p.name=='pushed'), \
+             patch.object(self.g,'pin_history',return_value=0), \
              patch.object(self.g,'git_storage',return_value=[]), \
              patch.object(self.g,'archive',side_effect=fake_archive):
             self.g.sweep()
@@ -384,6 +385,15 @@ class Safety(unittest.TestCase):
         self.assertIn(left,pinned)
         git('worktree','remove',str(w),cwd=repo);git('gc','--prune=now',cwd=repo)
         git('cat-file','-e',left,cwd=repo)
+        pins=lambda:subprocess.run(['git','for-each-ref','--format=%(objectname)','refs/devbox/released/'],cwd=repo,capture_output=True,text=True).stdout.split()
+        git('branch','keep',left,cwd=repo)
+        self.assertEqual(self.g.expire_pins(repo),2,'a branch now holds both (the second is its parent)')
+        self.assertEqual(pins(),[])
+        git('update-ref','refs/devbox/released/x',left,cwd=repo);git('branch','-D','keep',cwd=repo)
+        self.assertEqual(self.g.expire_pins(repo),0,'unreachable and recent: kept')
+        self.g.c['released_pin_days']=-1
+        self.assertEqual(self.g.expire_pins(repo),1,'older than the limit')
+        self.assertEqual(pins(),[])
 
     def test_archive_batches_persist_progress_and_stop_at_budget(self):
         self.g.c.update(sweep_batch_size=2,sweep_budget_seconds=0)

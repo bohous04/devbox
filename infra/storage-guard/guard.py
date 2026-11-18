@@ -909,7 +909,21 @@ class Guard:
         lost=[t for t in tips if t in unreachable]
         if lost:
             self.owner_git(p,['update-ref','--stdin'],input=''.join(f'update refs/devbox/released/{t} {t}\n' for t in lost).encode())
+        self.expire_pins(p)
         return len(lost)
+
+    def expire_pins(self, p):
+        """Drop pins a branch or tag now holds, and pins of commits older than released_pin_days."""
+        rows=[l.split() for l in self.owner_git(p,['for-each-ref','--format=%(refname) %(objectname) %(committerdate:unix)',
+                                                    'refs/devbox/released/']).decode().splitlines()]
+        if not rows:
+            return 0
+        unreachable=set(self.owner_git(p,['rev-list','--no-walk=unsorted',*{r[1] for r in rows},'--not','--branches','--tags']).decode().split())
+        cutoff=time.time()-self.c.get('released_pin_days',90)*86400
+        stale=[ref for ref,sha,when in rows if sha not in unreachable or int(when)<cutoff]
+        if stale:
+            self.owner_git(p,['update-ref','--stdin'],input=''.join(f'delete {r}\n' for r in stale).encode())
+        return len(stale)
 
     def save_removals(self, registry):
         # Re-read: agents release more worktrees while the archive runs (minutes to hours).
