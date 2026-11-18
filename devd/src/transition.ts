@@ -24,10 +24,15 @@ export function resumeFailedNotice(harness: string): string {
   return `Could not resume the earlier ${harness} thread; started a fresh one with the conversation handed over.`;
 }
 
+/** For a handoff whose request left no room for any history (`preamble === null && omitted > 0`). */
+export function historyOmittedNotice(omitted: number): string {
+  return `The earlier conversation (${omitted} items) did not fit next to your message and was not handed over; the agent can read it with devbox_thread_read.`;
+}
+
 // Run usage is the run's total, so for a multi-call turn this over-estimates the context: the safe side.
 const contextUsed = (u: TokenUsage): number => u.input + u.output + u.cacheCreation + u.cacheRead;
 
-function fresh(target: Target, store: ThreadStore, request: string, o: PlanOptions): Transition {
+function fresh(target: Target, store: ThreadStore, request: string, o: PlanOptions): Extract<Transition, { kind: "fresh-with-handoff" }> {
   const { items, runs } = store.snapshot();
   // A new native thread has used nothing of its window yet.
   const handoff = buildHandoff({ items, runs, request, window: o.window, used: 0, reserve: o.reserve });
@@ -35,10 +40,10 @@ function fresh(target: Target, store: ThreadStore, request: string, o: PlanOptio
 }
 
 /** Delta over the runs `harness`'s last thread missed, or null when that thread cannot be resumed (none, stale,
- *  or its last seen run is unknown). */
+ *  its resume failed before, or its last seen run is unknown). */
 function delta(target: Target, store: ThreadStore, request: string, o: PlanOptions): Transition | null {
   const prev = store.providerThread(target.harness);
-  if (prev === null || prev.coveredThroughRun === null || o.now - prev.lastUsedAt >= STALE_MS) return null;
+  if (prev === null || prev.resumeFailed || prev.coveredThroughRun === null || o.now - prev.lastUsedAt >= STALE_MS) return null;
   const { items, runs } = store.snapshot(); // runs in arrival order
   const last = runs.findIndex((r) => r.runId === prev.coveredThroughRun);
   if (last < 0) return null;
@@ -63,9 +68,14 @@ export function planTransition(current: Target & { nativeThreadId: string | null
   return (caps.resume ? delta(target, store, request, o) : null) ?? fresh(target, store, request, o);
 }
 
-/** The bridge reported `run.failed{error:"resume-failed"}` for a planned resume: start a fresh native thread with
- *  the full handoff and tell the user in the thread. */
-export function planAfterResumeFailure(target: Target, store: ThreadStore, request: string, o: PlanOptions): Transition {
+/** The bridge reported `run.failed{error:"resume-failed"}` for a planned resume of `failedThreadId`: mark that
+ *  thread dead, start a fresh native thread with the full handoff and tell the user in the thread. */
+export function planAfterResumeFailure(target: Target, failedThreadId: string, store: ThreadStore, request: string, o: PlanOptions): Transition {
+  store.markResumeFailed(target.harness, failedThreadId, o.now);
   store.addNotice(resumeFailedNotice(target.harness), o.now);
-  return fresh(target, store, request, o);
+  const t = fresh(target, store, request, o);
+  if (t.handoff.preamble === null && t.handoff.omitted > 0) {
+    store.addNotice(historyOmittedNotice(t.handoff.omitted), o.now);
+  }
+  return t;
 }

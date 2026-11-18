@@ -15,6 +15,8 @@ export interface ProviderThread {
   lastUsedAt: number;
   /** null until the bridge reports capabilities with `thread.native`. */
   caps: Capabilities | null;
+  /** Resuming it failed; cleared when the bridge announces the thread again. */
+  resumeFailed: boolean;
 }
 
 /** Per-session conversation store: `<root>/_threads/<id>.sqlite`. Conversation data stays out of the
@@ -54,7 +56,8 @@ export class ThreadStore {
       account TEXT, model TEXT)`);
     db.run(`CREATE TABLE IF NOT EXISTS provider_threads (
       harness TEXT NOT NULL, account TEXT, native_thread_id TEXT NOT NULL, covered_through_run TEXT,
-      last_used_at INTEGER NOT NULL, caps TEXT, PRIMARY KEY (harness, native_thread_id))`);
+      last_used_at INTEGER NOT NULL, caps TEXT, resume_failed INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (harness, native_thread_id))`);
     return new ThreadStore(db);
   }
 
@@ -94,7 +97,12 @@ export class ThreadStore {
         // caps describe the adapter that announced the thread now: an announcement without them clears old ones.
         db.query(`INSERT INTO provider_threads (harness, account, native_thread_id, last_used_at, caps) VALUES (?, ?, ?, ?, ?)
           ON CONFLICT(harness, native_thread_id) DO UPDATE SET account=excluded.account, last_used_at=excluded.last_used_at,
-          caps=excluded.caps`).run(ev.harness, ev.account, ev.nativeThreadId, ts, ev.caps ? JSON.stringify(ev.caps) : null);
+          caps=excluded.caps, resume_failed=0`).run(ev.harness, ev.account, ev.nativeThreadId, ts, ev.caps ? JSON.stringify(ev.caps) : null);
+        // A run that started before its thread was known (Claude announces it at init, inside the run) ran in it.
+        for (const r of db.query(`SELECT run_id FROM runs WHERE status='running' AND native_thread_id IS NULL`).all() as { run_id: string }[]) {
+          db.query(`UPDATE runs SET native_thread_id=?, updated_seq=? WHERE run_id=?`).run(ev.nativeThreadId, seq, r.run_id);
+          this.touchProviderThread(r.run_id, ts);
+        }
         return;
       case "run.queued":
         this.insertRun(seq, ev.runId, "user", "queued", null, null, ts, null);
@@ -170,6 +178,11 @@ export class ThreadStore {
         this.terminal(seq, ts, ev.runId, "interrupted", { error: null });
         return;
       case "run.failed":
+        // resume-failed comes for a switch, not a run: its run id was never announced (contract with the bridge).
+        if (ev.error === "resume-failed" && !db.query("SELECT 1 FROM runs WHERE run_id=?").get(ev.runId)) {
+          this.insertItem(seq, ts, { runId: ev.runId, itemId: null, kind: "notice", text: ev.error, status: "done" });
+          return;
+        }
         this.terminal(seq, ts, ev.runId, "failed", { error: ev.error });
         this.insertItem(seq, ts, { runId: ev.runId, itemId: null, kind: "notice", text: ev.error, status: "done" });
         return;
@@ -208,11 +221,20 @@ export class ThreadStore {
     this.touchProviderThread(runId, ts);
   }
 
-  /** The current native thread has seen `runId`. Before the first `thread.native` there is no thread to mark;
-   *  Claude announces its thread during the first run, so that run's terminal event marks it. */
+  /** The run's own native thread has seen `runId`. While that thread is unknown nothing is marked: the
+   *  `thread.native` inside the run or `run.completed` names it later. */
   private touchProviderThread(runId: string, ts: number) {
-    this.db.query(`UPDATE provider_threads SET covered_through_run=?, last_used_at=?
-      WHERE (harness, native_thread_id) = (SELECT harness, native_thread_id FROM native WHERE id=1)`).run(runId, ts);
+    const r = this.db.query("SELECT native_thread_id FROM runs WHERE run_id=?").get(runId) as { native_thread_id: string | null } | null;
+    if (r?.native_thread_id == null) return;
+    this.db.query(`UPDATE provider_threads SET covered_through_run=?, last_used_at=? WHERE native_thread_id=?`)
+      .run(runId, ts, r.native_thread_id);
+  }
+
+  /** Resuming `nativeThreadId` failed: later plans must not try it again. A thread without a row (a store file
+   *  from before provider_threads) gets one, so the flag is never lost. */
+  markResumeFailed(harness: string, nativeThreadId: string, ts: number): void {
+    this.db.query(`INSERT INTO provider_threads (harness, account, native_thread_id, last_used_at, resume_failed) VALUES (?, NULL, ?, ?, 1)
+      ON CONFLICT(harness, native_thread_id) DO UPDATE SET resume_failed=1`).run(harness, nativeThreadId, ts);
   }
 
   private findItem(runId: string, itemId: string): { id: number } | null {
@@ -277,7 +299,7 @@ export class ThreadStore {
     if (!r) return null;
     return {
       harness: r.harness, account: r.account, nativeThreadId: r.native_thread_id, coveredThroughRun: r.covered_through_run,
-      lastUsedAt: r.last_used_at, caps: r.caps === null ? null : (JSON.parse(r.caps) as Capabilities),
+      lastUsedAt: r.last_used_at, caps: r.caps === null ? null : (JSON.parse(r.caps) as Capabilities), resumeFailed: r.resume_failed === 1,
     };
   }
 

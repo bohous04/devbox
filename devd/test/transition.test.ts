@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handoffBudget } from "../src/handoff";
-import { planAfterResumeFailure, planTransition, resumeFailedNotice, STALE_MS } from "../src/transition";
+import { historyOmittedNotice, planAfterResumeFailure, planTransition, resumeFailedNotice, STALE_MS } from "../src/transition";
 import { ThreadStore } from "../src/threadStore";
 import type { BridgeEvent, Capabilities } from "../../shared/thread";
 
@@ -167,14 +167,67 @@ test("resume failure falls back to a full handoff", () => {
 
   f.at(T0 + 2 * DAY);
   f.push({ type: "run.failed", runId: "switch-1", error: "resume-failed" });
-  const t = planAfterResumeFailure(target, s, "back", opts(T0 + 2 * DAY));
+  const t = planAfterResumeFailure(target, "c1", s, "back", opts(T0 + 2 * DAY));
   expect(t.kind).toBe("fresh-with-handoff");
   if (t.kind !== "fresh-with-handoff") return;
   expect(t.target).toEqual(target);
   expect(t.handoff.preamble).toContain("[user] first question");
   expect(t.handoff.preamble).toContain("[assistant] fourth answer");
   const notices = s.snapshot().items.filter((i) => i.kind === "notice").map((i) => i.text);
-  expect(notices).toContain(resumeFailedNotice("claude"));
+  expect(notices).toEqual(["resume-failed", resumeFailedNotice("claude")]); // no "unknown run" notice
+
+  // The dead thread is not tried again.
+  expect(s.providerThread("claude")).toMatchObject({ nativeThreadId: "c1", resumeFailed: true });
+  const again = planTransition({ harness: "codex", account: "acc-x", model: "gpt", nativeThreadId: "x1" }, target, s, "back", ALL, opts(T0 + 2 * DAY));
+  expect(again.kind).toBe("fresh-with-handoff");
+  // Announcing that thread again (it resumed after all) makes it resumable again.
+  f.push({ type: "thread.native", harness: "claude", nativeThreadId: "c1", account: "acc-a", model: "opus" });
+  expect(s.providerThread("claude")!.resumeFailed).toBe(false);
+});
+
+test("resume failure with a request too big for any history says the history was omitted", () => {
+  const s = store();
+  claudeThenCodex(s);
+  const target = { harness: "claude", account: "acc-a", model: "opus" };
+  const t = planAfterResumeFailure(target, "c1", s, "x".repeat(1000), { window: 1200, reserve: 0, now: T0 + 2 * DAY });
+  expect(t.kind).toBe("fresh-with-handoff");
+  if (t.kind !== "fresh-with-handoff") return;
+  expect(t.handoff.preamble).toBeNull();
+  const notices = s.snapshot().items.filter((i) => i.kind === "notice").map((i) => i.text);
+  expect(notices).toEqual([resumeFailedNotice("claude"), historyOmittedNotice(t.handoff.omitted)]);
+  expect(historyOmittedNotice(8)).toContain("devbox_thread_read");
+});
+
+test("a run that starts before its new thread is announced is credited to that thread, not the previous one", () => {
+  const s = store();
+  const f = feeder(s);
+  f.push({ type: "thread.native", harness: "codex", nativeThreadId: "x1", account: null, model: "gpt" });
+  run(f, "r1", "x1", "codex question", "codex answer");
+  // Switch to Claude: the run starts before Claude's init announces the thread.
+  f.push({ type: "run.queued", runId: "r2", text: "claude question", attachments: [] });
+  f.push({ type: "run.started", runId: "r2", origin: "user", nativeThreadId: null, model: "opus" });
+  expect(s.providerThread("codex")!.coveredThroughRun).toBe("r1");
+  f.push({ type: "thread.native", harness: "claude", nativeThreadId: "c1", account: null, model: "opus" });
+  expect(s.providerThread("claude")!.coveredThroughRun).toBe("r2");
+  f.push({ type: "run.interrupted", runId: "r2" });
+  expect(s.providerThread("codex")!.coveredThroughRun).toBe("r1");
+  expect(s.providerThread("claude")!.coveredThroughRun).toBe("r2");
+
+  // Without an announcement during the run, run.completed names the thread.
+  f.push({ type: "run.queued", runId: "r3", text: "q3", attachments: [] });
+  f.push({ type: "run.started", runId: "r3", origin: "user", nativeThreadId: null, model: "opus" });
+  f.push({ type: "run.completed", runId: "r3", nativeThreadId: "c1", usage: null, costUsd: null });
+  expect(s.providerThread("claude")!.coveredThroughRun).toBe("r3");
+  expect(s.providerThread("codex")!.coveredThroughRun).toBe("r1");
+
+  // Back to Codex: the delta carries both Claude runs.
+  const t = planTransition({ harness: "claude", account: null, model: "opus", nativeThreadId: "c1" },
+    { harness: "codex", account: null, model: "gpt" }, s, "go", ALL, opts(T0 + DAY));
+  expect(t.kind).toBe("resume-with-delta");
+  if (t.kind !== "resume-with-delta") return;
+  expect(t.handoff.preamble).toContain("[user] claude question");
+  expect(t.handoff.preamble).toContain("[user] q3");
+  expect(t.handoff.preamble).not.toContain("codex question");
 });
 
 test("a null target model on the same harness and account restarts, since only a restart applies the default", () => {
