@@ -47,7 +47,9 @@ export type BridgeEvent =
   | { type: "run.completed"; runId: string; nativeThreadId: string; usage: TokenUsage | null; costUsd: number | null }
   | { type: "run.interrupted"; runId: string }
   | { type: "run.failed"; runId: string; error: string }
-  | { type: "bridge.started"; version: string; resumed: boolean };
+  // awaitingTarget: restarted after a switch whose secret env was not persisted; no harness until devd re-sends
+  // switchTarget.
+  | { type: "bridge.started"; version: string; resumed: boolean; awaitingTarget?: boolean };
 
 export interface LoggedEvent {
   seq: number;

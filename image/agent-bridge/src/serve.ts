@@ -8,9 +8,9 @@ import { EventLog } from "./eventLog";
 import type { BackgroundWork, BridgeEvent, UsageBaseline } from "./events";
 import { DEFAULT_SOCKET } from "./mcp";
 import { APPENDED_SYSTEM_PROMPT, claudeMcpServers, codexMcpArgs } from "./prompts";
-import type { BridgeCommand, SwitchTarget } from "./protocol";
+import type { BridgeCommand, HandoffDelivery, SwitchTarget } from "./protocol";
 import { startServer } from "./server";
-import { loadState, saveState, type BridgeState } from "./state";
+import { loadState, saveState, type BridgeState, type PersistedTarget } from "./state";
 import { DeclaredWaits } from "./waits";
 
 export const BRIDGE_VERSION = "1.0.0";
@@ -21,6 +21,7 @@ export const RESTART_LOOP_ERROR = "restart loop: no automatic continuation";
 export const NO_THREAD_ERROR = "restart before the conversation started; resend your message";
 /** `run.failed` error for a switch whose resume did not work (on a run id no `run.started` announced). */
 export const RESUME_FAILED = "resume-failed";
+const AWAITING_TARGET_ERROR = "the bridge restarted after a switch and waits for devd to send switchTarget again";
 
 // Exit statuses of `agent-bridge serve`, read by agent-bridge-launch.
 export const EXIT_STOPPED = 0;
@@ -93,8 +94,16 @@ export function codexAccountArgs(env: Env): string[] {
 /** A Claude target needs its CLAUDE_CONFIG_DIR with credentials (a proxy profile authenticates with
  *  ANTHROPIC_AUTH_TOKEN instead); a Codex target gets its account's shadow home prepared, which fails without a
  *  signed-in auth.json. Throws before anything of the running session is touched. */
-export function resolveTarget(t: SwitchTarget, codexAccountsRoot: string, homes?: Partial<HomesPaths>): SwitchTarget {
+export interface ResolveOptions {
+  codexAccountsRoot: string;
+  homes?: Partial<HomesPaths>;
+  /** The image's `claude`, or null when it is not on PATH. */
+  claudeExecutable: string | null;
+}
+
+export function resolveTarget(t: SwitchTarget, r: ResolveOptions): SwitchTarget {
   if (t.harness === "claude") {
+    if (r.claudeExecutable === null) throw new Error("switch target: claude binary not found on PATH");
     const dir = t.env.CLAUDE_CONFIG_DIR;
     if (!dir) throw new Error("switch target: CLAUDE_CONFIG_DIR is missing from the target env");
     if (!isDir(dir)) throw new Error(`switch target: Claude config dir ${dir} does not exist`);
@@ -104,8 +113,22 @@ export function resolveTarget(t: SwitchTarget, codexAccountsRoot: string, homes?
     return t;
   }
   if (t.account === null) throw new Error("switch target: a Codex target needs an account");
-  const home = prepareShadowHome(t.account, codexAccountsRoot, homes);
+  const home = prepareShadowHome(t.account, r.codexAccountsRoot, r.homes);
   return { ...t, env: { ...t.env, CODEX_HOME: home, CODEX_SQLITE_HOME: join(home, "sqlite"), DEVD_CODEX_ACCOUNT_ID: t.account } };
+}
+
+const SECRET_KEY = /TOKEN|KEY|SECRET|PASSWORD/i;
+
+/** The target as state.json may hold it: values of secret env keys are dropped and only their names kept
+ *  (no secrets on disk); devd re-sends the full target after a restart. */
+export function persistableTarget(t: SwitchTarget): PersistedTarget {
+  const env: Record<string, string> = {};
+  const droppedEnvKeys: string[] = [];
+  for (const [k, v] of Object.entries(t.env)) {
+    if (SECRET_KEY.test(k)) droppedEnvKeys.push(k);
+    else env[k] = v;
+  }
+  return { harness: t.harness, account: t.account, model: t.model, env, droppedEnvKeys };
 }
 
 function isDir(p: string): boolean {
@@ -234,7 +257,14 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     pendingHandoff: null,
   };
   if (state.target === null) state.account = o.account;
-  let current: SwitchTarget = state.target ?? { harness: o.harness, account: o.account, model: o.model, env: {} };
+  // A persisted target whose secret env values were dropped cannot be opened until devd sends it again.
+  const awaitingTarget = state.target !== null && state.target.droppedEnvKeys.length > 0;
+  let current: SwitchTarget | null = state.target === null
+    ? { harness: o.harness, account: o.account, model: o.model, env: {} }
+    : awaitingTarget ? null : { harness: state.target.harness, account: state.target.account, model: state.target.model, env: state.target.env };
+  // Interrupted and queued runs of the previous bridge wait for a harness: from the start, or the next switchTarget.
+  let recoveryPending = true;
+  let switching = false;
   const persist = () => saveState(statePath, state);
   persist();
 
@@ -252,7 +282,8 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
         return;
       case "thread.native":
         state.nativeThreadId = e.nativeThreadId;
-        state.model = e.model;
+        // A resumed Claude thread is announced before the CLI names its model; that null is not a model change.
+        if (e.model !== null) state.model = e.model;
         persist();
         server.publish({ ...e, account: state.account });
         return;
@@ -288,7 +319,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     (closing ??= (async () => {
       clearInterval(sweep);
       try {
-        await harness.session.close();
+        await harness?.session.close();
       } finally {
         await server.close();
         markClosed(status);
@@ -303,7 +334,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     const h = {
       retired: false,
       session: o.openHarness({
-        target: current,
+        target: current!,
         resume: state.nativeThreadId,
         usageBaseline: state.usageBaseline,
         emit: onHarnessEvent,
@@ -330,24 +361,48 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     return h;
   }
 
+  /** A switch's handoff goes with one user message: injected where the harness can, else as its preamble
+   *  (devd's deliverInline format); the user's own text stays what the thread shows. It is cleared on disk before
+   *  an injection, so a crash never injects it twice; `putBack` is what to restore if the turn does not start
+   *  (null once injected). */
+  async function consumeHandoff(h: HarnessSession, text: string): Promise<{ harnessText: string; putBack: HandoffDelivery | null }> {
+    const handoff = state.pendingHandoff;
+    if (handoff === null) return { harnessText: text, putBack: null };
+    state.pendingHandoff = null;
+    persist();
+    if (handoff.injectItems && h.capabilities().injectItems) {
+      try {
+        await h.injectItems(handoff.injectItems);
+      } catch (e) {
+        state.pendingHandoff = handoff;
+        persist();
+        throw e;
+      }
+      return { harnessText: text, putBack: null };
+    }
+    return { harnessText: handoff.preamble === null ? text : `${handoff.preamble}\n\nUser message:\n${text}`, putBack: handoff };
+  }
+
   async function startTurn(text: string): Promise<{ runId: string }> {
     const runId = crypto.randomUUID();
-    // A switch's handoff goes with this one message: injected where the harness can, else as its preamble
-    // (devd's deliverInline format). The user's own text stays what the thread shows.
-    const handoff = state.pendingHandoff;
-    let harnessText = text;
-    if (handoff?.injectItems && harness.session.capabilities().injectItems) await harness.session.injectItems(handoff.injectItems);
-    else if (handoff && handoff.preamble !== null) harnessText = `${handoff.preamble}\n\nUser message:\n${text}`;
+    if (recoveryPending) {
+      // No usable harness yet: the message waits in the queue and starts with the recovered ones.
+      state.queue.push({ runId, text, attachments: [] });
+      persist();
+      announceQueued(runId, text);
+      return { runId };
+    }
+    const session = harness!.session;
+    const { harnessText, putBack } = await consumeHandoff(session, text);
     // Persisted before the harness sees it: a crash from here on still runs the message after the restart.
     // `run.started` removes it again.
     state.queue.push({ runId, text, attachments: [], ...(harnessText !== text ? { harnessText } : {}) });
-    state.pendingHandoff = null;
     persist();
     try {
-      await harness.session.startTurn(runId, harnessText, "user");
+      await session.startTurn(runId, harnessText, "user");
     } catch (e) {
       state.queue = state.queue.filter((q) => q.runId !== runId);
-      state.pendingHandoff = handoff;
+      state.pendingHandoff = putBack;
       persist();
       throw e;
     }
@@ -365,7 +420,18 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     if (state.activeRunId !== null || state.queue.length > 0) throw new Error(`${what} refused: a run is active or queued`);
   }
 
+  /** The harness, or an explicit error while there is none to talk to. */
+  function liveHarness(): { session: HarnessSession; retired: boolean } {
+    if (recoveryPending || harness === null) throw new Error(`no harness: ${AWAITING_TARGET_ERROR}`);
+    return harness;
+  }
+
+  function refuseWhileSwitching(what: string): void {
+    if (switching) throw new Error(`${what} refused: a switch is in progress`);
+  }
+
   async function retireHarness(): Promise<void> {
+    if (harness === null) return;
     harness.retired = true;
     await harness.session.close();
     if (adapterWork.length) {
@@ -375,7 +441,18 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   }
 
   async function switchTarget(cmd: Extract<BridgeCommand, { kind: "switchTarget" }>): Promise<void> {
-    refuseWhileRunning("switch");
+    refuseWhileSwitching("switch");
+    switching = true;
+    try {
+      await doSwitch(cmd);
+    } finally {
+      switching = false;
+    }
+  }
+
+  async function doSwitch(cmd: Extract<BridgeCommand, { kind: "switchTarget" }>): Promise<void> {
+    // Runs left by the previous bridge are not active here: they start once this switch has opened the harness.
+    if (!recoveryPending) refuseWhileRunning("switch");
     const target = o.resolveTarget(cmd.target);
     const caps = target.harness === "claude" ? CLAUDE_CAPABILITIES : CODEX_CAPABILITIES;
     if (cmd.handoff?.injectItems && cmd.handoff.preamble === null && !caps.injectItems) {
@@ -383,9 +460,9 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     }
     await retireHarness();
     // A different thread (or harness) does not continue the old running usage totals.
-    if (target.harness !== current.harness || cmd.resume !== state.nativeThreadId) state.usageBaseline = null;
+    if (target.harness !== state.harness || cmd.resume !== state.nativeThreadId) state.usageBaseline = null;
     current = target;
-    state.target = target;
+    state.target = persistableTarget(target);
     state.harness = target.harness;
     state.account = target.account;
     state.model = target.model;
@@ -405,7 +482,9 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       state.pendingHandoff = null;
       persist();
       server.publish({ type: "run.failed", runId: crypto.randomUUID(), error: RESUME_FAILED });
+      return;
     }
+    if (recoveryPending) await recover();
   }
 
   async function handle(cmd: BridgeCommand): Promise<unknown> {
@@ -415,24 +494,28 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
         if (cmd.attachments?.length) throw new Error("attachments are not supported yet");
         return startTurn(cmd.text);
       case "interrupt":
-        return harness.session.interrupt();
+        return liveHarness().session.interrupt();
       case "answer":
-        return harness.session.answer(cmd.requestId, cmd.answer);
+        return liveHarness().session.answer(cmd.requestId, cmd.answer);
       case "declareWait":
         return waits.declare(cmd.reason, cmd.waitKind, cmd.timeoutMinutes);
       case "endWait":
         return waits.clear();
       case "restartAgent": {
+        refuseWhileSwitching("restart");
+        liveHarness();
         refuseWhileRunning("restart");
         await retireHarness();
         harness = openHarness();
         return;
       }
       case "setModel":
+        refuseWhileSwitching("model switch");
+        liveHarness();
         refuseWhileRunning("model switch");
-        await harness.session.setModel(cmd.model);
-        current = { ...current, model: cmd.model };
-        state.target = current;
+        await liveHarness().session.setModel(cmd.model);
+        current = { ...current!, model: cmd.model };
+        state.target = persistableTarget(current);
         state.model = cmd.model;
         persist();
         return;
@@ -455,37 +538,58 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       publishBackground();
     }
   }, o.sweepMs ?? SWEEP_MS);
-  server.publish({ type: "bridge.started", version: BRIDGE_VERSION, resumed: state.nativeThreadId !== null });
+  server.publish({
+    type: "bridge.started",
+    version: BRIDGE_VERSION,
+    resumed: awaitingTarget || state.nativeThreadId !== null,
+    ...(awaitingTarget ? { awaitingTarget: true } : {}),
+  });
   // The previous process's background work and declared waits died with it.
   server.publish({ type: "background.changed", work: [] });
   for (const requestId of unresolved) server.publish({ type: "request.resolved", requestId, answer: null, by: "expired" });
 
-  let harness = openHarness();
-
-  const interrupted = state.activeRunId;
-  const queued = state.queue.map((q) => ({ ...q }));
-  if (interrupted !== null) {
-    state.activeRunId = null;
-    persist();
-    const t = now();
-    if (state.nativeThreadId === null) {
-      // Nothing to resume: a continuation would land in a fresh conversation without the user's message.
-      server.publish({ type: "run.failed", runId: interrupted, error: NO_THREAD_ERROR });
-    } else if (mayContinue(state.continuations, t)) {
-      server.publish({ type: "run.interrupted", runId: interrupted });
-      state.continuations = [...state.continuations.filter((c) => t - c < CONTINUATION_WINDOW_MS), t];
+  /** Continues what the previous bridge left: the interrupted run, then the queued messages in order. */
+  async function recover(): Promise<void> {
+    recoveryPending = false;
+    const session = harness!.session;
+    const interrupted = state.activeRunId;
+    const queued = state.queue.map((q) => ({ ...q }));
+    if (interrupted !== null) {
+      state.activeRunId = null;
       persist();
-      await harness.session.startTurn(crypto.randomUUID(), CONTINUATION_TEXT, "continuation");
-    } else {
-      server.publish({ type: "run.failed", runId: interrupted, error: RESTART_LOOP_ERROR });
+      const t = now();
+      if (state.nativeThreadId === null) {
+        // Nothing to resume: a continuation would land in a fresh conversation without the user's message.
+        server.publish({ type: "run.failed", runId: interrupted, error: NO_THREAD_ERROR });
+      } else if (mayContinue(state.continuations, t)) {
+        server.publish({ type: "run.interrupted", runId: interrupted });
+        state.continuations = [...state.continuations.filter((c) => t - c < CONTINUATION_WINDOW_MS), t];
+        persist();
+        await session.startTurn(crypto.randomUUID(), CONTINUATION_TEXT, "continuation");
+      } else {
+        server.publish({ type: "run.failed", runId: interrupted, error: RESTART_LOOP_ERROR });
+      }
+    }
+    // Messages queued before the restart were accepted; they start after the continuation, in order.
+    for (const q of queued) {
+      let sent = q.harnessText;
+      if (sent === undefined) {
+        // Queued while no harness was open: a pending handoff goes with the first of them.
+        sent = (await consumeHandoff(session, q.text)).harnessText;
+        const entry = state.queue.find((x) => x.runId === q.runId);
+        if (entry && sent !== q.text) {
+          entry.harnessText = sent;
+          persist();
+        }
+      }
+      await session.startTurn(q.runId, sent, "user");
+      // A crash between persist() and the run.queued publish left the message unannounced.
+      if (!announced.has(q.runId) && state.queue.some((x) => x.runId === q.runId)) announceQueued(q.runId, q.text);
     }
   }
-  // Messages queued before the restart were accepted; they start after the continuation, in order.
-  for (const q of queued) {
-    await harness.session.startTurn(q.runId, q.harnessText ?? q.text, "user");
-    // A crash between persist() and the run.queued publish left the message unannounced.
-    if (!announced.has(q.runId) && state.queue.some((x) => x.runId === q.runId)) announceQueued(q.runId, q.text);
-  }
+
+  let harness: { session: HarnessSession; retired: boolean } | null = awaitingTarget ? null : openHarness();
+  if (!awaitingTarget) await recover();
 
   return { closed, close };
 }
@@ -495,7 +599,7 @@ export async function runServe(env: Env = process.env): Promise<number> {
   const config = serveConfigFromEnv(env);
   if (config.harness === "claude" && !Bun.which("claude")) throw new ConfigError("claude binary not found on PATH");
   const logError = (msg: string) => console.error(msg);
-  const codexAccountsRoot = env.DEVD_CODEX_ACCOUNTS_DIR || CODEX_ACCOUNTS_ROOT;
-  const bridge = await serve({ ...config, openHarness: harnessOpener(env, logError), resolveTarget: (t) => resolveTarget(t, codexAccountsRoot), logError });
+  const resolveOptions: ResolveOptions = { codexAccountsRoot: env.DEVD_CODEX_ACCOUNTS_DIR || CODEX_ACCOUNTS_ROOT, claudeExecutable: Bun.which("claude") };
+  const bridge = await serve({ ...config, openHarness: harnessOpener(env, logError), resolveTarget: (t) => resolveTarget(t, resolveOptions), logError });
   return bridge.closed;
 }

@@ -19,7 +19,7 @@ const state: BridgeState = {
   queue: [{ runId: "r2", text: "hi", attachments: ["a.png"] }],
   continuations: [1, 2],
   usageBaseline: { usage: { input: 1, output: 2, cacheCreation: 3, cacheRead: 4 }, costUsd: 0.5 },
-  target: { harness: "codex", account: "a1", model: "m", env: { CODEX_HOME: "/h" } },
+  target: { harness: "codex", account: "a1", model: "m", env: { CODEX_HOME: "/h" }, droppedEnvKeys: [] },
   pendingHandoff: { preamble: "earlier" },
 };
 

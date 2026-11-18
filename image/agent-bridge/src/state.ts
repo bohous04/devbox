@@ -2,6 +2,9 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { UsageBaseline } from "./events";
 import type { HandoffDelivery, SwitchTarget } from "./protocol";
 
+/** A switch target as persisted: secret env values are dropped, their names kept in `droppedEnvKeys`. */
+export type PersistedTarget = SwitchTarget & { droppedEnvKeys: string[] };
+
 export interface BridgeState {
   harness: "claude" | "codex";
   nativeThreadId: string | null;
@@ -16,7 +19,7 @@ export interface BridgeState {
   usageBaseline: UsageBaseline | null;
   /** The target of the last switch (or setModel), with its resolved env; it overrides the launch env on restart.
    *  Null while the session runs as launched. */
-  target: SwitchTarget | null;
+  target: PersistedTarget | null;
   /** A switch's handoff not yet delivered with a user turn. */
   pendingHandoff: HandoffDelivery | null;
 }
