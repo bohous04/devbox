@@ -11,8 +11,10 @@ export interface RunRecord {
 }
 
 export const GATE_RATIO = 1.15;
-// Below this total delta the whole-percent meter granularity dominates the ratio.
-export const LOW_SIGNAL_PCT = 10;
+// Per path. Each run's delta is the difference of two whole-percent reads, so it is off by up to
+// ±1 point; at 10 points over 5 runs that error was about ±13 % on the ratio, as large as the 15 %
+// margin being tested. At 30 points it stays well inside the margin.
+export const LOW_SIGNAL_PCT = 30;
 
 export function weightedTokens(u: TokenUsage): number {
   return u.input + u.cacheCreation * 1.25 + u.cacheRead * 0.1 + u.output * 5;

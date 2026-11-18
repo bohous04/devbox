@@ -99,21 +99,21 @@ describe("sessionUsage", () => {
 
 describe("gate", () => {
   test("passes at equal cost", () => {
-    const g = gate([...runs("tui", 3), ...runs("bridge", 3)]);
+    const g = gate([...runs("tui", 6), ...runs("bridge", 6)]);
     expect(g.ratio).toBe(1);
     expect(g.perTaskRatio).toBe(1);
     expect(g.pass).toBe(true);
-    expect(g.tuiDeltaPct).toBe(15);
+    expect(g.tuiDeltaPct).toBe(30);
   });
   test("fails above 15 percent", () => {
-    const g = gate([...runs("tui", 3), ...runs("bridge", 3.5)]);
+    const g = gate([...runs("tui", 6), ...runs("bridge", 7)]);
     expect(g.ratio).toBeCloseTo(1.1667, 3);
     expect(g.pass).toBe(false);
   });
   test("fails when per-token cost is equal but the bridge uses 1.3x tokens per task", () => {
     const heavy = { input: 1_300_000, output: 0, cacheCreation: 0, cacheRead: 0 };
-    const bridge = Array.from({ length: 5 }, () => run("bridge", 3.9, { usage: heavy }));
-    const g = gate([...runs("tui", 3), ...bridge]);
+    const bridge = Array.from({ length: 5 }, () => run("bridge", 7.8, { usage: heavy }));
+    const g = gate([...runs("tui", 6), ...bridge]);
     expect(g.ratio).toBeCloseTo(1, 6);
     expect(g.perTaskRatio).toBeCloseTo(1.3, 6);
     expect(g.bridgeMeanWeighted).toBeCloseTo(1_300_000);
@@ -131,6 +131,12 @@ describe("gate", () => {
     const g = gate([...runs("tui", 1.2), ...runs("bridge", 3)]);
     expect(g.tuiDeltaPct).toBeCloseTo(6);
     expect(g.lowSignal).toBe(true);
+  });
+  test("low signal is per path at 30 points", () => {
+    // 29 points on one path: ±1 per whole-percent read still swings the ratio past the margin
+    expect(gate([...runs("tui", 5.8), ...runs("bridge", 6)]).lowSignal).toBe(true);
+    expect(gate([...runs("tui", 6), ...runs("bridge", 5.8)]).lowSignal).toBe(true);
+    expect(gate([...runs("tui", 6), ...runs("bridge", 6)]).lowSignal).toBe(false);
   });
   test("refuses to judge without valid runs on both paths", () => {
     expect(() => gate(runs("tui", 3))).toThrow(/bridge/);
