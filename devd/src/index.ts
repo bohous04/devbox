@@ -899,7 +899,11 @@ const apiDeps: ApiDeps = {
     build: () => buildBackupTar(backupDeps),
     // The restored DB is swapped in on start (applyPendingRestore): answer first, then restart
     // through the normal shutdown path; systemd (Restart=always) starts devd again.
-    restore: async (t) => { await restoreBackup(backupDeps, t); setTimeout(() => process.kill(process.pid, "SIGTERM"), 1000); },
+    restore: async (t) => {
+      try { await restoreBackup(backupDeps, t); }
+      catch (e) { rmSync(`${backupDeps.dbPath}.restore`, { force: true }); throw e; } // never applied at a later restart
+      setTimeout(() => process.kill(process.pid, "SIGTERM"), 1000);
+    },
   },
   agentEvents, liveActivities, gitea, spawnPty: realSpawnPty, scheduler, critic, codexAuth,
   codexUsage: { view: () => buildCodexView(db) },

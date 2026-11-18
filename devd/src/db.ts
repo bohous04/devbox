@@ -1417,12 +1417,13 @@ export function checkpointFully(db: Database): void {
 
 /** A restore cannot replace the file under open WAL connections (their cached pages would be
  *  written back over it), so restoreBackup leaves it next to the DB and devd restarts; this swaps
- *  it in before the DB is opened, dropping the old WAL with it. */
+ *  it in before the DB is opened; the old DB and its WAL are kept as devd.sqlite.pre-restore. */
 export function applyPendingRestore(path: string): boolean {
   const pending = `${path}.restore`;
   if (!existsSync(pending)) return false;
-  rmSync(`${path}-wal`, { force: true });
-  rmSync(`${path}-shm`, { force: true });
+  // The replaced DB (with its WAL folded in by the next open of it) stays as a way back.
+  if (existsSync(path)) renameSync(path, `${path}.pre-restore`);
+  for (const ext of ["-wal", "-shm"]) if (existsSync(path + ext)) renameSync(path + ext, `${path}.pre-restore${ext}`);
   renameSync(pending, path);
   return true;
 }

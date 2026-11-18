@@ -66,5 +66,8 @@ test("a restored DB is swapped in before opening, without the old WAL", () => {
   const db = openDb(path);
   expect(db.query("SELECT v FROM t").all()).toEqual([{ v: "restored" }]);
   expect(applyPendingRestore(path)).toBe(false);
+  const previous = new Database(`${path}.pre-restore`); // the replaced DB, its WAL alongside
+  expect(previous.query("SELECT v FROM t").all()).toEqual([{ v: "old" }]);
+  previous.close();
   db.close();
 });

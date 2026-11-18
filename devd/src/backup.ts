@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { run as runProc, timeoutFor } from "./proc";
 
@@ -89,7 +89,11 @@ export async function restoreBackup(d: BackupDeps, tarPath: string): Promise<voi
   if (d.vaultPath && existsSync(join(d.tmpDir, "vault.age"))) copyFileSync(join(d.tmpDir, "vault.age"), d.vaultPath);
   // Not over the live file: open WAL connections would write their cached pages back over it.
   // devd swaps it in on its next start (db.ts applyPendingRestore); the caller restarts devd.
-  if (existsSync(join(d.tmpDir, "devd.sqlite"))) copyFileSync(join(d.tmpDir, "devd.sqlite"), `${d.dbPath}.restore`);
+  // Via .tmp + rename, so a crash mid-copy never leaves a truncated DB to be swapped in.
+  if (existsSync(join(d.tmpDir, "devd.sqlite"))) {
+    copyFileSync(join(d.tmpDir, "devd.sqlite"), `${d.dbPath}.restore.tmp`);
+    renameSync(`${d.dbPath}.restore.tmp`, `${d.dbPath}.restore`);
+  }
   // shred the extracted plaintext staging files
   for (const f of staged(d)) rmSync(join(d.tmpDir, f), { force: true });
 }
