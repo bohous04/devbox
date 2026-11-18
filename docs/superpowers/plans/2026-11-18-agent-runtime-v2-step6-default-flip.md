@@ -32,7 +32,8 @@ migration; Clients / `dev` CLI). Requires steps 2–5 verified (their reports).
 **Files:** Modify `devd/src/settings.ts` (or the settings module that holds `critic`/`ccUpkeep`; field
 `defaultRuntime`, default `tmux` until the owner flips it), `devd/src/api.ts` (`POST /api/sessions` uses it when
 `runtime` is omitted; response carries `runtime` and `runtimeNotice` when it had to use tmux),
-`dashboard` settings page + NewSession default, iOS/Mac new-session default; tests.
+`dashboard` settings page + NewSession default, `dashboard/src/App.tsx` (the Inbox, at `/inbox` since step 2,
+becomes the home route `/`; Overview moves to its own path; ruling R12.1), iOS/Mac new-session default; tests.
 - [ ] Tests: omitted runtime follows the setting; explicit runtime wins; an agent not allowed in chat yields tmux
   with `runtimeNotice`; schedules keep their stored runtime. FAIL → implement → PASS. Commit.
 

@@ -6,7 +6,7 @@
 (the owner's primary desktop client), schedules on the chat runtime, the settled shelf with snooze and PR watch,
 images in the composer, and the critic on run completion.
 
-**Architecture:** Clients use step 2's REST + SSE API. Settled/snooze state is small per-session metadata in the main
+**Architecture:** Clients use step 2's REST + SSE API (SSE at `GET /api/stream`, not `/api/events`). Settled/snooze state is small per-session metadata in the main
 devd DB (`session_attention`), read by `inbox.ts`. PR watch is a devd poller using `gh` (GitHub) and the Gitea API.
 The critic reuses `criticGate.ts`, triggered by `run.started`/`run.completed` instead of hooks.
 

@@ -32,8 +32,9 @@ Step 1 result: `docs/superpowers/reports/2026-11-agent-runtime-v2-metering.md` (
   `{"t":"hello","afterSeq":N}`, receives every logged event with `seq > N`, then live events. Commands are
   `{"t":"cmd","id":<uuid>,"cmd":{...}}`, answered by `{"t":"res","id":...,"ok":bool,"error"?}`.
   The bridge survives devd; devd never holds the agent's stdio.
-- **Client stream:** SSE, `GET /api/events?session=<id>` (works through Cloudflare Access and `fetch`, and iOS
-  can read it with `URLSession.bytes`).
+- **Client stream:** SSE, `GET /api/stream?session=<id>` (works through Cloudflare Access and `fetch`, and iOS
+  can read it with `URLSession.bytes`). Not `/api/events`: that path is the existing JSON event log (dashboard,
+  CLI) and stays unchanged (ruling R11.1).
 - **Event log location:** `/run/devd/bridge/events.jsonl` + `/run/devd/bridge/state.json`. The control dir
   survives container restarts and is removed on session end, after the thread store has everything.
 - **Thread store:** `<root>/_threads/<sessionId>.sqlite` (root = `/srv/dev` in production), WAL, one writer
@@ -521,7 +522,7 @@ Rules (spec "Attention model"):
   - `GET /api/inbox` → `{ items: InboxItem[] }` where `InboxItem = { sessionId, runtime, title, project, repo,
     agent, attention: Attention, lastText: string | null }`, sorted needs_you (oldest `since` first), working,
     idle (newest first). tmux sessions use `tmuxAttention` and carry `runtime:"tmux"`.
-  - `GET /api/events?session=<id>` → SSE. Events: `inbox` (full `InboxItem` on change, coalesced to at most one per
+  - `GET /api/stream?session=<id>[&afterSeq=N]` → SSE (R11.1; `/api/events` stays the JSON event log). Events: `inbox` (full `InboxItem` on change, coalesced to at most one per
     session per 250 ms), `thread` (`LoggedEvent` for the subscribed session only), `ping` every 25 s.
   - `eventBus.ts`: `class EventBus { publish(topic: "inbox" | `thread:${string}`, data: unknown): void; subscribe(topics, cb): () => void }`.
 - [ ] **Step 1: Write the failing tests** (pattern of `devd/test/agentEventApi.test.ts`: `createApp({...} as never)`
@@ -537,15 +538,16 @@ Rules (spec "Attention model"):
 - Create: `dashboard/src/threadView.ts`, `dashboard/src/inboxView.ts`, `dashboard/src/useEventStream.ts`,
   `dashboard/src/pages/Inbox.tsx`, `dashboard/src/pages/SessionPage.tsx`,
   `dashboard/src/components/chat/{MessageList,ToolCall,RequestForm,Composer}.tsx`
-- Modify: `dashboard/src/api.ts` (thread/inbox calls and types), `dashboard/src/App.tsx` (routes: `/` → Inbox,
-  `/s/:id` → SessionPage; `/sessions` stays), `dashboard/src/pages/Sessions.tsx` (`NewSession`: runtime toggle,
+- Modify: `dashboard/src/api.ts` (thread/inbox calls and types), `dashboard/src/App.tsx` (routes: `/inbox` → Inbox
+  with a nav entry, `/` stays Overview until the default flips in step 6 (ruling R12.1), `/s/:id` → SessionPage;
+  `/sessions` stays), `dashboard/src/pages/Sessions.tsx` (`NewSession`: runtime toggle,
   default `tmux`), `dashboard/src/terminalRoute.ts` (`?thread=<id>` deep link → `/#/s/<id>`)
 - Test: `dashboard/src/threadView.test.ts`, `dashboard/src/inboxView.test.ts`, `dashboard/src/terminalRoute.test.ts`
 
 **Interfaces:**
 - Produces: `applyThreadEvent(t: ThreadSnapshot, e: LoggedEvent): ThreadSnapshot` (pure; same semantics as
   `ThreadStore.apply`, ignores `seq <= lastSeq`); `groupInbox(items: InboxItem[]): { needsYou; working; idle }`;
-  `useEventStream(sessionId?: string)` (EventSource on `api/events`, reconnects with `Last-Event-ID` = last seq,
+  `useEventStream(sessionId?: string)` (EventSource on `api/stream`, reconnects with `Last-Event-ID` = last seq,
   falls back to a 5 s poll of `/api/inbox` only while the stream is down and shows "live updates paused").
 - UI (existing style: Tailwind v4, shadcn components, IBM Plex):
   - Inbox: three sections, "Working" collapsed by default, each row shows title, agent badge, `tmux` badge for tmux
