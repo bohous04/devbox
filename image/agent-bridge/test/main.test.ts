@@ -87,3 +87,21 @@ describe("live smoke", () => {
     expect(finals.some((e) => e.type === "message.final" && e.text.toLowerCase().includes("pong"))).toBe(true);
   }, 120_000);
 });
+
+describe("codex-home argv", () => {
+  const run = (...args: string[]) => Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "codex-home", ...args], { stderr: "pipe" });
+
+  test("requires exactly one account id", () => {
+    for (const args of [[], ["a", "b"]]) {
+      const r = run(...args);
+      expect(r.exitCode).toBe(2);
+      expect(r.stderr.toString()).toContain("usage: agent-bridge codex-home <accountId>");
+    }
+  });
+
+  test("rejects an invalid account id", () => {
+    const r = run("../x");
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr.toString()).toContain("invalid Codex account id");
+  });
+});

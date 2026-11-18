@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -88,4 +88,32 @@ exit 0
   expect(p.stderr.toString()).toBe("");
   expect(p.exitCode).toBe(0);
   expect(readFileSync(join(dir, "env"), "utf8").trim()).toBe("/shadow/default|/shadow/default/sqlite|default|");
+});
+
+test.skipIf(Bun.spawnSync(["python3", "-c", "import tomllib"]).exitCode !== 0)("codex chat derives a standalone account from CODEX_HOME under DEVD_CODEX_ACCOUNTS_DIR", () => {
+  const id = "11111111-2222-3333-4444-555555555555";
+  mkdirSync(join(dir, id));
+  writeFileSync(join(dir, id, "auth.json"), "{}");
+  mkdirSync(join(dir, "default-home"));
+  writeFileSync(
+    join(dir, "agent-bridge"),
+    `#!/usr/bin/env bash
+if [ "$1" = codex-home ]; then echo "/shadow/$2"; exit 0; fi
+echo "$CODEX_HOME|$CODEX_SQLITE_HOME|$DEVD_CODEX_ACCOUNT_ID" > "${dir}/env"
+exit 0
+`,
+  );
+  chmodSync(join(dir, "agent-bridge"), 0o755);
+  const p = Bun.spawnSync(["bash", LAUNCHER], {
+    env: {
+      PATH: `${dir}:${process.env.PATH}`,
+      DEVD_AGENT: "codex",
+      CODEX_HOME: join(dir, "default-home"),
+      DEVD_CODEX_ACCOUNTS_DIR: dir,
+      DEVD_CODEX_ACCOUNT_ID: id,
+    },
+    stderr: "pipe",
+  });
+  expect(p.stderr.toString()).toBe("");
+  expect(readFileSync(join(dir, "env"), "utf8").trim()).toBe(`/shadow/${id}|/shadow/${id}/sqlite|${id}`);
 });

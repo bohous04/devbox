@@ -4,7 +4,7 @@ import { EventLog } from "./eventLog.ts";
 import type { TokenUsage } from "./events.ts";
 import { runMcp } from "./mcp.ts";
 import { prepareShadowHome } from "./codexHomes.ts";
-import { CODEX_ACCOUNTS_ROOT, ConfigError, EXIT_CONFIG, runServe } from "./serve.ts";
+import { ConfigError, EXIT_CONFIG, runServe } from "./serve.ts";
 
 export interface OnceArgs {
   promptFile: string;
@@ -89,7 +89,7 @@ if (import.meta.main) {
       process.exit(await runServe());
     } else if (argv[0] === "codex-home") {
       if (!argv[1] || argv.length > 2) throw new Error("usage: agent-bridge codex-home <accountId>");
-      console.log(prepareShadowHome(argv[1], CODEX_ACCOUNTS_ROOT));
+      console.log(prepareShadowHome(argv[1], process.env.DEVD_CODEX_ACCOUNTS_DIR || "/home/dev/.codex-accounts"));
     } else if (argv[0] === "mcp") {
       // Stays alive on stdio until the MCP client closes it.
       await runMcp();
