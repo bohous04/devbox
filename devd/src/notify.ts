@@ -13,13 +13,16 @@ const TARGET_PATHS: Record<NotifyTargetKind, string> = {
 
 /** Builds opts for the phone channel from `notify()` extra. important → EMERGENCY.
  *  A session-scoped push carries a deep link to that session's web terminal (tap the
- *  notification → terminal) and takes precedence; otherwise target → dashboard page.
+ *  notification → terminal), or to its thread for a chat session, and takes precedence; otherwise target → dashboard page.
  *  `target`/`targetId`/`blocked` are always passed on — APNs builds the payload from them,
  *  Pushover ignores them. */
 export function pushOptsFor(extra: NotifyExtra | undefined, dashboardUrl: string): PushOpts {
   const opts: PushOpts = { ...(extra?.important ? EMERGENCY : {}) };
   if (!dashboardUrl) {
     // Without DEVD_DASHBOARD_URL there is nowhere to link — the notification goes without a link.
+  } else if (extra?.session?.runtime === "chat") {
+    opts.url = `${dashboardUrl}/sessions?thread=${encodeURIComponent(extra.session.id)}`;
+    opts.url_title = "Open chat";
   } else if (extra?.session) {
     opts.url = `${dashboardUrl}/sessions?terminal=${encodeURIComponent(extra.session.id)}`;
     opts.url_title = "Open terminal";

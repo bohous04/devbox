@@ -85,6 +85,8 @@ export interface PaneAgentResult { target: string; outcome: PaneSwitchOutcome }
 export type SwitchAgentStatus =
   | "unknown-session"
   | "not-running"
+  // A chat session has no panes to restart: refused before anything is touched.
+  | "wrong-runtime"
   // Target == the profile in the DB — nothing to do. (A forced restart of the same profile is a different
   // operation and is done by ccUpkeep / accountSwitch.)
   | "unchanged"
@@ -138,6 +140,7 @@ async function switchPane(
 export async function switchAgent(deps: SwitchAgentDeps, sessionId: string, target: AgentName): Promise<SwitchAgentResult> {
   const s = getSession(deps.db, sessionId);
   if (!s) return { status: "unknown-session" };
+  if (s.runtime === "chat") return { status: "wrong-runtime" };
   if (s.status !== "running") return { status: "not-running" };
   // agent-launch runs an unknown value in the DB as claude — the same holds for "is it the same choice?"
   // (agentNameFor = the same fallback as specFor / agent-launch.sh).

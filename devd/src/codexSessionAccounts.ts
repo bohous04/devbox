@@ -127,6 +127,7 @@ export class CodexSessionAccounts {
   private session(id: string): SessionRow {
     const session = getSession(this.d.db, id);
     if (!session) throw new CodexSessionAccountError("Unknown session.", 404);
+    if (session.runtime === "chat") throw new CodexSessionAccountError("Chat sessions do not support Codex account switching.", 409);
     if (session.status !== "running") throw new CodexSessionAccountError("Start the session before changing its Codex account.", 409);
     if (session.agent !== "codex") throw new CodexSessionAccountError("Account switching is available for native Codex sessions only.", 409);
     return session;

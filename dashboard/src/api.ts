@@ -4,6 +4,7 @@ import type { VaultStatus } from "./vaultView";
 import type { OpRow } from "./operationsView";
 import { normalizeForm, type DbCandidate, type DbDiscovery, type DbRequestRow, type ProvisionForm } from "./dbRequestsView";
 import type { IbxJobDto, IbxStatusDto, PlacementDto } from "./instaboxView";
+import type { InboxItem, ThreadSnapshot } from "../../shared/thread";
 
 export interface SessionPort { host: number; container: number }
 export type ClaudeState = "working" | "waiting" | "idle";
@@ -27,7 +28,10 @@ export interface SessionLive {
   dockerHost?: string | null;
   // The container was shared and not rebuilt yet → still restricted (devd/src/shareTaint.ts).
   tainted?: boolean;
+  runtime?: SessionRuntime;
 }
+/** How the agent runs: in tmux panes (the terminal) or behind the chat bridge (the chat view). */
+export type SessionRuntime = "tmux" | "chat";
 export interface ResourceRow {
   id: string; label: string; project: string; cpuPct: number; memBytes: number; dindMemBytes: number;
 }
@@ -262,14 +266,18 @@ export interface CcRunResult {
 }
 
 // Carries the HTTP status code next to the message — an optional endpoint (503 = "not configured")
-// can thus be told apart from a real error without parsing localized text.
+// can thus be told apart from a real error without parsing localized text. `body` is the parsed error
+// body (null when there was none), for endpoints whose errors carry more than `error`.
 export class ApiError extends Error {
-  constructor(message: string, public readonly status: number) { super(message); }
+  constructor(message: string, public readonly status: number, public readonly body: unknown = null) { super(message); }
 }
 
 async function j<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(path, init);
-  if (!r.ok) throw new ApiError((await r.json().catch(() => ({}))).error ?? `HTTP ${r.status}`, r.status);
+  if (!r.ok) {
+    const body = await r.json().catch(() => null);
+    throw new ApiError(body?.error ?? `HTTP ${r.status}`, r.status, body);
+  }
   // 202/204 and similar can arrive without a body (e.g. "Run now" for schedules) — r.json() would throw.
   const text = await r.text();
   return (text ? JSON.parse(text) : undefined) as T;
@@ -510,7 +518,7 @@ export const api = {
   // `fresh` = create ANOTHER session, not attach to the existing one (see sessionsFor
   // in newSession.ts). openSolo does not know `fresh` — the server does not accept it for solo
   // (`d.mgr.openSolo`), see devd/src/api.ts.
-  openSession: (t: { folder: string; project: string; repo: string; cloneUrl?: string; agent?: AgentName; fresh?: boolean }) => j<OpenResult>("/api/sessions", post(t)),
+  openSession: (t: { folder: string; project: string; repo: string; cloneUrl?: string; agent?: AgentName; fresh?: boolean; runtime?: SessionRuntime }) => j<OpenResult>("/api/sessions", post(t)),
   openSolo: (t: { folder: string; project: string; agent?: AgentName }) => j<OpenResult>("/api/sessions", post({ ...t, solo: true })),
   openInstabox: (t: { folder: string; project: string; repo: string; cloneUrl: string; agent?: AgentName }) =>
     j<{ jobId: string; sessionId: string }>("/api/sessions", post({ ...t, host: "instabox" })),
@@ -541,6 +549,21 @@ export const api = {
   reviews: (id: string) => j<import("./criticView").CriticReview[]>(`/api/sessions/${id}/reviews?limit=5`),
   // Session nickname (an empty string clears it) — the server sanitizes the input itself.
   setName: (id: string, name: string) => j<void>(`/api/sessions/${id}/name`, post({ name })),
+  // Chat sessions (devd/src/threadApi.ts). Commands answer 202; 409 agent-disconnected / command-failed and
+  // 504 agent-timeout come back as ApiError with the body (see composerErrorText in threadView.ts).
+  thread: (id: string, opts?: { afterSeq?: number; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (opts?.afterSeq !== undefined) q.set("afterSeq", String(opts.afterSeq));
+    if (opts?.limit !== undefined) q.set("limit", String(opts.limit));
+    const qs = q.toString();
+    return j<ThreadSnapshot>(`/api/sessions/${encodeURIComponent(id)}/thread${qs ? `?${qs}` : ""}`);
+  },
+  sendMessage: (id: string, text: string) => j<{ queued: true }>(`/api/sessions/${encodeURIComponent(id)}/thread/messages`, post({ text })),
+  interrupt: (id: string) => j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/interrupt`, { method: "POST" }),
+  answerRequest: (id: string, requestId: string, answer: string) =>
+    j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/requests/${encodeURIComponent(requestId)}`, post({ answer })),
+  markSeen: (id: string, seq: number) => j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/seen`, post({ seq })),
+  inbox: () => j<{ items: InboxItem[] }>("/api/inbox"),
   schedules: () => j<Schedule[]>("/api/schedules"),
   createSchedule: (s: { name: string; cron: string; folder: string; project: string; repo: string; cloneUrl: string; prompt: string; important?: 0 | 1 }) => j<Schedule>("/api/schedules", post(s)),
   updateSchedule: (id: string, patch: Partial<Pick<Schedule, "name" | "cron" | "prompt" | "enabled" | "important">>) => j<Schedule>(`/api/schedules/${id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(patch) }),

@@ -5,13 +5,13 @@ import type { Database } from "bun:sqlite";
 import { chmodSync, chownSync, existsSync, mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { liveAgentPresent, staleAccountMounts } from "./accountMountRepair";
-import { specFor, usesProxy, type Upstream } from "./agents";
+import { chatRuntimeBlock, specFor, usesProxy, type Upstream } from "./agents";
 import { parseProcTree, PS_TREE_CMD } from "./ccUpkeep";
 import { insteadOfEnv } from "./gitProxy";
 import { dindCleanupPlan, dindEnsurePlan, dindName, dindNetwork, dindNetworkCreate, dindSubnetCandidates, dockerHostFor } from "./dind";
 import { IBX_PATHS, toRemoteRunOpts } from "./instabox/runOpts";
 import type { DevConfig, Settings } from "./config";
-import { deleteGitStat, deleteSession, getRepoAgent, getSession, insertSession, listSessions, logEvent, releaseLeasesForSession, setAutoEnd, setRepoAgent, setSessionAgent, setSessionBranch, updateSession, type AgentName, type SessionRow } from "./db";
+import { deleteGitStat, deleteSession, getRepoAgent, getSession, insertSession, listSessions, logEvent, releaseLeasesForSession, setAutoEnd, setRepoAgent, setSessionAgent, setSessionBranch, updateSession, type AgentName, type SessionRow, type SessionRuntime } from "./db";
 import { containerEnv, containerMountDestinations, containerState, execInContainer, removeContainer, runContainer, startContainer, stopContainer, type RunOpts } from "./docker";
 import { dockerArgv } from "./dockerTarget";
 import { inspectCanonicalWorkspace, removeStoppedWorkspaceContainer, type CanonicalWorkspaceContainer } from "./canonicalWorkspace";
@@ -78,6 +78,10 @@ export interface SessionDeps {
    *  cover expiring grants, so without this a permanent grant's agent (decrypted key in RAM)
    *  would outlive the session forever. */
   killSshAgent?: (session: string) => Promise<void>;
+  /** Drops the chat session's bridge link and closes its thread store. Runs inside the session lock: at the
+   *  start of stop(), and in end() right before the archive, so no handle is open when end() archives
+   *  `_threads/<id>.sqlite`. */
+  releaseThread?: (session: string) => void;
   /** Sidecar with its own docker daemon instead of the host socket. Opt-in. */
   dind?: boolean;
   /** Is the session shared or tainted (shareTaint.ts) RIGHT NOW, relative to the container that
@@ -137,6 +141,12 @@ export function credentialMounts(ghConfigDir?: string, giteaTokensPath?: string)
   if (ghConfigDir) m.push(`${ghConfigDir}:/home/dev/.config/gh:ro`);
   if (giteaTokensPath) m.push(`${giteaTokensPath}:/run/devbox-git/gitea-tokens.json:ro`);
   return m;
+}
+
+/** The runtime of a row read from the DB (always set there; optional in the type only for insert literals). */
+export function storedRuntime(s: SessionRow): SessionRuntime {
+  if (!s.runtime) throw new Error(`session ${s.id} has no runtime`);
+  return s.runtime;
 }
 
 // Which agent will run: explicit choice (picker, API) → the remembered choice for the repo
@@ -467,7 +477,7 @@ export class SessionManager {
   private keepChats(id: string) {
     // A failed move leaves the transcripts in place (and logged) — never deletes them.
     try { archiveChats(this.d.root, id, new Date(this.now())); }
-    catch (e) { console.error(`archiving chats of ${id} failed, left in _claude-projects:`, e); }
+    catch (e) { console.error(`archiving chats of ${id} failed, what did not move is left in _claude-projects / _threads:`, e); }
   }
 
   private claudeProjectsDir(id: string) {
@@ -573,11 +583,17 @@ export class SessionManager {
   // Writes the conflict prompt for the container launcher (or clears a stale one).
   // Must run BEFORE the container is run/started; docker start re-runs the
   // entrypoint, so the file channel also covers restarted containers.
-  private syncPromptFile(id: string, pull: PullResult, override?: string): string | undefined {
+  // A chat session has no launcher reading the file: the prompt is only returned, and the API sends it as the
+  // session's first message once the bridge link connects.
+  private syncPromptFile(id: string, runtime: SessionRuntime, pull: PullResult, override?: string): string | undefined {
     const dir = this.controlDir(id);
     mkdirSync(dir, { recursive: true });
     chmodSync(dir, 0o777); // devd may run as root; container user is uid 1000
     const file = join(dir, "prompt");
+    if (runtime === "chat") {
+      rmSync(file, { force: true });
+      return pull.status === "conflict" ? conflictPrompt(pull.files) : override;
+    }
     if (pull.status === "conflict") {
       const prompt = conflictPrompt(pull.files);
       writeFileSync(file, prompt);
@@ -692,7 +708,7 @@ export class SessionManager {
   // does not have it and gets exactly the same mounts as before.
   // `remote` = the container will run on an InstaBox VM: no dind (R2), no prod-db keys, no
   // local mkdir of transcripts and with a devd address reachable from the VM (Tailscale).
-  private async runOpts(id: string, ws: string, portBase: number, project: string, repo: string, agent: AgentName, bare?: string | null, remote?: { devdUrl: string }): Promise<RunOpts> {
+  private async runOpts(id: string, ws: string, portBase: number, project: string, repo: string, agent: AgentName, runtime: SessionRuntime, bare?: string | null, remote?: { devdUrl: string }): Promise<RunOpts> {
     const projectsDir = remote ? this.claudeProjectsDir(id) : await this.ensureClaudeProjectsDir(id);
     const prod = remote ? [] : await this.prodMounts(project, repo);
     const dind = !!this.d.dind && !remote;
@@ -723,6 +739,8 @@ export class SessionManager {
         // The agent default for this container: read by agent-launch when the tmux
         // session starts, when the container restarts and in the web terminal.
         DEVD_AGENT: agent,
+        // How the agent runs in this container (tmux pane or chat bridge); fixed at session creation.
+        DEVD_RUNTIME: runtime,
         DEVD_URL: devdUrl,
         CLAUDE_CODE_ENABLE_TELEMETRY: "1",
         OTEL_METRICS_EXPORTER: "otlp",
@@ -737,14 +755,14 @@ export class SessionManager {
 
   /** RunOpts for an InstaBox session container: paths inside the VM, no dind, with a desktop. */
   async remoteRunOpts(id: string, portBase: number, project: string, repo: string, agent: AgentName, devdUrl: string): Promise<RunOpts> {
-    const base = await this.runOpts(id, IBX_PATHS.ws(id), portBase, project, repo, agent, null, { devdUrl });
+    const base = await this.runOpts(id, IBX_PATHS.ws(id), portBase, project, repo, agent, "tmux" /* InstaBox sessions are tmux-only (chatRuntimeBlock) */, null, { devdUrl });
     return toRemoteRunOpts(base, { id, controlDir: this.controlDir(id), claudeProjectsDir: this.claudeProjectsDir(id), ghConfigDir: this.d.ghConfigDir });
   }
 
   /** `sessionId`: open (resume/attach) EXACTLY this existing session of the repo, not the one
    *  existingSessionId would pick — e.g. a paused InstaBox session when the repo also has a VPS
    *  session (smoke test, M8). Never creates a new one. */
-  async open(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; fresh?: boolean; sessionId?: string }) {
+  async open(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string }) {
     // The repo key while the id is not known (a new session only gets it here); then also the id,
     // so open does not collide with stop/end/recreate of the same existing session.
     return this.locked([openKey(t)], "open", async () => {
@@ -755,7 +773,10 @@ export class SessionManager {
       const leftover = (id: string) => existsSync(sessionWorktreePath(this.d.root, id));
       // A scheduled run (prompt) never attaches to an InstaBox session: its prompt channel
       // is in the VM and resume does not write the prompt — the work would silently not get done. The scheduler is VPS-only.
-      const accept = t.prompt !== undefined ? (s: SessionRow) => (s.host ?? "vps") === "vps" : undefined;
+      // Nor does a request attach to a session of the other runtime: a tmux `dev <repo>` has nothing
+      // to attach to in a chat session, and a chat request must not silently land in a tmux one.
+      const wanted = t.runtime ?? "tmux";
+      const accept = (s: SessionRow) => storedRuntime(s) === wanted && (t.prompt === undefined || (s.host ?? "vps") === "vps");
       const id = t.sessionId ?? (t.fresh
         ? nextSessionId(this.d.db, t.project, t.repo, leftover)
         : (existingSessionId(this.d.db, t.project, t.repo, accept) ?? nextSessionId(this.d.db, t.project, t.repo, leftover)));
@@ -773,7 +794,7 @@ export class SessionManager {
   // repo: 14 s → the sidecar alone ~3 s of it). openUnlocked still awaits it before the session
   // container runs, so "docker works from the first command" holds. When the open fails before
   // the container exists, the sidecar would be an orphaned privileged container — removed here.
-  private async openWithEarlyDind(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; fresh?: boolean; sessionId?: string }, id: string) {
+  private async openWithEarlyDind(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string }, id: string) {
     const fresh = !t.sessionId && !getSession(this.d.db, id);   // sessionId never creates (see open)
     const dind = fresh && this.d.dind ? this.ensureDind(id).catch((e) => { console.error(`dind for ${id} failed:`, e); }) : undefined;
     try {
@@ -784,7 +805,7 @@ export class SessionManager {
     }
   }
 
-  private async openUnlocked(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; fresh?: boolean; sessionId?: string }, id: string, earlyDind?: Promise<void>) {
+  private async openUnlocked(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string }, id: string, earlyDind?: Promise<void>) {
     const ws = workspacePath(this.d.root, t.folder, t.project, t.repo);
     const existing = getSession(this.d.db, id);
     // The session ended in the meantime (or belongs to another repo) → an error, not a silent new session with the same id.
@@ -792,10 +813,16 @@ export class SessionManager {
       throw new Error(`Unknown session ${t.sessionId} for ${t.folder}/${t.project}/${t.repo}`);
     }
     if (existing?.host === "instabox") return this.openInstabox(existing, t);
+    const agent = resolveAgent(t.agent, getRepoAgent(this.d.db, t.folder, t.project, t.repo));
+    // The stored runtime wins over the request: a chat session must not be handed an agent the chat
+    // bridge cannot run (given or remembered). Before any agent write or container action.
+    if (existing && storedRuntime(existing) === "chat") {
+      const blocked = chatRuntimeBlock(agent, "vps");
+      if (blocked) throw new Error(blocked);
+    }
     const observed: CanonicalWorkspaceContainer = existing ? await inspectCanonicalWorkspace(id) : { state: "missing" };
     const state = observed.state === "stopped" ? "exited" : observed.state;
 
-    const agent = resolveAgent(t.agent, getRepoAgent(this.d.db, t.folder, t.project, t.repo));
     if (t.agent) setRepoAgent(this.d.db, t.folder, t.project, t.repo, t.agent, this.now());
 
     // One `docker inspect` on the existing container — the env is read ONCE and serves
@@ -924,7 +951,7 @@ export class SessionManager {
     progress({ step: "pull" });
     const pull = await pullWithRebase(dir, authEnv);
     progress({ step: "container", detail: "setting file ownership" });
-    const claudePrompt = this.syncPromptFile(id, pull, t.prompt);
+    const claudePrompt = this.syncPromptFile(id, existing ? storedRuntime(existing) : (t.runtime ?? "tmux"), pull, t.prompt);
     if (pull.status === "conflict") {
       logEvent(this.d.db, id, "pull-conflict", { files: pull.files });
       this.d.notify?.("devbox", `${t.project}/${t.repo}: pull conflict — Claude is resolving it`);
@@ -953,7 +980,7 @@ export class SessionManager {
           await removeContainer(id);
         }
         await this.ensureDind(id);
-        await runContainer(await this.runOpts(id, dir, existing.port_base, t.project, t.repo, agent, worktree ? bare : null));
+        await runContainer(await this.runOpts(id, dir, existing.port_base, t.project, t.repo, agent, storedRuntime(existing), worktree ? bare : null));
         // Audit log: an agent switch is always logged, even when the container was missing and would
         // have to be created again anyway — "agent-switch" carries more information than a plain "recreate".
         if (switching) logEvent(this.d.db, id, "agent-switch", { from: existing.agent ?? "claude", to: agent });
@@ -970,13 +997,13 @@ export class SessionManager {
     const row: SessionRow = {
       id, folder: t.folder, project: t.project, repo: t.repo, container: id, port_base,
       status: "running", solo: 0, created_at: this.now(), last_active_at: this.now(), important: 0, agent,
-      worktree, branch: settledBranch,
+      worktree, branch: settledBranch, runtime: t.runtime ?? "tmux",
     };
     insertSession(this.d.db, row);
     try {
       progress({ step: "container", detail: "waiting for the docker sidecar" });
       const [opts] = await Promise.all([
-        this.runOpts(id, dir, port_base, t.project, t.repo, agent, worktree ? bare : null),
+        this.runOpts(id, dir, port_base, t.project, t.repo, agent, row.runtime!, worktree ? bare : null),
         earlyDind ?? this.ensureDind(id),
       ]);
       progress({ step: "container", detail: "starting the container" });
@@ -1012,11 +1039,11 @@ export class SessionManager {
           status: "running", solo: 1, created_at: this.now(), last_active_at: this.now(), important: 0, agent: chosen,
         };
         insertSession(this.d.db, row);
-        this.syncPromptFile(id, { status: "clean" });
+        this.syncPromptFile(id, "tmux", { status: "clean" });
         await this.ensureOwned(ws); // git init ran as root → chown to dev (uid 1000)
         try {
           await this.ensureDind(id);
-          await runContainer(await this.runOpts(id, ws, port_base, project, repo, chosen));
+          await runContainer(await this.runOpts(id, ws, port_base, project, repo, chosen, "tmux" /* solo is tmux-only: the API refuses chat+solo */));
         } catch (e) {
           deleteSession(this.d.db, id);
           throw e;
@@ -1032,6 +1059,7 @@ export class SessionManager {
   async stop(id: string, reason: "manual" | "idle" = "manual") {
     return this.locked([id], "stop", async () => {
       const s = getSession(this.d.db, id);
+      this.d.releaseThread?.(id);
       if (s?.host === "instabox") {
         await this.instaboxOrThrow().pause(s, reason);
         try { releaseLeasesForSession(this.d.db, id, this.now()); }
@@ -1095,7 +1123,7 @@ export class SessionManager {
     await this.checkpointRecovery(id);
     await removeContainer(id);
     await this.ensureDind(id);
-    await runContainer(await this.runOpts(id, dir, s.port_base, s.project, s.repo, agent, s.worktree ? bare : null));
+    await runContainer(await this.runOpts(id, dir, s.port_base, s.project, s.repo, agent, storedRuntime(s), s.worktree ? bare : null));
     updateSession(this.d.db, id, { status: "running", last_active_at: this.now() });
     logEvent(this.d.db, id, "recreate", { reason });
     return getSession(this.d.db, id)!;
@@ -1179,7 +1207,7 @@ export class SessionManager {
         create: async s => {
           this.revokeShares(id); // this create() = a missing container is being created again
           await runContainer(await this.runOpts(id, workspace(s), s.port_base, s.project, s.repo,
-            s.agent ?? "claude", s.worktree ? barePath(this.d.root, s.folder, s.project, s.repo) : null));
+            s.agent ?? "claude", storedRuntime(s), s.worktree ? barePath(this.d.root, s.folder, s.project, s.repo) : null));
         },
         start: s => startContainer(s.container),
         ready: () => this.requireRecoveryReady(id),
@@ -1206,14 +1234,15 @@ export class SessionManager {
           await this.ensureOwned(route.cwd);
           if (created && route.restore.bare) await this.ownBare(route.restore.bare);
         },
-        clearPrompt: () => { this.syncPromptFile(id, { status: "clean" }); },
+        // A clean pull only clears the file, whatever the runtime.
+        clearPrompt: () => { this.syncPromptFile(id, "tmux", { status: "clean" }); },
         ensureDind: () => this.ensureDind(id),
         start: () => startContainer(id),
         removeStopped: (observed) => removeStoppedWorkspaceContainer(observed),
         create: async (row) => {
           this.revokeShares(id); // no-op if the session did not have a row yet (fresh Remote resume)
           await runContainer(await this.runOpts(id, route.cwd, row.port_base,
-            row.project, row.repo, row.agent ?? "codex", route.restore.bare));
+            row.project, row.repo, row.agent ?? "codex", storedRuntime(getSession(this.d.db, id)!) /* inserted before create */, route.restore.bare));
         },
         allocatePort: () => allocatePortBase(this.d.db, this.d.cfg.settings),
         insert: (row) => insertSession(this.d.db, row),
@@ -1295,7 +1324,7 @@ export class SessionManager {
         if (staleCanonicalMount) await removeStoppedWorkspaceContainer(observed);
         else await removeContainer(id);
         await this.ensureDind(id);
-        await runContainer(await this.runOpts(id, ws, s.port_base, s.project, s.repo, agent));
+        await runContainer(await this.runOpts(id, ws, s.port_base, s.project, s.repo, agent, storedRuntime(s)));
         logEvent(this.d.db, id, "recreate", { reason: staleCanonicalMount ? "canonical-workspace" : "proxy-env" });
       } else {
         await startContainer(id);
@@ -1321,6 +1350,7 @@ export class SessionManager {
         this.d.revokePlaceholder?.(id);
         await this.killSshAgent(id);
         rmSync(this.controlDir(id), { recursive: true, force: true });
+        this.d.releaseThread?.(id);
         this.keepChats(id);
         deleteGitStat(this.d.db, id);
         try { releaseLeasesForSession(this.d.db, id, this.now()); }
@@ -1348,6 +1378,9 @@ export class SessionManager {
       rmSync(this.controlDir(id), { recursive: true, force: true });
       // Transcripts outlive the session: the user returns to old conversations, so they move to
       // _chat-archive instead of piling up under _claude-projects or being deleted.
+      // The chat store is released only now: until the container is gone the bridge may still send events, and
+      // the store takes them (isEnding keeps readers out). Closed here, it is archived with no handle open.
+      this.d.releaseThread?.(id);
       this.keepChats(id);
       deleteGitStat(this.d.db, id);
       // The lease belongs to the session — without releasing it the account would look occupied until the

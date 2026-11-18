@@ -982,3 +982,11 @@ test("forget and retainRunning delete the persisted row of an ended session", ()
   hub.retainRunning(new Set()); // row.id no longer runs
   expect(getAgentLiveState(db, row.id)).toBeNull();
 });
+
+test("a chat session's notification carries its runtime, so the push links to the thread", () => {
+  const { row, hub, notified, tick } = fixture();
+  hub.handle({ ...row, runtime: "chat" }, "stop");
+  tick(20_000);
+  hub.sweep();
+  expect(notified[0].extra?.session).toMatchObject({ id: "dev-shop-cms", runtime: "chat" });
+});

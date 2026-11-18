@@ -28,14 +28,18 @@ function categoryFor(title: string, message: string, opts?: PushOpts): ApnsNotif
   return `${title} ${message}`.toLowerCase().includes("is waiting for") ? "blocked" : "done";
 }
 
-/** `notify()` builds the deep link as `<dashboardUrl>/sessions?terminal=<id>` (see
- *  index.ts) — this extracts the sessionId from it for the APNs payload and terminal:true, so the
- *  app knows to open the terminal directly, not just the session detail. */
-function sessionFromUrl(url?: string): { sessionId?: string; terminal?: boolean } {
+/** `notify()` builds the deep link as `<dashboardUrl>/sessions?terminal=<id>`, or `?thread=<id>` for a chat
+ *  session (see pushOptsFor in notify.ts) — this extracts the sessionId from it for the APNs payload and
+ *  terminal:true / thread:true, so the app knows to open the terminal or the chat directly, not just the
+ *  session detail. */
+function sessionFromUrl(url?: string): { sessionId?: string; terminal?: boolean; thread?: boolean } {
   if (!url) return {};
   try {
-    const terminal = new URL(url).searchParams.get("terminal");
-    return terminal ? { sessionId: terminal, terminal: true } : {};
+    const q = new URL(url).searchParams;
+    const terminal = q.get("terminal");
+    if (terminal) return { sessionId: terminal, terminal: true };
+    const thread = q.get("thread");
+    return thread ? { sessionId: thread, thread: true } : {};
   } catch {
     return {};
   }
@@ -59,7 +63,7 @@ export function createApnsChannel(d: PushChannelDeps, cfg: ApnsConfig | null): P
     send(title, message, opts) {
       if (!enabled) return false;
       const category = categoryFor(title, message, opts);
-      const { sessionId, terminal } = sessionFromUrl(opts?.url);
+      const { sessionId, terminal, thread } = sessionFromUrl(opts?.url);
       const target = opts?.target, targetId = opts?.targetId;
 
       // Fire-and-forget: `send` must return a boolean immediately (same contract as
@@ -67,11 +71,11 @@ export function createApnsChannel(d: PushChannelDeps, cfg: ApnsConfig | null): P
       if (category === "emergency") {
         const alertId = crypto.randomUUID();
         insertPushAlert(d.db, { alert_id: alertId, title, message, session_id: sessionId ?? null });
-        void pushToAllDevices(d, cfg!, { title, message, category, sessionId, alertId, terminal, target, targetId, timeSensitive: true })
+        void pushToAllDevices(d, cfg!, { title, message, category, sessionId, alertId, terminal, thread, target, targetId, timeSensitive: true })
           .then(() => touchPushAlert(d.db, alertId, d.now()))
           .catch((e) => console.error("apns: emergency push failed:", (e as Error).message));
       } else {
-        void pushToAllDevices(d, cfg!, { title, message, category, sessionId, terminal, target, targetId })
+        void pushToAllDevices(d, cfg!, { title, message, category, sessionId, terminal, thread, target, targetId })
           .catch((e) => console.error("apns: push failed:", (e as Error).message));
       }
       return true;

@@ -719,3 +719,12 @@ test("manual target that is unknown, disabled or quarantined → invalid-account
   expect(leaseHistory(db, "devbox", ROW.id)).toEqual(before);
   expect(d.inFlight.size).toBe(0);
 });
+
+test("chat session → wrong-runtime, no exec, no lease", async () => {
+  const db = baseDb(); insertSession(db, { ...ROW, runtime: "chat" });
+  let calls = 0;
+  const d = deps({ db, exec: async () => { calls++; return ok(); } });
+  expect(await switchAccount(d, ROW.id)).toEqual({ status: "wrong-runtime" });
+  expect(calls).toBe(0);
+  expect(leaseHistory(db, "devbox", ROW.id)).toEqual([]);
+});

@@ -22,6 +22,11 @@ test("every old path points to an existing new one", () => {
   }
 });
 
+test("NAV: Inbox comes right after Overview and is in the mobile bar", () => {
+  expect(NAV[1]).toMatchObject({ to: "/inbox", label: "Inbox", primary: true });
+  expect(activeLabel("/inbox")).toBe("Inbox");
+});
+
 test("activeLabel recognizes the root and subpages", () => {
   expect(activeLabel("/")).toBe("Overview");
   expect(activeLabel("/sessions")).toBe("Sessions");

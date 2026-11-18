@@ -70,7 +70,13 @@ import { guardedTick } from "./tick";
 import { createPushover, type Pushover } from "./pushover";
 import { createApnsChannel, tickPushAlerts, type RunFn } from "./pushChannel";
 import { predictDisk } from "./aggregate";
-import { DEFAULT_CONTROL_ROOT, DEFAULT_DEVD_URL, DEFAULT_OPENROUTER_URL, SessionManager, upstreamKey } from "./sessions";
+import { DEFAULT_CONTROL_ROOT, DEFAULT_DEVD_URL, DEFAULT_OPENROUTER_URL, SessionManager, storedRuntime, upstreamKey } from "./sessions";
+import { BridgeLinks } from "./bridgeLink";
+import { ThreadStore } from "./threadStore";
+import { ChatHub } from "./chatHub";
+import { EventBus } from "./eventBus";
+import { Inbox } from "./sessionInbox";
+import { chatAttention, chatBusy } from "./attention";
 import { contextLengthCached } from "./openrouterModels";
 import { parseMeminfo, resourceBreakdown } from "./resources";
 import { classifyClaudeState, collectDiskUsage, collectDockerStatsAsync, collectGitStats, collectSessionGitStat, type DockerStat, type Runner } from "./stats";
@@ -80,7 +86,7 @@ import { setUntrustedGitRoots } from "./safeGit";
 import { memoAsync, memoAsyncStrict } from "./cache";
 import { selfUpdateStatus, startSelfUpdate, type SelfUpdateDeps } from "./selfUpdate";
 import { buildUnpushedReport, unpushedOps } from "./unpushed";
-import { ApiErrorRetry, sweep429 } from "./apiErrorRetry";
+import { ApiErrorRetry, retryContainers, sweep429 } from "./apiErrorRetry";
 import { defaultProbe, sweepIdleSessions } from "./watchdog";
 import { getConnInfo, websocket } from "hono/bun";
 import { vmFetch } from "./vmListener";
@@ -370,6 +376,73 @@ const credentialsForUrl = (url: string): Record<string, string> => {
 // Shared with sshAgents below: the ssh-agent socket lives in the same per-session
 // directory that SessionManager mounts into the container as /run/devd.
 const controlRoot = env("DEVD_CONTROL_ROOT", DEFAULT_CONTROL_ROOT);
+// Chat sessions: ONE thread store per session, opened lazily and shared by the bridge link and its readers,
+// and a link to the session's agent bridge (<controlDir>/agent.sock). SessionManager calls
+// releaseThread at the start of stop() and right before end() archives the store, so nobody holds it open then.
+const threadStores = new Map<string, ThreadStore>();
+const threadStore = (id: string): ThreadStore => {
+  const open = threadStores.get(id);
+  if (open) return open;
+  // An ending or ended session's store is (being) archived; reopening it would leave a fresh empty file behind.
+  // `mgr` is late-bound: no store is opened before startup finishes.
+  if (mgr.isEnding(id)) throw new Error(`session ${id} is ending`);
+  const s = getSession(db, id);
+  if (!s || storedRuntime(s) !== "chat") throw new Error(`session ${id} is not a chat session`);
+  const store = ThreadStore.open(root, id);
+  threadStores.set(id, store);
+  return store;
+};
+const chatHub = new ChatHub({ hub: agentEvents, session: (id) => getSession(db, id) });
+// The hub-facing snapshot needs runs, pending and background only: `limit: 0` skips loading every item per event.
+const chatSnapshot = (id: string) => threadStore(id).snapshot({ limit: 0 });
+// SSE fan-out (threadApi.ts) and the inbox over all sessions; an ending session is left out (its store is being archived).
+const bus = new EventBus();
+const inbox = new Inbox({
+  sessions: () => listSessions(db).filter((s) => !mgr.isEnding(s.id)),
+  session: (id) => (mgr.isEnding(id) ? null : getSession(db, id)),
+  threads: threadStore,
+  chatLink: (id) => {
+    const link = chatHub.link(id);
+    const behindSince = bridgeLinks.behind(id);
+    return link && behindSince !== null ? { ...link, behindSince } : link;
+  },
+  tmuxLive: (id) => agentEvents.liveSnapshot(id),
+  bus,
+});
+const bridgeLinks = new BridgeLinks({
+  controlDir: (id) => join(controlRoot, id),
+  store: threadStore,
+  onEvent: (id, e) => {
+    bus.publish(`thread:${id}`, e);
+    chatHub.onEvent(id, e, () => chatSnapshot(id));
+    inbox.changed(id);
+  },
+  onStatus: (id, s) => {
+    chatHub.onStatus(id, s, () => chatSnapshot(id));
+    inbox.changed(id);
+  },
+  onBehind: (id) => inbox.changed(id),
+});
+const releaseThread = (id: string) => {
+  bridgeLinks.drop(id);
+  chatHub.drop(id);
+  threadStores.get(id)?.close();
+  threadStores.delete(id);
+  // Dropping a link fires no status callback: the inbox learns of the stop here (an ending session is removed).
+  inbox.changedSafe(id);
+};
+// Links follow the DB: a running chat session gets one (at boot, after open, after a restart recovery),
+// any other chat session loses it. The link itself retries while its bridge is unreachable. A session
+// under a lifecycle operation is left alone: stop/end released it and must not get it back mid-way.
+const syncBridgeLinks = () => {
+  try {
+    for (const s of listSessions(db)) {
+      if (storedRuntime(s) !== "chat" || accountSwitchInFlight.has(s.id)) continue;
+      if (s.status === "running") bridgeLinks.ensure(s.id);
+      else bridgeLinks.drop(s.id);
+    }
+  } catch (e) { console.error("bridge link sync failed:", e); }
+};
 // Git token placeholders. Created BEFORE SessionManager — it hands them out when creating a session.
 // dind is opt-in: without DEVD_DIND the host socket stays where it was, and a code deploy
 // by itself does not change the behavior of a running box. Enabling it is a deliberate step — new
@@ -411,6 +484,7 @@ const mgr = new SessionManager({
   revokePlaceholder: (session) => placeholders.revoke(session),
   // Late-bound: sshAgents is created below; end() never runs before startup finishes.
   killSshAgent: (session) => sshAgents.kill(session),
+  releaseThread,
   giteaInstances: getGiteaInstances,
   db, cfg, root,
   image: env("DEVD_IMAGE", "devbox:latest"),
@@ -692,6 +766,11 @@ const ccUpkeepDeps = (): UpkeepDeps => ({
   exec: dockerExec,
   host: (cmd, timeoutMs) => spawnWithTimeout(cmd, timeoutMs),
   turnInProgress: (id) => agentEvents.turnInProgress(id),
+  isChatWorking: (id) => {
+    const t = chatSnapshot(id);
+    return chatBusy(t, chatAttention(t, chatHub.link(id), Date.now()));
+  },
+  restartChatAgent: (id) => bridgeLinks.send(id, { kind: "restartAgent" }),
   notify,
   sleep: realSleep,
   repoDir: process.cwd(),
@@ -906,6 +985,7 @@ const apiDeps: ApiDeps = {
     },
   },
   agentEvents, liveActivities, gitea, spawnPty: realSpawnPty, scheduler, critic, codexAuth,
+  links: bridgeLinks, threads: threadStore, bus, inbox,
   codexUsage: { view: () => buildCodexView(db) },
   codexAccounts,
   codexSessionAccounts: new CodexSessionAccounts({
@@ -1067,10 +1147,15 @@ shareListenerUp = shareServer !== null;
 // that were running, with bounded retries, without replacing live tmux sessions.
 const startupRecovery = startRecovery({
   ids: listSessions(db).filter(s => s.status === "running").map(s => s.id),
-  recover: id => mgr.recoverAfterRestart(id),
+  recover: async id => {
+    await mgr.recoverAfterRestart(id);
+    inbox.changedSafe(id);
+  },
   failed: (id, error) => console.error(`restart recovery ${id}:`, (error as Error).message),
 });
 void mgr.recordBranches().catch(e => console.error("writing session branches failed:", e));
+syncBridgeLinks();
+setInterval(syncBridgeLinks, 5_000);
 startupRecovery.done.then(failed => {
   if (failed.length) logEvent(db, null, "restart-recovery-pending", { sessions: failed });
 });
@@ -1112,6 +1197,8 @@ setInterval(guardedTick("ssh grant cleanup", async () => {
 setInterval(() => {
   let done: string[] = [];
   try { done = agentEvents.sweep(); liveActivities.request(); } catch (e) { console.error("agent-event sweep failed:", e); }
+  // Sessions the sweep just marked done: the hub has no change hook, the inbox follows its callers.
+  for (const id of done) inbox.changedSafe(id);
   // Cleanup after scheduled runs: the "finished work" notification just went out, the session
   // flagged auto_end has served its purpose. Await is not possible here (interval), hence its own
   // catch — an uncaught rejected promise would bring down all of devd.
@@ -1148,7 +1235,7 @@ setInterval(() => {
 const apiErrorRetry = new ApiErrorRetry();
 setInterval(() => {
   sweep429({
-    containers: () => listSessions(db).filter((x) => x.status === "running").map((x) => x.container),
+    containers: () => retryContainers(listSessions(db)),
     exec: (c, cmd) => execInContainerAsync(c, cmd, 10_000),
     retry: apiErrorRetry,
   }, Date.now())
@@ -1332,7 +1419,7 @@ setInterval(() => {
         // repo "portal/web" is the same thing twice, and with an EMERGENCY notification that rings
         // for a whole hour you cannot tell which one to go unblock. The session nickname
         // is carried by `s.name` — `listSessions` returns the whole row, so it is at hand.
-        const sess = { id: s.id, project: s.project, repo: s.repo, name: s.name, agent: s.agent };
+        const sess = { id: s.id, project: s.project, repo: s.repo, name: s.name, agent: s.agent, runtime: s.runtime };
         const t = stuckText(sess);
         notify(t.title, t.message, { session: sess, important: true, sound: true });
         logEvent(db, s.id, "agent_stuck", { at: now });

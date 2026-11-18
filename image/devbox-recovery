@@ -627,6 +627,30 @@ def restore():
         return True
 
 
+def restore_chat():
+    # Chat containers have no tmux panes to restore (the agent lives in the bridge), only the
+    # inner Docker and the readiness markers devd waits for after a container restart.
+    with lock("restore.lock"):
+        # Starting a chat container means the user wants it running, even if the journal is unusable.
+        (ROOT / "manual-stop").unlink(missing_ok=True)
+        saved = read(ROOT / "latest.json")
+        if not saved or saved.get("generation") == generation():
+            return
+        if saved.get("version") != 1 or saved.get("session") != os.environ.get("DEVD_SESSION_ID"):
+            raise ValueError("Invalid recovery journal; refusing fresh agent fallback")
+        plan_name = "plan-" + generation() + ".json"
+        atomic(ROOT / plan_name, saved)
+        atomic(ROOT / "restore-incomplete", {"plan": plan_name})
+        try:
+            restore_docker(saved)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            print("devbox: the inner Docker cannot be restored yet: " + str(error), file=sys.stderr)
+            atomic(ROOT / "pending-docker.json", saved)
+        atomic(ROOT / (plan_name + ".ready"), {"ready": True})
+        (ROOT / "restore-incomplete").unlink(missing_ok=True)
+        (ROOT / "manual-stop").unlink(missing_ok=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -641,6 +665,7 @@ def main():
     sub.add_parser("check-ready")
     sub.add_parser("monitor")
     sub.add_parser("restore")
+    sub.add_parser("restore-chat")
     p = sub.add_parser("launch")
     p.add_argument("plan")
     p.add_argument("index", type=int)
@@ -664,6 +689,8 @@ def main():
         sys.exit(4 if pending else 0)
     elif args.command == "restore":
         sys.exit(0 if restore() else 3)
+    elif args.command == "restore-chat":
+        restore_chat()
     elif args.command == "launch":
         launch(args.plan, args.index)
     else:

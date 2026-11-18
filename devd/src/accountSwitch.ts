@@ -30,6 +30,8 @@ export interface PaneSwitchResult { target: string; outcome: PaneOutcome }
 export type SwitchAccountResult =
   | { status: "unknown-session" }
   | { status: "not-running" }
+  // A chat session has no panes to restart: switching is refused before anything is touched.
+  | { status: "wrong-runtime" }
   // The Anthropic account pool only concerns profiles that really run on such an account
   // (agent-launch requests a lease only for them) — other sessions have nothing to switch and
   // `/exit` would only throw away their turn.
@@ -123,6 +125,7 @@ async function restartPanes(deps: RestartDeps, container: string, configDir: str
 export async function switchAccount(deps: SwitchAccountDeps, sessionId: string, targetAccountId?: string): Promise<SwitchAccountResult> {
   const s = getSession(deps.db, sessionId);
   if (!s) return { status: "unknown-session" };
+  if (s.runtime === "chat") return { status: "wrong-runtime" };
   if (s.status !== "running") return { status: "not-running" };
   // The Anthropic account pool only concerns profiles that really run on such an account.
   // We ask about a PROPERTY, not a name: `=== "codex"` would, after proxy profiles were added,

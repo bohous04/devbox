@@ -30,6 +30,8 @@ export interface ApnsNotification {
   sessionId?: string;
   alertId?: string;
   terminal?: boolean;
+  /** The session is a chat session: open its thread (additive; older apps ignore it and open the session). */
+  thread?: boolean;
   timeSensitive?: boolean;
   /** App screen after tapping, when the notification does not belong to a session (see NotifyTarget). */
   target?: string;
@@ -108,6 +110,7 @@ export function apnsPayload(n: ApnsNotification): object {
   if (n.sessionId !== undefined) payload.sessionId = n.sessionId;
   if (n.alertId !== undefined) payload.alertId = n.alertId;
   if (n.terminal !== undefined) payload.terminal = n.terminal;
+  if (n.thread !== undefined) payload.thread = n.thread;
   if (n.target !== undefined) payload.target = n.target;
   if (n.targetId !== undefined) payload.targetId = n.targetId;
   return payload;

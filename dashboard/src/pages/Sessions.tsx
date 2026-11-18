@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronRight, Plus, Search, Terminal, Monitor, Star, ShieldCheck, Pencil, Square, RotateCcw, Trash2, ArrowLeftRight, Download, Folder, Box, Bell, Save, Share2 } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
-  api, type ActivityEvent, type AgentName, type CcStatus, type SessionLive, type SessionUsage,
+  api, type ActivityEvent, type AgentName, type CcStatus, type SessionLive, type SessionRuntime, type SessionUsage,
   type TreeProject,
 } from "../api";
 import { criticBadge, findingLines, type CriticReview } from "../criticView";
@@ -16,9 +16,9 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { agoLabel, bytes, compactNumber, czCurrency, durationLabel, stateLabel } from "../format";
-import { AGENT_IDS, AGENT_PROFILES, SOLO, agentNameFor, defaultAgentFor, folderChoices, instaboxAgentBlock, profileFor, projectChoices, repoChoices, sessionsFor, soleProject } from "../newSession";
+import { AGENT_IDS, AGENT_PROFILES, SOLO, agentNameFor, chatRuntimeBlock, defaultAgentFor, folderChoices, instaboxAgentBlock, profileFor, projectChoices, repoChoices, sessionsFor, soleProject } from "../newSession";
 import { CC_EVENT_TYPES, fleetBadge, historyLine, rowState, type HistoryTone } from "../ccUpkeepView";
-import { agentSwitchError } from "../sessionsView";
+import { agentSwitchError, openedNotice } from "../sessionsView";
 import { terminalTabUrl } from "../terminalRoute";
 import { useNow, useStore } from "../store";
 import { FormDialog } from "../components/FormDialog";
@@ -46,12 +46,14 @@ const HISTORY_TONE: Record<HistoryTone, string> = {
 
 function NewSession({ open, onClose, onStarted }: { open: boolean; onClose: () => void; onStarted: (id: string, message: string) => Promise<void> }) {
   const { live } = useStore();
+  const navigate = useNavigate();
   const [tree, setTree] = useState<TreeProject[] | null>(null);
   const [folder, setFolder] = useState("");
   const [project, setProject] = useState("");
   const [repo, setRepo] = useState("");
   const [agent, setAgent] = useState<AgentName>("claude");
   const [host, setHost] = useState<"vps" | "instabox">("vps");
+  const [runtime, setRuntime] = useState<SessionRuntime>("tmux");
   const [ibxStatus, setIbxStatus] = useState<IbxStatusDto>({ enabled: false });
   const [placement, setPlacement] = useState<PlacementDto | null>(null);
   const [step, setStep] = useState<string | null>(null);
@@ -93,9 +95,13 @@ function NewSession({ open, onClose, onStarted }: { open: boolean; onClose: () =
   const selected = repos.find((r) => r.value === repo);
   // Solo has no repo of its own (see SOLO) and the server does not accept `fresh` for it (openSolo),
   // so the "New session" option makes sense only for a real repo.
-  const existing = repo && repo !== SOLO ? sessionsFor(live?.sessions ?? [], project, repo) : [];
-  const ibxDisabled = hostDisabledReason(ibxStatus, repo === SOLO, instaboxAgentBlock(agent));
+  // devd attaches only to a session of the same runtime; one of the other runtime does not count as existing.
+  const existing = repo && repo !== SOLO
+    ? sessionsFor(live?.sessions ?? [], project, repo).filter((s) => (s.runtime ?? "tmux") === runtime)
+    : [];
+  const ibxDisabled = hostDisabledReason(ibxStatus, repo === SOLO, runtime === "chat" ? chatRuntimeBlock(agent, "instabox") : instaboxAgentBlock(agent));
   const onIbx = host === "instabox" && !ibxDisabled;
+  const chatDisabled = repo === SOLO ? "Chat sessions need a repo (no claudeSolo)" : chatRuntimeBlock(agent, onIbx ? "instabox" : "vps");
 
   // A folder with a single project → we fill in the project ourselves, so the user on mobile
   // immediately sees the repo picker instead of a confusing empty middle step.
@@ -110,6 +116,10 @@ function NewSession({ open, onClose, onStarted }: { open: boolean; onClose: () =
   useEffect(() => {
     if (host === "instabox" && ibxDisabled) setHost("vps");
   }, [host, ibxDisabled]);
+  // Same for chat: an agent the chat bridge cannot run puts the form back on tmux.
+  useEffect(() => {
+    if (runtime === "chat" && chatDisabled) setRuntime("tmux");
+  }, [runtime, chatDisabled]);
 
   if (!open) return null;
 
@@ -119,11 +129,14 @@ function NewSession({ open, onClose, onStarted }: { open: boolean; onClose: () =
     try {
       const r = repo === SOLO
         ? await api.openSolo({ folder, project, agent })
-        : await api.openSession({ folder, project, repo, cloneUrl: selected?.cloneUrl, agent, fresh });
+        : await api.openSession({ folder, project, repo, cloneUrl: selected?.cloneUrl, agent, fresh, runtime });
       setRepo("");
-      await onStarted(r.session.id, r.pull?.status === "conflict"
-        ? "Session started. The agent is resolving a pull conflict."
-        : "Session is ready.");
+      if (runtime === "chat") {
+        onClose();
+        navigate(`/s/${encodeURIComponent(r.session.id)}`, { state: { notice: openedNotice(r.pull, "chat") } });
+        return;
+      }
+      await onStarted(r.session.id, openedNotice(r.pull, "tmux")!);
       onClose();
     } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
   }
@@ -193,6 +206,15 @@ function NewSession({ open, onClose, onStarted }: { open: boolean; onClose: () =
               ))}
             </select>
           </label>
+          <fieldset className="sm:col-span-2">
+            <legend className={labelCls}>Interface</legend>
+            <div className="mt-2 flex gap-2">
+              <Button type="button" variant={runtime === "tmux" ? "default" : "outline"} disabled={busy} onClick={() => setRuntime("tmux")}>Terminal (tmux)</Button>
+              <Button type="button" variant={runtime === "chat" ? "default" : "outline"} disabled={busy || !!chatDisabled} title={chatDisabled ?? undefined} onClick={() => setRuntime("chat")}>Chat</Button>
+            </div>
+            {runtime === "chat" && <p className="mt-2 text-sm text-muted-foreground">The agent runs behind the chat view; its terminal stays available as a tab.</p>}
+            {repo && chatDisabled && <p className="mt-2 text-xs text-muted-foreground">{chatDisabled}</p>}
+          </fieldset>
           <fieldset className="sm:col-span-2">
             <legend className={labelCls}>Where it runs</legend>
             <div className="mt-2 flex gap-2">

@@ -20,7 +20,7 @@ const isBusy = (cmd: string[]) => cmd[0] === "sh" && !isBinAge(cmd);
 function deps(over: Partial<UpkeepDeps>): UpkeepDeps {
   return {
     db: openDb(":memory:"), exec: async () => ok(), host: async () => ok(),
-    turnInProgress: () => false, notify: () => {}, sleep: async () => {},
+    turnInProgress: () => false, isChatWorking: () => false, restartChatAgent: async () => {}, notify: () => {}, sleep: async () => {},
     repoDir: "/opt/vps-dev-infra", image: "devbox:latest", ...over,
   };
 }

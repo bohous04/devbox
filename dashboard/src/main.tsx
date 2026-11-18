@@ -22,7 +22,7 @@ import { StoreProvider } from "./store";
 import { ThemeProvider } from "./components/theme";
 import { deepLinkHash } from "./terminalRoute";
 
-// The deep link from Pushover notifications has PATH form (`/sessions?terminal=<id>`) —
+// The deep link from Pushover notifications has PATH form (`/sessions?terminal=<id>`, `?thread=<id>`) —
 // HashRouter does not see a query outside the hash, so the link would end up on Overview.
 // The translation to the terminal hash address MUST happen before the router mounts.
 const deepLink = deepLinkHash(window.location.search);

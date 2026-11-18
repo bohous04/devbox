@@ -26,7 +26,7 @@ import { createReadStream, mkdtempSync, openSync, rmSync, statSync, writeFileSyn
 import { Readable } from "node:stream";
 import { liveActivitiesRoutes, type LiveActivities } from "./liveActivities";
 import { AGENT_EVENTS, type AgentEvent, type AgentEventHub, type HookMeta, type NotifyFn } from "./agentEvents";
-import { AGENT_IDS, AGENTS, instaboxAgentBlock, specFor, type Upstream } from "./agents";
+import { AGENT_IDS, AGENTS, chatRuntimeBlock, instaboxAgentBlock, specFor, type Upstream } from "./agents";
 import { buildProjectLeaderboard, buildRange, buildSessionUsage, buildTotals, buildWorkHours, predictDisk, PROMPT_CHARS, PROMPT_WAIT } from "./aggregate";
 import { buildAccountViews, toCandidates } from "./accounts";
 import { currentAccount, lastSwitchAt } from "./accountLease";
@@ -44,7 +44,7 @@ import type { IbxStatus } from "./instabox/reconcile";
 import { suggestPlacement, type HostLoad } from "./placement";
 import { proxyContextRows } from "./proxyContext";
 import type { ConfigRepo } from "./configrepo";
-import { countEvents, diskHistoryEnds, distinctEventTypes, getHarvestState, getRepoAgent, getSession, insertMetrics, insertNotifyLog, isAgentName, lastMetricTs, listCriticReviews, listEvents, listNotifyLog, listRepoAgents, listSessions, logEvent, resetStats, sanitizeSessionName, setCritic, setHarvestState, setImportant, setNotifyVerdict, setSessionName, deleteSchedule, getSchedule, insertSchedule, listSchedules, updateSchedule, deleteAccount, getAccount, insertAccount, insertLease, isLeaseClient, leaseHistory, setAccountDisabled, setAccountLabel, setAccountOrgId, setAccountQuarantined, setAccountWeight, ackPushAlert, upsertPushDevice, type AgentName, type LeaseClient, type NotifyDecision, type NotifyVerdict, type ScheduleRow, type SessionRow } from "./db";
+import { countEvents, diskHistoryEnds, distinctEventTypes, getHarvestState, getRepoAgent, getSession, insertMetrics, insertNotifyLog, isAgentName, lastMetricTs, listCriticReviews, listEvents, listNotifyLog, listRepoAgents, listSessions, logEvent, resetStats, sanitizeSessionName, setCritic, setHarvestState, setImportant, setNotifyVerdict, setSessionName, deleteSchedule, getSchedule, insertSchedule, listSchedules, updateSchedule, deleteAccount, getAccount, insertAccount, insertLease, isLeaseClient, leaseHistory, setAccountDisabled, setAccountLabel, setAccountOrgId, setAccountQuarantined, setAccountWeight, ackPushAlert, upsertPushDevice, type AgentName, type LeaseClient, type NotifyDecision, type NotifyVerdict, type ScheduleRow, type SessionRow, type SessionRuntime } from "./db";
 import { validCron } from "./cron";
 import { memoAsync } from "./cache";
 import { GithubError, listOwners, listRepos, listSharedRepos, validOwner, type GithubOwner, type GithubRepo } from "./github";
@@ -53,13 +53,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readUpload, UploadError } from "./uploads";
 import { stageFile, stageShared } from "./inbox";
+import { registerThreadRoutes, type ThreadApiDeps } from "./threadApi";
 import type { SshKeyRef } from "./op";
 import { resolveSshTarget, type SshServer } from "./sshServers";
 import { createScopeGrant, keyCovered, listScopeGrants, liveScopeGrant, revokeScopeGrant, scopeIssue, scopeLabel } from "./sshScopeGrants";
 import { dbEntry, roUrl, entitledDbs, type Catalog, type Access, type DbEntry, type ServerRef } from "./prodDb";
 import { createProposal, listProposals, getProposal, setStatus, type WriteStatus, type WriteScope } from "./prodWrites";
 import type { ListenerClient } from "./listener";
-import { agentContextTokens, ExternalStartError, resolveAgent, RestartError, SessionBusyError, type SessionManager } from "./sessions";
+import { agentContextTokens, ExternalStartError, resolveAgent, RestartError, SessionBusyError, storedRuntime, type SessionManager } from "./sessions";
 import { localEnvProfiles } from "./localEnv";
 import { parseOtlpMetrics, pointsToRows } from "./metrics";
 import { classifyClaudeState } from "./stats";
@@ -174,6 +175,12 @@ export interface ApiDeps { mgr: SessionManager; db: Database; cfg: DevConfig; ro
   // ccUpkeep status and manual trigger for the dashboard. `run` returns null when the job is already running.
   agentUpkeep?: { status: (provider: UpkeepProvider) => Promise<AgentUpkeepStatus>; run: (provider: UpkeepProvider, only?: string[]) => Promise<AgentUpkeepResult | null> };
   ccUpkeep?: { status: () => Promise<CcStatus>; run: (only?: string[]) => Promise<UpkeepResult | null> };
+  // Chat sessions (threadApi.ts): bridge links, per-session thread stores, the SSE bus and the inbox.
+  // Optional like the other feature deps: without them the thread, inbox and stream routes answer 503.
+  links?: ThreadApiDeps["links"];
+  threads?: ThreadApiDeps["threads"];
+  bus?: ThreadApiDeps["bus"];
+  inbox?: ThreadApiDeps["inbox"];
   // "Update now": status of the server checkout vs origin/main and a manual start of devbox-update.service
   // (the nightly unit). `run` returns null when an update is already running.
   selfUpdate?: { status: () => Promise<SelfUpdateStatus>; run: () => Promise<{ ok: true } | null> };
@@ -296,6 +303,7 @@ export function createApp(d: ApiDeps): Hono {
     if (!session || !d.agentEvents) return;
     d.agentEvents.setSshWaiting(session, pendingSshLabel(d.db, session));
     d.liveActivities?.request();
+    d.inbox?.changedSafe(session);
   };
   const app = new Hono();
   // Only /api/*: static files are served by StaticFiles with precomputed gzip (see static.ts),
@@ -342,6 +350,8 @@ export function createApp(d: ApiDeps): Hono {
     return c.json(buildWeeklyUsage(d.db,range.from,range.to,now));
   });
   app.route("/api/live-activities", liveActivitiesRoutes(d.db, d.liveActivities));
+  registerThreadRoutes(app, d.links && d.threads && d.bus && d.inbox
+    ? { db: d.db, mgr: d.mgr, links: d.links, threads: d.threads, bus: d.bus, inbox: d.inbox } : null);
 
   // The git proxy MUST be registered first: further down the file is a catch-all that
   // serves the dashboard SPA, and Hono matches in registration order — otherwise requests
@@ -942,14 +952,38 @@ export function createApp(d: ApiDeps): Hono {
     return c.json({ progress: d.mgr.openProgressFor({ folder, project, repo }) });
   });
 
+  // Link the bridge of an opened chat session now instead of at the next 5 s link sync in index.ts. The session
+  // did open, so a failure here is logged, not answered: that sync retries. devd's prompt for the agent (a pull
+  // conflict) reaches a chat session as its first message, as the prompt file does for tmux.
+  const linkOpenedChat = (r: { session: SessionRow; claudePrompt?: string }) => {
+    const s = r.session;
+    try {
+      if (storedRuntime(s) === "chat" && s.status === "running") {
+        d.links?.ensure(s.id);
+        if (r.claudePrompt !== undefined) d.links?.startTurnWhenConnected(s.id, r.claudePrompt);
+      }
+    }
+    catch (e) { console.error(`bridge link of opened session ${s.id} failed:`, e); }
+    d.inbox?.changedSafe(s.id);
+  };
   app.post("/api/sessions", async (c) => {
     noIdleTimeout(c);
-    const body = (await c.req.json().catch(() => null)) as { folder: string; project: string; repo?: string; cloneUrl?: string; solo?: boolean; agent?: string; fresh?: boolean; host?: string; sessionId?: string } | null;
+    const body = (await c.req.json().catch(() => null)) as { folder: string; project: string; repo?: string; cloneUrl?: string; solo?: boolean; agent?: string; fresh?: boolean; host?: string; sessionId?: string; runtime?: unknown } | null;
     if (!body) return c.json({ error: "invalid JSON body" }, 400);
     if (body.agent !== undefined && !isAgentName(body.agent))
       return c.json({ error: `invalid agent (${AGENT_IDS.join("|")})` }, 400);
     const agent = body.agent as AgentName | undefined;
     if (body.host !== undefined && body.host !== "vps" && body.host !== "instabox") return c.json({ error: "invalid host (vps|instabox)" }, 400);
+    if (body.runtime !== undefined && body.runtime !== "tmux" && body.runtime !== "chat") return c.json({ error: "invalid runtime (tmux|chat)" }, 400);
+    const runtime = body.runtime as SessionRuntime | undefined;
+    if (runtime === "chat") {
+      if (body.solo) return c.json({ error: "chat runtime does not support solo sessions" }, 400);
+      // The repo's remembered agent counts too (open resolves it when `agent` is missing).
+      const remembered = body.folder && body.project && body.repo ? getRepoAgent(d.db, body.folder, body.project, body.repo) : null;
+      const effective = resolveAgent(agent, remembered);
+      const blocked = chatRuntimeBlock(effective, body.host ?? "vps");
+      if (blocked) return c.json({ error: blocked }, 400);
+    }
     if (body.host === "instabox") {
       if (body.solo) return c.json({ error: "claudeSolo runs only on the VPS" }, 400);
       if (!body.folder || !body.project || !body.repo || !body.cloneUrl) return c.json({ error: "folder, project, repo and cloneUrl are required" }, 400);
@@ -983,8 +1017,14 @@ export function createApp(d: ApiDeps): Hono {
         if (typeof body.sessionId !== "string" || body.fresh) return c.json({ error: "sessionId must be a string and cannot be combined with fresh" }, 400);
         const s = getSession(d.db, body.sessionId);
         if (!s || s.folder !== body.folder || s.project !== body.project || s.repo !== body.repo) return c.json({ error: `unknown session ${body.sessionId} for this repo` }, 404);
+        // The stored runtime wins over the body: a chat session never gets an agent chat cannot run.
+        if (s.runtime === "chat") {
+          const blocked = chatRuntimeBlock(resolveAgent(agent, getRepoAgent(d.db, body.folder, body.project, body.repo)), "vps");
+          if (blocked) return c.json({ error: blocked }, 400);
+        }
       }
-      const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, fresh: body.fresh, sessionId: body.sessionId });
+      const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, runtime, fresh: body.fresh, sessionId: body.sessionId });
+      linkOpenedChat(r);
       return c.json(r, r.created ? 201 : 200);
     } catch (e) {
       return busy(c, e) ?? c.json({ error: (e as Error).message }, 400);
@@ -1511,6 +1551,7 @@ export function createApp(d: ApiDeps): Hono {
 
   // Claude hook events from containers (image/vendor/devd-hooks). No auth, like
   // /v1/metrics — reachable only from the docker bridge / tailnet.
+  const chatHookLogged = new Set<string>();
   app.post("/api/agent-event", async (c) => {
     if (!d.agentEvents) return c.json({ error: "agent events are not enabled" }, 503);
     const body = (await c.req.json().catch(() => null)) as (Record<string, unknown> & { sessionId?: string; event?: string }) | null;
@@ -1556,6 +1597,15 @@ export function createApp(d: ApiDeps): Hono {
     }
     const s = getSession(d.db, body.sessionId);
     if (!s) return c.json({ error: `unknown session ${body.sessionId}` }, 404);
+    // The hooks live in the shared config homes, so a chat session's headless agent fires them too. Its turns
+    // reach the hub through the bridge (ChatHub); counting them here again would send early or double "done".
+    if (storedRuntime(s) === "chat") {
+      if (!chatHookLogged.has(s.id)) {
+        chatHookLogged.add(s.id);
+        console.warn(`agent-event: ignoring hook events of chat session ${s.id} (first: ${body.event})`);
+      }
+      return c.json({ ok: true, ignored: "chat-runtime" });
+    }
     // Critic: prompt starts the turn (baseline + task), stop is the gate before "done".
     if (d.critic && body.event === "user_prompt_submit") {
       d.critic.onPrompt(s, typeof body.prompt === "string" ? body.prompt : "");
@@ -1593,6 +1643,7 @@ export function createApp(d: ApiDeps): Hono {
     }
     d.agentEvents.handle(s, body.event as AgentEvent, hookMeta(body));
     d.liveActivities?.request();
+    d.inbox?.changedSafe(s.id);
     return c.json({ ok: true });
   });
 
@@ -2514,6 +2565,7 @@ export function createApp(d: ApiDeps): Hono {
       case "unknown-session": return c.json({ error: "unknown session" }, 404);
       case "not-running": return c.json({ error: "session is not running" }, 409);
       case "wrong-agent": return c.json({ error: "the session profile does not run on an Anthropic account — the pool does not apply to it" }, 400);
+      case "wrong-runtime": return c.json({ error: "chat sessions do not support account switching" }, 409);
       case "in-progress": return c.json({ error: "a switch for this session is already running" }, 409);
       case "no-account": return c.json({ ok: false, accountId: null, label: null, unchanged: false, exhausted: false, panes: [] });
       case "invalid-account": return c.json({ error: "that account does not exist or is disabled/quarantined" }, 400);
@@ -2545,6 +2597,7 @@ export function createApp(d: ApiDeps): Hono {
       case "unknown-session": return c.json({ error: "unknown session" }, 404);
       case "not-running": return c.json({ error: "session is not running" }, 409);
       case "in-progress": return c.json({ error: "a switch (agent or account) for this session is already running" }, 409);
+      case "wrong-runtime": return c.json({ error: "chat sessions do not support agent switching" }, 409);
       case "unchanged":
       case "no-agent": return c.json({ ok: r.status === "unchanged", status: r.status, panes: [] });
       case "failed":

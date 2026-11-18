@@ -137,7 +137,8 @@ codex_account_prepare() {
     export DEVD_CODEX_SHARED_HOME=$shared
     value=$(printf '%s' "$path" | jq -Rs .) || return 1
     CODEX_ACCOUNT_ARGS=(-c "sqlite_home=$value" -c 'cli_auth_credentials_store="file"')
-    if command -v seed-codex-hooks >/dev/null 2>&1; then seed-codex-hooks || return 1; fi
+    # Chat sessions (agent-bridge-launch) report through the bridge, not hooks.
+    if [ -z "${DEVBOX_SKIP_HOOK_SEED:-}" ] && command -v seed-codex-hooks >/dev/null 2>&1; then seed-codex-hooks || return 1; fi
   fi
   # Account identifiers only: never place credentials or labels in tmux state.
   if [ -n "${TMUX_PANE:-}" ]; then

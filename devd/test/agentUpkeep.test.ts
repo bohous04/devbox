@@ -8,7 +8,7 @@ function setup() {
   insertSession(db,{id:"a",folder:"f",project:"p",repo:"r",container:"dev-a",port_base:40100,status:"running",solo:0,created_at:0,last_active_at:0,important:0});
   const calls:string[][]=[];
   let installed="1.0.0";
-  const d:UpkeepDeps={db,repoDir:"/repo",image:"devbox:latest",sleep:async()=>{},notify:()=>{},turnInProgress:()=>false,
+  const d:UpkeepDeps={db,repoDir:"/repo",image:"devbox:latest",sleep:async()=>{},notify:()=>{},turnInProgress:()=>false,isChatWorking:()=>false,restartChatAgent:async()=>{},
     host:async(cmd)=>{calls.push(cmd);return ok(cmd.includes("--version") ? "grok 1.0.0" : "1.0.1");},
     exec:async(_container,cmd)=>{calls.push(cmd);if(cmd[0]==="/usr/local/bin/agent-auto-update"){installed="1.0.1";return ok();}if(cmd.includes("--version"))return ok(`grok ${installed}`);if(cmd[0]==="ps")return ok("1 0 900 bash\n2 1 300 grok-native\n3 1 300 claude");return ok("100");},
   };
@@ -57,7 +57,7 @@ test("updateLaunchAgent(agy) changes nothing and explains why", async () => {
   const calls: string[][] = [];
   const db = openDb(":memory:");
   const d: UpkeepDeps = {
-    db, repoDir: "/repo", image: "devbox:latest", sleep: async () => {}, notify: () => {}, turnInProgress: () => false,
+    db, repoDir: "/repo", image: "devbox:latest", sleep: async () => {}, notify: () => {}, turnInProgress: () => false, isChatWorking: () => false, restartChatAgent: async () => {},
     host: async (cmd) => { calls.push(cmd); return ok("1.3.5"); },
     exec: async (_container, cmd) => { calls.push(cmd); return ok("1.3.5"); },
   };
