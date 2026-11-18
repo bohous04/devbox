@@ -39,3 +39,10 @@ test("reasonLabel names every reason", () => {
   expect(reasonLabel("request")).toBe("waiting for your answer");
   expect(reasonLabel("disconnected")).toBe("agent not connected");
 });
+
+test("upsertInbox drops a removed session", () => {
+  const a = item("a", { section: "idle", reason: null, since: 1 });
+  const b = item("b", { section: "idle", reason: null, since: 2 });
+  expect(upsertInbox([a, b], { sessionId: "a", removed: true })).toEqual([b]);
+  expect(upsertInbox([b], { sessionId: "a", removed: true })).toEqual([b]);
+});

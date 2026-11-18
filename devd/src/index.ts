@@ -428,6 +428,8 @@ const releaseThread = (id: string) => {
   chatHub.drop(id);
   threadStores.get(id)?.close();
   threadStores.delete(id);
+  // Dropping a link fires no status callback: the inbox learns of the stop here (an ending session is removed).
+  inbox.changedSafe(id);
 };
 // Links follow the DB: a running chat session gets one (at boot, after open, after a restart recovery),
 // any other chat session loses it. The link itself retries while its bridge is unreachable. A session
@@ -1145,7 +1147,10 @@ shareListenerUp = shareServer !== null;
 // that were running, with bounded retries, without replacing live tmux sessions.
 const startupRecovery = startRecovery({
   ids: listSessions(db).filter(s => s.status === "running").map(s => s.id),
-  recover: id => mgr.recoverAfterRestart(id),
+  recover: async id => {
+    await mgr.recoverAfterRestart(id);
+    inbox.changedSafe(id);
+  },
   failed: (id, error) => console.error(`restart recovery ${id}:`, (error as Error).message),
 });
 void mgr.recordBranches().catch(e => console.error("writing session branches failed:", e));

@@ -957,6 +957,7 @@ export function createApp(d: ApiDeps): Hono {
   const linkOpenedChat = (s: SessionRow) => {
     try { if (storedRuntime(s) === "chat" && s.status === "running") d.links?.ensure(s.id); }
     catch (e) { console.error(`bridge link of opened session ${s.id} failed:`, e); }
+    d.inbox?.changedSafe(s.id);
   };
   app.post("/api/sessions", async (c) => {
     noIdleTimeout(c);

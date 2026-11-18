@@ -1,4 +1,4 @@
-import type { InboxItem, InboxSection } from "../../shared/thread";
+import type { InboxItem, InboxRemoved, InboxSection } from "../../shared/thread";
 import type { AgentLiveSnapshot } from "./agentEvents";
 import { chatAttention, tmuxAttention, WORKING_GRACE_MS, type LinkState } from "./attention";
 import type { SessionRow } from "./db";
@@ -24,7 +24,7 @@ export function sortInbox(items: InboxItem[]): InboxItem[] {
 const clip = (t: string) => (t.length > LAST_TEXT_MAX ? `${t.slice(0, LAST_TEXT_MAX)}…` : t);
 
 /** The inbox over all sessions, and its live feed: `changed(id)` publishes the session's item on the bus
- *  topic "inbox" when it differs from the last one published, at most once per session per `coalesceMs`
+ *  topic "inbox" when it differs from the last one published (an `InboxRemoved` once the session is gone or ending), at most once per session per `coalesceMs`
  *  (the first change goes out at once, later ones in the window as one trailing item with the newest state). */
 export class Inbox {
   private lastPublished = new Map<string, string>();
@@ -117,7 +117,12 @@ export class Inbox {
 
   private publish(sessionId: string) {
     const s = this.d.session(sessionId);
-    if (!s) { this.lastPublished.delete(sessionId); return; }
+    if (!s) {
+      this.lastPublished.delete(sessionId);
+      const removed: InboxRemoved = { sessionId, removed: true };
+      this.d.bus.publish("inbox", removed);
+      return;
+    }
     const { item, recheckAt } = this.build(s);
     const old = this.rechecks.get(sessionId);
     if (old) { clearTimeout(old); this.rechecks.delete(sessionId); }

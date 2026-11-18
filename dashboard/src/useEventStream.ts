@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { InboxItem, LoggedEvent, ThreadSnapshot } from "../../shared/thread";
+import type { InboxItem, InboxRemoved, LoggedEvent, ThreadSnapshot } from "../../shared/thread";
 import { api } from "./api";
 
 export const STREAM_POLL_MS = 5000;
@@ -14,7 +14,7 @@ export interface EventStreamOptions {
   afterSeq?: () => number;
   onSnapshot?: (m: { afterSeq: number; snapshot: ThreadSnapshot }) => void;
   onThread?: (e: LoggedEvent) => void;
-  onInbox?: (item: InboxItem) => void;
+  onInbox?: (item: InboxItem | InboxRemoved) => void;
   /** The whole inbox: fetched when the stream (re)opens and every 5 s while it is down. */
   onInboxList?: (items: InboxItem[]) => void;
 }
@@ -76,7 +76,7 @@ export function useEventStream(opts: EventStreamOptions): { paused: boolean; pol
       });
       on<{ afterSeq: number; snapshot: ThreadSnapshot }>("thread-snapshot", (d) => h.current.onSnapshot?.(d));
       on<LoggedEvent>("thread", (d) => h.current.onThread?.(d));
-      on<InboxItem>("inbox", (d) => h.current.onInbox?.(d));
+      on<InboxItem | InboxRemoved>("inbox", (d) => h.current.onInbox?.(d));
       src.onerror = () => {
         if (disposed) return;
         setPaused(true);

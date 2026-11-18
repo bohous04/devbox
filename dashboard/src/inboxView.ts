@@ -1,4 +1,4 @@
-import type { Attention, InboxItem } from "../../shared/thread";
+import type { Attention, InboxItem, InboxRemoved } from "../../shared/thread";
 
 /** The inbox's three sections. Ordering mirrors `sortInbox` in devd/src/sessionInbox.ts: needs-you oldest first
  *  (the longest wait on top), working and idle newest first. */
@@ -11,8 +11,9 @@ export function groupInbox(items: InboxItem[]): { needsYou: InboxItem[]; working
   };
 }
 
-/** An SSE `inbox` event carries one session's current item: it replaces that session's row. */
-export function upsertInbox(items: InboxItem[], next: InboxItem): InboxItem[] {
+/** An SSE `inbox` event carries one session's current item: it replaces that session's row. A removal drops it. */
+export function upsertInbox(items: InboxItem[], next: InboxItem | InboxRemoved): InboxItem[] {
+  if ("removed" in next) return items.filter((i) => i.sessionId !== next.sessionId);
   const idx = items.findIndex((i) => i.sessionId === next.sessionId);
   if (idx < 0) return [...items, next];
   const out = [...items];

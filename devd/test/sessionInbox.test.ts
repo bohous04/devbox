@@ -136,10 +136,15 @@ test("a run in its working grace window is re-published once the window ends", a
   expect(t.published.at(-1)!.attention.section).toBe("needs_you");
 });
 
-test("a session that disappeared publishes nothing", () => {
-  const t = setup();
-  t.inbox.changed("dev-gone");
-  expect(t.published).toEqual([]);
+test("a session that is gone (or ending) publishes its removal", async () => {
+  const t = setup({ coalesceMs: 0 });
+  chat(t, BASE, [started("r1"), completed("r1")]);
+  t.inbox.changed(BASE.id);
+  expect(t.published.at(-1)).toMatchObject({ sessionId: BASE.id, attention: { section: "needs_you" } });
+  await Bun.sleep(5);
+  t.db.run("DELETE FROM sessions WHERE id=?", [BASE.id]);
+  t.inbox.changedSafe(BASE.id);
+  expect(t.published.at(-1) as unknown).toEqual({ sessionId: BASE.id, removed: true });
 });
 
 test("event bus delivers to subscribers of the topic only and unsubscribes", () => {

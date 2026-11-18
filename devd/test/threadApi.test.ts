@@ -228,6 +228,17 @@ test("GET inbox lists every session with its attention, needs_you first", async 
 
 // --- open starts the link ---
 
+test("opening a session publishes its inbox item", async () => {
+  for (const row of [CHAT, TMUX]) {
+    const t = setup({ open: async () => ({ session: row, created: false }) });
+    const got: unknown[] = [];
+    t.bus.subscribe(["inbox"], (_t, d) => got.push(d));
+    const r = await t.a.fetch(req("POST", "/api/sessions", { folder: row.folder, project: row.project, repo: row.repo }));
+    expect(r.status).toBe(200);
+    expect(got).toEqual([expect.objectContaining({ sessionId: row.id })]);
+  }
+});
+
 test("opening a chat session starts its bridge link right away; a tmux session does not", async () => {
   for (const [row, expected] of [[CHAT, [CHAT.id]], [TMUX, []]] as const) {
     const t = setup({ open: async () => ({ session: row, created: false }) });
