@@ -119,7 +119,8 @@ async function main() {
   // Tokens mode reads no usage meter, so other sessions on the same account cannot skew it.
   const checkIdle = tokensOnly ? async () => {} : () => assertAccountIdle(fetch, devdUrl, a.account);
   await checkIdle();
-  if (!tokensOnly) await assertTokenLasts(d, a.account, a.runs);
+  // Also the check that the account's credentials exist at all.
+  await assertTokenLasts(d, a.account, a.runs);
 
   const partial = `${a.out}.runs.jsonl`;
   writeFileSync(partial, "");

@@ -337,4 +337,24 @@ describe("measureRun", () => {
     expect(fetched).toBe(0);
     expect(cmds.some((c) => c.includes("/a:ro"))).toBe(false);
   });
+  test("tokens mode returns a valid run without usage reads or the settle wait", async () => {
+    writeFileSync(join(dir, "s.jsonl"), fx("transcript-end-turn.jsonl"));
+    let fetched = 0;
+    const counting = (async () => { fetched++; return json({ five_hour: null }); }) as any;
+    const summary = { status: "completed", nativeThreadId: "t", model: "claude-opus-5-5",
+      usage: { input: 1, output: 1, cacheCreation: 0, cacheRead: 0 } };
+    let tmp = 0;
+    const e: Exec = async (c) => {
+      const j = c.join(" ");
+      if (j.startsWith("mktemp")) return ok(tmp++ === 0 ? "/clone\n" : `${dir}\n`);
+      if (j.includes("agent-bridge")) return ok(JSON.stringify(summary));
+      if (j.startsWith("rm -rf")) return ok(); // keep the test dir for afterEach
+      return ok();
+    };
+    const d = deps(e, counting);
+    const r = await measureRun(d, { ...opts, model: "claude-opus-5-5", expectedModel: "claude-opus-5-5", tokensOnly: true });
+    expect(r).toMatchObject({ ok: true, before: null, after: null, model: "claude-opus-5-5" });
+    expect(fetched).toBe(0);
+    expect(d.sleeps).toEqual([]);
+  });
 });
