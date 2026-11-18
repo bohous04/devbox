@@ -530,6 +530,16 @@ class Safety(unittest.TestCase):
                           (['worktree','add','--','-p'],'/w/-p'),(['worktree','add','-b','x'],None)):
             self.assertEqual(client.worktree_add_path(rest,base),want,rest)
 
+    def test_lost_worktree_registration_is_detected(self):
+        ws=self.root/'ws';ws.mkdir();reg=self.root/'repo.git'/'worktrees'/'ws';reg.mkdir(parents=True)
+        (ws/'.git').write_text(f'gitdir: {reg}\n')
+        self.assertFalse(guard.lost_registration(ws))
+        reg.rmdir()
+        self.assertTrue(guard.lost_registration(ws))
+        (ws/'.git').unlink();(ws/'.git').mkdir()
+        self.assertFalse(guard.lost_registration(ws),'a plain clone has a .git directory')
+        self.assertFalse(guard.lost_registration(self.root/'missing'))
+
     def test_checkout_slot_outside_a_repository_is_left_to_git(self):
         self.assertIsNone(client.checkout_slot(['-C',str(self.root)],slots=2,wait=0))
 

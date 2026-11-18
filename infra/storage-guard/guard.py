@@ -191,6 +191,15 @@ def held_files(paths):
     return held
 
 
+def lost_registration(workspace):
+    """True when the workspace's `.git` file points at a registration that no longer exists."""
+    try:
+        text=(Path(workspace)/'.git').read_text()
+    except (IsADirectoryError,FileNotFoundError):
+        return False
+    return text.startswith('gitdir: ') and not Path(text[8:].strip()).is_dir()
+
+
 class Guard:
     def __init__(self, cfg):
         self.c = cfg
@@ -255,7 +264,7 @@ class Guard:
         self.audit('archive-verified', archive=name, paths=list(before), shared=list(map(str, shared)))
         return name, before
 
-    def notify(self, key, message):
+    def notify(self, key, message, title='Devbox: místo na disku'):
         if not self.c.get('notify_enabled', True):
             self.audit('notification-suppressed',key=key)
             return
@@ -263,7 +272,7 @@ class Guard:
         previous = read(f, {})
         if time.time() - previous.get(key, 0) < self.c['notify_cooldown_seconds']:
             return
-        body = json.dumps({'title': 'Devbox: místo na disku', 'message': message}).encode()
+        body = json.dumps({'title': title, 'message': message}).encode()
         req = urllib.request.Request(self.c['notify_url'], data=body, headers={'Content-Type': 'application/json'})
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
@@ -372,6 +381,13 @@ class Guard:
                     raise
                 row['running']=False
                 self.audit('session-stopped-during-inventory',name=name)
+            if row['running'] and workspace and lost_registration(workspace):
+                # Git in the session says "not a git repository" until someone rebuilds it; wlon-3
+                # stayed broken for a day unnoticed (18 Nov 2026). The audit time bounds the cause.
+                row['git_registration_lost']=True
+                self.audit('session-git-registration-missing',name=name,workspace=workspace)
+                self.notify('git-registration-'+name,f'{name}: chybí registrace worktree ve sdíleném repu, git v session nefunguje. '
+                            'Soubory jsou na místě; opraví ji nové otevření session v devd.',title='Devbox: git v session')
             limits=self.c.get('session_limits',{}).get(name,{})
             warn=limits.get('warn_gib',self.c['session_warn_gib'])
             block=limits.get('block_gib',self.c['session_block_gib'])
