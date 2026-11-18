@@ -3,4 +3,3 @@
 mac-mcp-bridge/__pycache__
 mac-mcp-bridge/test_*.py
 agent-bridge/node_modules
-agent-bridge/test
