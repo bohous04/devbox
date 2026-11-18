@@ -4,8 +4,8 @@ import type { QueryFn } from "../src/claude.ts";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openClaudeSession, PLAN_UNAVAILABLE, type ClaudeSessionOptions, type UsageBaseline } from "../src/claudeSession.ts";
-import type { BridgeEvent } from "../src/events.ts";
+import { openClaudeSession, PLAN_UNAVAILABLE, type ClaudeSessionOptions } from "../src/claudeSession.ts";
+import type { BridgeEvent, UsageBaseline } from "../src/events.ts";
 
 // Scripted SDK: the test pushes output messages and reads what the session wrote to the input stream.
 function fakeSdk() {
@@ -364,7 +364,22 @@ describe("openClaudeSession", () => {
       { type: "run.failed", runId: "run-1", error: "Claude session ended" },
       { type: "run.failed", runId: "run-2", error: "Claude session ended" },
     ]);
-    await expect(session.startTurn("run-3", "z", "user")).rejects.toThrow("Claude session ended");
+    await expect(session.startTurn("run-3", "z", "user")).rejects.toThrow("Claude session ended");    expect(await session.ended).toEqual({});
+  });
+
+  test("ended carries the error when the SDK stream throws", async () => {
+    const queryFn = (() =>
+      Object.assign(
+        (async function* () {
+          throw new Error("claude exited with code 1");
+        })(),
+        { interrupt: async () => {}, close: () => {} },
+      )) as unknown as QueryFn;
+    const session = openClaudeSession(
+      { cwd: "/w", model: null, claudeExecutable: "/c", configDir: "/d", resume: null, mcpServers: {}, appendSystemPrompt: "", emit: () => {}, logError: () => {} },
+      queryFn,
+    );
+    expect(await session.ended).toEqual({ error: "claude exited with code 1" });
   });
 
   test("ExitPlanMode without plan text reads the plan file", async () => {

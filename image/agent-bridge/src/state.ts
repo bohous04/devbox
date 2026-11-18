@@ -1,5 +1,5 @@
-import type { UsageBaseline } from "./claudeSession";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import type { UsageBaseline } from "./events";
 
 export interface BridgeState {
   harness: "claude" | "codex";

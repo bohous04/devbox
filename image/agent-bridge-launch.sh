@@ -2,7 +2,15 @@
 # agent-bridge-launch — chat-runtime counterpart of agent-launch: prepares the account env for
 # $DEVD_AGENT and keeps `agent-bridge serve` running. The loop is the supervisor: the bridge
 # resumes its thread from /run/devd/bridge after a crash, so it is simply started again.
+#
+# Exit statuses of `agent-bridge serve` (src/serve.ts):
+#   0  stopped on request (`stop` command)      -> the launcher exits
+#   3  configuration error a restart cannot fix -> the launcher logs it once and exits
+#   anything else (1 harness ended, 2 usage error, crash) -> restart after 2 s
 set -u
+
+# Chat sessions get their state from the bridge; hooks would report the same agent a second time.
+export DEVBOX_SKIP_HOOK_SEED=1
 
 case "${DEVD_AGENT:-}" in
   claude)
@@ -28,8 +36,11 @@ esac
 while :; do
   agent-bridge serve
   status=$?
-  # 0 = the bridge was told to stop; anything else is a crash and the bridge comes back.
   [ "$status" = 0 ] && exit 0
+  if [ "$status" = 3 ]; then
+    echo "agent-bridge-launch: agent-bridge serve has a configuration error (see above); not restarting" >&2
+    exit 3
+  fi
   echo "agent-bridge-launch: agent-bridge serve exited with $status; restarting in 2 s" >&2
   sleep 2
 done

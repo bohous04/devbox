@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HarnessSession } from "../src/claudeSession";
@@ -7,7 +7,18 @@ import { CONTINUATION_TEXT } from "../src/continuation";
 import type { BridgeEvent, RunOrigin } from "../src/events";
 import { EventLog } from "../src/eventLog";
 import { sendCommand } from "../src/mcp";
-import { accountFromEnv, RESTART_LOOP_ERROR, serve, serveConfigFromEnv, type HarnessOpenOptions } from "../src/serve";
+import {
+  accountFromEnv,
+  codexAccountArgs,
+  ConfigError,
+  EXIT_HARNESS_ENDED,
+  EXIT_STOPPED,
+  NO_THREAD_ERROR,
+  RESTART_LOOP_ERROR,
+  serve,
+  serveConfigFromEnv,
+  type HarnessOpenOptions,
+} from "../src/serve";
 import { loadState, saveState, type BridgeState } from "../src/state";
 
 const MIN = 60_000;
@@ -26,7 +37,9 @@ afterEach(async () => {
 });
 
 // A harness that behaves like the adapters: one active run, later turns wait for it.
-function fakeHarness() {
+// `deferStart` holds every turn, as Codex does before its thread is ready.
+function fakeHarness(opts: { deferStart?: boolean } = {}) {
+  const ends: ((r: { error?: string }) => void)[] = [];
   const f = {
     opens: [] as HarnessOpenOptions[],
     turns: [] as { runId: string; text: string; origin: RunOrigin }[],
@@ -40,6 +53,10 @@ function fakeHarness() {
       f.active = runId;
       f.emit({ type: "run.started", runId, origin, nativeThreadId: null, model: null });
     },
+    /** The harness process went away by itself. */
+    end(error: string) {
+      ends[ends.length - 1]({ error });
+    },
     complete() {
       const runId = f.active!;
       f.active = null;
@@ -49,17 +66,22 @@ function fakeHarness() {
     },
     open(o: HarnessOpenOptions): HarnessSession {
       f.opens.push(o);
+      let end: (r: { error?: string }) => void = () => {};
+      const ended = new Promise<{ error?: string }>((r) => (end = r));
+      ends.push(end);
       return {
         async startTurn(runId, text, origin) {
           f.turns.push({ runId, text, origin });
-          if (f.active === null) f.start(runId, origin);
+          if (f.active === null && !opts.deferStart) f.start(runId, origin);
           else f.waiting.push({ runId, origin });
         },
         async interrupt() {},
         async answer() {},
         async close() {
           f.closes++;
+          end({});
         },
+        ended,
       };
     },
   };
@@ -85,6 +107,10 @@ async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string
   return bridge;
 }
 
+const STARTED_IDLE: BridgeEvent[] = [
+  { type: "bridge.started", version: expect.any(String), resumed: false },
+  { type: "background.changed", work: [] },
+];
 const events = () => new EventLog(join(dir, "events.jsonl")).readFrom(0).map((l) => l.event);
 const state = () => loadState(join(dir, "state.json"))!;
 const cmd = (c: Parameters<typeof sendCommand>[1]) => sendCommand(socketPath, c);
@@ -94,7 +120,7 @@ describe("serve", () => {
     const f = fakeHarness();
     await start(f);
     expect(f.opens[0].resume).toBeNull();
-    expect(events()).toEqual([{ type: "bridge.started", version: expect.any(String), resumed: false }]);
+    expect(events()).toEqual(STARTED_IDLE);
     expect(state()).toMatchObject({ harness: "claude", activeRunId: null, queue: [] });
   });
 
@@ -106,6 +132,7 @@ describe("serve", () => {
     expect(f.turns).toEqual([{ runId: expect.any(String), text: CONTINUATION_TEXT, origin: "continuation" }]);
     expect(events()).toEqual([
       { type: "bridge.started", version: expect.any(String), resumed: true },
+      { type: "background.changed", work: [] },
       { type: "run.interrupted", runId: "r-old" },
       { type: "run.started", runId: f.turns[0].runId, origin: "continuation", nativeThreadId: null, model: null },
     ]);
@@ -119,10 +146,7 @@ describe("serve", () => {
     const f = fakeHarness();
     await start(f);
     expect(f.turns).toEqual([]);
-    expect(events().slice(1)).toEqual([
-      { type: "run.interrupted", runId: "r-old" },
-      { type: "run.failed", runId: "r-old", error: RESTART_LOOP_ERROR },
-    ]);
+    expect(events().slice(2)).toEqual([{ type: "run.failed", runId: "r-old", error: RESTART_LOOP_ERROR }]);
     expect(state()).toMatchObject({ activeRunId: null, continuations: recent });
   });
 
@@ -149,7 +173,7 @@ describe("serve", () => {
     const f = fakeHarness();
     await start(f);
     expect(events().slice(3)).toEqual([
-      { type: "bridge.started", version: expect.any(String), resumed: false },
+      ...STARTED_IDLE,
       { type: "request.resolved", requestId: "q1", answer: null, by: "expired" },
     ]);
   });
@@ -227,6 +251,7 @@ describe("serve", () => {
     f.emit({ type: "background.changed", work: [] });
     const bg = events().filter((e) => e.type === "background.changed");
     expect(bg).toEqual([
+      { type: "background.changed", work: [] },
       { type: "background.changed", work: [wakeup] },
       { type: "background.changed", work: [wakeup, { id: "declared-wait", kind: "declared-wait", label: "ci: CI", holding: true, until: NOW + 10 * MIN }] },
       { type: "background.changed", work: [wakeup] },
@@ -236,15 +261,70 @@ describe("serve", () => {
 
   test("state.json of another harness is refused", async () => {
     saveState(join(dir, "state.json"), baseState({ harness: "codex" }));
-    await expect(start(fakeHarness())).rejects.toThrow("codex");
+    const err = await start(fakeHarness()).catch((e) => e);
+    expect(err).toBeInstanceOf(ConfigError);
+    expect(err.message).toContain("codex");
   });
 
   test("stop closes the harness and ends serve", async () => {
     const f = fakeHarness();
     const bridge = await start(f);
     await cmd({ kind: "stop" });
-    await bridge.closed;
+    expect(await bridge.closed).toBe(EXIT_STOPPED);
     expect(f.closes).toBe(1);
+  });
+
+  test("start with activeRunId but no native thread fails the run instead of continuing in a new conversation", async () => {
+    saveState(join(dir, "state.json"), baseState({ activeRunId: "r-old" }));
+    const f = fakeHarness();
+    await start(f);
+    expect(f.turns).toEqual([]);
+    expect(events().slice(2)).toEqual([{ type: "run.failed", runId: "r-old", error: NO_THREAD_ERROR }]);
+    expect(state()).toMatchObject({ activeRunId: null, continuations: [] });
+  });
+
+  test("a turn the harness holds is queued and persisted; a restart in that window still runs it", async () => {
+    const f = fakeHarness({ deferStart: true });
+    const bridge = await start(f);
+    const r = (await cmd({ kind: "startTurn", text: "hello" })) as { runId: string };
+    expect(state().queue).toEqual([{ runId: r.runId, text: "hello", attachments: [] }]);
+    expect(events()).toContainEqual({ type: "run.queued", runId: r.runId, text: "hello", attachments: [] });
+    await bridge.close();
+    const g = fakeHarness();
+    await start(g);
+    expect(g.turns).toEqual([{ runId: r.runId, text: "hello", origin: "user" }]);
+    expect(state()).toMatchObject({ activeRunId: r.runId, queue: [] });
+  });
+
+  test("a turn that starts at once is not announced as queued", async () => {
+    const f = fakeHarness();
+    await start(f);
+    await cmd({ kind: "startTurn", text: "one" });
+    expect(events().some((e) => e.type === "run.queued")).toBe(false);
+  });
+
+  test("the harness ending by itself saves state and ends serve with the restart status", async () => {
+    const f = fakeHarness();
+    const bridge = await start(f);
+    f.emit({ type: "thread.native", harness: "claude", nativeThreadId: "thread-1", account: null, model: "m" });
+    f.end("claude exited with code 1");
+    expect(await bridge.closed).toBe(EXIT_HARNESS_ENDED);
+    expect(state()).toMatchObject({ nativeThreadId: "thread-1" });
+  });
+
+  test("restartAgent's own close of the old harness does not end serve", async () => {
+    const f = fakeHarness();
+    const bridge = await start(f);
+    await cmd({ kind: "restartAgent" });
+    const status = await Promise.race([bridge.closed, new Promise((r) => setTimeout(() => r("open"), 20))]);
+    expect(status).toBe("open");
+    await cmd({ kind: "startTurn", text: "still here" });
+    expect(f.turns.map((t) => t.text)).toEqual(["still here"]);
+  });
+
+  test("a corrupt state.json is a configuration error", async () => {
+    writeFileSync(join(dir, "state.json"), "{not json");
+    await expect(start(fakeHarness())).rejects.toBeInstanceOf(ConfigError);
   });
 });
 
@@ -256,14 +336,30 @@ describe("launch env", () => {
   });
 
   test("codex account is DEVD_CODEX_ACCOUNT_ID when set", () => {
-    expect(accountFromEnv("codex", { DEVD_CODEX_ACCOUNT_ID: "acct-2" })).toBe("acct-2");
+    expect(accountFromEnv("codex", { DEVD_CODEX_ACCOUNT_ID: "acct-2", CODEX_HOME: "/home/dev/.codex-accounts/acct-3" })).toBe("acct-2");
     expect(accountFromEnv("codex", {})).toBeNull();
+  });
+
+  test("an automatically selected codex account is the account home's directory name", () => {
+    expect(accountFromEnv("codex", { CODEX_HOME: "/home/dev/.codex-accounts/acct-3" })).toBe("acct-3");
+    expect(accountFromEnv("codex", { CODEX_HOME: "/home/dev/.codex" })).toBeNull();
+  });
+
+  test("codex app-server gets co's account overrides", () => {
+    expect(codexAccountArgs({})).toEqual(["-c", 'cli_auth_credentials_store="file"']);
+    expect(codexAccountArgs({ CODEX_SQLITE_HOME: "/home/dev/.codex-accounts/a" })).toEqual([
+      "-c",
+      'cli_auth_credentials_store="file"',
+      "-c",
+      'sqlite_home="/home/dev/.codex-accounts/a"',
+    ]);
   });
 
   test("serveConfigFromEnv reads the launch env and refuses bad values", () => {
     const env = { DEVD_RUNTIME: "chat", DEVD_AGENT: "claude", CLAUDE_CONFIG_DIR: "/home/dev/.claude", DEVD_BRIDGE_DIR: "/tmp/b", DEVD_AGENT_SOCK: "/tmp/s" };
     expect(serveConfigFromEnv(env)).toMatchObject({ harness: "claude", configHome: "/home/dev/.claude", model: null, bridgeDir: "/tmp/b", socketPath: "/tmp/s", account: null });
     expect(serveConfigFromEnv({ ...env, DEVD_AGENT_MODEL: "opus" }).model).toBe("opus");
+    expect(() => serveConfigFromEnv({ ...env, DEVD_RUNTIME: "tmux" })).toThrow(ConfigError);
     expect(() => serveConfigFromEnv({ ...env, DEVD_RUNTIME: "tmux" })).toThrow("DEVD_RUNTIME");
     expect(() => serveConfigFromEnv({ ...env, DEVD_AGENT: "grok" })).toThrow("DEVD_AGENT");
     expect(() => serveConfigFromEnv({ DEVD_RUNTIME: "chat", DEVD_AGENT: "codex" })).toThrow("CODEX_HOME");

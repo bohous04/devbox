@@ -3,7 +3,7 @@ import { runClaudeTurn, type QueryFn } from "./claude.ts";
 import { EventLog } from "./eventLog.ts";
 import type { TokenUsage } from "./events.ts";
 import { runMcp } from "./mcp.ts";
-import { runServe } from "./serve.ts";
+import { ConfigError, EXIT_CONFIG, runServe } from "./serve.ts";
 
 export interface OnceArgs {
   promptFile: string;
@@ -85,8 +85,7 @@ if (import.meta.main) {
   const argv = process.argv.slice(2);
   try {
     if (argv[0] === "serve") {
-      await runServe();
-      process.exit(0);
+      process.exit(await runServe());
     } else if (argv[0] === "mcp") {
       // Stays alive on stdio until the MCP client closes it.
       await runMcp();
@@ -97,6 +96,7 @@ if (import.meta.main) {
     }
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
-    process.exit(2);
+    // A configuration error is permanent: the launcher stops instead of restarting serve.
+    process.exit(err instanceof ConfigError ? EXIT_CONFIG : 2);
   }
 }

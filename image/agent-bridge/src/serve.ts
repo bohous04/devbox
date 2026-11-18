@@ -1,10 +1,10 @@
 import { mkdirSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { openClaudeSession, type HarnessSession, type UsageBaseline } from "./claudeSession";
+import { openClaudeSession, type HarnessSession } from "./claudeSession";
 import { openCodexSession } from "./codexSession";
 import { CONTINUATION_TEXT, CONTINUATION_WINDOW_MS, mayContinue } from "./continuation";
 import { EventLog } from "./eventLog";
-import type { BackgroundWork, BridgeEvent } from "./events";
+import type { BackgroundWork, BridgeEvent, UsageBaseline } from "./events";
 import { DEFAULT_SOCKET } from "./mcp";
 import { APPENDED_SYSTEM_PROMPT, claudeMcpServers, codexMcpArgs } from "./prompts";
 import type { BridgeCommand } from "./protocol";
@@ -15,7 +15,17 @@ import { DeclaredWaits } from "./waits";
 export const BRIDGE_VERSION = "1.0.0";
 export const DEFAULT_BRIDGE_DIR = "/run/devd/bridge";
 export const CLAUDE_ACCOUNTS_ROOT = "/home/dev/.claude-accounts";
+export const CODEX_ACCOUNTS_ROOT = "/home/dev/.codex-accounts";
 export const RESTART_LOOP_ERROR = "restart loop: no automatic continuation";
+export const NO_THREAD_ERROR = "restart before the conversation started; resend your message";
+
+// Exit statuses of `agent-bridge serve`, read by agent-bridge-launch.
+export const EXIT_STOPPED = 0;
+export const EXIT_HARNESS_ENDED = 1;
+export const EXIT_CONFIG = 3;
+
+/** A configuration problem that a restart cannot fix; serve exits with EXIT_CONFIG. */
+export class ConfigError extends Error {}
 const WORKSPACE = "/workspace";
 const SWEEP_MS = 30_000;
 
@@ -42,18 +52,30 @@ export interface ServeOptions {
 }
 
 export interface Bridge {
-  /** Resolves once the bridge has shut down (after `stop` or `close`). */
-  closed: Promise<void>;
+  /** Resolves with the exit status once the bridge has shut down: EXIT_STOPPED after `stop` or `close`,
+   *  EXIT_HARNESS_ENDED when the harness process went away by itself. */
+  closed: Promise<number>;
   close(): Promise<void>;
 }
 
 type Env = Record<string, string | undefined>;
 
-/** Account id for `thread.native`: the lease's profile dir for Claude, the selected Codex account otherwise. */
+function accountDir(dir: string | undefined, root: string): string | null {
+  return dir && dirname(dir) === root ? basename(dir) : null;
+}
+
+/** Account id for `thread.native`: the lease's profile dir for Claude; for Codex the explicit account,
+ *  else the standalone account home codex_account_prepare selected. */
 export function accountFromEnv(harness: Harness, env: Env): string | null {
-  if (harness === "codex") return env.DEVD_CODEX_ACCOUNT_ID ? env.DEVD_CODEX_ACCOUNT_ID : null;
-  const dir = env.CLAUDE_CONFIG_DIR;
-  return dir && dirname(dir) === CLAUDE_ACCOUNTS_ROOT ? basename(dir) : null;
+  if (harness === "claude") return accountDir(env.CLAUDE_CONFIG_DIR, CLAUDE_ACCOUNTS_ROOT);
+  return env.DEVD_CODEX_ACCOUNT_ID ? env.DEVD_CODEX_ACCOUNT_ID : accountDir(env.CODEX_HOME, CODEX_ACCOUNTS_ROOT);
+}
+
+/** `co`'s per-account config overrides, so app-server reads the same auth and state as the TUI would. */
+export function codexAccountArgs(env: Env): string[] {
+  const args = ["-c", 'cli_auth_credentials_store="file"'];
+  if (env.CODEX_SQLITE_HOME) args.push("-c", `sqlite_home=${JSON.stringify(env.CODEX_SQLITE_HOME)}`);
+  return args;
 }
 
 export interface ServeConfig {
@@ -67,12 +89,12 @@ export interface ServeConfig {
 }
 
 export function serveConfigFromEnv(env: Env): ServeConfig {
-  if (env.DEVD_RUNTIME !== "chat") throw new Error(`agent-bridge serve needs DEVD_RUNTIME=chat (got ${JSON.stringify(env.DEVD_RUNTIME ?? null)})`);
+  if (env.DEVD_RUNTIME !== "chat") throw new ConfigError(`agent-bridge serve needs DEVD_RUNTIME=chat (got ${JSON.stringify(env.DEVD_RUNTIME ?? null)})`);
   const harness = env.DEVD_AGENT;
-  if (harness !== "claude" && harness !== "codex") throw new Error(`DEVD_AGENT must be claude or codex (got ${JSON.stringify(harness ?? null)})`);
+  if (harness !== "claude" && harness !== "codex") throw new ConfigError(`DEVD_AGENT must be claude or codex (got ${JSON.stringify(harness ?? null)})`);
   const homeVar = harness === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
   const configHome = env[homeVar];
-  if (!configHome) throw new Error(`${homeVar} is not set`);
+  if (!configHome) throw new ConfigError(`${homeVar} is not set`);
   return {
     harness,
     configHome,
@@ -83,13 +105,14 @@ export function serveConfigFromEnv(env: Env): ServeConfig {
   };
 }
 
-function harnessOpener(c: ServeConfig, logError: (msg: string) => void): OpenHarness {
+function harnessOpener(c: ServeConfig, env: Env, logError: (msg: string) => void): OpenHarness {
   if (c.harness === "codex") {
+    const mcpConfigArgs = [...codexMcpArgs(), ...codexAccountArgs(env)];
     return (o) =>
-      openCodexSession({ cwd: WORKSPACE, model: c.model, codexHome: c.configHome, resume: o.resume, mcpConfigArgs: codexMcpArgs(), developerInstructions: APPENDED_SYSTEM_PROMPT, emit: o.emit, logError });
+      openCodexSession({ cwd: WORKSPACE, model: c.model, codexHome: c.configHome, resume: o.resume, mcpConfigArgs, developerInstructions: APPENDED_SYSTEM_PROMPT, emit: o.emit, logError });
   }
   const claudeExecutable = Bun.which("claude");
-  if (!claudeExecutable) throw new Error("claude binary not found on PATH");
+  if (!claudeExecutable) throw new ConfigError("claude binary not found on PATH");
   return (o) =>
     openClaudeSession({
       cwd: WORKSPACE,
@@ -122,9 +145,14 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   mkdirSync(o.bridgeDir, { recursive: true });
   const statePath = join(o.bridgeDir, "state.json");
   const log = new EventLog(join(o.bridgeDir, "events.jsonl"));
-  const loaded = loadState(statePath);
+  let loaded: BridgeState | null;
+  try {
+    loaded = loadState(statePath);
+  } catch (e) {
+    throw new ConfigError(`${statePath} is unreadable: ${e instanceof Error ? e.message : String(e)}`);
+  }
   if (loaded && loaded.harness !== o.harness) {
-    throw new Error(`state.json belongs to a ${loaded.harness} thread but DEVD_AGENT is ${o.harness}; refusing to mix threads`);
+    throw new ConfigError(`state.json belongs to a ${loaded.harness} thread but DEVD_AGENT is ${o.harness}; refusing to mix threads`);
   }
   const state: BridgeState = loaded ?? {
     harness: o.harness,
@@ -174,49 +202,60 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     server.publish(e);
   }
 
-  const openHarness = () =>
-    o.openHarness({
-      resume: state.nativeThreadId,
-      usageBaseline: state.usageBaseline,
-      emit: onHarnessEvent,
-      onUsageBaseline: (b) => {
-        state.usageBaseline = b;
-        persist();
-      },
-    });
-
   let closing: Promise<void> | null = null;
-  let markClosed: () => void = () => {};
-  const closed = new Promise<void>((r) => (markClosed = r));
-  const close = () =>
+  let markClosed: (status: number) => void = () => {};
+  const closed = new Promise<number>((r) => (markClosed = r));
+  const shutdown = (status: number) =>
     (closing ??= (async () => {
       clearInterval(sweep);
       try {
-        await harness.close();
+        await harness.session.close();
       } finally {
         await server.close();
-        markClosed();
+        markClosed(status);
       }
     })());
+  const close = () => shutdown(EXIT_STOPPED);
+
+  // `retired` marks a harness serve closes on purpose (restartAgent, shutdown); any other end exits serve so the
+  // launcher starts a fresh bridge that resumes the thread.
+  function openHarness(): { session: HarnessSession; retired: boolean } {
+    const h = {
+      retired: false,
+      session: o.openHarness({
+        resume: state.nativeThreadId,
+        usageBaseline: state.usageBaseline,
+        emit: onHarnessEvent,
+        onUsageBaseline: (b) => {
+          state.usageBaseline = b;
+          persist();
+        },
+      }),
+    };
+    void h.session.ended.then((r) => {
+      if (h.retired || closing) return;
+      logError(`agent-bridge: harness ended${r.error ? `: ${r.error}` : ""}; exiting for a restart`);
+      persist();
+      void shutdown(EXIT_HARNESS_ENDED).catch((e) => logError(`agent-bridge: shutdown failed: ${e instanceof Error ? e.message : String(e)}`));
+    });
+    return h;
+  }
 
   async function startTurn(text: string): Promise<{ runId: string }> {
     const runId = crypto.randomUUID();
-    const queued = state.activeRunId !== null || state.queue.length > 0;
-    if (queued) {
-      state.queue.push({ runId, text, attachments: [] });
-      persist();
-      server.publish({ type: "run.queued", runId, text, attachments: [] });
-    }
+    // Persisted before the harness sees it: a crash from here on still runs the message after the restart.
+    // `run.started` removes it again.
+    state.queue.push({ runId, text, attachments: [] });
+    persist();
     try {
-      await harness.startTurn(runId, text, "user");
+      await harness.session.startTurn(runId, text, "user");
     } catch (e) {
-      if (queued) {
-        state.queue = state.queue.filter((q) => q.runId !== runId);
-        persist();
-        server.publish({ type: "run.failed", runId, error: e instanceof Error ? e.message : String(e) });
-      }
+      state.queue = state.queue.filter((q) => q.runId !== runId);
+      persist();
       throw e;
     }
+    // The harness holds the turn (a run is active, or Codex has no thread yet).
+    if (state.queue.some((q) => q.runId === runId)) server.publish({ type: "run.queued", runId, text, attachments: [] });
     return { runId };
   }
 
@@ -227,16 +266,17 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
         if (cmd.attachments?.length) throw new Error("attachments are not supported yet");
         return startTurn(cmd.text);
       case "interrupt":
-        return harness.interrupt();
+        return harness.session.interrupt();
       case "answer":
-        return harness.answer(cmd.requestId, cmd.answer);
+        return harness.session.answer(cmd.requestId, cmd.answer);
       case "declareWait":
         return waits.declare(cmd.reason, cmd.waitKind, cmd.timeoutMinutes);
       case "endWait":
         return waits.clear();
       case "restartAgent": {
         if (state.activeRunId !== null || state.queue.length > 0) throw new Error("restart refused: a run is active or queued");
-        await harness.close();
+        harness.retired = true;
+        await harness.session.close();
         if (adapterWork.length) {
           adapterWork = [];
           publishBackground();
@@ -255,6 +295,8 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   const server = startServer({ socketPath: o.socketPath, log, onCommand: handle, logError });
   const sweep = setInterval(() => waits.sweep(), SWEEP_MS);
   server.publish({ type: "bridge.started", version: BRIDGE_VERSION, resumed: state.nativeThreadId !== null });
+  // The previous process's background work and declared waits died with it.
+  server.publish({ type: "background.changed", work: [] });
   for (const requestId of unresolved) server.publish({ type: "request.resolved", requestId, answer: null, by: "expired" });
 
   let harness = openHarness();
@@ -264,26 +306,29 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   if (interrupted !== null) {
     state.activeRunId = null;
     persist();
-    server.publish({ type: "run.interrupted", runId: interrupted });
     const t = now();
-    if (mayContinue(state.continuations, t)) {
+    if (state.nativeThreadId === null) {
+      // Nothing to resume: a continuation would land in a fresh conversation without the user's message.
+      server.publish({ type: "run.failed", runId: interrupted, error: NO_THREAD_ERROR });
+    } else if (mayContinue(state.continuations, t)) {
+      server.publish({ type: "run.interrupted", runId: interrupted });
       state.continuations = [...state.continuations.filter((c) => t - c < CONTINUATION_WINDOW_MS), t];
       persist();
-      await harness.startTurn(crypto.randomUUID(), CONTINUATION_TEXT, "continuation");
+      await harness.session.startTurn(crypto.randomUUID(), CONTINUATION_TEXT, "continuation");
     } else {
       server.publish({ type: "run.failed", runId: interrupted, error: RESTART_LOOP_ERROR });
     }
   }
   // Messages queued before the restart were accepted; they start after the continuation, in order.
-  for (const q of queued) await harness.startTurn(q.runId, q.text, "user");
+  for (const q of queued) await harness.session.startTurn(q.runId, q.text, "user");
 
   return { closed, close };
 }
 
-/** Entry for `agent-bridge serve`. Resolves when the bridge stops. */
-export async function runServe(env: Env = process.env): Promise<void> {
+/** Entry for `agent-bridge serve`. Resolves with the exit status when the bridge stops; throws ConfigError. */
+export async function runServe(env: Env = process.env): Promise<number> {
   const config = serveConfigFromEnv(env);
   const logError = (msg: string) => console.error(msg);
-  const bridge = await serve({ ...config, openHarness: harnessOpener(config, logError), logError });
-  await bridge.closed;
+  const bridge = await serve({ ...config, openHarness: harnessOpener(config, env, logError), logError });
+  return bridge.closed;
 }

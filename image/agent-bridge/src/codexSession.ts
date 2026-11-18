@@ -451,10 +451,11 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
   peer.onNotification((method, params) => handle({ method, params } as CodexNotification));
   peer.onRequest((method, params, id) => onServerRequest(id, method, params));
 
-  void proc.exited.then((code) => {
+  const sessionEnded = proc.exited.then((code) => {
     const reason = `codex app-server exited with code ${code}`;
     peer.close(reason);
     endSession(reason);
+    return { error: reason };
   });
 
   void (async () => {
@@ -513,5 +514,6 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
       endSession(SESSION_ENDED);
       proc.kill();
     },
+    ended: sessionEnded,
   };
 }

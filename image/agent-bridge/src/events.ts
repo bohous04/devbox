@@ -5,6 +5,12 @@ export interface TokenUsage {
   cacheRead: number;
 }
 
+/** Claude's running usage totals at the last result; a resumed query continues from them. */
+export interface UsageBaseline {
+  usage: TokenUsage;
+  costUsd: number;
+}
+
 export type RunOrigin = "user" | "agent" | "continuation";
 export type RequestKind = "question" | "plan" | "approval";
 

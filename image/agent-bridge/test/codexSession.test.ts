@@ -437,6 +437,7 @@ describe("openCodexSession", () => {
       { type: "run.failed", runId: "run-2", error: "codex app-server exited with code 137" },
     ]);
     expect(await session.startTurn("run-3", "z", "user").catch((e) => e.message)).toBe("codex app-server exited with code 137");
+    expect(await session.ended).toEqual({ error: "codex app-server exited with code 137" });
   });
 
   test("a request the server resolves itself expires", async () => {

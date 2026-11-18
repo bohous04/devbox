@@ -2,13 +2,15 @@ import { readFile } from "node:fs/promises";
 import { query, type CanUseTool, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { BackgroundTracker, WAKEUP_ID } from "./background.ts";
 import { claudeQueryOptions, mapSdkMessage, resultError, sumModelUsage, type ClaudeSdkOptions, type QueryFn } from "./claude.ts";
-import type { BridgeEvent, RunOrigin, TokenUsage } from "./events.ts";
+import type { BridgeEvent, RunOrigin, TokenUsage, UsageBaseline } from "./events.ts";
 
 export interface HarnessSession {
   startTurn(runId: string, text: string, origin: RunOrigin): Promise<void>; // resolves when the turn is accepted
   interrupt(): Promise<void>;
   answer(requestId: string, answer: string): Promise<void>;
   close(): Promise<void>;
+  /** Settles when the harness process is gone (stream ended or threw, process exited), also after close(). */
+  ended: Promise<{ error?: string }>;
 }
 
 export interface ClaudeSessionOptions {
@@ -27,11 +29,6 @@ export interface ClaudeSessionOptions {
   onUsageBaseline?: (b: UsageBaseline) => void;
   now?: () => number;
   logError?: (msg: string) => void;
-}
-
-export interface UsageBaseline {
-  usage: TokenUsage;
-  costUsd: number;
 }
 
 // The answer to a plan request that approves it; any other text rejects the plan with that text as feedback.
@@ -277,12 +274,15 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
     },
   });
 
-  void (async () => {
+  const sessionEnded = (async (): Promise<{ error?: string }> => {
     try {
       for await (const msg of stream) handle(msg);
       endSession(SESSION_ENDED);
+      return {};
     } catch (e) {
-      endSession(e instanceof Error ? e.message : String(e));
+      const error = e instanceof Error ? e.message : String(e);
+      endSession(error);
+      return { error };
     }
   })();
 
@@ -318,5 +318,6 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
       endSession(SESSION_ENDED);
       stream.close();
     },
+    ended: sessionEnded,
   };
 }
