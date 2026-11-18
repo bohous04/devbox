@@ -28,6 +28,9 @@ export const EXIT_CONFIG = 3;
 export class ConfigError extends Error {}
 const WORKSPACE = "/workspace";
 const SWEEP_MS = 30_000;
+// Adapter work with an `until` (a ScheduleWakeup) is dropped this long after its time: the agent was meant to
+// wake by then. A wakeup that fires during a user run is folded into it and never cleared by the adapter.
+export const OVERDUE_MARGIN_MS = 60_000;
 
 type Harness = BridgeState["harness"];
 
@@ -49,6 +52,8 @@ export interface ServeOptions {
   openHarness: OpenHarness;
   now?: () => number;
   logError?: (msg: string) => void;
+  /** Interval of the expiry sweep; tests shorten it. */
+  sweepMs?: number;
 }
 
 export interface Bridge {
@@ -172,6 +177,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   persist();
 
   let adapterWork: BackgroundWork[] = [];
+  const notOverdue = (work: BackgroundWork[]) => work.filter((w) => w.until === undefined || w.until + OVERDUE_MARGIN_MS > now());
   const publishBackground = () => server.publish({ type: "background.changed", work: [...adapterWork, ...waits.current()] });
   const waits = new DeclaredWaits(now, publishBackground);
 
@@ -179,7 +185,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     switch (e.type) {
       case "background.changed":
         // The adapter reports only its own work; devd sees one list including the declared wait.
-        adapterWork = e.work;
+        adapterWork = notOverdue(e.work);
         publishBackground();
         return;
       case "thread.native":
@@ -309,7 +315,14 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
 
   const { unresolved, announced } = scanLog(log);
   const server = startServer({ socketPath: o.socketPath, log, onCommand: handle, logError });
-  const sweep = setInterval(() => waits.sweep(), SWEEP_MS);
+  const sweep = setInterval(() => {
+    waits.sweep();
+    const live = notOverdue(adapterWork);
+    if (live.length !== adapterWork.length) {
+      adapterWork = live;
+      publishBackground();
+    }
+  }, o.sweepMs ?? SWEEP_MS);
   server.publish({ type: "bridge.started", version: BRIDGE_VERSION, resumed: state.nativeThreadId !== null });
   // The previous process's background work and declared waits died with it.
   server.publish({ type: "background.changed", work: [] });

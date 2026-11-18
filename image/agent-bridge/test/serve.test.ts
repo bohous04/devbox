@@ -259,6 +259,29 @@ describe("serve", () => {
     ]);
   });
 
+  test("a wakeup past its time stops holding", async () => {
+    // The wakeup fired while a user run was active, so the agent never started a turn of its own that clears it.
+    let t = NOW;
+    const f = fakeHarness();
+    const bridge = await serve({ bridgeDir: dir, socketPath, harness: "claude", account: null, model: null, openHarness: (o) => f.open(o), now: () => t, logError: () => {}, sweepMs: 5 });
+    closers.push(() => bridge.close());
+    const wakeup = { id: "wakeup", kind: "wakeup" as const, label: "check CI", holding: true, until: NOW + MIN };
+    const sub = { id: "t1", kind: "subagent" as const, label: "review", holding: true };
+    f.emit({ type: "background.changed", work: [wakeup, sub] });
+    t = NOW + MIN + 30_000; // inside the margin: still holding
+    await Bun.sleep(20);
+    expect(events().filter((e) => e.type === "background.changed").at(-1)).toEqual({ type: "background.changed", work: [wakeup, sub] });
+    t = NOW + 2 * MIN + 1;
+    await Bun.sleep(20);
+    const bg = events().filter((e) => e.type === "background.changed");
+    expect(bg.at(-1)).toEqual({ type: "background.changed", work: [sub] });
+    // Published once, not on every sweep.
+    expect(bg.filter((e) => e.work.length === 1)).toHaveLength(1);
+    // The adapter re-reporting its stale wakeup does not bring it back.
+    f.emit({ type: "background.changed", work: [wakeup] });
+    expect(events().filter((e) => e.type === "background.changed").at(-1)).toEqual({ type: "background.changed", work: [] });
+  });
+
   test("state.json of another harness is refused", async () => {
     saveState(join(dir, "state.json"), baseState({ harness: "codex" }));
     const err = await start(fakeHarness()).catch((e) => e);
