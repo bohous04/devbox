@@ -579,7 +579,7 @@ test("agent-event: permission immediately, stop after sweep, with payloads", asy
   expect((await aePost(a, { sessionId: "dev-shop-cms", event: "stop" })).status).toBe(200);
   agentEvents.sweep(); // quietMs 0 → the window elapsed immediately
   expect(notified[1].title).toBe("shop/cms");
-  expect(notified[1].extra?.session).toEqual({ id: "dev-shop-cms", project: "shop", repo: "cms", agent: "claude", name: null });
+  expect(notified[1].extra?.session).toEqual({ id: "dev-shop-cms", project: "shop", repo: "cms", agent: "claude", name: null, runtime: "tmux" });
 });
 
 test("agent-event stop: malformed backgroundTasks (string, negative, infinite) is ignored, neither crashes nor believes busy", async () => {
