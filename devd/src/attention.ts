@@ -1,0 +1,62 @@
+import type { Attention, LinkStatus, RunRow, ThreadSnapshot } from "../../shared/thread";
+import type { AgentLiveSnapshot } from "./agentEvents";
+
+/** A run that ended this recently still counts as working, so a run that is about to continue does not flicker. */
+export const WORKING_GRACE_MS = 2000;
+
+/** devd's link to a running chat session's bridge and since when it has that status. */
+export interface LinkState { status: LinkStatus; since: number }
+
+function required(v: number | null, what: string, run: RunRow): number {
+  if (v === null) throw new Error(`run ${run.runId} (${run.status}) has no ${what}`);
+  return v;
+}
+
+/** `t` must be a full snapshot (no `afterSeq`): runs filtered by seq would hide the last run. Items are not read.
+ *  `link` is null when devd keeps no link to the bridge (the session is not running): then a lost connection
+ *  is expected, not something the user has to look at. */
+export function chatAttention(t: ThreadSnapshot, link: LinkState | null, now: number): Attention {
+  if (t.pending.length > 0) {
+    return { section: "needs_you", reason: "request", since: Math.min(...t.pending.map((p) => p.openedAt)) };
+  }
+  // Before "working": a run the store still calls running may be dead with the bridge.
+  if (link?.status === "disconnected") return { section: "needs_you", reason: "disconnected", since: link.since };
+  const running = t.runs.find((r) => r.status === "running");
+  if (running) return { section: "working", reason: "running", since: required(running.startedAt, "startedAt", running) };
+  const queued = t.runs.find((r) => r.status === "queued");
+  if (queued) return { section: "working", reason: "queued", since: required(queued.queuedAt, "queuedAt", queued) };
+
+  const last = t.runs.at(-1);
+  const holding = t.background.some((w) => w.holding);
+  if (!last) {
+    if (holding) throw new Error("holding background work without any run: is the snapshot partial?");
+    return { section: "idle", reason: null, since: 0 };
+  }
+  const endedAt = required(last.endedAt, "endedAt", last);
+  if (last.status === "failed") return { section: "needs_you", reason: "failed", since: endedAt };
+  if (holding) return { section: "working", reason: "background", since: endedAt };
+  if (now - endedAt < WORKING_GRACE_MS) return { section: "working", reason: "running", since: endedAt };
+  if (last.status === "completed" && t.seenSeq < required(last.endedSeq, "endedSeq", last)) {
+    return { section: "needs_you", reason: "completed", since: endedAt };
+  }
+  return { section: "idle", reason: null, since: endedAt };
+}
+
+/** ccUpkeep must not restart the agent: it is working, or an open request (question, approval) would die with it. */
+export function chatBusy(t: ThreadSnapshot, a: Attention): boolean {
+  return a.section === "working" || t.pending.length > 0;
+}
+
+/** The hub's live state of a tmux session. `done` stays needs_you until the next prompt: tmux has no seen marker. */
+export function tmuxAttention(live: AgentLiveSnapshot | null): Attention {
+  if (!live) return { section: "idle", reason: null, since: 0 };
+  const since = live.statusSince;
+  switch (live.status) {
+    case "waiting": return { section: "needs_you", reason: "request", since };
+    case "failed": return { section: "needs_you", reason: "failed", since };
+    case "done": return { section: "needs_you", reason: "completed", since };
+    case "working":
+    case "stalled": return { section: "working", reason: "running", since };
+    case "unknown": return { section: "idle", reason: null, since };
+  }
+}

@@ -24,8 +24,12 @@ export interface RunRow {
   harness: string | null;
   nativeThreadId: string | null;
   model: string | null;
+  /** When `run.queued` arrived; null for runs the bridge started without queueing (agent, continuation). */
+  queuedAt: number | null;
   startedAt: number | null;
   endedAt: number | null;
+  /** Seq of the terminal event; attention compares it with `seenSeq`. */
+  endedSeq: number | null;
   usage: TokenUsage | null;
   error: string | null;
 }
@@ -53,3 +57,11 @@ export interface ThreadSnapshot {
 
 /** devd's connection to a chat session's agent bridge socket. */
 export type LinkStatus = "connecting" | "connected" | "disconnected";
+
+export type InboxSection = "needs_you" | "working" | "idle";
+/** Where a session belongs in the inbox and why; `since` is when that state began (0 = nothing happened yet). */
+export interface Attention {
+  section: InboxSection;
+  reason: "request" | "failed" | "completed" | "disconnected" | "running" | "background" | "queued" | null;
+  since: number;
+}

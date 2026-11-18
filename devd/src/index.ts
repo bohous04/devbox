@@ -73,6 +73,8 @@ import { predictDisk } from "./aggregate";
 import { DEFAULT_CONTROL_ROOT, DEFAULT_DEVD_URL, DEFAULT_OPENROUTER_URL, SessionManager, storedRuntime, upstreamKey } from "./sessions";
 import { BridgeLinks } from "./bridgeLink";
 import { ThreadStore } from "./threadStore";
+import { ChatHub } from "./chatHub";
+import { chatAttention, chatBusy } from "./attention";
 import { contextLengthCached } from "./openrouterModels";
 import { parseMeminfo, resourceBreakdown } from "./resources";
 import { classifyClaudeState, collectDiskUsage, collectDockerStatsAsync, collectGitStats, collectSessionGitStat, type DockerStat, type Runner } from "./stats";
@@ -388,12 +390,15 @@ const threadStore = (id: string): ThreadStore => {
   threadStores.set(id, store);
   return store;
 };
+const chatHub = new ChatHub({ hub: agentEvents, session: (id) => getSession(db, id) });
+// The hub-facing snapshot needs runs, pending and background only: `limit: 0` skips loading every item per event.
+const chatSnapshot = (id: string) => threadStore(id).snapshot({ limit: 0 });
 const bridgeLinks = new BridgeLinks({
   controlDir: (id) => join(controlRoot, id),
   store: threadStore,
-  // TODO(Task 10/11): attention and the SSE thread stream consume these.
-  onEvent: () => {},
-  onStatus: () => {},
+  // TODO(Task 11): the SSE thread stream consumes these too.
+  onEvent: (id, e) => chatHub.onEvent(id, e, chatSnapshot(id)),
+  onStatus: (id, s) => chatHub.onStatus(id, s),
 });
 const releaseThread = (id: string) => {
   bridgeLinks.drop(id);
@@ -735,8 +740,10 @@ const ccUpkeepDeps = (): UpkeepDeps => ({
   exec: dockerExec,
   host: (cmd, timeoutMs) => spawnWithTimeout(cmd, timeoutMs),
   turnInProgress: (id) => agentEvents.turnInProgress(id),
-  // TODO(Task 10): attention decides "working". Until then chat sessions count as busy (skipped).
-  isChatWorking: () => true,
+  isChatWorking: (id) => {
+    const t = chatSnapshot(id);
+    return chatBusy(t, chatAttention(t, chatHub.link(id), Date.now()));
+  },
   restartChatAgent: (id) => bridgeLinks.send(id, { kind: "restartAgent" }),
   notify,
   sleep: realSleep,

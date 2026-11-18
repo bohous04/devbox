@@ -23,7 +23,7 @@ export class ThreadStore {
     db.run(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)`);
     db.run(`CREATE TABLE IF NOT EXISTS runs (
       run_id TEXT PRIMARY KEY, origin TEXT NOT NULL, status TEXT NOT NULL, harness TEXT,
-      native_thread_id TEXT, model TEXT, started_at INTEGER, ended_at INTEGER, usage TEXT, error TEXT,
+      native_thread_id TEXT, model TEXT, queued_at INTEGER, started_at INTEGER, ended_at INTEGER, ended_seq INTEGER, usage TEXT, error TEXT,
       updated_seq INTEGER NOT NULL)`);
     db.run(`CREATE TABLE IF NOT EXISTS items (
       id INTEGER PRIMARY KEY AUTOINCREMENT, seq INTEGER NOT NULL, run_id TEXT, item_id TEXT, kind TEXT NOT NULL, text TEXT NOT NULL,
@@ -76,12 +76,12 @@ export class ThreadStore {
           account=excluded.account, model=excluded.model`).run(ev.harness, ev.nativeThreadId, ev.account, ev.model);
         return;
       case "run.queued":
-        this.insertRun(seq, ev.runId, "user", "queued", null, null, null);
+        this.insertRun(seq, ev.runId, "user", "queued", null, null, ts, null);
         this.insertItem(seq, ts, { runId: ev.runId, itemId: `user:${ev.runId}`, kind: "user", text: ev.text, status: "done" });
         return;
       case "run.started": {
         const row = db.query("SELECT status FROM runs WHERE run_id=?").get(ev.runId) as { status: string } | null;
-        if (!row) this.insertRun(seq, ev.runId, ev.origin, "running", ev.nativeThreadId, ev.model, ts);
+        if (!row) this.insertRun(seq, ev.runId, ev.origin, "running", ev.nativeThreadId, ev.model, null, ts);
         else if (row.status === "queued") {
           db.query(`UPDATE runs SET origin=?, status='running', native_thread_id=?, model=?, started_at=?, updated_seq=? WHERE run_id=?`)
             .run(ev.origin, ev.nativeThreadId, ev.model, ts, seq, ev.runId);
@@ -161,11 +161,11 @@ export class ThreadStore {
     }
   }
 
-  private insertRun(seq: number, runId: string, origin: string, status: string, nativeThreadId: string | null, model: string | null, startedAt: number | null) {
+  private insertRun(seq: number, runId: string, origin: string, status: string, nativeThreadId: string | null, model: string | null, queuedAt: number | null, startedAt: number | null) {
     const n = this.db.query("SELECT harness FROM native WHERE id=1").get() as { harness: string } | null;
     // harness stays null until the bridge has announced its native thread.
-    this.db.query(`INSERT OR IGNORE INTO runs (run_id, origin, status, harness, native_thread_id, model, started_at, updated_seq)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(runId, origin, status, n?.harness ?? null, nativeThreadId, model, startedAt, seq);
+    this.db.query(`INSERT OR IGNORE INTO runs (run_id, origin, status, harness, native_thread_id, model, queued_at, started_at, updated_seq)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(runId, origin, status, n?.harness ?? null, nativeThreadId, model, queuedAt, startedAt, seq);
   }
 
   private terminal(seq: number, ts: number, runId: string, status: RunRow["status"],
@@ -177,9 +177,9 @@ export class ThreadStore {
     }
     // The later terminal event wins, also over an earlier terminal status.
     // Only run.completed reports usage; a later interrupted/failed keeps it.
-    this.db.query(`UPDATE runs SET status=?, ended_at=?, error=?,
+    this.db.query(`UPDATE runs SET status=?, ended_at=?, ended_seq=?, error=?,
       native_thread_id=COALESCE(?, native_thread_id), usage=CASE WHEN ? THEN ? ELSE usage END, updated_seq=? WHERE run_id=?`)
-      .run(status, ts, f.error, f.nativeThreadId ?? null, setUsage ? 1 : 0, f.usage ? JSON.stringify(f.usage) : null, seq, runId);
+      .run(status, ts, seq, f.error, f.nativeThreadId ?? null, setUsage ? 1 : 0, f.usage ? JSON.stringify(f.usage) : null, seq, runId);
     this.db.query(`UPDATE items SET status='done', updated_seq=? WHERE run_id=? AND status='streaming'`).run(seq, runId);
   }
 
@@ -213,7 +213,7 @@ export class ThreadStore {
     const runs = (this.db.query(`SELECT * FROM runs WHERE updated_seq > ? ORDER BY rowid`).all(after) as Record<string, any>[])
       .map((r): RunRow => ({
         runId: r.run_id, origin: r.origin, status: r.status, harness: r.harness, nativeThreadId: r.native_thread_id,
-        model: r.model, startedAt: r.started_at, endedAt: r.ended_at, usage: r.usage === null ? null : JSON.parse(r.usage), error: r.error,
+        model: r.model, queuedAt: r.queued_at, startedAt: r.started_at, endedAt: r.ended_at, endedSeq: r.ended_seq, usage: r.usage === null ? null : JSON.parse(r.usage), error: r.error,
       }));
     const pending = (this.db.query(`SELECT * FROM requests WHERE status='open' ORDER BY opened_at, rowid`).all() as Record<string, any>[])
       .map((r): PendingRequest => {

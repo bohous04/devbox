@@ -194,3 +194,17 @@ test("run.started for an unknown run creates it; resumed bridge.started adds a n
   expect(items[0]).toMatchObject({ kind: "notice", text: "Agent bridge restarted (v2)" });
   expect(items[1]).toMatchObject({ kind: "tool", tool: "(unknown)", output: "out" });
 });
+
+test("runs carry when they were queued and the seq that ended them", () => {
+  const s = store(); n = 0;
+  s.apply(ev({ type: "run.queued", runId: "r1", text: "hi", attachments: [] }));
+  s.apply(ev({ type: "run.started", runId: "r1", origin: "user", nativeThreadId: null, model: null }));
+  s.apply(ev({ type: "run.started", runId: "r2", origin: "agent", nativeThreadId: null, model: null }));
+  expect(s.snapshot().runs.map((r) => [r.queuedAt, r.endedSeq])).toEqual([[1001, null], [null, null]]);
+  s.apply(ev({ type: "run.completed", runId: "r1", nativeThreadId: "n", usage: null, costUsd: null }));
+  s.apply(ev({ type: "run.failed", runId: "r2", error: "boom" }));
+  expect(s.snapshot().runs.map((r) => r.endedSeq)).toEqual([4, 5]);
+  // limit 0 (the hub's snapshot) skips items but keeps every run.
+  const lean = s.snapshot({ limit: 0 });
+  expect([lean.items.length, lean.runs.length]).toEqual([0, 2]);
+});
