@@ -1,6 +1,6 @@
 import type { BackgroundWork, RequestKind, RunOrigin, TokenUsage } from "../image/agent-bridge/src/events";
 
-export type { BackgroundWork, BridgeEvent, LoggedEvent, RequestKind, RunOrigin, TokenUsage } from "../image/agent-bridge/src/events";
+export type { BackgroundWork, BridgeEvent, Capabilities, LoggedEvent, RequestKind, RunOrigin, TokenUsage } from "../image/agent-bridge/src/events";
 
 export interface ThreadItem {
   seq: number;

@@ -1,9 +1,21 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { BackgroundWork, LoggedEvent, PendingRequest, RunRow, ThreadItem, ThreadSnapshot } from "../../shared/thread";
+import type { BackgroundWork, Capabilities, LoggedEvent, PendingRequest, RunRow, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
 const TERMINAL: ReadonlySet<string> = new Set(["completed", "interrupted", "failed"]);
+
+/** A native thread this session has used, kept so a later switch back to its harness can resume it. */
+export interface ProviderThread {
+  harness: string;
+  account: string | null;
+  nativeThreadId: string;
+  /** The last run this thread has seen; null until a run started in it. */
+  coveredThroughRun: string | null;
+  lastUsedAt: number;
+  /** null until the bridge reports capabilities with `thread.native`. */
+  caps: Capabilities | null;
+}
 
 /** Per-session conversation store: `<root>/_threads/<id>.sqlite`. Conversation data stays out of the
  *  main devd DB on purpose. Items are ordered by their own `id`; `seq` is the log seq of the event that created them (one event can create
@@ -40,6 +52,9 @@ export class ThreadStore {
     db.run(`CREATE TABLE IF NOT EXISTS native (
       id INTEGER PRIMARY KEY CHECK (id = 1), harness TEXT NOT NULL, native_thread_id TEXT NOT NULL,
       account TEXT, model TEXT)`);
+    db.run(`CREATE TABLE IF NOT EXISTS provider_threads (
+      harness TEXT NOT NULL, account TEXT, native_thread_id TEXT NOT NULL, covered_through_run TEXT,
+      last_used_at INTEGER NOT NULL, caps TEXT, PRIMARY KEY (harness, native_thread_id))`);
     return new ThreadStore(db);
   }
 
@@ -76,6 +91,10 @@ export class ThreadStore {
         db.query(`INSERT INTO native (id, harness, native_thread_id, account, model) VALUES (1, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET harness=excluded.harness, native_thread_id=excluded.native_thread_id,
           account=excluded.account, model=excluded.model`).run(ev.harness, ev.nativeThreadId, ev.account, ev.model);
+        // caps describe the adapter that announced the thread now: an announcement without them clears old ones.
+        db.query(`INSERT INTO provider_threads (harness, account, native_thread_id, last_used_at, caps) VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(harness, native_thread_id) DO UPDATE SET account=excluded.account, last_used_at=excluded.last_used_at,
+          caps=excluded.caps`).run(ev.harness, ev.account, ev.nativeThreadId, ts, ev.caps ? JSON.stringify(ev.caps) : null);
         return;
       case "run.queued":
         this.insertRun(seq, ev.runId, "user", "queued", null, null, ts, null);
@@ -87,8 +106,8 @@ export class ThreadStore {
         else if (row.status === "queued") {
           db.query(`UPDATE runs SET origin=?, status='running', native_thread_id=?, model=?, started_at=?, updated_seq=? WHERE run_id=?`)
             .run(ev.origin, ev.nativeThreadId, ev.model, ts, seq, ev.runId);
-        }
-        // A start for a run that already ended or runs is a replay artefact: do not regress it.
+        } else return; // A start for a run that already ended or runs is a replay artefact: do not regress it.
+        this.touchProviderThread(ev.runId, ts);
         return;
       }
       case "message.delta": {
@@ -186,6 +205,14 @@ export class ThreadStore {
       native_thread_id=COALESCE(?, native_thread_id), usage=CASE WHEN ? THEN ? ELSE usage END, updated_seq=? WHERE run_id=?`)
       .run(status, ts, seq, f.error, f.nativeThreadId ?? null, setUsage ? 1 : 0, f.usage ? JSON.stringify(f.usage) : null, seq, runId);
     this.db.query(`UPDATE items SET status='done', updated_seq=? WHERE run_id=? AND status='streaming'`).run(seq, runId);
+    this.touchProviderThread(runId, ts);
+  }
+
+  /** The current native thread has seen `runId`. Before the first `thread.native` there is no thread to mark;
+   *  Claude announces its thread during the first run, so that run's terminal event marks it. */
+  private touchProviderThread(runId: string, ts: number) {
+    this.db.query(`UPDATE provider_threads SET covered_through_run=?, last_used_at=?
+      WHERE (harness, native_thread_id) = (SELECT harness, native_thread_id FROM native WHERE id=1)`).run(runId, ts);
   }
 
   private findItem(runId: string, itemId: string): { id: number } | null {
@@ -240,6 +267,17 @@ export class ThreadStore {
       lastSeq: this.lastSeq(), seenSeq: this.meta("seen_seq"), runs, items, pending,
       background: bg ? (JSON.parse(bg.work) as BackgroundWork[]) : [],
       native: n ? { harness: n.harness, nativeThreadId: n.native_thread_id, account: n.account, model: n.model } : null,
+    };
+  }
+
+  /** The most recently used native thread of `harness`, or null when this session never used that harness. */
+  providerThread(harness: string): ProviderThread | null {
+    const r = this.db.query(`SELECT * FROM provider_threads WHERE harness=? ORDER BY last_used_at DESC, rowid DESC LIMIT 1`)
+      .get(harness) as Record<string, any> | null;
+    if (!r) return null;
+    return {
+      harness: r.harness, account: r.account, nativeThreadId: r.native_thread_id, coveredThroughRun: r.covered_through_run,
+      lastUsedAt: r.last_used_at, caps: r.caps === null ? null : (JSON.parse(r.caps) as Capabilities),
     };
   }
 

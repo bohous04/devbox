@@ -11,6 +11,16 @@ export interface UsageBaseline {
   costUsd: number;
 }
 
+/** What a harness adapter can do; reported with `thread.native` and stored by devd with the native thread. */
+export interface Capabilities {
+  resume: boolean;
+  injectItems: boolean;
+  liveModelSwitch: boolean;
+  questions: boolean;
+  images: boolean;
+  backgroundVisibility: boolean;
+}
+
 export type RunOrigin = "user" | "agent" | "continuation";
 export type RequestKind = "question" | "plan" | "approval";
 
@@ -23,7 +33,7 @@ export interface BackgroundWork {
 }
 
 export type BridgeEvent =
-  | { type: "thread.native"; harness: "claude" | "codex"; nativeThreadId: string; account: string | null; model: string | null }
+  | { type: "thread.native"; harness: "claude" | "codex"; nativeThreadId: string; account: string | null; model: string | null; caps?: Capabilities }
   | { type: "run.queued"; runId: string; text: string; attachments: string[] }
   | { type: "run.started"; runId: string; origin: RunOrigin; nativeThreadId: string | null; model: string | null }
   | { type: "message.delta"; runId: string; itemId: string; text: string }
