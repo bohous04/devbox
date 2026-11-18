@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { serve, type Bridge, type HarnessOpenOptions } from "../../image/agent-bridge/src/serve";
-import type { HarnessSession } from "../../image/agent-bridge/src/claudeSession";
+import { CLAUDE_CAPABILITIES, type HarnessSession } from "../../image/agent-bridge/src/claudeSession";
 import type { BridgeEvent } from "../../image/agent-bridge/src/events";
 import { applyThreadEvent, emptyThread } from "../../dashboard/src/threadView";
 import type { ThreadSnapshot } from "../../shared/thread";
@@ -44,7 +44,11 @@ function scriptedHarness() {
         async answer(requestId, answer) {
           o.emit({ type: "request.resolved", requestId, answer, by: "user" });
         },
+        async setModel() {},
+        async injectItems() {},
+        capabilities: () => CLAUDE_CAPABILITIES,
         async close() { end({}); },
+        ready: Promise.resolve(),
         ended,
       };
     },
@@ -59,7 +63,7 @@ test("a normal exchange: devd's store and the dashboard's copy agree, user messa
   const h = scriptedHarness();
   const bridge: Bridge = await serve({
     bridgeDir: join(root, "bridge"), socketPath: join(ctl, "agent.sock"), harness: "claude", account: null, model: null,
-    openHarness: (o) => h.open(o), logError: () => {},
+    openHarness: (o) => h.open(o), resolveTarget: (t) => t, logError: () => {},
   });
   const store = ThreadStore.open(root, ID);
   let client: ThreadSnapshot = emptyThread();

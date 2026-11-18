@@ -1,6 +1,6 @@
 import { capText, HOST_SESSION_VARS, toolResultText } from "./claude.ts";
-import type { HarnessSession } from "./claudeSession.ts";
-import type { BridgeEvent, RunOrigin, TokenUsage } from "./events.ts";
+import { ResumeFailedError, type HarnessSession } from "./claudeSession.ts";
+import type { BridgeEvent, Capabilities, RunOrigin, TokenUsage } from "./events.ts";
 import { JsonRpcPeer } from "./jsonRpc.ts";
 import type { InitializeParams } from "./codex-protocol/InitializeParams";
 import type { RequestId } from "./codex-protocol/RequestId";
@@ -15,6 +15,7 @@ import type { ItemStartedNotification } from "./codex-protocol/v2/ItemStartedNot
 import type { PermissionsRequestApprovalParams } from "./codex-protocol/v2/PermissionsRequestApprovalParams";
 import type { PermissionsRequestApprovalResponse } from "./codex-protocol/v2/PermissionsRequestApprovalResponse";
 import type { ServerRequestResolvedNotification } from "./codex-protocol/v2/ServerRequestResolvedNotification";
+import type { ThreadInjectItemsParams } from "./codex-protocol/v2/ThreadInjectItemsParams";
 import type { ThreadItem } from "./codex-protocol/v2/ThreadItem";
 import type { ThreadResumeParams } from "./codex-protocol/v2/ThreadResumeParams";
 import type { ThreadResumeResponse } from "./codex-protocol/v2/ThreadResumeResponse";
@@ -43,6 +44,8 @@ export interface CodexSessionOptions {
   cwd: string;
   model: string | null;
   codexHome: string;
+  /** Environment app-server starts from; the bridge's own when omitted. */
+  baseEnv?: Record<string, string | undefined>;
   resume: string | null;
   mcpConfigArgs: string[];
   developerInstructions: string;
@@ -66,6 +69,10 @@ export const APPROVAL_ACCEPT = "Accept";
 const APPROVAL_OPTIONS = [{ label: APPROVAL_ACCEPT }, { label: "Decline" }];
 
 const SESSION_ENDED = "Codex session ended";
+
+// injectItems: the generated protocol has `thread/inject_items`. liveModelSwitch: the model is a turn/start
+// parameter, so a switch applies from the next turn. No background work is reported.
+export const CODEX_CAPABILITIES: Capabilities = { resume: true, injectItems: true, liveModelSwitch: true, questions: true, images: true, backgroundVisibility: false };
 
 // Full access, matching today's tmux Codex sessions (global constraints).
 const ACCESS = { approvalPolicy: "never", sandbox: "danger-full-access" } as const;
@@ -189,7 +196,7 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
   const emit = o.emit;
   const logError = o.logError ?? ((msg: string) => console.error(msg));
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !HOST_SESSION_VARS.includes(k)) env[k] = v;
+  for (const [k, v] of Object.entries(o.baseEnv ?? process.env)) if (v !== undefined && !HOST_SESSION_VARS.includes(k)) env[k] = v;
   env.CODEX_HOME = o.codexHome;
 
   const proc = spawn(["codex", "app-server", ...o.mcpConfigArgs], env);
@@ -222,6 +229,15 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
   const waiting: Turn[] = [];
   const requests = new Map<string, OpenRequest>();
   let threadId: string | null = null;
+  let model = o.model;
+  let markReady: () => void = () => {};
+  let failReady: (e: Error) => void = () => {};
+  const ready = new Promise<void>((resolve, reject) => {
+    markReady = resolve;
+    failReady = reject;
+  });
+  // Callers that never await `ready` must not see an unhandled rejection.
+  ready.catch(() => {});
   let active: ActiveRun | null = null;
   // Turns that sent turn/completed; their stragglers must not reach a later run.
   const completedTurns = new Set<string>();
@@ -244,11 +260,11 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
   function writeTurn(t: Turn): void {
     const run = newRun(t.runId, null);
     active = run;
-    emit({ type: "run.started", runId: t.runId, origin: t.origin, nativeThreadId: threadId, model: o.model });
+    emit({ type: "run.started", runId: t.runId, origin: t.origin, nativeThreadId: threadId, model });
     const params: TurnStartParams = {
       threadId: threadId!,
       input: [{ type: "text", text: t.text, text_elements: [] }],
-      ...(o.model !== null ? { model: o.model } : {}),
+      ...(model !== null ? { model } : {}),
     };
     peer.request<TurnStartResponse>("turn/start", params).then(
       (r) => bindTurn(run, r.turn.id),
@@ -311,7 +327,7 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
         if (active === null) {
           // Codex started a turn by itself.
           active = newRun(crypto.randomUUID(), n.params.turn.id);
-          emit({ type: "run.started", runId: active.runId, origin: "agent", nativeThreadId: threadId, model: o.model });
+          emit({ type: "run.started", runId: active.runId, origin: "agent", nativeThreadId: threadId, model });
         } else if (active.turnId === null) bindTurn(active, n.params.turn.id);
         else if (active.turnId !== n.params.turn.id) logError(`codex turn/started for turn ${n.params.turn.id} while turn ${active.turnId} is active`);
         return;
@@ -464,17 +480,25 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
       await peer.request("initialize", init);
       peer.notify("initialized", undefined);
       const policy = { cwd: o.cwd, ...ACCESS, developerInstructions: o.developerInstructions };
-      const r =
-        o.resume !== null
-          ? await peer.request<ThreadResumeResponse>("thread/resume", { threadId: o.resume, ...policy } satisfies ThreadResumeParams)
-          : await peer.request<ThreadStartResponse>("thread/start", policy satisfies ThreadStartParams);
-      if (endReason !== null) return;
+      let r: ThreadStartResponse | ThreadResumeResponse;
+      if (o.resume !== null) {
+        try {
+          r = await peer.request<ThreadResumeResponse>("thread/resume", { threadId: o.resume, ...policy } satisfies ThreadResumeParams);
+        } catch (e) {
+          throw new ResumeFailedError(`thread/resume ${o.resume} failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      } else {
+        r = await peer.request<ThreadStartResponse>("thread/start", policy satisfies ThreadStartParams);
+      }
+      if (endReason !== null) throw new Error(endReason);
       threadId = r.thread.id;
-      emit({ type: "thread.native", harness: "codex", nativeThreadId: threadId, account: null, model: r.model });
+      emit({ type: "thread.native", harness: "codex", nativeThreadId: threadId, account: null, model: r.model, caps: CODEX_CAPABILITIES });
+      markReady();
       startNext();
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       logError(`codex session start failed: ${reason}`);
+      failReady(e instanceof Error ? e : new Error(reason));
       endSession(reason);
       proc.kill();
     }
@@ -510,10 +534,21 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
       emit({ type: "request.resolved", requestId, answer, by: "user" });
       r.resolve(answer);
     },
+    async setModel(next) {
+      if (endReason !== null) throw new Error(endReason);
+      model = next;
+    },
+    async injectItems(items) {
+      await ready;
+      const params: ThreadInjectItemsParams = { threadId: threadId!, items: items as ThreadInjectItemsParams["items"] };
+      await peer.request("thread/inject_items", params);
+    },
+    capabilities: () => CODEX_CAPABILITIES,
     async close() {
       endSession(SESSION_ENDED);
       proc.kill();
     },
+    ready,
     ended: sessionEnded,
   };
 }

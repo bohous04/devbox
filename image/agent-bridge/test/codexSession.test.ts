@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { openCodexSession, spawnCodex, type CodexSpawn } from "../src/codexSession.ts";
+import { ResumeFailedError } from "../src/claudeSession.ts";
+import { CODEX_CAPABILITIES, openCodexSession, spawnCodex, type CodexSpawn } from "../src/codexSession.ts";
 import type { BridgeEvent } from "../src/events.ts";
 import {
   commandApprovalRequest,
@@ -74,7 +75,12 @@ function fakeCodex() {
               const msg = JSON.parse(line) as Sent;
               sent.push(msg);
               const respond = msg.method !== undefined && msg.id !== undefined ? fake.responders[msg.method] : undefined;
-              if (respond) fake.push({ id: msg.id, result: respond(msg.params) });
+              if (!respond) continue;
+              try {
+                fake.push({ id: msg.id, result: respond(msg.params) });
+              } catch (e) {
+                fake.push({ id: msg.id, error: { code: -32600, message: (e as Error).message } });
+              }
             }
           },
         },
@@ -145,7 +151,7 @@ describe("openCodexSession", () => {
     fake.push(...simpleTurn("turn-1"));
     await until(() => events.some((e) => e.type === "run.completed"));
     expect(events).toEqual([
-      { type: "thread.native", harness: "codex", nativeThreadId: THREAD_ID, account: null, model: "gpt-5.5-codex" },
+      { type: "thread.native", harness: "codex", nativeThreadId: THREAD_ID, account: null, model: "gpt-5.5-codex", caps: CODEX_CAPABILITIES },
       { type: "run.started", runId: "run-1", origin: "user", nativeThreadId: THREAD_ID, model: "gpt-5.5-codex" },
       { type: "message.delta", runId: "run-1", itemId: "msg_1", text: "Lis" },
       { type: "message.delta", runId: "run-1", itemId: "msg_1", text: "ting" },
@@ -181,7 +187,7 @@ describe("openCodexSession", () => {
       developerInstructions: "call devbox_wait",
     });
     expect(fake.requests("turn/start")[0]!.params.threadId).toBe(resumed);
-    expect(events[0]).toEqual({ type: "thread.native", harness: "codex", nativeThreadId: resumed, account: null, model: "gpt-5.5-codex" });
+    expect(events[0]).toEqual({ type: "thread.native", harness: "codex", nativeThreadId: resumed, account: null, model: "gpt-5.5-codex", caps: CODEX_CAPABILITIES });
     expect(events[1]).toMatchObject({ type: "run.started", runId: "run-1", origin: "continuation", nativeThreadId: resumed });
   });
 
@@ -481,5 +487,57 @@ describe("spawnCodex", () => {
     for await (const l of proc.lines) lines.push(l);
     expect(lines).toEqual(["a", "bc", "d"]);
     expect(await proc.exited).toBe(3);
+  });
+});
+
+describe("Codex switching", () => {
+  test("setModel on Codex applies to the next turn/start", async () => {
+    const fake = fakeCodex();
+    const { session, events } = open(fake);
+    await session.ready;
+    await session.setModel("gpt-5.5-mini");
+    // Nothing is sent to the app-server: the model is a turn/start parameter.
+    expect(fake.sent.map((m) => m.method)).toEqual(["initialize", "initialized", "thread/start"]);
+    await session.startTurn("run-1", "hi", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    expect(fake.requests("turn/start")[0]!.params.model).toBe("gpt-5.5-mini");
+    expect(events.find((e) => e.type === "run.started")).toMatchObject({ runId: "run-1", model: "gpt-5.5-mini" });
+  });
+
+  test("capabilities: item injection from the protocol, live model switch per turn, no background visibility", () => {
+    const { session } = open(fakeCodex());
+    expect(session.capabilities()).toEqual({ resume: true, injectItems: true, liveModelSwitch: true, questions: true, images: true, backgroundVisibility: false });
+  });
+
+  test("injectItems sends thread/inject_items for the open thread", async () => {
+    const fake = fakeCodex();
+    fake.responders["thread/inject_items"] = () => ({});
+    const { session } = open(fake);
+    const items = [{ type: "message", role: "user", content: [{ type: "input_text", text: "earlier" }] }];
+    await session.injectItems(items);
+    expect(fake.requests("thread/inject_items")[0]!.params).toEqual({ threadId: THREAD_ID, items });
+  });
+
+  test("resume failure: a failed thread/resume rejects ready with ResumeFailedError and starts no turn", async () => {
+    const fake = fakeCodex();
+    fake.responders["thread/resume"] = () => {
+      throw new Error("thread not found");
+    };
+    const { session, events } = open(fake, { resume: "gone" });
+    await expect(session.ready).rejects.toBeInstanceOf(ResumeFailedError);
+    await session.ended;
+    expect(fake.requests("turn/start")).toEqual([]);
+    expect(events.filter((e) => e.type === "thread.native")).toEqual([]);
+  });
+
+  test("a failed thread/start is not a resume failure", async () => {
+    const fake = fakeCodex();
+    fake.responders["thread/start"] = () => {
+      throw new Error("not signed in");
+    };
+    const { session } = open(fake);
+    const err = await session.ready.then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(ResumeFailedError);
   });
 });

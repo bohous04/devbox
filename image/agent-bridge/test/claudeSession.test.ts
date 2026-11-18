@@ -4,7 +4,8 @@ import type { QueryFn } from "../src/claude.ts";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openClaudeSession, PLAN_UNAVAILABLE, type ClaudeSessionOptions } from "../src/claudeSession.ts";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { CLAUDE_CAPABILITIES, openClaudeSession, PLAN_UNAVAILABLE, ResumeFailedError, type ClaudeSessionOptions } from "../src/claudeSession.ts";
 import type { BridgeEvent, UsageBaseline } from "../src/events.ts";
 
 // Scripted SDK: the test pushes output messages and reads what the session wrote to the input stream.
@@ -17,6 +18,7 @@ function fakeSdk() {
     inputs,
     options: undefined as Record<string, unknown> | undefined,
     interrupts: 0,
+    models: [] as (string | undefined)[],
     onInterrupt: undefined as (() => Promise<void>) | undefined,
     push(...ms: Record<string, unknown>[]) {
       pending.push(...(ms as unknown as SDKMessage[]));
@@ -48,6 +50,9 @@ function fakeSdk() {
           await sdk.onInterrupt?.();
         },
         close: () => sdk.end(),
+        setModel: async (m?: string) => {
+          sdk.models.push(m);
+        },
       });
     }) as unknown as QueryFn,
   };
@@ -81,6 +86,14 @@ function open(sdk: ReturnType<typeof fakeSdk>, now = () => 0, extra: Partial<Cla
     sdk.queryFn,
   );
   return { session, events, logs };
+}
+
+/** A config dir whose project dir for /workspace holds the transcripts of `sessions`. */
+function configDirWith(...sessions: string[]): string {
+  const dir = mkdtempSync(join(tmpdir(), "claude-config-"));
+  mkdirSync(join(dir, "projects", "-workspace"), { recursive: true });
+  for (const s of sessions) writeFileSync(join(dir, "projects", "-workspace", `${s}.jsonl`), "{}\n");
+  return dir;
 }
 
 const init = (sessionId = "sess-1") => ({ type: "system", subtype: "init", session_id: sessionId, model: "claude-sonnet-4-5" });
@@ -148,7 +161,7 @@ describe("openClaudeSession", () => {
     await flush();
     expect(events).toEqual([
       { type: "run.started", runId: "run-1", origin: "user", nativeThreadId: null, model: "claude-sonnet-4-5" },
-      { type: "thread.native", harness: "claude", nativeThreadId: "sess-1", account: null, model: "claude-sonnet-4-5" },
+      { type: "thread.native", harness: "claude", nativeThreadId: "sess-1", account: null, model: "claude-sonnet-4-5", caps: CLAUDE_CAPABILITIES },
       { type: "message.delta", runId: "run-1", itemId: "msg_1", text: "Lis" },
       { type: "message.final", runId: "run-1", itemId: "msg_1", role: "assistant", text: "Listing" },
       { type: "tool.started", runId: "run-1", itemId: "toolu_1", tool: "Bash", input: { command: "ls" } },
@@ -182,7 +195,7 @@ describe("openClaudeSession", () => {
     const sdk = fakeSdk();
     const baselines: UsageBaseline[] = [];
     const baseline: UsageBaseline = { usage: { input: 100, output: 50, cacheCreation: 10, cacheRead: 20 }, costUsd: 0.01 };
-    const { session, events } = open(sdk, () => 0, { resume: "sess-1", usageBaseline: baseline, onUsageBaseline: (b) => baselines.push(b) });
+    const { session, events } = open(sdk, () => 0, { resume: "sess-1", configDir: configDirWith("sess-1"), usageBaseline: baseline, onUsageBaseline: (b) => baselines.push(b) });
     await session.startTurn("run-1", "again", "user");
     sdk.push(init(), assistantText("m1", "a"), result(usage(130, 70, 10, 50), 0.015));
     await flush();
@@ -485,5 +498,56 @@ describe("openClaudeSession", () => {
     await flush();
     expect(events.filter((e) => e.type === "background.changed").at(-1)).toEqual({ type: "background.changed", work: [] });
     expect(events.filter((e) => e.type === "run.started").at(-1)).toMatchObject({ origin: "agent" });
+  });
+});
+
+describe("Claude switching", () => {
+  test("setModel on Claude calls query.setModel", async () => {
+    const sdk = fakeSdk();
+    const { session, events } = open(sdk);
+    await session.setModel("claude-opus-4-5");
+    expect(sdk.models).toEqual(["claude-opus-4-5"]);
+    await session.startTurn("run-1", "hi", "user");
+    expect(events.find((e) => e.type === "run.started")).toMatchObject({ runId: "run-1", model: "claude-opus-4-5" });
+  });
+
+  test("capabilities are all true except injectItems", () => {
+    const { session } = open(fakeSdk());
+    expect(session.capabilities()).toEqual({ resume: true, injectItems: false, liveModelSwitch: true, questions: true, images: true, backgroundVisibility: true });
+  });
+
+  test("a resume announces the resumed thread with its capabilities once it is ready", async () => {
+    const sdk = fakeSdk();
+    const { session, events } = open(sdk, () => 0, { resume: "sess-1", configDir: configDirWith("sess-1") });
+    await session.ready;
+    expect(events).toEqual([{ type: "thread.native", harness: "claude", nativeThreadId: "sess-1", account: null, model: "claude-sonnet-4-5", caps: CLAUDE_CAPABILITIES }]);
+    await session.startTurn("run-1", "again", "user");
+    sdk.push(init("sess-1"));
+    await flush();
+    // The CLI's init for the same session is not a second announcement.
+    expect(events.filter((e) => e.type === "thread.native").length).toBe(1);
+  });
+
+  test("resume failure: a missing transcript rejects ready with ResumeFailedError and never starts the CLI", async () => {
+    const sdk = fakeSdk();
+    const { session, events } = open(sdk, () => 0, { resume: "gone", configDir: configDirWith() });
+    await expect(session.ready).rejects.toBeInstanceOf(ResumeFailedError);
+    expect(await session.ended).toEqual({ error: expect.stringContaining("gone") });
+    expect(sdk.options).toBeUndefined();
+    await expect(session.startTurn("run-1", "hi", "user")).rejects.toThrow();
+    expect(events).toEqual([]);
+  });
+
+  test("the CLI starts from the given base env, not the bridge's", () => {
+    const sdk = fakeSdk();
+    open(sdk, () => 0, { baseEnv: { SWITCHED_ONLY: "1", PATH: "/bin" } });
+    const env = sdk.options!.env as Record<string, string>;
+    expect(env).toMatchObject({ SWITCHED_ONLY: "1", PATH: "/bin", CLAUDE_CONFIG_DIR: "/home/dev/.claude" });
+    expect(Object.keys(env).sort()).toEqual(["CLAUDE_CONFIG_DIR", "PATH", "SWITCHED_ONLY"]);
+  });
+
+  test("injectItems is refused: Claude has no item injection", async () => {
+    const { session } = open(fakeSdk());
+    await expect(session.injectItems([{}])).rejects.toThrow("injectItems");
   });
 });

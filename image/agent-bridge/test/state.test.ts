@@ -19,6 +19,8 @@ const state: BridgeState = {
   queue: [{ runId: "r2", text: "hi", attachments: ["a.png"] }],
   continuations: [1, 2],
   usageBaseline: { usage: { input: 1, output: 2, cacheCreation: 3, cacheRead: 4 }, costUsd: 0.5 },
+  target: { harness: "codex", account: "a1", model: "m", env: { CODEX_HOME: "/h" } },
+  pendingHandoff: { preamble: "earlier" },
 };
 
 test("saveState then loadState round-trips", () => {
@@ -35,4 +37,11 @@ test("corrupt state throws", () => {
   const p = join(dir, "state.json");
   writeFileSync(p, "{not json");
   expect(() => loadState(p)).toThrow();
+});
+
+test("a state file from before switching loads with no target and no pending handoff", () => {
+  const p = join(dir, "state.json");
+  const { target: _t, pendingHandoff: _h, ...old } = state;
+  writeFileSync(p, JSON.stringify(old));
+  expect(loadState(p)).toEqual({ ...old, target: null, pendingHandoff: null });
 });

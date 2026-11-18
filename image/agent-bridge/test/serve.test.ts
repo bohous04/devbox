@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { HarnessSession } from "../src/claudeSession";
+import { CLAUDE_CAPABILITIES, ResumeFailedError, type HarnessSession } from "../src/claudeSession";
+import type { Capabilities } from "../src/events";
 import { CONTINUATION_TEXT } from "../src/continuation";
 import type { BridgeEvent, RunOrigin } from "../src/events";
 import { EventLog } from "../src/eventLog";
@@ -16,9 +17,11 @@ import {
   NO_THREAD_ERROR,
   RESTART_LOOP_ERROR,
   serve,
+  resolveTarget,
   serveConfigFromEnv,
   type HarnessOpenOptions,
 } from "../src/serve";
+import type { SwitchTarget } from "../src/protocol";
 import { loadState, saveState, type BridgeState } from "../src/state";
 
 const MIN = 60_000;
@@ -38,10 +41,13 @@ afterEach(async () => {
 
 // A harness that behaves like the adapters: one active run, later turns wait for it.
 // `deferStart` holds every turn, as Codex does before its thread is ready.
-function fakeHarness(opts: { deferStart?: boolean } = {}) {
+// `readyErrors[i]` makes the i-th open fail to become ready (the session then ends, as the adapters do).
+function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities; readyErrors?: (Error | undefined)[] } = {}) {
   const ends: ((r: { error?: string }) => void)[] = [];
   const f = {
     opens: [] as HarnessOpenOptions[],
+    models: [] as string[],
+    injected: [] as unknown[][],
     turns: [] as { runId: string; text: string; origin: RunOrigin }[],
     closes: 0,
     active: null as string | null,
@@ -69,7 +75,19 @@ function fakeHarness(opts: { deferStart?: boolean } = {}) {
       let end: (r: { error?: string }) => void = () => {};
       const ended = new Promise<{ error?: string }>((r) => (end = r));
       ends.push(end);
+      const readyError = opts.readyErrors?.[f.opens.length - 1];
+      const ready = readyError ? Promise.reject(readyError) : Promise.resolve();
+      ready.catch(() => {});
+      if (readyError) end({ error: readyError.message });
       return {
+        ready,
+        capabilities: () => opts.caps ?? CLAUDE_CAPABILITIES,
+        async setModel(m) {
+          f.models.push(m);
+        },
+        async injectItems(items) {
+          f.injected.push(items);
+        },
         async startTurn(runId, text, origin) {
           f.turns.push({ runId, text, origin });
           if (f.active === null && !opts.deferStart) f.start(runId, origin);
@@ -89,7 +107,27 @@ function fakeHarness(opts: { deferStart?: boolean } = {}) {
 }
 
 function baseState(over: Partial<BridgeState> = {}): BridgeState {
-  return { harness: "claude", nativeThreadId: null, account: null, model: null, activeRunId: null, queue: [], continuations: [], usageBaseline: null, ...over };
+  return { harness: "claude", nativeThreadId: null, account: null, model: null, activeRunId: null, queue: [], continuations: [], usageBaseline: null, target: null, pendingHandoff: null, ...over };
+}
+
+// Account homes for switch targets, under the test dir.
+const codexRoot = () => join(dir, "codex-accounts");
+const homes = () => ({ sharedHome: join(dir, "codex-v2", "shared"), shadowRoot: join(dir, "codex-v2", "shadow") });
+
+/** A Claude profile dir; with `credentials` it is signed in. */
+function claudeProfile(name: string, credentials = '{"claudeAiOauth":{}}'): string {
+  const p = join(dir, "claude-accounts", name);
+  mkdirSync(p, { recursive: true });
+  if (credentials) writeFileSync(join(p, ".credentials.json"), credentials);
+  return p;
+}
+
+/** A signed-in Codex account; the shared config is pre-seeded so preparing a shadow home needs no python. */
+function codexAccount(id: string, auth = '{"tokens":{}}'): void {
+  mkdirSync(join(codexRoot(), id), { recursive: true });
+  writeFileSync(join(codexRoot(), id, "auth.json"), auth);
+  mkdirSync(homes().sharedHome, { recursive: true });
+  writeFileSync(join(homes().sharedHome, "config.toml"), 'model = "x"\n');
 }
 
 async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string | null } = {}) {
@@ -100,6 +138,7 @@ async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string
     account: over.account ?? null,
     model: null,
     openHarness: (o) => f.open(o),
+    resolveTarget: (t) => resolveTarget(t, codexRoot(), homes()),
     now: () => NOW,
     logError: () => {},
   });
@@ -263,7 +302,7 @@ describe("serve", () => {
     // The wakeup fired while a user run was active, so the agent never started a turn of its own that clears it.
     let t = NOW;
     const f = fakeHarness();
-    const bridge = await serve({ bridgeDir: dir, socketPath, harness: "claude", account: null, model: null, openHarness: (o) => f.open(o), now: () => t, logError: () => {}, sweepMs: 5 });
+    const bridge = await serve({ bridgeDir: dir, socketPath, harness: "claude", account: null, model: null, openHarness: (o) => f.open(o), resolveTarget: (x) => x, now: () => t, logError: () => {}, sweepMs: 5 });
     closers.push(() => bridge.close());
     const wakeup = { id: "wakeup", kind: "wakeup" as const, label: "check CI", holding: true, until: NOW + MIN };
     const sub = { id: "t1", kind: "subagent" as const, label: "review", holding: true };
@@ -391,6 +430,158 @@ describe("serve", () => {
   test("a corrupt state.json is a configuration error", async () => {
     writeFileSync(join(dir, "state.json"), "{not json");
     await expect(start(fakeHarness())).rejects.toBeInstanceOf(ConfigError);
+  });
+});
+
+const ACCT = "11111111-2222-3333-4444-555555555555";
+const switchCmd = (target: SwitchTarget, resume: string | null = null, handoff: { preamble: string | null; injectItems?: unknown[] } | null = null) =>
+  cmd({ kind: "switchTarget", target, resume, handoff });
+
+describe("switching", () => {
+  test("setModel is applied by the harness and kept for the next start", async () => {
+    const f = fakeHarness();
+    const bridge = await start(f);
+    await cmd({ kind: "setModel", model: "claude-opus-4-5" });
+    expect(f.models).toEqual(["claude-opus-4-5"]);
+    expect(state()).toMatchObject({ model: "claude-opus-4-5", target: { harness: "claude", model: "claude-opus-4-5", env: {} } });
+    await bridge.close();
+    const g = fakeHarness();
+    await start(g);
+    expect(g.opens[0].target).toMatchObject({ harness: "claude", model: "claude-opus-4-5" });
+  });
+
+  test("setModel and switchTarget during an active run are refused", async () => {
+    const f = fakeHarness();
+    await start(f);
+    await cmd({ kind: "startTurn", text: "one" });
+    await expect(cmd({ kind: "setModel", model: "m2" })).rejects.toThrow("active");
+    await expect(switchCmd({ harness: "claude", account: "b", model: null, env: { CLAUDE_CONFIG_DIR: claudeProfile("b") } })).rejects.toThrow("active");
+    expect(f.models).toEqual([]);
+    expect(f.closes).toBe(0);
+    expect(f.opens.length).toBe(1);
+  });
+
+  test("switchTarget with resume reopens with the stored id", async () => {
+    const f = fakeHarness();
+    await start(f, { account: "a" });
+    f.emit({ type: "thread.native", harness: "claude", nativeThreadId: "thread-a", account: null, model: "m" });
+    const env = { CLAUDE_CONFIG_DIR: claudeProfile("b") };
+    await switchCmd({ harness: "claude", account: "b", model: "claude-opus-4-5", env }, "thread-old");
+    expect(f.closes).toBe(1);
+    expect(f.opens.length).toBe(2);
+    expect(f.opens[1]).toMatchObject({ resume: "thread-old", target: { harness: "claude", account: "b", model: "claude-opus-4-5", env } });
+    expect(state()).toMatchObject({ harness: "claude", account: "b", model: "claude-opus-4-5", nativeThreadId: "thread-old", target: { account: "b" } });
+    // The new harness announces its thread with the switched account.
+    f.emit({ type: "thread.native", harness: "claude", nativeThreadId: "thread-old", account: null, model: "claude-opus-4-5", caps: CLAUDE_CAPABILITIES });
+    expect(events().at(-1)).toEqual({ type: "thread.native", harness: "claude", nativeThreadId: "thread-old", account: "b", model: "claude-opus-4-5", caps: CLAUDE_CAPABILITIES });
+  });
+
+  test("a switch to Codex prepares the account's shadow home for that harness only", async () => {
+    codexAccount(ACCT);
+    const f = fakeHarness();
+    await start(f);
+    await switchCmd({ harness: "codex", account: ACCT, model: "gpt-5.5", env: {} }, null);
+    const shadow = join(homes().shadowRoot, ACCT);
+    expect(f.opens[1]).toMatchObject({ resume: null, target: { harness: "codex", account: ACCT, env: { CODEX_HOME: shadow, CODEX_SQLITE_HOME: join(shadow, "sqlite"), DEVD_CODEX_ACCOUNT_ID: ACCT } } });
+    expect(process.env.CODEX_HOME).not.toBe(shadow);
+    expect(state()).toMatchObject({ harness: "codex", account: ACCT, nativeThreadId: null, usageBaseline: null });
+  });
+
+  test("a bridge restart after a switch reopens the switched target, not the launch one", async () => {
+    codexAccount(ACCT);
+    const f = fakeHarness();
+    const bridge = await start(f);
+    await switchCmd({ harness: "codex", account: ACCT, model: null, env: {} }, null);
+    f.emit({ type: "thread.native", harness: "codex", nativeThreadId: "codex-thread", account: null, model: "gpt" });
+    await bridge.close();
+    const g = fakeHarness();
+    await start(g); // launched as claude
+    expect(g.opens[0]).toMatchObject({ resume: "codex-thread", target: { harness: "codex", account: ACCT } });
+  });
+
+  test("unusable target account is refused without touching the session", async () => {
+    codexAccount(ACCT, "");
+    const f = fakeHarness();
+    await start(f, { account: "a" });
+    f.emit({ type: "thread.native", harness: "claude", nativeThreadId: "thread-a", account: null, model: "m" });
+    const before = state();
+    const unusable: SwitchTarget[] = [
+      { harness: "claude", account: "b", model: null, env: { CLAUDE_CONFIG_DIR: claudeProfile("b", "") } },
+      { harness: "claude", account: "c", model: null, env: { CLAUDE_CONFIG_DIR: join(dir, "claude-accounts", "missing") } },
+      { harness: "claude", account: "d", model: null, env: {} },
+      { harness: "codex", account: ACCT, model: null, env: {} },
+      { harness: "codex", account: null, model: null, env: {} },
+    ];
+    for (const t of unusable) await expect(switchCmd(t, null)).rejects.toThrow();
+    expect(f.closes).toBe(0);
+    expect(f.opens.length).toBe(1);
+    expect(state()).toEqual(before);
+    await cmd({ kind: "startTurn", text: "still on a" });
+    expect(f.turns.map((t) => t.text)).toEqual(["still on a"]);
+  });
+
+  test("handoff preamble is prepended to the next user message only", async () => {
+    const f = fakeHarness();
+    await start(f);
+    await switchCmd({ harness: "claude", account: "b", model: null, env: { CLAUDE_CONFIG_DIR: claudeProfile("b") } }, null, { preamble: "[user] earlier" });
+    expect(state().pendingHandoff).toEqual({ preamble: "[user] earlier" });
+    const first = (await cmd({ kind: "startTurn", text: "hi" })) as { runId: string };
+    f.complete();
+    await cmd({ kind: "startTurn", text: "again" });
+    expect(f.turns.map((t) => t.text)).toEqual(["[user] earlier\n\nUser message:\nhi", "again"]);
+    // The thread shows what the user wrote, not the handoff.
+    expect(events()).toContainEqual({ type: "message.final", runId: first.runId, itemId: `user:${first.runId}`, role: "user", text: "hi" });
+    expect(state().pendingHandoff).toBeNull();
+  });
+
+  test("a queued handed-over message survives a restart with its preamble", async () => {
+    const f = fakeHarness({ deferStart: true });
+    const bridge = await start(f);
+    await switchCmd({ harness: "claude", account: "b", model: null, env: { CLAUDE_CONFIG_DIR: claudeProfile("b") } }, null, { preamble: "P" });
+    await cmd({ kind: "startTurn", text: "hi" });
+    expect(state().queue).toEqual([{ runId: expect.any(String), text: "hi", attachments: [], harnessText: "P\n\nUser message:\nhi" }]);
+    await bridge.close();
+    const g = fakeHarness();
+    await start(g);
+    expect(g.turns.map((t) => t.text)).toEqual(["P\n\nUser message:\nhi"]);
+  });
+
+  test("Codex handoff items are injected, not inlined", async () => {
+    codexAccount(ACCT);
+    const items = [{ type: "message", role: "user", content: [] }];
+    const f = fakeHarness({ caps: { ...CLAUDE_CAPABILITIES, injectItems: true } });
+    await start(f);
+    await switchCmd({ harness: "codex", account: ACCT, model: null, env: {} }, null, { preamble: "P", injectItems: items });
+    await cmd({ kind: "startTurn", text: "hi" });
+    expect(f.injected).toEqual([items]);
+    expect(f.turns.map((t) => t.text)).toEqual(["hi"]);
+  });
+
+  test("handoff items for a harness that cannot inject them and no preamble are refused before closing", async () => {
+    const f = fakeHarness();
+    await start(f);
+    await expect(
+      switchCmd({ harness: "claude", account: "b", model: null, env: { CLAUDE_CONFIG_DIR: claudeProfile("b") } }, null, { preamble: null, injectItems: [{}] }),
+    ).rejects.toThrow("inject");
+    expect(f.closes).toBe(0);
+  });
+
+  test("resume failure emits resume-failed", async () => {
+    const f = fakeHarness({ readyErrors: [undefined, new ResumeFailedError("no transcript")] });
+    const bridge = await start(f);
+    await switchCmd({ harness: "claude", account: "b", model: null, env: { CLAUDE_CONFIG_DIR: claudeProfile("b") } }, "thread-dead", { preamble: "P" });
+    const failed = events().filter((e) => e.type === "run.failed");
+    expect(failed).toEqual([{ type: "run.failed", runId: expect.any(String), error: "resume-failed" }]);
+    const started = events().filter((e) => e.type === "run.started").map((e) => e.type === "run.started" && e.runId);
+    expect(started).not.toContain(failed[0].runId);
+    expect(f.turns).toEqual([]);
+    // devd follows with a fresh switch; until then the bridge stays up on the switched target without a thread.
+    const status = await Promise.race([bridge.closed, new Promise((r) => setTimeout(() => r("open"), 20))]);
+    expect(status).toBe("open");
+    expect(state()).toMatchObject({ account: "b", nativeThreadId: null, pendingHandoff: null });
+    await switchCmd({ harness: "claude", account: "b", model: null, env: { CLAUDE_CONFIG_DIR: claudeProfile("b") } }, null, { preamble: "full" });
+    expect(f.opens.length).toBe(3);
+    expect(f.opens[2].resume).toBeNull();
   });
 });
 

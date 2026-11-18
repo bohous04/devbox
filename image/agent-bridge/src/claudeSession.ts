@@ -1,17 +1,32 @@
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { query, type CanUseTool, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { BackgroundTracker, WAKEUP_ID } from "./background.ts";
 import { claudeQueryOptions, mapSdkMessage, resultError, sumModelUsage, type ClaudeSdkOptions, type QueryFn } from "./claude.ts";
-import type { BridgeEvent, RunOrigin, TokenUsage, UsageBaseline } from "./events.ts";
+import type { BridgeEvent, Capabilities, RunOrigin, TokenUsage, UsageBaseline } from "./events.ts";
 
 export interface HarnessSession {
   startTurn(runId: string, text: string, origin: RunOrigin): Promise<void>; // resolves when the turn is accepted
   interrupt(): Promise<void>;
   answer(requestId: string, answer: string): Promise<void>;
+  /** Model for the next turns; the current turn keeps its model. */
+  setModel(model: string): Promise<void>;
+  /** Appends raw items to the thread's model-visible history; only when `capabilities().injectItems`. */
+  injectItems(items: unknown[]): Promise<void>;
+  capabilities(): Capabilities;
   close(): Promise<void>;
+  /** Resolves when the harness accepts turns on its thread; rejects (ResumeFailedError for a resume that did not
+   *  work) when it never will. The session has then ended. */
+  ready: Promise<void>;
   /** Settles when the harness process is gone (stream ended or threw, process exited), also after close(). */
   ended: Promise<{ error?: string }>;
 }
+
+/** The native thread to resume is gone or unusable; the caller decides how to continue without it. */
+export class ResumeFailedError extends Error {}
+
+export const CLAUDE_CAPABILITIES: Capabilities = { resume: true, injectItems: false, liveModelSwitch: true, questions: true, images: true, backgroundVisibility: true };
 
 export interface ClaudeSessionOptions {
   cwd: string;
@@ -19,6 +34,8 @@ export interface ClaudeSessionOptions {
   claudeExecutable: string;
   configDir: string;
   entrypoint?: string;
+  /** Environment the CLI starts from; the bridge's own when omitted. */
+  baseEnv?: Record<string, string | undefined>;
   resume: string | null;
   mcpServers: Record<string, unknown>;
   appendSystemPrompt: string;
@@ -97,7 +114,36 @@ function subtractUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
   return { input: a.input - b.input, output: a.output - b.output, cacheCreation: a.cacheCreation - b.cacheCreation, cacheRead: a.cacheRead - b.cacheRead };
 }
 
+/** Where Claude Code keeps the transcript of `sessionId` for `cwd` (non-alphanumerics of the cwd become "-"). */
+function transcriptPath(configDir: string, cwd: string, sessionId: string): string {
+  return join(configDir, "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"), `${sessionId}.jsonl`);
+}
+
+/** A session that never started: every call fails with `error`. */
+function failedSession(error: Error): HarnessSession {
+  const fail = async () => {
+    throw error;
+  };
+  const ready = Promise.reject(error);
+  ready.catch(() => {});
+  return {
+    startTurn: fail,
+    interrupt: fail,
+    answer: fail,
+    setModel: fail,
+    injectItems: fail,
+    capabilities: () => CLAUDE_CAPABILITIES,
+    async close() {},
+    ready,
+    ended: Promise.resolve({ error: error.message }),
+  };
+}
+
 export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = query): HarnessSession {
+  // The CLI would only fail on the first turn; checked here so a switch can tell a dead thread before any turn.
+  if (o.resume !== null && !existsSync(transcriptPath(o.configDir, o.cwd, o.resume))) {
+    return failedSession(new ResumeFailedError(`Claude session ${o.resume} has no transcript in ${o.configDir}`));
+  }
   const now = o.now ?? Date.now;
   const input = new InputQueue();
   const background = new BackgroundTracker();
@@ -106,6 +152,7 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
   const cursor = { messageId: "" };
   let active: ActiveRun | null = null;
   let nativeThreadId: string | null = o.resume;
+  let model = o.model;
   // modelUsage and total_cost_usd are running totals of the query (sdk.d.ts SDKResultMessage),
   // so a run's own usage is the difference to the previous result.
   // A resumed query continues the previous process's totals, so it starts from the persisted baseline.
@@ -130,7 +177,7 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
   function writeTurn(t: Turn): void {
     active = { runId: t.runId, interrupted: false, interruptReported: false };
     input.push({ type: "user", message: { role: "user", content: t.text }, parent_tool_use_id: null });
-    emit({ type: "run.started", runId: t.runId, origin: t.origin, nativeThreadId, model: o.model });
+    emit({ type: "run.started", runId: t.runId, origin: t.origin, nativeThreadId, model });
   }
 
   function startAgentRun(model: string | null): void {
@@ -168,9 +215,9 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
   function handle(msg: SDKMessage): void {
     if (msg.type === "system" && msg.subtype === "init" && msg.session_id !== nativeThreadId) {
       nativeThreadId = msg.session_id;
-      emit({ type: "thread.native", harness: "claude", nativeThreadId, account: null, model: msg.model });
+      emit({ type: "thread.native", harness: "claude", nativeThreadId, account: null, model: msg.model, caps: CLAUDE_CAPABILITIES });
     }
-    if (active === null && isRootFrame(msg)) startAgentRun(msg.type === "system" && msg.subtype === "init" ? msg.model : o.model);
+    if (active === null && isRootFrame(msg)) startAgentRun(msg.type === "system" && msg.subtype === "init" ? msg.model : model);
     if (active !== null) for (const e of mapSdkMessage(msg, active.runId, cursor)) emit(e);
     emitBackground(background.apply(msg));
     if (msg.type === "result") finishRun(msg);
@@ -274,6 +321,9 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
     },
   });
 
+  // A resumed thread is known now; a new one is announced by the CLI's init.
+  if (o.resume !== null) emit({ type: "thread.native", harness: "claude", nativeThreadId: o.resume, account: null, model, caps: CLAUDE_CAPABILITIES });
+
   const sessionEnded = (async (): Promise<{ error?: string }> => {
     try {
       for await (const msg of stream) handle(msg);
@@ -314,10 +364,20 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
       emit({ type: "request.resolved", requestId, answer, by: "user" });
       resolve(answer);
     },
+    async setModel(next) {
+      if (ended) throw new Error(SESSION_ENDED);
+      await stream.setModel(next);
+      model = next;
+    },
+    async injectItems() {
+      throw new Error("injectItems is not supported by Claude sessions");
+    },
+    capabilities: () => CLAUDE_CAPABILITIES,
     async close() {
       endSession(SESSION_ENDED);
       stream.close();
     },
+    ready: Promise.resolve(),
     ended: sessionEnded,
   };
 }

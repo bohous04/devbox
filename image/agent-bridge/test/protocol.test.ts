@@ -19,6 +19,15 @@ describe("parseClientFrame", () => {
       { kind: "stop" },
       { kind: "endWait" },
       { kind: "declareWait", reason: "ci", waitKind: "ci", timeoutMinutes: 5 },
+      { kind: "setModel", model: "claude-opus-4-5" },
+      {
+        kind: "switchTarget",
+        target: { harness: "codex", account: "acct-1", model: null, env: { A: "1" } },
+        resume: "thread-1",
+        handoff: { preamble: "earlier", injectItems: [{ type: "message" }] },
+      },
+      { kind: "switchTarget", target: { harness: "claude", account: null, model: "m", env: {} }, resume: null, handoff: null },
+      { kind: "switchTarget", target: { harness: "claude", account: null, model: "m", env: {} }, resume: null, handoff: { preamble: null } },
     ];
     for (const cmd of cmds) {
       expect(parseClientFrame(JSON.stringify({ t: "cmd", id: "c", cmd }))).toEqual({ t: "cmd", id: "c", cmd });
@@ -39,6 +48,21 @@ describe("parseClientFrame", () => {
       '{"t":"cmd","id":"c1","cmd":{"kind":"answer","requestId":"q1"}}',
       '{"t":"cmd","id":"c1","cmd":{"kind":"declareWait","reason":"x","waitKind":"nope"}}',
       "null",
+      '{"t":"cmd","id":"c1","cmd":{"kind":"setModel","model":""}}',
+      ...[
+        { harness: "grok", account: null, model: null, env: {} },
+        { harness: "claude", account: "", model: null, env: {} },
+        { harness: "claude", account: null, model: 5, env: {} },
+        { harness: "claude", account: null, model: null, env: { A: 1 } },
+        { harness: "claude", account: null, model: null },
+      ].map((target) => JSON.stringify({ t: "cmd", id: "c1", cmd: { kind: "switchTarget", target, resume: null, handoff: null } })),
+      ...[
+        { resume: "", handoff: null },
+        { handoff: null },
+        { resume: null },
+        { resume: null, handoff: { preamble: 1 } },
+        { resume: null, handoff: { preamble: null, injectItems: "x" } },
+      ].map((rest) => JSON.stringify({ t: "cmd", id: "c1", cmd: { kind: "switchTarget", target: { harness: "claude", account: null, model: null, env: {} }, ...rest } })),
     ];
     for (const line of bad) expect(() => parseClientFrame(line)).toThrow(ProtocolError);
   });
