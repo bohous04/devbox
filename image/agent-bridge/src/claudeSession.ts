@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { query, type CanUseTool, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { BackgroundTracker, WAKEUP_ID } from "./background.ts";
 import { claudeQueryOptions, mapSdkMessage, resultError, sumModelUsage, type ClaudeSdkOptions, type QueryFn } from "./claude.ts";
@@ -21,6 +22,7 @@ export interface ClaudeSessionOptions {
   appendSystemPrompt: string;
   emit: (e: BridgeEvent) => void;
   now?: () => number;
+  logError?: (msg: string) => void;
 }
 
 // The answer to a plan request that approves it; any other text rejects the plan with that text as feedback.
@@ -31,6 +33,8 @@ export const PLAN_APPROVE = "Approve";
 const WAKEUP_EARLY_FIRE_MARGIN_MS = 120_000;
 
 const SESSION_ENDED = "Claude session ended";
+
+export const PLAN_UNAVAILABLE = "The agent asked to leave plan mode but its plan text was not available.";
 
 class InputQueue implements AsyncIterable<SDKUserMessage> {
   private items: SDKUserMessage[] = [];
@@ -60,6 +64,7 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
 interface ActiveRun {
   runId: string;
   interrupted: boolean;
+  interruptReported: boolean;
 }
 
 interface Turn {
@@ -102,19 +107,27 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
   let ended = false;
 
   const emit = o.emit;
+  const logError = o.logError ?? ((msg: string) => console.error(msg));
+
+  // Emitted once, by whichever comes first: interrupt() returning or the run's own result.
+  function reportInterrupt(run: ActiveRun): void {
+    if (run.interruptReported) return;
+    run.interruptReported = true;
+    emit({ type: "run.interrupted", runId: run.runId });
+  }
 
   function emitBackground(work: ReturnType<BackgroundTracker["list"]> | null): void {
     if (work) emit({ type: "background.changed", work });
   }
 
   function writeTurn(t: Turn): void {
-    active = { runId: t.runId, interrupted: false };
+    active = { runId: t.runId, interrupted: false, interruptReported: false };
     input.push({ type: "user", message: { role: "user", content: t.text }, parent_tool_use_id: null });
     emit({ type: "run.started", runId: t.runId, origin: t.origin, nativeThreadId, model: o.model });
   }
 
   function startAgentRun(model: string | null): void {
-    active = { runId: crypto.randomUUID(), interrupted: false };
+    active = { runId: crypto.randomUUID(), interrupted: false, interruptReported: false };
     emit({ type: "run.started", runId: active.runId, origin: "agent", nativeThreadId, model });
     const wakeup = background.list().find((w) => w.id === WAKEUP_ID);
     // The agent started a turn by itself at its wakeup time: that is the wakeup firing.
@@ -134,7 +147,8 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
     }
     lastUsage = total;
     lastCost = msg.total_cost_usd;
-    if (!run.interrupted) {
+    if (run.interrupted) reportInterrupt(run);
+    else {
       const error = resultError(msg);
       if (error === null) emit({ type: "run.completed", runId: run.runId, nativeThreadId: msg.session_id, usage, costUsd: cost });
       else emit({ type: "run.failed", runId: run.runId, error });
@@ -158,7 +172,13 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
     if (ended) return;
     ended = true;
     input.end();
-    if (active && !active.interrupted) emit({ type: "run.failed", runId: active.runId, error });
+    for (const [requestId, resolve] of requests) {
+      emit({ type: "request.resolved", requestId, answer: null, by: "expired" });
+      resolve(null);
+    }
+    requests.clear();
+    if (active?.interrupted) reportInterrupt(active);
+    else if (active) emit({ type: "run.failed", runId: active.runId, error });
     active = null;
     for (const t of waiting.splice(0)) emit({ type: "run.failed", runId: t.runId, error });
   }
@@ -167,7 +187,24 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
     return new Promise((resolve) => requests.set(requestId, resolve));
   }
 
-  // Resolves to the user's answer, or null when the SDK withdrew the tool call (interrupt).
+  // ExitPlanModeInput declares no plan field (sdk-tools.d.ts); the CLI may send the text or only a file path.
+  async function planText(toolInput: Record<string, unknown>): Promise<string> {
+    if (typeof toolInput.plan === "string" && toolInput.plan.trim()) return toolInput.plan;
+    const path = [toolInput.planFilePath, toolInput.filePath].find((p): p is string => typeof p === "string" && p !== "");
+    if (path === undefined) {
+      logError(`ExitPlanMode without plan text or plan file: ${JSON.stringify(Object.keys(toolInput))}`);
+      return PLAN_UNAVAILABLE;
+    }
+    try {
+      return await readFile(path, "utf8");
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      logError(`ExitPlanMode plan file unreadable: ${reason}`);
+      return `${PLAN_UNAVAILABLE} (plan file ${path}: ${reason})`;
+    }
+  }
+
+  // Resolves to the user's answer, or null when the SDK withdrew the tool call (interrupt) or the session ended.
   async function ask(requestId: string, opened: Omit<Extract<BridgeEvent, { type: "request.opened" }>, "type" | "runId" | "requestId">, signal: AbortSignal): Promise<string | null> {
     const answer = openRequest(requestId);
     emit({ type: "request.opened", runId: active!.runId, requestId, ...opened });
@@ -187,12 +224,17 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
     if (toolName !== "AskUserQuestion" && toolName !== "ExitPlanMode") return { behavior: "allow", updatedInput: toolInput };
     if (active === null) return { behavior: "deny", message: `${toolName} arrived outside a run; the bridge cannot ask the user.` };
     if (toolName === "ExitPlanMode") {
-      const plan = typeof toolInput.plan === "string" ? toolInput.plan : "";
+      const plan = await planText(toolInput);
+      if (active === null || ended) return { behavior: "deny", message: "ExitPlanMode: the run ended before the plan could be shown to the user." };
       const answer = await ask(toolUseID, { kind: "plan", prompt: plan, options: [{ label: PLAN_APPROVE }] }, signal);
       if (answer === null) return { behavior: "deny", message: "The user did not answer the plan before the turn was stopped." };
       return answer === PLAN_APPROVE ? { behavior: "allow", updatedInput: toolInput } : { behavior: "deny", message: answer };
     }
-    const questions = (toolInput as QuestionInput).questions ?? [];
+    const questions = (toolInput as QuestionInput).questions;
+    if (!Array.isArray(questions) || questions.length === 0 || questions.some((q) => typeof q?.question !== "string" || q.question === "")) {
+      logError(`AskUserQuestion input had no questions: ${JSON.stringify(toolInput)}`);
+      return { behavior: "deny", message: "AskUserQuestion input had no questions" };
+    }
     const answers = await Promise.all(
       questions.map((q, i) =>
         ask(
@@ -249,10 +291,10 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
       try {
         await stream.interrupt();
       } catch (e) {
-        run.interrupted = false;
+        if (!run.interruptReported) run.interrupted = false;
         throw e;
       }
-      emit({ type: "run.interrupted", runId: run.runId });
+      reportInterrupt(run);
     },
     async answer(requestId, answer) {
       const resolve = requests.get(requestId);

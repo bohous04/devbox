@@ -43,6 +43,25 @@ describe("BackgroundTracker", () => {
     expect(t.apply(toolResult("toolu_e", "Error: boom", true))).toEqual([]);
   });
 
+  test("two ScheduleWakeup results in one message keep the last wakeup", () => {
+    const t = new BackgroundTracker();
+    t.apply(toolUse("toolu_a", "ScheduleWakeup", { reason: "first" }));
+    t.apply(toolUse("toolu_b", "ScheduleWakeup", { reason: "second" }));
+    const both = msg({
+      type: "user",
+      parent_tool_use_id: null,
+      message: {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "toolu_a", content: "ok" },
+          { type: "tool_result", tool_use_id: "toolu_b", content: "ok" },
+        ],
+      },
+      tool_use_result: { scheduledFor: 2_000 },
+    });
+    expect(t.apply(both)).toEqual([{ id: "wakeup", kind: "wakeup", label: "second", holding: true, until: 2_000 }]);
+  });
+
   test("task_notification completed removes the subagent", () => {
     const t = new BackgroundTracker();
     expect(t.apply(taskStarted("a1", "local_agent", { is_backgrounded: true }))).toEqual([

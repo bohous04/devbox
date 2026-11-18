@@ -86,7 +86,8 @@ export class BackgroundTracker {
     const reason = this.wakeupCalls.get(last.tool_use_id)!;
     for (const b of returned) this.wakeupCalls.delete((b as { tool_use_id: string }).tool_use_id);
     const result = msg.tool_use_result as { scheduledFor?: unknown } | undefined;
-    const scheduledFor = returned.length === 1 && !last.is_error && result && typeof result === "object" ? result.scheduledFor : undefined;
+    // tool_use_result is one per message; with several ScheduleWakeup results it is the last call's (the one that stands).
+    const scheduledFor = !last.is_error && result && typeof result === "object" ? result.scheduledFor : undefined;
     // stop:true reports scheduledFor 0, and a failed call schedules nothing: both clear the wakeup.
     if (typeof scheduledFor === "number" && scheduledFor > 0) {
       this.work.set(WAKEUP_ID, { id: WAKEUP_ID, kind: "wakeup", label: reason, holding: true, until: scheduledFor });

@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { CanUseTool, PermissionResult, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { QueryFn } from "../src/claude.ts";
-import { openClaudeSession } from "../src/claudeSession.ts";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { openClaudeSession, PLAN_UNAVAILABLE } from "../src/claudeSession.ts";
 import type { BridgeEvent } from "../src/events.ts";
 
 // Scripted SDK: the test pushes output messages and reads what the session wrote to the input stream.
@@ -14,6 +17,7 @@ function fakeSdk() {
     inputs,
     options: undefined as Record<string, unknown> | undefined,
     interrupts: 0,
+    onInterrupt: undefined as (() => Promise<void>) | undefined,
     push(...ms: Record<string, unknown>[]) {
       pending.push(...(ms as unknown as SDKMessage[]));
       wake?.();
@@ -41,6 +45,7 @@ function fakeSdk() {
       return Object.assign(gen, {
         interrupt: async () => {
           sdk.interrupts++;
+          await sdk.onInterrupt?.();
         },
         close: () => sdk.end(),
       });
@@ -51,8 +56,14 @@ function fakeSdk() {
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
+async function until(cond: () => boolean) {
+  for (let i = 0; i < 100 && !cond(); i++) await new Promise((r) => setTimeout(r, 5));
+  expect(cond()).toBe(true);
+}
+
 function open(sdk: ReturnType<typeof fakeSdk>, now = () => 0) {
   const events: BridgeEvent[] = [];
+  const logs: string[] = [];
   const session = openClaudeSession(
     {
       cwd: "/workspace",
@@ -64,10 +75,11 @@ function open(sdk: ReturnType<typeof fakeSdk>, now = () => 0) {
       appendSystemPrompt: "call devbox_wait",
       emit: (e) => events.push(e),
       now,
+      logError: (m) => logs.push(m),
     },
     sdk.queryFn,
   );
-  return { session, events };
+  return { session, events, logs };
 }
 
 const init = (sessionId = "sess-1") => ({ type: "system", subtype: "init", session_id: sessionId, model: "claude-sonnet-4-5" });
@@ -338,6 +350,83 @@ describe("openClaudeSession", () => {
       { type: "run.failed", runId: "run-2", error: "Claude session ended" },
     ]);
     await expect(session.startTurn("run-3", "z", "user")).rejects.toThrow("Claude session ended");
+  });
+
+  test("ExitPlanMode without plan text reads the plan file", async () => {
+    const sdk = fakeSdk();
+    const { session, events } = open(sdk);
+    const dir = await mkdtemp(join(tmpdir(), "plan-"));
+    const file = join(dir, "plan.md");
+    await writeFile(file, "# Plan\n1. from file");
+    await session.startTurn("run-1", "plan it", "user");
+    sdk.push(init());
+    await flush();
+    void sdk.canUseTool()("ExitPlanMode", { planFilePath: file }, { signal: new AbortController().signal, toolUseID: "toolu_p", requestId: "r" });
+    await until(() => events.some((e) => e.type === "request.opened"));
+    expect(events.find((e) => e.type === "request.opened")).toMatchObject({ kind: "plan", prompt: "# Plan\n1. from file" });
+  });
+
+  test("ExitPlanMode with neither plan text nor file says so explicitly and logs it", async () => {
+    const sdk = fakeSdk();
+    const { session, events, logs } = open(sdk);
+    await session.startTurn("run-1", "plan it", "user");
+    sdk.push(init());
+    await flush();
+    void sdk.canUseTool()("ExitPlanMode", {}, { signal: new AbortController().signal, toolUseID: "toolu_p", requestId: "r" });
+    await until(() => events.some((e) => e.type === "request.opened"));
+    expect(events.find((e) => e.type === "request.opened")).toMatchObject({ kind: "plan", prompt: PLAN_UNAVAILABLE });
+    expect(logs).toHaveLength(1);
+  });
+
+  test("AskUserQuestion with missing or malformed questions is denied, not auto-answered", async () => {
+    const sdk = fakeSdk();
+    const { session, events, logs } = open(sdk);
+    await session.startTurn("run-1", "ask", "user");
+    sdk.push(init());
+    await flush();
+    for (const input of [{}, { questions: [] }, { questions: [{ header: "x", options: [] }] }]) {
+      expect(await sdk.canUseTool()("AskUserQuestion", input, { signal: new AbortController().signal, toolUseID: "toolu_q", requestId: "r" })).toEqual({
+        behavior: "deny",
+        message: "AskUserQuestion input had no questions",
+      });
+    }
+    expect(events.some((e) => e.type === "request.opened")).toBe(false);
+    expect(logs).toHaveLength(3);
+  });
+
+  test("close expires open requests and settles their tool calls", async () => {
+    const sdk = fakeSdk();
+    const { session, events } = open(sdk);
+    await session.startTurn("run-1", "ask", "user");
+    sdk.push(init());
+    await flush();
+    const decision = sdk.canUseTool()(
+      "AskUserQuestion",
+      { questions: [{ question: "Q?", header: "Q", options: [{ label: "a", description: "" }, { label: "b", description: "" }], multiSelect: false }] },
+      { signal: new AbortController().signal, toolUseID: "toolu_q", requestId: "r" },
+    );
+    await flush();
+    await session.close();
+    expect(await decision).toMatchObject({ behavior: "deny" });
+    expect(events).toContainEqual({ type: "request.resolved", requestId: "toolu_q:0", answer: null, by: "expired" });
+    await expect(session.answer("toolu_q:0", "a")).rejects.toThrow("no open request");
+  });
+
+  test("run.interrupted precedes the next run when the result beats interrupt()", async () => {
+    const sdk = fakeSdk();
+    const { session, events } = open(sdk);
+    await session.startTurn("run-1", "long", "user");
+    sdk.push(init());
+    await flush();
+    await session.startTurn("run-2", "next", "user");
+    sdk.onInterrupt = async () => {
+      sdk.push(result(usage(1, 1), 0.001, { subtype: "error_during_execution", is_error: true, errors: [] }));
+      await flush();
+    };
+    await session.interrupt();
+    expect(
+      events.filter((e) => e.type === "run.interrupted" || e.type === "run.started").map((e) => `${e.type}:${(e as { runId: string }).runId}`),
+    ).toEqual(["run.started:run-1", "run.interrupted:run-1", "run.started:run-2"]);
   });
 
   test("background work is emitted and a wakeup clears when the agent wakes at its time", async () => {
