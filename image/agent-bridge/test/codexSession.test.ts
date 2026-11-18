@@ -102,7 +102,7 @@ function open(fake: ReturnType<typeof fakeCodex>, o: { resume?: string | null; m
     {
       cwd: "/workspace",
       model: o.model === undefined ? "gpt-5.5-codex" : o.model,
-      codexHome: "/home/dev/.codex-accounts/a",
+      codexHome: "/tmp/codex-home",
       resume: o.resume ?? null,
       mcpConfigArgs: ["-c", 'mcp_servers.devbox.command="agent-bridge"'],
       developerInstructions: "call devbox_wait",
@@ -124,7 +124,7 @@ describe("openCodexSession", () => {
     await until(() => fake.requests("turn/start").length === 1);
 
     expect(fake.argv).toEqual(["codex", "app-server", "-c", 'mcp_servers.devbox.command="agent-bridge"']);
-    expect(fake.env.CODEX_HOME).toBe("/home/dev/.codex-accounts/a");
+    expect(fake.env.CODEX_HOME).toBe("/tmp/codex-home");
     expect(fake.sent.map((m) => m.method)).toEqual(["initialize", "initialized", "thread/start", "turn/start"]);
     expect(fake.requests("initialize")[0]!.params).toEqual({
       clientInfo: { name: "devbox-agent-bridge", title: null, version: expect.any(String) },
@@ -304,6 +304,110 @@ describe("openCodexSession", () => {
     fake.push({ method: "turn/completed", params: { threadId: THREAD_ID, turn: turn("turn-1", "completed") } });
     await until(() => events.some((e) => e.type === "run.completed"));
     expect(types(events)).toEqual(["thread.native", "run.started", "run.completed"]);
+  });
+
+  test("a completed turn without a usage update has usage null and is logged", async () => {
+    const fake = fakeCodex();
+    const { session, events, logs } = open(fake);
+    await session.startTurn("run-1", "x", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    fake.push({ method: "turn/completed", params: { threadId: THREAD_ID, turn: turn("turn-1", "completed") } });
+    await until(() => events.some((e) => e.type === "run.completed"));
+    expect(events.at(-1)).toEqual({ type: "run.completed", runId: "run-1", nativeThreadId: THREAD_ID, usage: null, costUsd: null });
+    expect(logs).toContain("codex turn turn-1 completed without a token usage update; usage is null");
+  });
+
+  test("a straggler of the previous turn does not bind the next run to it", async () => {
+    const fake = fakeCodex();
+    const { session, events, logs } = open(fake);
+    await session.startTurn("run-1", "first", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    await session.startTurn("run-2", "second", "user");
+    fake.responders["turn/start"] = undefined;
+    const late = simpleTurn("turn-1").find((n) => n.method === "thread/tokenUsage/updated")!;
+    fake.push({ method: "turn/completed", params: { threadId: THREAD_ID, turn: turn("turn-1", "completed") } }, late);
+    await until(() => fake.requests("turn/start").length === 2);
+    await until(() => logs.some((l) => l.includes("completed turn turn-1 dropped")));
+    fake.push({ id: fake.requests("turn/start")[1]!.id, result: turnStartResponse("turn-2") });
+    fake.push(...simpleTurn("turn-2"));
+    await until(() => events.filter((e) => e.type === "run.completed").length === 2);
+    expect(events.at(-1)).toMatchObject({ type: "run.completed", runId: "run-2", usage: { input: 250, output: 40, cacheCreation: 0, cacheRead: 150 } });
+  });
+
+  test("an open request expires when its turn completes", async () => {
+    const fake = fakeCodex();
+    const { session, events } = open(fake);
+    await session.startTurn("run-1", "x", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    fake.push({ id: 4, method: "item/tool/requestUserInput", params: userInputRequest("turn-1") });
+    await until(() => events.some((e) => e.type === "request.opened"));
+    const opened = events.find((e) => e.type === "request.opened") as Extract<BridgeEvent, { type: "request.opened" }>;
+    fake.push({ method: "turn/completed", params: { threadId: THREAD_ID, turn: turn("turn-1", "completed") } });
+    await until(() => events.some((e) => e.type === "run.completed"));
+    expect(types(events).slice(-2)).toEqual(["request.resolved", "run.completed"]);
+    expect(events.at(-2)).toEqual({ type: "request.resolved", requestId: opened.requestId, answer: null, by: "expired" });
+    await until(() => fake.responseTo(4) !== undefined);
+    expect(fake.responseTo(4)!.error).toBeDefined();
+  });
+
+  test("a secret question is refused, logged and never opened", async () => {
+    const fake = fakeCodex();
+    const { session, events, logs } = open(fake);
+    await session.startTurn("run-1", "x", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    const params = userInputRequest("turn-1");
+    params.questions[0]!.isSecret = true;
+    fake.push({ id: 0, method: "item/tool/requestUserInput", params });
+    await until(() => fake.responseTo(0) !== undefined);
+    expect(fake.responseTo(0)!.error!.message).toBe("secret input requested; not supported in chat sessions");
+    expect(types(events)).toEqual(["thread.native", "run.started"]);
+    expect(logs.some((l) => l.includes("secret input requested; not supported in chat sessions"))).toBe(true);
+  });
+
+  test("turn/completed before the turn/interrupt response reports the interrupt once", async () => {
+    const fake = fakeCodex();
+    fake.responders["turn/interrupt"] = undefined;
+    const { session, events } = open(fake);
+    await session.startTurn("run-1", "long", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    const interrupted = session.interrupt();
+    await until(() => fake.requests("turn/interrupt").length === 1);
+    fake.push({ method: "turn/completed", params: { threadId: THREAD_ID, turn: turn("turn-1", "interrupted") } });
+    await until(() => events.some((e) => e.type === "run.interrupted"));
+    fake.push({ id: fake.requests("turn/interrupt")[0]!.id, result: {} });
+    await interrupted;
+    expect(types(events)).toEqual(["thread.native", "run.started", "run.interrupted"]);
+  });
+
+  test("host Claude session variables are not passed to codex", async () => {
+    const saved = { CLAUDECODE: process.env.CLAUDECODE, CLAUDE_CODE_SESSION_ID: process.env.CLAUDE_CODE_SESSION_ID };
+    process.env.CLAUDECODE = "1";
+    process.env.CLAUDE_CODE_SESSION_ID = "host";
+    try {
+      const fake = fakeCodex();
+      open(fake);
+      expect("CLAUDECODE" in fake.env).toBe(false);
+      expect("CLAUDE_CODE_SESSION_ID" in fake.env).toBe(false);
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
+  test("file change diffs and output are capped", async () => {
+    const fake = fakeCodex();
+    const { session, events } = open(fake);
+    await session.startTurn("run-1", "x", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    const huge = "+".repeat(100 * 1024);
+    const item = { type: "fileChange" as const, id: "patch_1", status: "completed" as const, changes: [{ path: "a.txt", kind: { type: "add" as const }, diff: huge }] };
+    fake.push({ method: "item/completed", params: { threadId: THREAD_ID, turnId: "turn-1", item, completedAtMs: 1 } });
+    await until(() => events.some((e) => e.type === "tool.finished"));
+    const started = events.find((e) => e.type === "tool.started") as Extract<BridgeEvent, { type: "tool.started" }>;
+    expect((started.input as { diff: string }[])[0]!.diff.length).toBe(64 * 1024);
+    expect(events.at(-1)).toEqual({ type: "tool.finished", runId: "run-1", itemId: "patch_1", isError: false, output: "add a.txt" });
   });
 
   test("a failed turn is run.failed with the turn error", async () => {

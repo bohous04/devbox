@@ -18,7 +18,7 @@ const MAX_OUTPUT_BYTES = 64 * 1024;
 
 // The bridge may itself run inside a Claude Code session; these make the child CLI
 // believe it is nested and change its behaviour.
-const HOST_SESSION_VARS = ["CLAUDECODE", "CLAUDE_CODE_SESSION_ID"];
+export const HOST_SESSION_VARS = ["CLAUDECODE", "CLAUDE_CODE_SESSION_ID"];
 
 export function claudeEnv(base: Record<string, string | undefined>, o: { configDir: string; entrypoint?: string }): Record<string, string> {
   const env: Record<string, string> = {};

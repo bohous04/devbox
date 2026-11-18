@@ -104,8 +104,12 @@ export class JsonRpcPeer {
       return;
     }
     try {
-      this.send({ id, result: await this.requestHandler(method, params, id) });
+      const result = await this.requestHandler(method, params, id);
+      // A response without a result is not valid JSON-RPC; treat it as a handler bug.
+      if (result === undefined) throw new Error(`handler for ${method} returned no result`);
+      this.send({ id, result });
     } catch (e) {
+      this.logError(`json-rpc: server request ${method} failed: ${e instanceof Error ? e.message : String(e)}`);
       this.send({ id, error: { code: HANDLER_FAILED, message: e instanceof Error ? e.message : String(e) } });
     }
   }

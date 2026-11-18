@@ -1,4 +1,4 @@
-import { capText, toolResultText } from "./claude.ts";
+import { capText, HOST_SESSION_VARS, toolResultText } from "./claude.ts";
 import type { HarnessSession } from "./claudeSession.ts";
 import type { BridgeEvent, RunOrigin, TokenUsage } from "./events.ts";
 import { JsonRpcPeer } from "./jsonRpc.ts";
@@ -171,14 +171,14 @@ function toolName(item: ThreadItem): string | null {
 
 function toolInput(item: ThreadItem): unknown {
   if (item.type === "commandExecution") return item.command;
-  if (item.type === "fileChange") return item.changes;
+  if (item.type === "fileChange") return item.changes.map((c) => ({ ...c, diff: capText(c.diff) }));
   if (item.type === "mcpToolCall") return item.arguments;
   return null;
 }
 
 function toolOutput(item: ThreadItem): { isError: boolean; output: string } {
   if (item.type === "commandExecution") return { isError: item.status !== "completed", output: capText(item.aggregatedOutput ?? "") };
-  if (item.type === "fileChange") return { isError: item.status !== "completed", output: item.changes.map((c) => `${c.kind.type} ${c.path}`).join("\n") };
+  if (item.type === "fileChange") return { isError: item.status !== "completed", output: capText(item.changes.map((c) => `${c.kind.type} ${c.path}`).join("\n")) };
   if (item.type === "mcpToolCall") {
     return { isError: item.status !== "completed", output: capText(item.error ? item.error.message : toolResultText(item.result?.content)) };
   }
@@ -189,7 +189,7 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
   const emit = o.emit;
   const logError = o.logError ?? ((msg: string) => console.error(msg));
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !HOST_SESSION_VARS.includes(k)) env[k] = v;
   env.CODEX_HOME = o.codexHome;
 
   const proc = spawn(["codex", "app-server", ...o.mcpConfigArgs], env);
@@ -223,6 +223,8 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
   const requests = new Map<string, OpenRequest>();
   let threadId: string | null = null;
   let active: ActiveRun | null = null;
+  // Turns that sent turn/completed; their stragglers must not reach a later run.
+  const completedTurns = new Set<string>();
   let endReason: string | null = null;
 
   function reportInterrupt(run: ActiveRun): void {
@@ -273,24 +275,23 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
   }
 
   // The active run a notification of `turnId` belongs to, or null (logged) when it belongs to none.
+  // Runs are bound to a turn only by the turn/start response or turn/started, never by other notifications.
   function runFor(turnId: string, method: string): ActiveRun | null {
-    if (active !== null && (active.turnId === null || active.turnId === turnId)) {
-      bindTurn(active, turnId);
-      return active;
-    }
-    logError(`codex ${method} for turn ${turnId} outside the active run`);
+    if (active !== null && active.turnId === turnId) return active;
+    logError(`codex ${method} for ${completedTurns.has(turnId) ? "completed" : "unknown"} turn ${turnId} dropped`);
     return null;
   }
 
   function finishTurn(n: TurnCompletedNotification): void {
     const run = runFor(n.turn.id, "turn/completed");
+    completedTurns.add(n.turn.id);
     if (run === null) return;
     active = null;
     for (const [requestId, r] of requests) if (r.runId === run.runId) expire(requestId);
     if (run.interrupted || n.turn.status === "interrupted") reportInterrupt(run);
     else if (n.turn.status === "completed") {
-      if (run.usageBase === null || run.usageTotal === null) logError(`codex turn ${n.turn.id} completed without a token usage update`);
-      const usage = run.usageBase && run.usageTotal ? toTokenUsage(minus(run.usageTotal, run.usageBase)) : { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
+      const usage = run.usageBase && run.usageTotal ? toTokenUsage(minus(run.usageTotal, run.usageBase)) : null;
+      if (usage === null) logError(`codex turn ${n.turn.id} completed without a token usage update; usage is null`);
       emit({ type: "run.completed", runId: run.runId, nativeThreadId: threadId!, usage, costUsd: null });
     } else {
       emit({ type: "run.failed", runId: run.runId, error: n.turn.error?.message ?? `turn ended with status ${n.turn.status} and no error message` });
@@ -311,7 +312,8 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
           // Codex started a turn by itself.
           active = newRun(crypto.randomUUID(), n.params.turn.id);
           emit({ type: "run.started", runId: active.runId, origin: "agent", nativeThreadId: threadId, model: o.model });
-        } else runFor(n.params.turn.id, n.method);
+        } else if (active.turnId === null) bindTurn(active, n.params.turn.id);
+        else if (active.turnId !== n.params.turn.id) logError(`codex turn/started for turn ${n.params.turn.id} while turn ${active.turnId} is active`);
         return;
       }
       case "turn/completed":
@@ -380,6 +382,7 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
     return answer === APPROVAL_ACCEPT;
   }
 
+  // Server requests are attached to the active run deliberately, without matching their turnId.
   async function onServerRequest(rpcId: RequestId, method: string, params: any): Promise<unknown> {
     if (active === null || endReason !== null) {
       logError(`codex ${method} arrived outside a run`);
@@ -390,6 +393,11 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
       if (!Array.isArray(p.questions) || p.questions.length === 0 || p.questions.some((q) => typeof q?.question !== "string" || q.question === "")) {
         logError(`codex requestUserInput had no question text: ${JSON.stringify(params)}`);
         throw new Error("requestUserInput had no question text");
+      }
+      // A secret answer would be stored in the thread and the event log; refuse instead of asking.
+      if (p.questions.some((q) => q.isSecret)) {
+        logError("codex requestUserInput: secret input requested; not supported in chat sessions");
+        throw new Error("secret input requested; not supported in chat sessions");
       }
       const answers = await Promise.all(
         p.questions.map((q) =>

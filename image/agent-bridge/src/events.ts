@@ -27,7 +27,8 @@ export type BridgeEvent =
   | { type: "request.opened"; runId: string; requestId: string; kind: RequestKind; prompt: string; options?: { label: string; description?: string }[]; multiSelect?: boolean }
   | { type: "request.resolved"; requestId: string; answer: string | null; by: "user" | "expired" }
   | { type: "background.changed"; work: BackgroundWork[] }
-  | { type: "run.completed"; runId: string; nativeThreadId: string; usage: TokenUsage; costUsd: number | null }
+  // usage is null when the harness reported no usage for this run.
+  | { type: "run.completed"; runId: string; nativeThreadId: string; usage: TokenUsage | null; costUsd: number | null }
   | { type: "run.interrupted"; runId: string }
   | { type: "run.failed"; runId: string; error: string }
   | { type: "bridge.started"; version: string; resumed: boolean };

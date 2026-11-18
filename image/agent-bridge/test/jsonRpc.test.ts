@@ -60,6 +60,15 @@ describe("JsonRpcPeer", () => {
     expect(written).toEqual([{ id: 7, error: { code: -32603, message: "unsupported" } }]);
   });
 
+  test("a handler returning no result answers with an error and logs", async () => {
+    const { peer, written, receive, logs } = pipe();
+    peer.onRequest(async () => undefined);
+    receive({ id: 3, method: "item/tool/requestUserInput", params: {} });
+    await flush();
+    expect(written).toEqual([{ id: 3, error: { code: -32603, message: "handler for item/tool/requestUserInput returned no result" } }]);
+    expect(logs.some((l) => l.includes("item/tool/requestUserInput"))).toBe(true);
+  });
+
   test("notification reaches onNotification", () => {
     const { peer, written, receive } = pipe();
     const seen: [string, unknown][] = [];
