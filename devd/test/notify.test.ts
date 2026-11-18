@@ -25,6 +25,13 @@ test("pushOptsFor: session → deep link to the terminal, important → EMERGENC
   expect(pushOptsFor(undefined, DASH)).toEqual({});
 });
 
+test("pushOptsFor: a chat session links to its thread, not the terminal", () => {
+  const o = pushOptsFor({ session: { id: "dev-a-b", project: "a", repo: "b", runtime: "chat" } }, DASH);
+  expect(o).toMatchObject({ url: `${DASH}/sessions?thread=dev-a-b`, url_title: "Open chat" });
+  expect(pushOptsFor({ session: { id: "dev-a-b", project: "a", repo: "b", runtime: "tmux" } }, DASH))
+    .toMatchObject({ url: `${DASH}/sessions?terminal=dev-a-b`, url_title: "Open terminal" });
+});
+
 test("pushOptsFor: target → dashboard page (Pushover) + target/targetId/blocked (APNs)", () => {
   expect(pushOptsFor({ target: { kind: "prodWrites", id: "7" }, blocked: true }, DASH))
     .toEqual({ url: `${DASH}/prod-writes`, url_title: "Open in dashboard", target: "prodWrites", targetId: "7", blocked: true });

@@ -2,10 +2,11 @@ import type { Database } from "bun:sqlite";
 import { specFor } from "./agents";
 import {
   deleteAgentLiveState, getAgentLiveState, insertNotifyLog, insertWorkInterval, lastMetricTs, logEvent, updateSession,
-  upsertAgentLiveState, type AgentName, type NotifyDecision, type SessionRow,
+  upsertAgentLiveState, type AgentName, type NotifyDecision, type SessionRow, type SessionRuntime,
 } from "./db";
 
-export interface NotifySession { id: string; project: string; repo: string; agent?: AgentName; name?: string | null }
+/** `runtime`: a chat session's push links to its thread instead of the terminal (pushOptsFor). */
+export interface NotifySession { id: string; project: string; repo: string; agent?: AgentName; name?: string | null; runtime?: SessionRuntime }
 /** Where a notification leads after a tap when it does not belong to a session: a dashboard
  *  page (Pushover URL) or a screen in the iOS app (APNs `target`/`targetId`). */
 export type NotifyTargetKind = "prodWrites" | "sshApprovals" | "schedules" | "subscriptions" | "vault";
@@ -254,7 +255,7 @@ export class AgentEventHub {
       if (s.status !== "running" || this.state.has(s.id)) continue;
       const row = getAgentLiveState(this.d.db, s.id);
       if (!row) continue;
-      const session: NotifySession = { id: s.id, project: s.project, repo: s.repo, agent: s.agent, name: s.name };
+      const session: NotifySession = { id: s.id, project: s.project, repo: s.repo, agent: s.agent, name: s.name, runtime: s.runtime };
       const live: AgentLiveSnapshot = row.status === "working" || row.status === "waiting"
         ? { status: "unknown", body: "Waiting for agent status", reason: null, startedAt: row.started_at, updatedAt: now, statusSince: now }
         : {
@@ -356,7 +357,7 @@ export class AgentEventHub {
 
   handle(s: SessionRow, event: AgentEvent, meta: HookMeta = {}): void {
     const now = this.now();
-    const session = { id: s.id, project: s.project, repo: s.repo, agent: s.agent, name: s.name };
+    const session = { id: s.id, project: s.project, repo: s.repo, agent: s.agent, name: s.name, runtime: s.runtime };
     let st = this.state.get(s.id);
     if (!st) {
       st = this.freshState(session, s.important === 1,

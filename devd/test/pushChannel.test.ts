@@ -135,6 +135,22 @@ test("opts.url with ?terminal=<id> → sessionId + terminal:true in the payload"
   expect(payload.terminal).toBe(true);
 });
 
+test("opts.url with ?thread=<id> → sessionId + thread:true, no terminal flag", async () => {
+  const db = openDb(":memory:");
+  const path = await makeKeyFile();
+  upsertPushDevice(db, { token: "tok1", platform: "ios" });
+  const calls: string[][] = [];
+  const channel = createApnsChannel({ db, run: okRun(calls), now: () => Date.now() }, cfg(path));
+
+  channel.send("shop/cms", "m", { url: "https://dev.example.com/sessions?thread=dev-shop-cms", url_title: "Open chat" });
+  await flush();
+
+  const payload = findPayload(calls[0]) as ReturnType<typeof findPayload> & { thread?: boolean };
+  expect(payload.sessionId).toBe("dev-shop-cms");
+  expect(payload.thread).toBe(true);
+  expect(payload.terminal).toBeUndefined();
+});
+
 test("410 (gone) → the dead device is deleted from push_devices", async () => {
   const db = openDb(":memory:");
   const path = await makeKeyFile();

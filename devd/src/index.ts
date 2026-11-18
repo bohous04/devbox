@@ -1409,7 +1409,7 @@ setInterval(() => {
         // repo "portal/web" is the same thing twice, and with an EMERGENCY notification that rings
         // for a whole hour you cannot tell which one to go unblock. The session nickname
         // is carried by `s.name` — `listSessions` returns the whole row, so it is at hand.
-        const sess = { id: s.id, project: s.project, repo: s.repo, name: s.name, agent: s.agent };
+        const sess = { id: s.id, project: s.project, repo: s.repo, name: s.name, agent: s.agent, runtime: s.runtime };
         const t = stuckText(sess);
         notify(t.title, t.message, { session: sess, important: true, sound: true });
         logEvent(db, s.id, "agent_stuck", { at: now });
