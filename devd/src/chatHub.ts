@@ -55,8 +55,8 @@ export class ChatHub {
     const st = this.stateOf(sessionId);
     st.link = { status, since: this.now() };
     if (status !== "connected" || st.seeded) return;
+    const t = snapshot(); // a throw leaves the state unseeded, so the next connect tries again
     st.seeded = true;
-    const t = snapshot();
     const last = t.runs.at(-1);
     if (last?.status === "completed" && holdingCount(t) > 0) st.heldRun = last.runId;
     const s = this.d.session(sessionId);

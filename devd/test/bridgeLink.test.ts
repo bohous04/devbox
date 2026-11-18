@@ -76,12 +76,13 @@ function setup(prior: LoggedEvent[] = []) {
   const statuses: LinkStatus[] = [];
   const logs: string[] = [];
   const onEvent: (id: string, e: LoggedEvent) => void = (_id, e) => { seen.push(e); };
-  const t = { onEvent };
+  const onStatus: (id: string, s: LinkStatus) => void = (_id, s) => { statuses.push(s); };
+  const t = { onEvent, onStatus };
   const links = new BridgeLinks({
     controlDir: (id) => join(root, id),
     store: () => store,
     onEvent: (id, e) => t.onEvent(id, e),
-    onStatus: (_id, s) => { statuses.push(s); },
+    onStatus: (id, s) => t.onStatus(id, s),
     retryMs: RETRY,
     log: (m) => { logs.push(m); },
   });
@@ -265,4 +266,18 @@ test("an unreadable store keeps the link disconnected and retrying, without cras
   expect(logs.filter((l) => l.includes("session is ending"))).toHaveLength(1);
   broken = false;
   await waitFor(() => links.status(ID) === "connected", "connect once the store opens");
+});
+
+test("a throwing onStatus is logged and the link keeps working", async () => {
+  const { links, seen, logs, serve, t } = setup();
+  t.onStatus = (_id, st) => { throw new Error(`store unreadable while ${st}`); };
+  const s = serve({ events: [ev(1)] });
+  links.ensure(ID);
+  await waitFor(() => seen.length === 1, "replayed event");
+  expect(links.status(ID)).toBe("connected");
+  await links.send(ID, { kind: "interrupt" });
+  s.publish(ev(2));
+  await waitFor(() => seen.length === 2, "live event");
+  expect(logs).toContain(`bridge link ${ID}: onStatus failed for connecting: store unreadable while connecting`);
+  expect(logs).toContain(`bridge link ${ID}: onStatus failed for connected: store unreadable while connected`);
 });

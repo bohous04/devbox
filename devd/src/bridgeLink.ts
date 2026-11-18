@@ -87,7 +87,7 @@ export class BridgeLinks {
       pending: new Map(), retry: null, dropped: false, outageLogged: false,
     };
     this.links.set(sessionId, link);
-    this.d.onStatus(sessionId, "connecting");
+    this.notifyStatus(sessionId, "connecting");
     this.connect(sessionId, link);
   }
 
@@ -127,7 +127,13 @@ export class BridgeLinks {
   private setStatus(sessionId: string, link: Link, s: LinkStatus) {
     if (link.status === s) return;
     link.status = s;
-    this.d.onStatus(sessionId, s);
+    this.notifyStatus(sessionId, s);
+  }
+
+  /** Runs inside socket callbacks: a throw (e.g. a store read) must not escape, the link carries on. */
+  private notifyStatus(sessionId: string, s: LinkStatus) {
+    try { this.d.onStatus(sessionId, s); }
+    catch (err) { this.log(`bridge link ${sessionId}: onStatus failed for ${s}: ${err instanceof Error ? err.message : String(err)}`); }
   }
 
   private write(link: Link, f: ClientFrame) {
