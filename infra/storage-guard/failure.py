@@ -18,5 +18,6 @@ failures=m.read(path,{})
 recent=[t for t in failures.get(unit,[]) if t>time.time()-7200]+[time.time()]
 failures[unit]=recent
 m.atomic(path,failures)
-if len(recent)>=3:
+# The sweep runs for hours: three failures within two hours never happen, so it alerted never.
+if len(recent)>=(1 if 'maintenance' in unit else 3):
     g.notify('failure-'+unit,'Automatická údržba disku opakovaně nedoběhla. Data zůstala zachována a další pokus proběhne automaticky; běžící sessions pokračují.')

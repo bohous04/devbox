@@ -23,6 +23,8 @@ import uuid
 GIB = 2**30
 DEFAULT_CONFIG = Path('/etc/devbox-storage/config.json')
 DOCKER = '/usr/bin/docker'
+# Ignored paths a sweep may drop without an archive: build/tool output that is rebuilt on demand.
+REGENERABLE = {'__pycache__', '.pytest_cache', 'node_modules', '.cache', '.next', '.turbo', 'dist', 'build', 'coverage'}
 
 
 def run(args, timeout=300, **kw):
@@ -129,7 +131,7 @@ def referenced(path):
         candidates = [proc / 'cwd', proc / 'root']
         try:
             candidates += list((proc / 'fd').iterdir())
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):  # process exited mid-scan
             continue
         except PermissionError:
             return True
@@ -152,7 +154,7 @@ def referenced(path):
                             if (s.st_dev,s.st_ino)==identity:return True
                         except FileNotFoundError:
                             continue
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 pass
             except PermissionError:
                 return True
@@ -767,6 +769,7 @@ class Guard:
         self.borg(['compact',self.c['borg_repo']])
 
     def sweep(self):
+        started=time.time()
         registry=read(self.state/'registry.json',{})
         inventory=read(self.state/'inventory.json',{})
         live={r['name'] for r in inventory.get('sessions',[])}
@@ -813,19 +816,116 @@ class Guard:
                 continue
             todo[key]=(p,common)
         orphans=self.orphan_sessions(report,mounts,grace)
-        # HEAD, index and reflog of an orphan live in its registration (admin) dir: archive it too.
-        orphan_admin=[a for a in (self.admin_dir(o,o) for o in orphans) if a and a.is_dir()]
         # A released worktree inside an orphaned session goes with that session's directory.
         todo={k:v for k,v in todo.items() if not any(beneath(v[0],o) for o in orphans)}
-        if todo or orphans:
-            # One archive per sweep: each per-worktree archive re-read the whole shared bare
-            # repo (~15 min each), so a sweep could never keep up with agents.
-            shared=list(dict.fromkeys([x for _,c in todo.values() if c for x in self.git_storage(c)]+orphan_admin))
+        # Clean worktrees whose HEAD is on a remote hold nothing Git does not already have:
+        # remove them without an archive. Backing up these ~13 GB checkouts pushed every
+        # sweep past its time limit, so nothing was removed at all.
+        for key,(p,common) in list(todo.items()):
+            if common is None or not self.in_git(p):
+                continue
+            del todo[key]
+            e=registry[key]
             try:
-                archive,sigs=self.archive([p for p,_ in todo.values()]+orphans,'worktrees',shared,require_stable=False)
+                # The checks above can take a while: re-check the release, references and contents.
+                again=read(self.state/'registry.json',{}).get(key,{})
+                if (again.get('released_at')!=e['released_at'] or (p/'.git').stat().st_mtime>e['released_at']
+                        or referenced(p) or not self.in_git(p)):
+                    report.append(dict(path=str(p),owner=e.get('session'),reason='In use or changed before removal; kept'))
+                    continue
+                pinned=self.pin_history(p)
+                run(['/usr/bin/git','-c','safe.directory=*','-C',p,'worktree','remove','--force','--force',str(p)])
             except (RuntimeError,OSError,subprocess.SubprocessError) as err:
-                self.audit('released-worktree-archive-failed',paths=[str(p) for p,_ in todo.values()]+list(map(str,orphans)),error=str(err)[-300:])
-                todo={};orphans=[];report.append(dict(path='(batch)',reason='Archive of released worktrees failed: '+str(err)[-300:]))
+                # Not removed: fall back to the archive path instead of retrying this forever.
+                if p.exists():
+                    todo[key]=(p,common)
+                self.audit('released-worktree-cleanup-failed',path=str(p),error=str(err)[-300:])
+                continue
+            e.update(removed_at=time.time(),archive=None)
+            self.audit('released-worktree-removed-in-git',path=str(p),pinned_commits=pinned)
+        self.save_removals(registry)
+        # The rest is archived in bounded batches, each removed and recorded before the next:
+        # one archive of everything (31-46 checkouts, ~3 h) outlived the unit timeout and lost all progress.
+        batch_size=max(1,self.c.get('sweep_batch_size',8))
+        deadline=started+self.c.get('sweep_budget_seconds',9000)
+        pending=list(todo.items())
+        while pending or orphans:
+            batch_orphans,orphans=orphans[:batch_size],orphans[batch_size:]
+            n=max(0,batch_size-len(batch_orphans))
+            self.sweep_batch(dict(pending[:n]),batch_orphans,registry,report)
+            pending=pending[n:]
+            self.save_removals(registry)
+            if (pending or orphans) and time.time()>=deadline:
+                self.notify('sweep-backlog',f'Údržba disku nestihla {len(pending)+len(orphans)} uvolněných worktrees/sessions; pokračuje při dalším běhu.')
+                break
+        atomic(self.state/'review.json',dict(time=time.time(),candidates=report))
+
+    def owner_git(self, p, args, input=None):
+        """Git in an agent-writable repo runs as the worktree's owner: `status` executes
+        repo-configured fsmonitor/clean filters, which must never run as root."""
+        s=Path(p).stat()
+        if os.geteuid()==0 and not s.st_uid:
+            raise RuntimeError('Root-owned worktree: repo filters would run as root')
+        drop=['setpriv',f'--reuid={s.st_uid}',f'--regid={s.st_gid}','--clear-groups'] if os.geteuid()==0 else []
+        return run(drop+['/usr/bin/git','-c','safe.directory=*','-c','core.fsmonitor=false','-C',p,*args],
+                   timeout=600,env={**os.environ,'HOME':'/nonexistent'},input=input)
+
+    def in_git(self, p):
+        """True when the files of the worktree are all in Git: no changes (also hidden by
+        skip-worktree/assume-unchanged), no untracked files, no submodules, HEAD on a remote,
+        ignored only regenerable dirs. Its commit history is kept by pin_history()."""
+        if (Path(p)/'.gitmodules').exists():
+            return False
+        try:
+            if any(l[:1].islower() or l[:1]=='S' for l in self.owner_git(p,['ls-files','-v']).decode(errors='replace').splitlines()):
+                return False
+            status=self.owner_git(p,['status','--porcelain=v1','-z','--untracked-files=all','--ignored=matching'])
+            if self.owner_git(p,['rev-list','--max-count=1','HEAD','--not','--remotes']).strip():
+                return False
+        except (RuntimeError,OSError,subprocess.SubprocessError):
+            return False
+        for entry in filter(None,status.split(b'\0')):
+            # Only a whole ignored directory such as `node_modules/`, never a file inside one.
+            name=entry[3:].decode(errors='replace')
+            if not entry.startswith(b'!! ') or not name.endswith('/') or Path(name).name not in REGENERABLE:
+                return False
+        return True
+
+    def pin_history(self, p):
+        """`worktree remove` deletes the worktree's HEAD reflog, the only ref to commits left
+        behind by a rebase, amend or detached checkout; a remote-tracking ref alone may be
+        pruned later. Pin HEAD and those commits in the shared repo, which stays."""
+        log=Path(self.owner_git(p,['rev-parse','--absolute-git-dir']).decode().strip())/'logs'/'HEAD'
+        tips=[self.owner_git(p,['rev-parse','HEAD']).decode().strip()]
+        if log.exists():
+            tips+=[l.split()[1] for l in log.read_text(errors='replace').splitlines() if len(l.split())>1]
+        tips=[t for t in dict.fromkeys(tips) if re.fullmatch(r'[0-9a-f]{40,64}',t)]
+        unreachable=set(self.owner_git(p,['rev-list','--ignore-missing',*tips,'--not','--branches','--tags']).decode().split())
+        lost=[t for t in tips if t in unreachable]
+        if lost:
+            self.owner_git(p,['update-ref','--stdin'],input=''.join(f'update refs/devbox/released/{t} {t}\n' for t in lost).encode())
+        return len(lost)
+
+    def save_removals(self, registry):
+        # Re-read: agents release more worktrees while the archive runs (minutes to hours).
+        current=read(self.state/'registry.json',{})
+        for key,e in registry.items():
+            # Only the same release cycle: a `created` meanwhile cleared it on purpose.
+            if 'removed_at' in e and key in current and current[key].get('released_at')==e.get('released_at'):
+                current[key].update(removed_at=e['removed_at'],archive=e['archive'])
+        atomic(self.state/'registry.json',current)
+
+    def sweep_batch(self, todo, orphans, registry, report):
+        # HEAD, index and reflog of an orphan live in its registration (admin) dir: archive it too.
+        orphan_admin=[a for a in (self.admin_dir(o,o) for o in orphans) if a and a.is_dir()]
+        # Shared bare repo goes into every batch archive; borg deduplicates it.
+        shared=list(dict.fromkeys([x for _,c in todo.values() if c for x in self.git_storage(c)]+orphan_admin))
+        try:
+            archive,sigs=self.archive([p for p,_ in todo.values()]+orphans,'worktrees',shared,require_stable=False)
+        except (RuntimeError,OSError,subprocess.SubprocessError) as err:
+            self.audit('released-worktree-archive-failed',paths=[str(p) for p,_ in todo.values()]+list(map(str,orphans)),error=str(err)[-300:])
+            report.append(dict(path='(batch)',reason='Archive of released worktrees failed: '+str(err)[-300:]))
+            return
         try:
             # The archive can take hours: a session may have claimed its directory meanwhile.
             live=self.devd_sessions() if orphans else set()
@@ -862,14 +962,6 @@ class Guard:
             e['removed_at']=time.time()
             e['archive']=archive
             self.audit('released-worktree-offloaded',path=str(p),archive=archive)
-        # Re-read: agents release more worktrees while the archive runs (minutes to hours).
-        current=read(self.state/'registry.json',{})
-        for key,_ in todo.items():
-            # Only the same release cycle: a `created` meanwhile cleared it on purpose.
-            if 'removed_at' in registry[key] and key in current and current[key].get('released_at')==registry[key]['released_at']:
-                current[key].update(removed_at=registry[key]['removed_at'],archive=registry[key]['archive'])
-        atomic(self.state/'registry.json',current)
-        atomic(self.state/'review.json',dict(time=time.time(),candidates=report))
 
     def devd_sessions(self):
         with urllib.request.urlopen(self.c['sessions_url'], timeout=10) as r:

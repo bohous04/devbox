@@ -309,6 +309,109 @@ class Safety(unittest.TestCase):
         self.assertTrue(all(c.count('--force')==2 for c in removes), 'locked agent worktrees too')
         self.assertTrue(all('removed_at' in e for e in guard.read(self.g.state/'registry.json').values()))
 
+    def test_clean_pushed_worktree_is_removed_without_archive(self):
+        # Archiving ~13 GB checkouts whose content is already on the remote took the sweep past
+        # its 4 h limit every run, so nothing was ever removed and the disk filled up.
+        ws=self.released('pushed','local')
+        for p in ws.values():self.git(p,'gitdir: x\n')
+        guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[]})
+        archived=[];removed=[]
+        def fake_run(args,*a,**k):
+            args=[str(x) for x in args]
+            if 'remove' in args:removed.append(args[-1]);shutil.rmtree(args[-1])
+            return (str(self.root/'repo.git')+'\n').encode()
+        def fake_archive(paths,kind,shared=(),require_stable=True):
+            archived.append(sorted(map(str,paths)));return 'arch',{str(x):guard.signature(x) for x in paths}
+        with patch.object(guard,'run',side_effect=fake_run), \
+             patch.object(guard,'referenced',return_value=False), \
+             patch.object(self.g,'in_git',side_effect=lambda p:p.name=='pushed'), \
+             patch.object(self.g,'git_storage',return_value=[]), \
+             patch.object(self.g,'archive',side_effect=fake_archive):
+            self.g.sweep()
+        self.assertEqual(archived,[[str(ws['local'])]])
+        self.assertEqual(removed[0],str(ws['pushed']),'clean copies go first, before any archive')
+        reg=guard.read(self.g.state/'registry.json')
+        self.assertIsNone(reg['pushed']['archive']);self.assertEqual(reg['local']['archive'],'arch')
+
+    def test_clean_worktree_used_meanwhile_is_kept(self):
+        w=self.released('w')['w'];self.git(w,'gitdir: x\n')
+        guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[]})
+        checks=iter([True,False])   # dirty by the time it is about to be removed
+        with patch.object(guard,'run',return_value=(str(self.root/'repo.git')+'\n').encode()), \
+             patch.object(guard,'referenced',return_value=False), \
+             patch.object(self.g,'in_git',side_effect=lambda p:next(checks)), \
+             patch.object(self.g,'git_storage',return_value=[]), \
+             patch.object(self.g,'archive',side_effect=AssertionError('must not archive')):
+            self.g.sweep()
+        self.assertTrue(w.exists())
+        self.assertNotIn('removed_at',guard.read(self.g.state/'registry.json')['w'])
+
+    def test_in_git_requires_clean_tree_pushed_head_and_only_generated_ignores(self):
+        git=lambda *a,cwd:subprocess.run(['git','-c','user.name=t','-c','user.email=t@t','-c','init.defaultBranch=main',*a],cwd=cwd,check=True,capture_output=True)
+        remote=self.root/'remote.git';git('init','--bare',str(remote),cwd=self.root)
+        repo=self.root/'repo';git('clone',str(remote),str(repo),cwd=self.root)
+        (repo/'.gitignore').write_text('__pycache__/\n.env\n');(repo/'a').write_text('a')
+        git('add','.',cwd=repo);git('commit','-m','a',cwd=repo);git('push','origin','HEAD',cwd=repo)
+        w=self.root/'wt';git('worktree','add','--detach',str(w),cwd=repo)
+        self.assertTrue(self.g.in_git(w))
+        (w/'__pycache__').mkdir();(w/'__pycache__'/'x.pyc').write_text('x')
+        self.assertTrue(self.g.in_git(w),'regenerable ignored output is not work')
+        (w/'.env').write_text('SECRET=1')
+        self.assertFalse(self.g.in_git(w),'ignored local config exists nowhere else');(w/'.env').unlink()
+        (w/'build').mkdir();(w/'build'/'.env').write_text('SECRET=1')
+        self.assertFalse(self.g.in_git(w),'a secret inside an output-named dir is still a secret');shutil.rmtree(w/'build')
+        git('update-index','--skip-worktree','a',cwd=w);(w/'a').write_text('hidden')
+        self.assertFalse(self.g.in_git(w),'edits hidden by skip-worktree')
+        git('update-index','--no-skip-worktree','a',cwd=w);git('checkout','a',cwd=w)
+        self.assertTrue(self.g.in_git(w))
+        (w/'new').write_text('n')
+        self.assertFalse(self.g.in_git(w),'untracked file');(w/'new').unlink()
+        (w/'a').write_text('changed')
+        self.assertFalse(self.g.in_git(w),'modified file')
+        git('commit','-am','local',cwd=w)
+        self.assertFalse(self.g.in_git(w),'commit not on any remote')
+        (w/'b').write_text('b');git('add','b',cwd=w);git('commit','-m','detached work',cwd=w)
+        left=subprocess.run(['git','rev-parse','HEAD'],cwd=w,capture_output=True,text=True).stdout.strip()
+        git('checkout','--detach','origin/main',cwd=w)
+        self.assertTrue(self.g.in_git(w),'files are all in Git; history is pinned separately')
+        self.assertEqual(self.g.pin_history(w),2,'both commits left behind exist only in the reflog')
+        pinned=subprocess.run(['git','for-each-ref','--format=%(objectname)','refs/devbox/released/'],cwd=repo,capture_output=True,text=True).stdout.split()
+        self.assertIn(left,pinned)
+        git('worktree','remove',str(w),cwd=repo);git('gc','--prune=now',cwd=repo)
+        git('cat-file','-e',left,cwd=repo)
+
+    def test_archive_batches_persist_progress_and_stop_at_budget(self):
+        self.g.c.update(sweep_batch_size=2,sweep_budget_seconds=0)
+        ws=self.released('a','b','c')
+        for p in ws.values():self.git(p,'gitdir: x\n')
+        guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[]})
+        archived=[]
+        def fake_run(args,*a,**k):
+            args=[str(x) for x in args]
+            if 'remove' in args:shutil.rmtree(args[-1])
+            return (str(self.root/'repo.git')+'\n').encode()
+        def fake_archive(paths,kind,shared=(),require_stable=True):
+            archived.append(len(paths));return 'arch',{str(x):guard.signature(x) for x in paths}
+        with patch.object(guard,'run',side_effect=fake_run), \
+             patch.object(guard,'referenced',return_value=False), \
+             patch.object(self.g,'in_git',return_value=False), \
+             patch.object(self.g,'git_storage',return_value=[]), \
+             patch.object(self.g,'notify') as notify, \
+             patch.object(self.g,'archive',side_effect=fake_archive):
+            self.g.sweep()
+        self.assertEqual(archived,[2],'one batch always runs, no new batch past the budget')
+        reg=guard.read(self.g.state/'registry.json')
+        self.assertEqual(sum('removed_at' in e for e in reg.values()),2)
+        self.assertEqual(notify.call_args.args[0],'sweep-backlog')
+        self.g.c.update(sweep_budget_seconds=3600)
+        with patch.object(guard,'run',side_effect=fake_run), \
+             patch.object(guard,'referenced',return_value=False), \
+             patch.object(self.g,'in_git',return_value=False), \
+             patch.object(self.g,'git_storage',return_value=[]), \
+             patch.object(self.g,'archive',side_effect=fake_archive):
+            self.g.sweep()
+        self.assertEqual(archived,[2,1],'the next run continues with the rest')
+
     def test_worktree_changed_during_archive_is_kept(self):
         ws=self.released('a','b')
         for p in ws.values():self.git(p,'gitdir: x\n')
