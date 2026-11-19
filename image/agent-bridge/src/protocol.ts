@@ -33,7 +33,9 @@ export type ClientFrame = { t: "hello"; afterSeq: number } | { t: "cmd"; id: str
 export type ServerFrame =
   | { t: "event"; e: LoggedEvent }
   | { t: "res"; id: string; ok: boolean; error?: string; result?: unknown }
-  | { t: "ready"; lastSeq: number };
+  // `version` and `awaitingTarget` (the bridge holds no harness until devd sends switchTarget) are in every
+  // handshake since 1.1.0; a bridge without them predates switching.
+  | { t: "ready"; lastSeq: number; version?: string; awaitingTarget?: boolean };
 
 export class ProtocolError extends Error {}
 

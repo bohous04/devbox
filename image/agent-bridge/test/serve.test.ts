@@ -15,6 +15,7 @@ import {
   EXIT_HARNESS_ENDED,
   EXIT_STOPPED,
   harnessEnv,
+  BRIDGE_VERSION,
   NO_THREAD_ERROR,
   RESTART_LOOP_ERROR,
   serve,
@@ -22,7 +23,7 @@ import {
   serveConfigFromEnv,
   type HarnessOpenOptions,
 } from "../src/serve";
-import type { SwitchTarget } from "../src/protocol";
+import type { ServerFrame, SwitchTarget } from "../src/protocol";
 import { loadState, saveState, type BridgeState } from "../src/state";
 
 const MIN = 60_000;
@@ -700,6 +701,132 @@ describe("switching: fix round 1", () => {
     f.emit({ type: "thread.native", harness: "claude", nativeThreadId: "t1", account: null, model: "claude-opus-4-5" });
     f.emit({ type: "thread.native", harness: "claude", nativeThreadId: "t1", account: null, model: null });
     expect(state().model).toBe("claude-opus-4-5");
+  });
+});
+
+/** The `ready` frame of a new connection's handshake. */
+async function handshake(): Promise<Extract<ServerFrame, { t: "ready" }>> {
+  let buf = "";
+  let done: (f: Extract<ServerFrame, { t: "ready" }>) => void = () => {};
+  const ready = new Promise<Extract<ServerFrame, { t: "ready" }>>((r) => (done = r));
+  const socket = await Bun.connect({
+    unix: socketPath,
+    socket: {
+      data(_s, chunk) {
+        buf += chunk.toString("utf8");
+        for (const line of buf.split("\n").filter(Boolean)) {
+          const f = JSON.parse(line) as ServerFrame;
+          if (f.t === "ready") done(f);
+        }
+      },
+    },
+  });
+  socket.write(JSON.stringify({ t: "hello", afterSeq: 1_000_000 }) + "\n");
+  try {
+    return await ready;
+  } finally {
+    socket.end();
+  }
+}
+
+describe("final review fixes", () => {
+  test("C1: a thread that cannot be resumed at start keeps serve up, reports resume-failed and holds the queue for devd's fresh target", async () => {
+    saveState(join(dir, "state.json"), baseState({ harness: "codex", nativeThreadId: "step2-thread", queue: [{ runId: "r-q", text: "queued", attachments: [] }], pendingHandoff: { preamble: "stale delta" } }));
+    codexAccount(ACCT);
+    const f = fakeHarness({ readyErrors: [new ResumeFailedError("thread/resume step2-thread failed: not found")] });
+    const bridge = await serve({
+      bridgeDir: dir, socketPath, harness: "codex", account: ACCT, model: null,
+      openHarness: (o) => f.open(o),
+      resolveTarget: (t) => resolveTarget(t, { codexAccountsRoot: codexRoot(), homes: homes(), claudeExecutable: null }),
+      now: () => NOW, logError: () => {},
+    });
+    closers.push(() => bridge.close());
+    expect(f.opens[0].resume).toBe("step2-thread");
+    const status = await Promise.race([bridge.closed, new Promise((r) => setTimeout(() => r("open"), 20))]);
+    expect(status).toBe("open");
+    const failed = events().filter((e) => e.type === "run.failed");
+    expect(failed).toEqual([{ type: "run.failed", runId: expect.any(String), error: "resume-failed" }]);
+    expect(failed[0].type === "run.failed" && failed[0].runId).not.toBe("r-q");
+    expect(state()).toMatchObject({ nativeThreadId: null, pendingHandoff: null, queue: [{ runId: "r-q", text: "queued" }] });
+    expect(await handshake()).toMatchObject({ awaitingTarget: true, version: BRIDGE_VERSION });
+    // A new message waits with the queued one instead of reaching a harness without a thread.
+    const later = (await cmd({ kind: "startTurn", text: "later" })) as { runId: string };
+    expect(events()).toContainEqual({ type: "run.queued", runId: later.runId, text: "later", attachments: [] });
+    expect(f.turns).toEqual([]);
+
+    // devd's re-plan: the same target, a fresh thread, the full handoff with the first waiting message.
+    await switchCmd({ harness: "codex", account: ACCT, model: null, env: {} }, null, { preamble: "full" });
+    expect(f.opens[1].resume).toBeNull();
+    expect(f.turns.map((t) => [t.runId, t.text])).toEqual([["r-q", "full\n\nUser message:\nqueued"], [later.runId, "later"]]);
+    expect((await handshake()).awaitingTarget).toBe(false);
+  });
+
+  test("C1: a failed resume during a switch also holds new messages for devd's fresh target", async () => {
+    const f = fakeHarness({ readyErrors: [undefined, new ResumeFailedError("no transcript")] });
+    await start(f);
+    const target: SwitchTarget = { harness: "claude", account: "b", model: null, env: { CLAUDE_CONFIG_DIR: claudeProfile("b") } };
+    await switchCmd(target, "thread-dead");
+    expect((await handshake()).awaitingTarget).toBe(true);
+    const r = (await cmd({ kind: "startTurn", text: "hi" })) as { runId: string };
+    expect(f.turns).toEqual([]);
+    await switchCmd(target, null, { preamble: "full" });
+    expect(f.turns).toEqual([{ runId: r.runId, text: "full\n\nUser message:\nhi", origin: "user" }]);
+  });
+
+  test("I1: after a VPS reboot, the re-sent target without a handoff keeps the bridge's pending handoff; another target replaces it", async () => {
+    const f = fakeHarness();
+    const bridge = await start(f);
+    const env = { CLAUDE_CONFIG_DIR: claudeProfile("proxy", ""), ANTHROPIC_BASE_URL: "http://proxy.invalid", ANTHROPIC_AUTH_TOKEN: "tok" };
+    await switchCmd({ harness: "claude", account: null, model: "proxy-model", env }, null, { preamble: "P" });
+    f.emit({ type: "thread.native", harness: "claude", nativeThreadId: "proxy-thread", account: null, model: "proxy-model" });
+    await bridge.close();
+
+    // Reboot: devd lost its memory and rebuilds the target without the handoff.
+    const g = fakeHarness();
+    const again = await start(g);
+    await switchCmd({ harness: "claude", account: null, model: "proxy-model", env }, "proxy-thread", null);
+    expect(state().pendingHandoff).toEqual({ preamble: "P" });
+    await cmd({ kind: "startTurn", text: "hi" });
+    expect(g.turns.map((t) => t.text)).toEqual(["P\n\nUser message:\nhi"]);
+    g.complete();
+    await again.close();
+
+    const h = fakeHarness();
+    await start(h);
+    await switchCmd({ harness: "claude", account: null, model: "proxy-model", env }, "proxy-thread", { preamble: "Q" });
+    expect(state().pendingHandoff).toEqual({ preamble: "Q" });
+    await switchCmd({ harness: "claude", account: null, model: "other-model", env }, "proxy-thread", null);
+    expect(state().pendingHandoff).toBeNull();
+  });
+
+  test("I3: a setModel target keeps only the model; a restart with another leased account runs on it and announces it", async () => {
+    const f = fakeHarness();
+    const bridge = await start(f, { account: "acct-a" });
+    await cmd({ kind: "setModel", model: "claude-sonnet-5-5" });
+    await bridge.close();
+    const g = fakeHarness();
+    await start(g, { account: "acct-b" });
+    expect(g.opens[0].target).toMatchObject({ harness: "claude", account: "acct-b", model: "claude-sonnet-5-5" });
+    expect(state()).toMatchObject({ account: "acct-b", target: { account: "acct-b", model: "claude-sonnet-5-5" } });
+    g.emit({ type: "thread.native", harness: "claude", nativeThreadId: "t1", account: null, model: null });
+    expect(events().at(-1)).toMatchObject({ type: "thread.native", account: "acct-b" });
+  });
+
+  test("I3: a switched target with its own home keeps its account whatever the launch leased", async () => {
+    const f = fakeHarness();
+    const bridge = await start(f, { account: "acct-a" });
+    await switchCmd({ harness: "claude", account: "b", model: null, env: { CLAUDE_CONFIG_DIR: claudeProfile("b") } });
+    await bridge.close();
+    const g = fakeHarness();
+    await start(g, { account: "acct-c" });
+    expect(g.opens[0].target).toMatchObject({ account: "b" });
+    expect(state().account).toBe("b");
+  });
+
+  test("M1: the handshake names a bridge version newer than the one before switching", async () => {
+    await start(fakeHarness());
+    expect(BRIDGE_VERSION).not.toBe("1.0.0");
+    expect(await handshake()).toMatchObject({ version: BRIDGE_VERSION, awaitingTarget: false });
   });
 });
 

@@ -32,6 +32,7 @@ beforeEach(async () => {
       if (cmd.kind === "endWait") return void waits.clear();
       throw new Error(`unexpected ${cmd.kind}`);
     },
+    handshake: () => ({ version: "test", awaitingTarget: false }),
     logError: () => {},
   });
   closers.push(() => server.close());

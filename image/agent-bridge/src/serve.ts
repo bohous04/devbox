@@ -14,15 +14,16 @@ import { startServer } from "./server";
 import { loadState, saveState, type BridgeState, type PersistedTarget } from "./state";
 import { DeclaredWaits } from "./waits";
 
-export const BRIDGE_VERSION = "1.0.0";
+export const BRIDGE_VERSION = "1.1.0";
 export const DEFAULT_BRIDGE_DIR = "/run/devd/bridge";
 export const CLAUDE_ACCOUNTS_ROOT = "/home/dev/.claude-accounts";
 export const CODEX_ACCOUNTS_ROOT = "/home/dev/.codex-accounts";
 export const RESTART_LOOP_ERROR = "restart loop: no automatic continuation";
 export const NO_THREAD_ERROR = "restart before the conversation started; resend your message";
-/** `run.failed` error for a switch whose resume did not work (on a run id no `run.started` announced). */
+/** `run.failed` error for a resume that did not work, at a switch or at start (on a run id no `run.started`
+ *  announced); the bridge then awaits devd's fresh target. */
 export const RESUME_FAILED = "resume-failed";
-const AWAITING_TARGET_ERROR = "the bridge restarted after a switch and waits for devd to send switchTarget again";
+const AWAITING_TARGET_ERROR = "the bridge waits for devd to send switchTarget (after a restart or a failed resume)";
 
 // Exit statuses of `agent-bridge serve`, read by agent-bridge-launch.
 export const EXIT_STOPPED = 0;
@@ -279,9 +280,15 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     target: null,
     pendingHandoff: null,
   };
-  if (state.target === null) state.account = o.account;
-  // A persisted target whose secret env values were dropped cannot be opened until devd sends it again.
-  const awaitingTarget = state.target !== null && state.target.droppedEnvKeys.length > 0;
+  // A target without its own home (a setModel on the launch target) keeps only the model choice: the account is the
+  // one this launch leased, which a recreated container may have changed.
+  if (state.target !== null && !state.target.env.CLAUDE_CONFIG_DIR && !state.target.env.CODEX_HOME) {
+    state.target = persistableTarget({ harness: state.target.harness, account: o.account, model: state.target.model, env: o.targetEnv ?? {} });
+  }
+  state.account = state.target === null ? o.account : state.target.account;
+  // A persisted target whose secret env values were dropped cannot be opened until devd sends it again. Also set
+  // after a failed resume, until devd sends the fresh target; every handshake reports it.
+  let awaitingTarget = state.target !== null && state.target.droppedEnvKeys.length > 0;
   let current: SwitchTarget | null = state.target === null
     ? { harness: o.harness, account: o.account, model: o.model, env: o.targetEnv ?? {} }
     : awaitingTarget ? null : { harness: state.target.harness, account: state.target.account, model: state.target.model, env: state.target.env };
@@ -350,10 +357,10 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     })());
   const close = () => shutdown(EXIT_STOPPED);
 
-  // `retired` marks a harness serve closes on purpose (restartAgent, shutdown) or, opened by a switch, one whose
-  // resume failed (devd re-plans); any other end exits serve so the launcher starts a fresh bridge that resumes the
-  // thread.
-  function openHarness(forSwitch = false): { session: HarnessSession; retired: boolean } {
+  // `retired` marks a harness serve closes on purpose (restartAgent, shutdown) or, opened by a switch or at start, one
+  // whose resume failed (devd re-plans); any other end exits serve so the launcher starts a fresh bridge that resumes
+  // the thread.
+  function openHarness(handlesResumeFailure = false): { session: HarnessSession; retired: boolean } {
     const h = {
       retired: false,
       session: o.openHarness({
@@ -368,7 +375,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       }),
     };
     // Registered before the end handler, so a failed resume is retired before its session's end is looked at.
-    if (forSwitch) {
+    if (handlesResumeFailure) {
       h.session.ready.catch((e) => {
         if (e instanceof ResumeFailedError) h.retired = true;
       });
@@ -484,13 +491,17 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     await retireHarness();
     // A different thread (or harness) does not continue the old running usage totals.
     if (target.harness !== state.harness || cmd.resume !== state.nativeThreadId) state.usageBaseline = null;
+    // The bridge owns the pending handoff: the same target and thread again without one (devd re-sending after a
+    // restart) keeps it; anything else replaces it.
+    const sameTarget = target.harness === state.harness && target.account === state.account
+      && target.model === (state.target !== null ? state.target.model : current!.model) && cmd.resume === state.nativeThreadId;
     current = target;
     state.target = persistableTarget(target);
     state.harness = target.harness;
     state.account = target.account;
     state.model = target.model;
     state.nativeThreadId = cmd.resume;
-    state.pendingHandoff = cmd.handoff;
+    if (cmd.handoff !== null || !sameTarget) state.pendingHandoff = cmd.handoff;
     persist();
     const h = openHarness(true);
     harness = h;
@@ -498,16 +509,25 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       await h.session.ready;
     } catch (e) {
       if (!(e instanceof ResumeFailedError)) throw e;
-      // devd re-plans with a fresh thread and a full handoff; this one's handoff was a delta for the dead thread.
-      // The run id is new and never started: nothing ran.
-      logError(`agent-bridge: ${e.message}`);
-      state.nativeThreadId = null;
-      state.pendingHandoff = null;
-      persist();
-      server.publish({ type: "run.failed", runId: crypto.randomUUID(), error: RESUME_FAILED });
+      resumeFailed(e);
       return;
     }
+    awaitingTarget = false;
     if (recoveryPending) await recover();
+  }
+
+  /** The harness could not resume the thread: devd re-plans a fresh thread with a full handoff and sends it as
+   *  switchTarget. Until then the bridge awaits that target (reported on every handshake); queued and new messages
+   *  wait for it. A handoff still pending was a delta for the dead thread. The run id is new and never started:
+   *  nothing ran. */
+  function resumeFailed(e: ResumeFailedError): void {
+    logError(`agent-bridge: ${e.message}; waiting for devd's fresh target`);
+    state.nativeThreadId = null;
+    state.pendingHandoff = null;
+    persist();
+    recoveryPending = true;
+    awaitingTarget = true;
+    server.publish({ type: "run.failed", runId: crypto.randomUUID(), error: RESUME_FAILED });
   }
 
   async function handle(cmd: BridgeCommand): Promise<unknown> {
@@ -552,7 +572,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   }
 
   const { unresolved, announced } = scanLog(log);
-  const server = startServer({ socketPath: o.socketPath, log, onCommand: handle, logError });
+  const server = startServer({ socketPath: o.socketPath, log, onCommand: handle, handshake: () => ({ version: BRIDGE_VERSION, awaitingTarget }), logError });
   const sweep = setInterval(() => {
     waits.sweep();
     const live = notOverdue(adapterWork);
@@ -561,6 +581,20 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       publishBackground();
     }
   }, o.sweepMs ?? SWEEP_MS);
+  /** Opens the target at start; a thread that cannot be resumed is devd's to re-plan (resumeFailed), any other
+   *  failure ends the harness and serve exits for a restart. */
+  async function startHarness(): Promise<void> {
+    const h = openHarness(true);
+    harness = h;
+    try {
+      await h.session.ready;
+    } catch (e) {
+      if (e instanceof ResumeFailedError) resumeFailed(e);
+      return;
+    }
+    await recover();
+  }
+
   server.publish({
     type: "bridge.started",
     version: BRIDGE_VERSION,
@@ -611,8 +645,8 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     }
   }
 
-  let harness: { session: HarnessSession; retired: boolean } | null = awaitingTarget ? null : openHarness();
-  if (!awaitingTarget) await recover();
+  let harness: { session: HarnessSession; retired: boolean } | null = null;
+  if (!awaitingTarget) await startHarness();
 
   return { closed, close };
 }
