@@ -21,6 +21,10 @@ export interface ProviderThread {
   resumeFailed: boolean;
 }
 
+/** The thread store's schema (`PRAGMA user_version`). A change to the schema raises it and adds a migration from the
+ *  previous version in `open`; a store with a higher version (written by a newer devd) is refused, never guessed at. */
+export const THREAD_STORE_SCHEMA = 1;
+
 /** Per-session conversation store: `<root>/_threads/<id>.sqlite`. Conversation data stays out of the
  *  main devd DB on purpose. Items are ordered by their own `id`; `seq` is the log seq of the event that created them (one event can create
  *  several items); `updated_seq`
@@ -39,6 +43,19 @@ export class ThreadStore {
     db.run("PRAGMA busy_timeout = 5000");
     db.run("PRAGMA journal_mode = WAL");
     db.run("PRAGMA synchronous = NORMAL");
+    const version = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+    if (version > THREAD_STORE_SCHEMA) {
+      db.close();
+      throw new Error(`thread store schema ${version} is newer than this devd's (${THREAD_STORE_SCHEMA}): ${ThreadStore.path(root, sessionId)}`);
+    }
+    if (version === 0) db.transaction(() => ThreadStore.createSchema1(db))();
+    return new ThreadStore(db, opts.onNotice ?? (() => {}));
+  }
+
+  /** Schema 1: every store from before `user_version` (steps 2-5 created and extended them without one) and every new
+   *  store. Idempotent on purpose: an unversioned store may be of any shape step 2-5 shipped, so tables are created if
+   *  missing and the columns added since step 2 are added if missing. */
+  private static createSchema1(db: Database) {
     db.run(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)`);
     db.run(`CREATE TABLE IF NOT EXISTS runs (
       run_id TEXT PRIMARY KEY, origin TEXT NOT NULL, status TEXT NOT NULL, harness TEXT,
@@ -69,7 +86,7 @@ export class ThreadStore {
     if (!(db.query("PRAGMA table_info(items)").all() as { name: string }[]).some((c) => c.name === "attachments")) {
       db.run("ALTER TABLE items ADD COLUMN attachments TEXT");
     }
-    return new ThreadStore(db, opts.onNotice ?? (() => {}));
+    db.run(`PRAGMA user_version = 1`);
   }
 
   lastSeq(): number { return this.meta("last_seq"); }
