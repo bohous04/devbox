@@ -77,6 +77,17 @@ export function runtimeChoice(wanted: "tmux" | "chat", chatBlock: string | null,
   return { runtime: other, notice: `${blocked}, so this session runs in ${other}` };
 }
 
+/** The form's runtime once the configured default arrives: a runtime the user picked meanwhile stays (S6-R18). */
+export function runtimeAfterDefault(picked: "tmux" | "chat" | null, def: "tmux" | "chat"): "tmux" | "chat" {
+  return picked ?? def;
+}
+
+/** The repo's running sessions of the other runtime than the form's: the form names its runtime, so devd would not
+ *  join them, and starting would put a second container next to a live session — the form offers to open them. */
+export function runningInOtherRuntime<T extends { runtime?: "tmux" | "chat"; status: "running" | "stopped" }>(repoSessions: T[], runtime: "tmux" | "chat"): T[] {
+  return repoSessions.filter((s) => s.status === "running" && (s.runtime ?? "tmux") !== runtime);
+}
+
 /** Normalizes text to a profile — mirrors `agentNameFor` from devd/src/agents.ts
  *  (it cannot be imported here — this is a vite bundle for the browser). `agent` comes
  *  from the API as a plain string; the fallback to claude is the same as in devd and

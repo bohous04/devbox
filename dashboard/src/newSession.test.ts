@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import {
-  AGENT_IDS, AGENT_PROFILES, SOLO, chatRuntimeBlock, defaultAgentFor, folderChoices, instaboxAgentBlock, isProxyAgent, profileFor, projectChoices, repoChoices, runtimeChoice, sessionsFor, soleProject, tmuxRuntimeBlock,
+  AGENT_IDS, AGENT_PROFILES, SOLO, chatRuntimeBlock, defaultAgentFor, folderChoices, instaboxAgentBlock, isProxyAgent, profileFor, projectChoices, repoChoices, runningInOtherRuntime, runtimeAfterDefault, runtimeChoice, sessionsFor, soleProject, tmuxRuntimeBlock,
 } from "./newSession";
 import type { TreeProject } from "./api";
 // Only this test may import devd — it ensures the manual mirror in newSession.ts
@@ -153,4 +153,17 @@ test("runtimeChoice on the VPS mirrors devd runtimeForOmitted for every agent an
       expect(runtimeChoice(def, chatRuntimeBlock(id, "vps"), tmuxRuntimeBlock(id))).toEqual({ runtime: devd.runtime, notice: devd.notice ?? null });
     }
   }
+});
+
+test("runtimeAfterDefault: the configured default fills an unpicked runtime, never overwrites a pick (S6-R18)", () => {
+  expect(runtimeAfterDefault(null, "chat")).toBe("chat");
+  expect(runtimeAfterDefault("tmux", "chat")).toBe("tmux");
+  expect(runtimeAfterDefault("chat", "tmux")).toBe("chat");
+});
+
+test("runningInOtherRuntime: the repo's running sessions the form's runtime would not join (S6-R18)", () => {
+  const s = (id: string, runtime: "tmux" | "chat" | undefined, status: "running" | "stopped") => ({ id, runtime, status });
+  const repo = [s("dev-x-r", "tmux", "running"), s("dev-x-r-2", "chat", "stopped"), s("dev-x-r-3", undefined, "running"), s("dev-x-r-4", "chat", "running")];
+  expect(runningInOtherRuntime(repo, "chat").map((x) => x.id)).toEqual(["dev-x-r", "dev-x-r-3"]);   // no runtime = tmux
+  expect(runningInOtherRuntime(repo, "tmux").map((x) => x.id)).toEqual(["dev-x-r-4"]);
 });
