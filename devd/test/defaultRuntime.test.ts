@@ -202,3 +202,23 @@ test("a schedule keeps its stored runtime when the default flips (create, then f
   expect(getSchedule(h.db, id)).toMatchObject({ name: "renamed", runtime: "tmux" });
 });
 
+test("an invalid defaultRuntime in the config repo → 400 with the config error on every path that reads it", async () => {
+  const bad = { ...DEFAULT_CONFIG, settings: { ...DEFAULT_CONFIG.settings, defaultRuntime: "vm" } } as unknown as DevConfig;
+  const h = harness(bad);
+  const configRepo = { read: () => validateConfig(bad), write: async () => {} };
+  const app = createApp(fakeDeps({
+    db: h.db, configRepo, mgr: { open: async () => { throw new Error("must not open"); } } as never,
+    instabox: { sessions: { startCreate: async () => { throw new Error("must not create"); } } } as never,
+  }));
+  const post = (path: string, body: unknown) =>
+    app.request(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  for (const [path, body] of [
+    ["/api/sessions", BASE],
+    ["/api/sessions", { ...BASE, cloneUrl: "https://git.example/x.git", host: "instabox" }],
+    ["/api/schedules", SCHEDULE],
+  ] as const) {
+    const r = await post(path, body);
+    expect(r.status).toBe(400);
+    expect((await r.json() as { error: string }).error).toBe("config.settings.defaultRuntime must be tmux or chat");
+  }
+});

@@ -1010,7 +1010,10 @@ export function createApp(d: ApiDeps): Hono {
       if (blocked) return c.json({ error: blocked }, 400);
       if (!d.instabox) return c.json({ error: "InstaBox is not configured" }, 503);
       // InstaBox sessions are tmux. A request that named no runtime says so when the default is chat (S6-R4).
-      const notice = runtime === undefined && resolveDefaultRuntime(d.configRepo.read().settings) === "chat" ? "InstaBox sessions run in tmux" : undefined;
+      let notice: string | undefined;
+      // A broken config is this request's error, the same 400 as on the VPS path below, never a silent tmux.
+      try { if (runtime === undefined && resolveDefaultRuntime(d.configRepo.read().settings) === "chat") notice = "InstaBox sessions run in tmux"; }
+      catch (e) { return c.json({ error: (e as Error).message }, 400); }
       try {
         const job = await d.instabox.sessions.startCreate({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent });
         return c.json({ jobId: job.id, sessionId: job.sessionId, runtime: "tmux", ...(notice ? { runtimeNotice: notice } : {}) }, 202);
@@ -2178,8 +2181,11 @@ export function createApp(d: ApiDeps): Hono {
     const invalid = scheduleRuntimeError(d.db, b.folder, b.project, b.repo, b.runtime, b.agent);
     if (invalid) return c.json({ error: invalid }, 400);
     // No runtime named: the schedule stores the default at creation and keeps it when the default flips (S6-R7).
-    const picked: { runtime: SessionRuntime; notice?: string } = b.runtime !== undefined ? { runtime: b.runtime }
-      : runtimeForOmitted(resolveDefaultRuntime(d.configRepo.read().settings), resolveAgent((b.agent ?? undefined) as AgentName | undefined, getRepoAgent(d.db, b.folder, b.project, b.repo)), "schedule");
+    let picked: { runtime: SessionRuntime; notice?: string };
+    try {
+      picked = b.runtime !== undefined ? { runtime: b.runtime }
+        : runtimeForOmitted(resolveDefaultRuntime(d.configRepo.read().settings), resolveAgent((b.agent ?? undefined) as AgentName | undefined, getRepoAgent(d.db, b.folder, b.project, b.repo)), "schedule");
+    } catch (e) { return c.json({ error: (e as Error).message }, 400); }
     const bad = scheduleRuntimeError(d.db, b.folder, b.project, b.repo, picked.runtime, b.agent);
     if (bad) return c.json({ error: bad }, 400);
     const row: ScheduleRow = { id: crypto.randomUUID(), name: b.name, cron: b.cron, folder: b.folder, project: b.project, repo: b.repo, clone_url: b.cloneUrl, prompt: b.prompt, important: b.important === 1 ? 1 : 0, enabled: 1, last_run_at: null, runtime: picked.runtime, agent: b.agent ?? null };
