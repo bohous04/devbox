@@ -102,7 +102,7 @@ function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; pro
   const app = new Hono();
   registerThreadRoutes(app, {
     db, mgr: { isEnding: () => false }, threads: () => store, bus: new EventBus(), inbox: { changedSafe: () => {} } as never,
-    links: { send: deps.links.send, ensure: () => {}, startTurnWhenConnected: () => {} }, switcher: sw,
+    links: { send: deps.links.send, ensure: () => {}, startTurnWhenConnected: () => {} }, switcher: sw, untilReset: () => { throw new Error("not used"); },
   });
   const post = async (what: string, body: unknown) => {
     const r = await app.fetch(new Request(`http://x/api/sessions/${CHAT.id}/thread/${what}`, {

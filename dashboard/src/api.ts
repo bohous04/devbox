@@ -584,6 +584,11 @@ export const api = {
     j<ChatSwitchResult>(`/api/sessions/${encodeURIComponent(id)}/thread/harness`, post({ agent })),
   markSeen: (id: string, seq: number) => j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/seen`, post({ seq })),
   inbox: () => j<{ items: InboxItem[] }>("/api/inbox"),
+  // Inbox shelves (any session, tmux too); each answers the session's new inbox item.
+  settle: (id: string) => j<InboxItem>(`/api/sessions/${encodeURIComponent(id)}/settle`, { method: "POST" }),
+  unsettle: (id: string) => j<InboxItem>(`/api/sessions/${encodeURIComponent(id)}/unsettle`, { method: "POST" }),
+  snooze: (id: string, to: { until: number } | { untilReset: true }) => j<InboxItem>(`/api/sessions/${encodeURIComponent(id)}/snooze`, post(to)),
+  snoozeReset: (id: string) => j<{ resetsAt: number } | { reason: string }>(`/api/sessions/${encodeURIComponent(id)}/snooze-reset`),
   schedules: () => j<Schedule[]>("/api/schedules"),
   createSchedule: (s: { name: string; cron: string; folder: string; project: string; repo: string; cloneUrl: string; prompt: string; important?: 0 | 1; runtime?: "tmux" | "chat"; agent?: AgentName }) => j<Schedule>("/api/schedules", post(s)),
   updateSchedule: (id: string, patch: Partial<Pick<Schedule, "name" | "cron" | "prompt" | "enabled" | "important">>) => j<Schedule>(`/api/schedules/${id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(patch) }),

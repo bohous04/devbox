@@ -8,6 +8,7 @@ import { AgentDisconnected, CommandFailed, CommandTimeout } from "../src/bridgeL
 import { getSession, insertSession, listSessions, openDb, type SessionRow } from "../src/db";
 import { EventBus } from "../src/eventBus";
 import { Inbox } from "../src/sessionInbox";
+import type { ResetTarget } from "../src/sessionAttention";
 import { ThreadStore } from "../src/threadStore";
 import type { BridgeCommand } from "../../image/agent-bridge/src/protocol";
 import type { BridgeEvent, LoggedEvent, ThreadItem, ThreadSnapshot } from "../../shared/thread";
@@ -27,7 +28,7 @@ const completed = (runId: string): BridgeEvent => ({ type: "run.completed", runI
 const said = (runId: string, itemId: string, text: string): BridgeEvent => ({ type: "message.final", runId, itemId, role: "assistant", text });
 const asked = (runId: string, requestId: string): BridgeEvent => ({ type: "request.opened", runId, requestId, kind: "question", prompt: "Which one?" });
 
-function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown> } = {}) {
+function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown>; untilReset?: (s: SessionRow) => ResetTarget } = {}) {
   const db = openDb(":memory:");
   for (const r of [CHAT, CHAT2, TMUX]) insertSession(db, r);
   const dir = mkdtempSync(join(tmpdir(), "thread-api-"));
@@ -53,7 +54,7 @@ function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown
   };
   const hub = new AgentEventHub({ db, notify: () => {} });
   const inbox = new Inbox({
-    sessions: () => listSessions(db), session: (id) => getSession(db, id), threads,
+    db, sessions: () => listSessions(db), session: (id) => getSession(db, id), threads,
     chatLink: () => ({ status: "connected", since: 1 }), tmuxLive: (id) => hub.liveSnapshot(id), bus,
     now: () => 1_000_000, coalesceMs: 0,
   });
@@ -63,7 +64,7 @@ function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown
     cfg: { version: 1, settings: { autoStopHours: 4, portRangeStart: 40100, portsPerSession: 10, diskWarnPercent: 80 }, folders: {} },
     root: dir, tree: async () => [], listener: {} as never, notify: () => {}, stats: () => ({ sessions: [], disk: {} }),
     cloneQueue: {} as never, configRepo: {} as never, dashboardDir: dir, agentEvents: hub,
-    links, threads, bus, inbox,
+    links, threads, bus, inbox, untilReset: opts.untilReset ?? (() => ({ reason: "No usage limit is active on this account" })),
   } as never);
   /** Applies events to a session's store and publishes them like index.ts does (store first, then the bus). */
   const feed = (id: string, events: BridgeEvent[]) => {
@@ -476,4 +477,47 @@ test("a chat session whose link cannot start still opens", async () => {
   const r = await t.a.fetch(req("POST", "/api/sessions", { folder: CHAT.folder, project: CHAT.project, repo: CHAT.repo }));
   expect(r.status).toBe(201);
   expect(String(err.mock.calls[0]?.[0])).toContain("bridge link of opened session");
+});
+
+// --- settle and snooze (tmux sessions too) ---
+
+test("POST settle and unsettle work for chat and tmux sessions and answer the new inbox item", async () => {
+  const t = setup();
+  for (const id of [CHAT.id, TMUX.id]) {
+    const r = await t.a.fetch(req("POST", `/api/sessions/${id}/settle`));
+    expect(r.status).toBe(200);
+    expect(((await r.json()) as { attention: { section: string } }).attention.section).toBe("settled");
+    const u = await t.a.fetch(req("POST", `/api/sessions/${id}/unsettle`));
+    expect(u.status).toBe(200);
+    expect(((await u.json()) as { attention: { section: string } }).attention.section).not.toBe("settled");
+  }
+});
+
+test("POST snooze {until} and {untilReset} for a tmux session", async () => {
+  const t = setup({ untilReset: () => ({ resetsAt: 1_000_000 + 7_200_000 }) });
+  const r = await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/snooze`, { until: 1_000_000 + 3_600_000 }));
+  expect(r.status).toBe(200);
+  expect(((await r.json()) as { attention: unknown }).attention).toMatchObject({ section: "snoozed", until: 1_000_000 + 3_600_000 });
+  const u = await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/snooze`, { untilReset: true }));
+  expect(u.status).toBe(200);
+  expect(((await u.json()) as { attention: unknown }).attention).toMatchObject({ section: "snoozed", until: 1_000_000 + 7_200_000 });
+});
+
+test("POST snooze: no active limit is 409 with the reason; a bad body is 400; unknown session 404, ending 409", async () => {
+  const t = setup();
+  const r = await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/snooze`, { untilReset: true }));
+  expect(r.status).toBe(409);
+  expect(await r.json()).toEqual({ error: "no-active-limit", message: "No usage limit is active on this account" });
+  for (const body of [{}, { until: 999_999 }, { until: "soon" }, { until: 2_000_000, untilReset: true }, { untilReset: false }, { until: 2_000_000, x: 1 }]) {
+    expect((await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/snooze`, body))).status).toBe(400);
+  }
+  expect((await t.a.fetch(req("POST", "/api/sessions/nope/settle"))).status).toBe(404);
+  t.ending.add(TMUX.id);
+  expect((await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/settle`))).status).toBe(409);
+});
+
+test("GET snooze-reset tells when the active limit resets, or why snoozing until it is not possible", async () => {
+  const t = setup({ untilReset: (s) => (s.runtime === "tmux" ? { resetsAt: 5_000_000 } : { reason: "Mistral Vibe has no usage limit devbox can read" }) });
+  expect(await (await t.a.fetch(req("GET", `/api/sessions/${TMUX.id}/snooze-reset`))).json()).toEqual({ resetsAt: 5_000_000 });
+  expect(await (await t.a.fetch(req("GET", `/api/sessions/${CHAT.id}/snooze-reset`))).json()).toEqual({ reason: "Mistral Vibe has no usage limit devbox can read" });
 });

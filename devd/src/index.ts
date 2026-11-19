@@ -29,8 +29,8 @@ import { executeWrite } from "./prodWrites";
 import { buildBackupTar, restoreBackup } from "./backup";
 import { CloneQueue } from "./clone";
 import { alertNotifyExtra, pinAlerts, switchAlerts } from "./accountAlerts";
-import { accountsBySession } from "./accountLease";
-import { buildAccountViews } from "./accounts";
+import { accountsBySession, currentAccount } from "./accountLease";
+import { buildAccountViews, parseLimits } from "./accounts";
 import { switchAccount } from "./accountSwitch";
 import { ensureLiveAccountProfile } from "./liveAccountProfile";
 import { switchAgent, type SwitchAgentDeps } from "./agentSwitch";
@@ -39,7 +39,7 @@ import { createConfigRepo } from "./configrepo";
 import { createGiteaApi } from "./gitea";
 import { giteaAuthEnv } from "./git";
 import {
-  activeLeases, diskHistoryEnds, failRunningCloneJobs, getSession, type SessionRow, insertDiskTotal, lastMetricTs, listAccounts, listSessions, logEvent,
+  activeLeases, getAccountUsage, leaseHistory, diskHistoryEnds, failRunningCloneJobs, getSession, type SessionRow, insertDiskTotal, lastMetricTs, listAccounts, listSessions, logEvent,
   getRepoAgent, applyPendingRestore, checkpointFully, savePendingFirstTurn, prunePendingFirstTurns, getPendingFirstTurn, deletePendingFirstTurn, openDb, startCheckpointer, pruneAccountLeases, pruneCriticReviews, pruneDiskStats, pruneEvents, pruneNotifyLog, prunePushAlerts,
 } from "./db";
 import { createSshAgents } from "./sshAgent";
@@ -77,6 +77,7 @@ import { ChatHub } from "./chatHub";
 import { ChatSwitch } from "./chatSwitch";
 import { EventBus } from "./eventBus";
 import { Inbox } from "./sessionInbox";
+import { AUTO_SETTLE_TICK_MS, untilReset } from "./sessionAttention";
 import { chatAttention, chatBusy } from "./attention";
 import { contextLengthCached } from "./openrouterModels";
 import { parseMeminfo, resourceBreakdown } from "./resources";
@@ -250,7 +251,21 @@ function hydrate(s: Secrets): void {
   apiDeps.opToken = secrets.opServiceAccountToken;
   console.log(`vault unlocked — available: ${Object.keys(s).sort().join(", ") || "nothing"}`);
 }
-const agentEvents = new AgentEventHub({ db, notify });
+// The inbox shelves (sessionAttention.ts): `inbox` is declared below; the hub calls these only once hooks and bridge
+// events arrive, after startup.
+const agentEvents = new AgentEventHub({
+  db, notify,
+  // A shelf that cannot be updated is logged; it must not fail the hook or bridge event that carried the activity.
+  onActivity: (id, kind) => {
+    try { inbox.activity(id, kind); }
+    catch (e) { console.error(`inbox shelf of ${id} not updated after ${kind}:`, e); }
+  },
+  // An unreadable snooze must not swallow a "finished": notifications may not get less reliable (logged, then sent).
+  snoozed: (id): boolean => {
+    try { return inbox.snoozed(id); }
+    catch (e) { console.error(`snooze state of ${id} unreadable, notifying:`, e); return false; }
+  },
+});
 // State of running sessions surviving a devd restart (see agentEvents.ts loadPersisted):
 // working/waiting come back as unknown (that state cannot be restored reliably without
 // hook memory), done/failed unchanged. Must run before the first hook/sweep tick manages
@@ -400,7 +415,8 @@ const chatHub = new ChatHub({ hub: agentEvents, session: (id) => getSession(db, 
 const chatSnapshot = (id: string) => threadStore(id).snapshot({ limit: 0 });
 // SSE fan-out (threadApi.ts) and the inbox over all sessions; an ending session is left out (its store is being archived).
 const bus = new EventBus();
-const inbox = new Inbox({
+const inbox: Inbox = new Inbox({
+  db,
   sessions: () => listSessions(db).filter((s) => !mgr.isEnding(s.id)),
   session: (id) => (mgr.isEnding(id) ? null : getSession(db, id)),
   threads: threadStore,
@@ -1029,6 +1045,18 @@ const apiDeps: ApiDeps = {
   },
   agentEvents, liveActivities, gitea, spawnPty: realSpawnPty, scheduler, critic, codexAuth,
   links: bridgeLinks, threads: threadStore, bus, inbox, switcher: chatSwitch,
+  untilReset: (s) => untilReset(s, {
+    claudeAccount: (id) => currentAccount(leaseHistory(db, "devbox", id)),
+    claudeLimits: (account) => { const u = getAccountUsage(db, account); return u ? parseLimits(u.limits_json) : null; },
+    // A chat session's thread records its Codex account; devd does not track a tmux session's (codexSessionAccounts
+    // probes the container for it), so "until reset" says the account is not known there.
+    codexAccount: (s) => {
+      if (storedRuntime(s) !== "chat") return null;
+      const n = threadStore(s.id).snapshot({ limit: 0 }).native;
+      return n?.harness === "codex" ? n.account : null;
+    },
+    codexUsage: (account) => codexAccounts.list().accounts.find((a) => a.id === account)?.usage ?? null,
+  }, Date.now()),
   codexUsage: { view: () => buildCodexView(db) },
   codexAccounts,
   codexSessionAccounts: new CodexSessionAccounts({
@@ -1250,6 +1278,8 @@ setInterval(() => {
       .catch((e) => console.error("auto-end failed:", e));
   }
 }, 5_000);
+// Settle sessions idle for 7 days (sessionAttention.ts).
+setInterval(guardedTick("auto-settle", async () => { inbox.autoSettle(); }), AUTO_SETTLE_TICK_MS);
 // Hardware: the tick itself decides what is currently due (see INTERVALS in hardware.ts),
 // so this interval is only a fine sieve, not the refresh cadence.
 // `hardware` may only come into existence after the vault is unlocked, so it is read on every tick,

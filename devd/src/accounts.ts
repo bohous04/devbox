@@ -34,7 +34,7 @@ export interface AccountView {
   leases: AccountLeaseView[];
 }
 
-function parseLimits(json: string | null): UsageLimit[] {
+export function parseLimits(json: string | null): UsageLimit[] {
   if (!json) return [];
   try {
     const v = JSON.parse(json);

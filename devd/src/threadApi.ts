@@ -5,6 +5,7 @@ import { AgentDisconnected, CommandFailed, CommandTimeout, type BridgeLinks } fr
 import { SwitchRefused, type ChatSwitch, type SwitchRequest } from "./chatSwitch";
 import { getSession, type SessionRow } from "./db";
 import type { BusTopic, EventBus } from "./eventBus";
+import type { ResetTarget } from "./sessionAttention";
 import type { Inbox } from "./sessionInbox";
 import { storedRuntime } from "./sessions";
 import type { ThreadStore } from "./threadStore";
@@ -21,6 +22,8 @@ export interface ThreadApiDeps {
   inbox: Inbox;
   /** Model, account and harness switching (chatSwitch.ts); without it those routes answer 503. */
   switcher?: Pick<ChatSwitch, "switch" | "target">;
+  /** When the session's active usage limit resets, or why that is not known (sessionAttention.untilReset). */
+  untilReset: (s: SessionRow) => ResetTarget;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -48,7 +51,8 @@ const sseFrame = (event: string, data: unknown, id?: number) =>
 export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
   if (!d) {
     const off = (c: Context) => c.json({ error: "chat runtime is not configured" }, 503);
-    for (const path of ["/api/sessions/:id/thread", "/api/sessions/:id/thread/*", "/api/inbox", "/api/stream"]) app.all(path, off);
+    for (const path of ["/api/sessions/:id/thread", "/api/sessions/:id/thread/*", "/api/inbox", "/api/stream",
+      "/api/sessions/:id/settle", "/api/sessions/:id/unsettle", "/api/sessions/:id/snooze", "/api/sessions/:id/snooze-reset"]) app.all(path, off);
     return;
   }
   /** The chat session's row and store, or the error response: 404 unknown, 409 tmux or ending. */
@@ -157,6 +161,58 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
   });
 
   app.get("/api/inbox", (c) => c.json({ items: d.inbox.list() }));
+
+  /** Settle and snooze apply to every session, tmux too: 404 unknown, 409 ending. */
+  const anySession = (c: Context, id: string): { s: SessionRow } | { res: Response } => {
+    const s = getSession(d.db, id);
+    if (!s) return { res: c.json({ error: "unknown session" }, 404) };
+    if (d.mgr.isEnding(id)) return { res: c.json({ error: "session-ending" }, 409) };
+    return { s };
+  };
+  /** Each answers the session's new inbox item. */
+  app.post("/api/sessions/:id/settle", (c) => {
+    const r = anySession(c, c.req.param("id"));
+    if ("res" in r) return r.res;
+    d.inbox.settle(r.s.id, "manual");
+    return c.json(d.inbox.item(r.s));
+  });
+  /** Back into the inbox: ends a settle and a snooze. */
+  app.post("/api/sessions/:id/unsettle", (c) => {
+    const r = anySession(c, c.req.param("id"));
+    if ("res" in r) return r.res;
+    d.inbox.unsettle(r.s.id);
+    return c.json(d.inbox.item(r.s));
+  });
+  /** `{until}` (epoch ms, in the future) or `{untilReset: true}`; 409 no-active-limit with the reason when the
+   *  session has no active usage limit to wait for. */
+  app.post("/api/sessions/:id/snooze", async (c) => {
+    const r = anySession(c, c.req.param("id"));
+    if ("res" in r) return r.res;
+    const body = await c.req.json().catch(() => null);
+    const keys = isRecord(body) ? Object.keys(body) : [];
+    if (!isRecord(body) || keys.length !== 1 || !(keys[0] === "until" || keys[0] === "untilReset")) {
+      return c.json({ error: "body must be {until} or {untilReset: true}" }, 400);
+    }
+    if ("until" in body) {
+      const until = body.until;
+      if (typeof until !== "number" || !Number.isSafeInteger(until) || until <= d.inbox.now()) {
+        return c.json({ error: "until must be a time in the future (epoch ms)" }, 400);
+      }
+      d.inbox.snooze(r.s.id, until, "time");
+      return c.json(d.inbox.item(r.s));
+    }
+    if (body.untilReset !== true) return c.json({ error: "body must be {until} or {untilReset: true}" }, 400);
+    const target = d.untilReset(r.s);
+    if ("reason" in target) return c.json({ error: "no-active-limit", message: target.reason }, 409);
+    d.inbox.snooze(r.s.id, target.resetsAt, "reset");
+    return c.json(d.inbox.item(r.s));
+  });
+  /** For the snooze menu: `{resetsAt}` or `{reason}` why "until the limit resets" is not possible. */
+  app.get("/api/sessions/:id/snooze-reset", (c) => {
+    const r = anySession(c, c.req.param("id"));
+    if ("res" in r) return r.res;
+    return c.json(d.untilReset(r.s));
+  });
 
   /** Server-sent events: `inbox` (InboxItem, coalesced per session by Inbox), `ping` every 25 s and, with
    *  `?session=<id>`, `thread` (LoggedEvent, `id: <seq>`) and `thread-notice` (a devd notice, ThreadItem with item id

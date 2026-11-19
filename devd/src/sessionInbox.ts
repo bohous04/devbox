@@ -1,8 +1,10 @@
+import type { Database } from "bun:sqlite";
 import type { InboxItem, InboxRemoved, InboxSection } from "../../shared/thread";
 import type { AgentLiveSnapshot } from "./agentEvents";
 import { chatAttention, lastEndedRun, tmuxAttention, WORKING_GRACE_MS, type LinkState } from "./attention";
-import type { SessionRow } from "./db";
+import { getSessionAttention, putSessionAttention, type SessionRow, type SettleReason, type SnoozeKind } from "./db";
 import type { EventBus } from "./eventBus";
+import { autoSettleDue, shelve, snoozeActive, type Activity } from "./sessionAttention";
 import { storedRuntime } from "./sessions";
 import type { ThreadStore } from "./threadStore";
 
@@ -10,9 +12,11 @@ import type { ThreadStore } from "./threadStore";
 export const LAST_TEXT_MAX = 200;
 export const INBOX_COALESCE_MS = 250;
 
-const SECTION_ORDER: Record<InboxSection, number> = { needs_you: 0, working: 1, idle: 2 };
+const SECTION_ORDER: Record<InboxSection, number> = { needs_you: 0, working: 1, idle: 2, snoozed: 3, settled: 4 };
+/** setTimeout's longest delay; a snooze that ends later is re-checked at this distance until it ends. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
-/** needs_you oldest first (the longest wait on top), working and idle newest first. */
+/** needs_you oldest first (the longest wait on top), the other sections newest first. */
 export function sortInbox(items: InboxItem[]): InboxItem[] {
   return [...items].sort((a, b) => {
     const s = SECTION_ORDER[a.attention.section] - SECTION_ORDER[b.attention.section];
@@ -36,6 +40,8 @@ export class Inbox {
   private log: (msg: string) => void;
 
   constructor(private d: {
+    /** The main DB: the sessions' settled and snoozed shelves (session_attention). */
+    db: Database;
     /** Sessions the inbox lists (index.ts leaves out ending ones: their store is being archived). */
     sessions: () => SessionRow[];
     /** null for a session that is gone or ending. */
@@ -52,15 +58,75 @@ export class Inbox {
     this.log = d.log ?? ((msg) => console.error(msg));
   }
 
-  private now() { return this.d.now?.() ?? Date.now(); }
+  now() { return this.d.now?.() ?? Date.now(); }
 
   item(s: SessionRow): InboxItem { return this.build(s).item; }
 
+  /** Settle by hand (`manual`) or by the idle rule (`idle`); ends a snooze. */
+  settle(sessionId: string, reason: SettleReason): void {
+    const now = this.now();
+    putSessionAttention(this.d.db, { session_id: sessionId, settled_at: now, settled_reason: reason, snooze_until: null, snooze_kind: null, updated_at: now });
+    this.changedSafe(sessionId);
+  }
+
+  /** Back into the inbox: ends a settle and a snooze. */
+  unsettle(sessionId: string): void {
+    const now = this.now();
+    putSessionAttention(this.d.db, { session_id: sessionId, settled_at: null, settled_reason: null, snooze_until: null, snooze_kind: null, updated_at: now });
+    this.changedSafe(sessionId);
+  }
+
+  /** Snooze until `until` (epoch ms); ends a settle. */
+  snooze(sessionId: string, until: number, kind: SnoozeKind): void {
+    putSessionAttention(this.d.db, { session_id: sessionId, settled_at: null, settled_reason: null, snooze_until: until, snooze_kind: kind, updated_at: this.now() });
+    this.changedSafe(sessionId);
+  }
+
+  snoozed(sessionId: string): boolean {
+    return snoozeActive(getSessionAttention(this.d.db, sessionId), this.now());
+  }
+
+  /** A new run unsettles; a request or a failure unsettles and wakes a snooze. */
+  activity(sessionId: string, kind: Activity): void {
+    const row = getSessionAttention(this.d.db, sessionId);
+    if (!row) return;
+    const wake = kind !== "run" && row.snooze_until !== null;
+    if (row.settled_at === null && !wake) return;
+    putSessionAttention(this.d.db, {
+      ...row, settled_at: null, settled_reason: null,
+      ...(wake ? { snooze_until: null, snooze_kind: null } : {}), updated_at: this.now(),
+    });
+    this.changedSafe(sessionId);
+  }
+
+  /** The idle rule (index.ts runs it every AUTO_SETTLE_TICK_MS): settles every session that is due. Returns their ids. */
+  autoSettle(): string[] {
+    const now = this.now();
+    const settled: string[] = [];
+    for (const s of this.d.sessions()) {
+      if (!autoSettleDue(this.base(s).item.attention, s, getSessionAttention(this.d.db, s.id), now)) continue;
+      this.settle(s.id, "idle");
+      settled.push(s.id);
+    }
+    return settled;
+  }
+
   list(): InboxItem[] { return sortInbox(this.d.sessions().map((s) => this.item(s))); }
 
-  /** `recheckAt`: a chat run that just ended counts as working for WORKING_GRACE_MS; no event marks the end
-   *  of that window, so the item has to be rebuilt then. */
+  /** `recheckAt`: when the item changes without an event: the end of a snooze, or of the WORKING_GRACE_MS a chat
+   *  run that just ended still counts as working. */
   private build(s: SessionRow): { item: InboxItem; recheckAt: number | null } {
+    const b = this.base(s);
+    const row = getSessionAttention(this.d.db, s.id);
+    const now = this.now();
+    const attention = shelve(b.item.attention, row, now);
+    const snoozeEnd = attention.until ?? null;
+    const recheckAt = b.recheckAt === null ? snoozeEnd : snoozeEnd === null ? b.recheckAt : Math.min(b.recheckAt, snoozeEnd);
+    return { item: { ...b.item, attention }, recheckAt };
+  }
+
+  /** The session's item without its shelf. */
+  private base(s: SessionRow): { item: InboxItem; recheckAt: number | null } {
     const runtime = storedRuntime(s);
     // `agent` is optional in SessionRow only for insert literals; the column is NOT NULL.
     const base = { sessionId: s.id, runtime, title: s.name || `${s.project}/${s.repo}`, project: s.project, repo: s.repo, agent: s.agent! };
@@ -130,7 +196,7 @@ export class Inbox {
       this.rechecks.set(sessionId, setTimeout(() => {
         this.rechecks.delete(sessionId);
         this.changedSafe(sessionId);
-      }, recheckAt - this.now() + 1));
+      }, Math.min(recheckAt - this.now() + 1, MAX_TIMER_MS)));
     }
     const json = JSON.stringify(item);
     if (this.lastPublished.get(sessionId) === json) return;

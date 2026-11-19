@@ -37,7 +37,7 @@ function setup(opts: { link?: LinkState | null; now?: () => number; coalesceMs?:
   const bus = new EventBus();
   const link = opts.link === undefined ? { status: "connected" as const, since: 1 } : opts.link;
   const inbox = new Inbox({
-    sessions: () => listSessions(db), session: (id) => getSession(db, id), threads,
+    db, sessions: () => listSessions(db), session: (id) => getSession(db, id), threads,
     chatLink: () => link, tmuxLive: (id) => hub.liveSnapshot(id), bus,
     now: opts.now ?? (() => 1_000_000), coalesceMs: opts.coalesceMs,
   });
@@ -185,7 +185,7 @@ test("a broken chat store is one needs-you item, logged once per message, not a 
   insertSession(t.db, BASE);
   insertSession(t.db, TMUX);
   const inbox = new Inbox({
-    sessions: () => listSessions(t.db), session: (id) => getSession(t.db, id),
+    db: t.db, sessions: () => listSessions(t.db), session: (id) => getSession(t.db, id),
     threads: () => { throw new Error("disk I/O error"); },
     chatLink: () => null, tmuxLive: () => null, bus: t.bus, now: () => 42, log: (m) => logs.push(m),
   });

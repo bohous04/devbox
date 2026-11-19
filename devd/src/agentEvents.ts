@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { specFor } from "./agents";
+import type { Activity } from "./sessionAttention";
 import {
   deleteAgentLiveState, getAgentLiveState, insertNotifyLog, insertWorkInterval, lastMetricTs, logEvent, updateSession,
   upsertAgentLiveState, type AgentName, type NotifyDecision, type SessionRow, type SessionRuntime,
@@ -185,6 +186,10 @@ export interface HubDeps {
   now?: () => number;
   quietMs?: number;     // silence after Stop before "finished" goes out
   coalesceMs?: number;  // min. spacing of two blocking notifications of the same session
+  /** The inbox shelves (Inbox.activity): a new prompt, a blocking request or a failure of the session's agent. */
+  onActivity?: (sessionId: string, kind: Activity) => void;
+  /** The session is snoozed: its "finished" is logged but not sent. */
+  snoozed?: (sessionId: string) => boolean;
 }
 
 // Translates Claude hook events (POST /api/agent-event) into notifications. The state
@@ -462,6 +467,7 @@ export class AgentEventHub {
         // A leaked call (tool_complete missing) must not hold the STUCK_MS threshold until the end of the turn.
         if (!foreign) st.openCalls.clear();
         if (!foreign && !(event === "interrupted" && ["done", "failed"].includes(st.live.status))) {
+          if (event === "stop_failure") this.d.onActivity?.(s.id, "failure");
           st.pendingDoneAt = null;
           st.deferredStopAt = null;
           st.waits.clear();
@@ -486,6 +492,7 @@ export class AgentEventHub {
         st.lastBackgroundTasks = undefined;
         if (meta.agentSessionId) st.mainAgentSessionId = meta.agentSessionId;
         updateSession(this.d.db, s.id, { last_active_at: now });
+        this.d.onActivity?.(s.id, "run");
         log("none", coalesced ? "coalesced" : undefined);
         return;
       }
@@ -614,11 +621,15 @@ export class AgentEventHub {
       st.pendingDoneAt = null;
       this.live(st, "done", "Work finished", now);
       done.push(id);
-      const t = doneText(st.session);
-      this.d.notify(t.title, t.message, { session: st.session, important: st.important });
+      // A snoozed session's completion is silent; it still counts as done (autoEnd, the log).
+      const snoozed = this.d.snoozed?.(id) ?? false;
+      if (!snoozed) {
+        const t = doneText(st.session);
+        this.d.notify(t.title, t.message, { session: st.session, important: st.important });
+      }
       logEvent(this.d.db, id, "agent_done", { project: st.session.project, repo: st.session.repo, at: now, via: "hook" });
       insertNotifyLog(this.d.db, {
-        ts: now, session_id: id, event: "sweep_done", decision: "sent", reason: null,
+        ts: now, session_id: id, event: "sweep_done", decision: snoozed ? "suppressed" : "sent", reason: snoozed ? "snoozed" : null,
         inflight: st.inflight, teammates: st.teammates, agent_session_id: null, detail: null,
       });
     }
@@ -655,6 +666,7 @@ export class AgentEventHub {
   }
 
   private blocked(st: SessionState, kind: BlockedKind, now: number, log: (d: NotifyDecision, r?: string) => void): void {
+    this.d.onActivity?.(st.session.id, "request");
     st.pendingDoneAt = null;
     this.live(st, "waiting", kind === "permission" ? "Waiting for permission" : "Waiting for a reply", now, waitReason(st));
     if (now - st.lastBlockedAt < (this.d.coalesceMs ?? 30_000)) { log("suppressed", "coalesced"); return; }

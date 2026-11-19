@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Attention, InboxItem } from "../../shared/thread";
-import { groupInbox, inboxHref, reasonLabel, upsertInbox } from "./inboxView";
+import { groupInbox, inboxHref, reasonLabel, snoozeTimes, upsertInbox } from "./inboxView";
 
 const item = (sessionId: string, attention: Attention, runtime: InboxItem["runtime"] = "chat"): InboxItem => ({
   sessionId, runtime, title: sessionId, project: "p", repo: "r", agent: "claude", attention, lastText: null,
@@ -46,4 +46,23 @@ test("upsertInbox drops a removed session", () => {
   const b = item("b", { section: "idle", reason: null, since: 2 });
   expect(upsertInbox([a, b], { sessionId: "a", removed: true })).toEqual([b]);
   expect(upsertInbox([b], { sessionId: "a", removed: true })).toEqual([b]);
+});
+
+test("groupInbox: settled and snoozed shelves, newest first", () => {
+  const g = groupInbox([
+    item("set-old", { section: "settled", reason: null, since: 1 }),
+    item("snz", { section: "snoozed", reason: "completed", since: 3, until: 99 }),
+    item("set-new", { section: "settled", reason: "completed", since: 7 }),
+    item("idle", { section: "idle", reason: null, since: 2 }),
+  ]);
+  expect(g.settled.map((i) => i.sessionId)).toEqual(["set-new", "set-old"]);
+  expect(g.snoozed.map((i) => i.sessionId)).toEqual(["snz"]);
+  expect(g.idle.map((i) => i.sessionId)).toEqual(["idle"]);
+});
+
+test("snoozeTimes: one hour from now, and tomorrow at 9:00 local time", () => {
+  const now = new Date(2026, 10, 19, 23, 30);
+  expect(snoozeTimes(now)).toEqual({ hour: now.getTime() + 3_600_000, tomorrow: new Date(2026, 10, 20, 9, 0).getTime() });
+  const lateMonth = new Date(2026, 10, 30, 8, 0);
+  expect(snoozeTimes(lateMonth).tomorrow).toBe(new Date(2026, 11, 1, 9, 0).getTime());
 });

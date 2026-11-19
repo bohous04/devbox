@@ -233,6 +233,11 @@ export function openDb(path: string): Database {
   const pendingCols = (db.query("PRAGMA table_info(pending_first_turns)").all() as { name: string }[]).map((c) => c.name);
   if (!pendingCols.includes("after_seq")) db.run(`ALTER TABLE pending_first_turns ADD COLUMN after_seq INTEGER NOT NULL DEFAULT 0`);
   if (!pendingCols.includes("tag")) db.run(`ALTER TABLE pending_first_turns ADD COLUMN tag TEXT`);
+  // The inbox shelves of a session (sessionAttention.ts): settled (by hand or after 7 days idle) and snoozed. One row
+  // per session, deleted with it (deleteSession).
+  db.run(`CREATE TABLE IF NOT EXISTS session_attention (
+    session_id TEXT PRIMARY KEY, settled_at INTEGER, settled_reason TEXT,
+    snooze_until INTEGER, snooze_kind TEXT, updated_at INTEGER NOT NULL)`);
   // Dummy git tokens. In the database, not only in memory — a devd restart must not break git
   // in running sessions (the container has the dummy in a file and devd must be able to translate it).
   db.run(`CREATE TABLE IF NOT EXISTS git_placeholders (
@@ -686,6 +691,8 @@ export function setSessionName(db: Database, id: string, name: string | null): v
 
 export function deleteSession(db: Database, id: string): void {
   db.query(`DELETE FROM sessions WHERE id=?`).run(id);
+  // A later session may get the same id: it must not start settled or snoozed.
+  db.query(`DELETE FROM session_attention WHERE session_id=?`).run(id);
 }
 
 export function getSession(db: Database, id: string): SessionRow | null {
@@ -1092,6 +1099,21 @@ export interface ScheduleRow {
   id: string; name: string; cron: string; folder: string; project: string; repo: string;
   clone_url: string; prompt: string; important: 0 | 1; enabled: 0 | 1; last_run_at: number | null;
   runtime: SessionRuntime; agent: AgentName | null;
+}
+
+export type SettleReason = "manual" | "idle";
+/** `reset`: until the session's active usage limit resets (the time is fixed when the snooze is set). */
+export type SnoozeKind = "time" | "reset";
+export interface SessionAttentionRow {
+  session_id: string; settled_at: number | null; settled_reason: SettleReason | null;
+  snooze_until: number | null; snooze_kind: SnoozeKind | null; updated_at: number;
+}
+export function getSessionAttention(db: Database, sessionId: string): SessionAttentionRow | null {
+  return (db.query(`SELECT * FROM session_attention WHERE session_id=?`).get(sessionId) as SessionAttentionRow | null) ?? null;
+}
+export function putSessionAttention(db: Database, r: SessionAttentionRow): void {
+  db.query(`INSERT OR REPLACE INTO session_attention (session_id,settled_at,settled_reason,snooze_until,snooze_kind,updated_at)
+    VALUES (?,?,?,?,?,?)`).run(r.session_id, r.settled_at, r.settled_reason, r.snooze_until, r.snooze_kind, r.updated_at);
 }
 
 export interface PendingFirstTurn { text: string; seq: number; tag: string | null }

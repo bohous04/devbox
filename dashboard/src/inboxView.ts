@@ -1,14 +1,25 @@
 import type { Attention, InboxItem, InboxRemoved } from "../../shared/thread";
 
-/** The inbox's three sections. Ordering mirrors `sortInbox` in devd/src/sessionInbox.ts: needs-you oldest first
- *  (the longest wait on top), working and idle newest first. */
-export function groupInbox(items: InboxItem[]): { needsYou: InboxItem[]; working: InboxItem[]; idle: InboxItem[] } {
+/** The inbox's sections and its two shelves. Ordering mirrors `sortInbox` in devd/src/sessionInbox.ts: needs-you
+ *  oldest first (the longest wait on top), the rest newest first. */
+export function groupInbox(items: InboxItem[]): {
+  needsYou: InboxItem[]; working: InboxItem[]; idle: InboxItem[]; snoozed: InboxItem[]; settled: InboxItem[];
+} {
   const newestFirst = (a: InboxItem, b: InboxItem) => b.attention.since - a.attention.since;
+  const of = (section: InboxItem["attention"]["section"]) => items.filter((i) => i.attention.section === section);
   return {
-    needsYou: items.filter((i) => i.attention.section === "needs_you").sort((a, b) => a.attention.since - b.attention.since),
-    working: items.filter((i) => i.attention.section === "working").sort(newestFirst),
-    idle: items.filter((i) => i.attention.section === "idle").sort(newestFirst),
+    needsYou: of("needs_you").sort((a, b) => a.attention.since - b.attention.since),
+    working: of("working").sort(newestFirst),
+    idle: of("idle").sort(newestFirst),
+    snoozed: of("snoozed").sort(newestFirst),
+    settled: of("settled").sort(newestFirst),
   };
+}
+
+/** The snooze menu's fixed times: one hour from now, and tomorrow at 9:00 local time. */
+export function snoozeTimes(now: Date): { hour: number; tomorrow: number } {
+  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 9, 0);
+  return { hour: now.getTime() + 3_600_000, tomorrow: tomorrow.getTime() };
 }
 
 /** An SSE `inbox` event carries one session's current item: it replaces that session's row. A removal drops it. */

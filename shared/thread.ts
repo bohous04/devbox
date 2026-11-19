@@ -60,12 +60,16 @@ export interface ThreadSnapshot {
 /** devd's connection to a chat session's agent bridge socket. */
 export type LinkStatus = "connecting" | "connected" | "disconnected";
 
-export type InboxSection = "needs_you" | "working" | "idle";
+/** `settled` and `snoozed` are shelves the user (or the 7-day idle rule) put a session on; `reason` and `since` stay
+ *  those of the state underneath (devd/src/sessionAttention.ts). */
+export type InboxSection = "needs_you" | "working" | "idle" | "settled" | "snoozed";
 /** Where a session belongs in the inbox and why; `since` is when that state began (0 = nothing happened yet). */
 export interface Attention {
   section: InboxSection;
   reason: "request" | "failed" | "rate-limited" | "completed" | "disconnected" | "bridge-behind" | "running" | "background" | "queued" | null;
   since: number;
+  /** Snoozed only: when the snooze ends (epoch ms). */
+  until?: number;
 }
 
 /** SSE `inbox` event for a session that left the inbox (ended, or ending). */
