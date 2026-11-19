@@ -892,7 +892,7 @@ describe("launch env", () => {
   const proxyInputs = { DEVD_UPSTREAM_URL: "http://proxy:8317", DEVD_UPSTREAM_KEY: "k-secret", DEVD_AGENT_MODEL: "gpt-x" };
 
   test("a proxy profile launches the claude harness with the profile env", () => {
-    const env = { DEVD_RUNTIME: "chat", DEVD_AGENT: "claude-gpt", CLAUDE_CONFIG_DIR: "/home/dev/.claude", ...proxyInputs };
+    const env = { DEVD_RUNTIME: "chat", DEVD_AGENT: "claude-gemini", CLAUDE_CONFIG_DIR: "/home/dev/.claude", ...proxyInputs };
     const c = serveConfigFromEnv(env);
     expect(c).toMatchObject({ harness: "claude", model: "gpt-x", account: null });
     expect(c.targetEnv).toMatchObject({ ANTHROPIC_BASE_URL: "http://proxy:8317", ANTHROPIC_AUTH_TOKEN: "k-secret", ANTHROPIC_MODEL: "gpt-x", DEVBOX_PROXY_PROFILE: "1" });

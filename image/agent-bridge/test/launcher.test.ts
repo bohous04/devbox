@@ -75,12 +75,25 @@ test("a proxy profile starts serve on the image's claude home (serve translates 
   writeFileSync(join(dir, "agent-bridge"), `#!/usr/bin/env bash\necho "$DEVD_AGENT|$CLAUDE_CONFIG_DIR" > "${dir}/env"\nexit 0\n`);
   chmodSync(join(dir, "agent-bridge"), 0o755);
   const p = Bun.spawnSync(["bash", LAUNCHER], {
-    env: { PATH: `${dir}:/usr/bin:/bin`, DEVD_AGENT: "claude-gpt", CLAUDE_CONFIG_DIR: "/home/dev/.claude" },
+    env: { PATH: `${dir}:/usr/bin:/bin`, DEVD_AGENT: "claude-gemini", CLAUDE_CONFIG_DIR: "/home/dev/.claude" },
     stderr: "pipe",
   });
   expect(p.stderr.toString()).toBe("");
   expect(p.exitCode).toBe(0);
-  expect(readFileSync(join(dir, "env"), "utf8").trim()).toBe("claude-gpt|/home/dev/.claude");
+  expect(readFileSync(join(dir, "env"), "utf8").trim()).toBe("claude-gemini|/home/dev/.claude");
+});
+
+// An old session row can still name a profile that was removed; the launcher refuses it instead of guessing.
+test("an unknown profile is refused with exit 2 and serve never starts", () => {
+  writeFileSync(join(dir, "agent-bridge"), `#!/usr/bin/env bash\ntouch "${dir}/ran"\n`);
+  chmodSync(join(dir, "agent-bridge"), 0o755);
+  const p = Bun.spawnSync(["bash", LAUNCHER], {
+    env: { PATH: `${dir}:/usr/bin:/bin`, DEVD_AGENT: "claude-removed", CLAUDE_CONFIG_DIR: "/home/dev/.claude" },
+    stderr: "pipe",
+  });
+  expect(p.exitCode).toBe(2);
+  expect(p.stderr.toString()).toContain('unknown DEVD_AGENT "claude-removed"');
+  expect(existsSync(join(dir, "ran"))).toBe(false);
 });
 
 test("codex chat runs on the shadow home reported by `agent-bridge codex-home`", () => {

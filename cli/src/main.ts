@@ -35,7 +35,7 @@ const USAGE = `Usage:
   dev                     manage running sessions (preview/attach/stop + new)
   dev <project>/<repo>    open a session (attach to a running one, or start another)
   dev --agent <id> <target>   start it with a given agent profile
-                              (claude | claude-gpt | claude-grok | claude-gemini | claude-openrouter | codex | grok | antigravity)
+                              (claude | claude-gemini | claude-openrouter | codex | grok | antigravity)
   dev --codex / --claude      shortcuts for the two most common ones
   dev --instabox <target>     start a NEW session on an InstaBox machine (overflow)
   dev instabox status         InstaBox capacity, base snapshot, orphaned machines

@@ -182,7 +182,7 @@ final class ModelsTests: XCTestCase {
 
     func testAgentNameKnownValueDecodes() throws {
         XCTAssertEqual(try decodeRaw("\"codex\"", as: AgentName.self), .codex)
-        XCTAssertEqual(try decodeRaw("\"claude-grok\"", as: AgentName.self), .claudeGrok)
+        XCTAssertEqual(try decodeRaw("\"claude-gemini\"", as: AgentName.self), .claudeGemini)
     }
 
     func testAgentNameUnknownRawValueDecodesToUnknown() throws {

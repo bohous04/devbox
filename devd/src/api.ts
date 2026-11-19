@@ -2769,7 +2769,7 @@ export function createApp(d: ApiDeps): Hono {
   });
 
   // ── Context windows of proxy profiles (dashboard: Model context windows) ──────────
-  // No gate on the `openrouter` dep: the gpt/grok rows make sense even where OpenRouter
+  // No gate on the `openrouter` dep: the cliproxy rows make sense even where OpenRouter
   // is not wired — only its row then stays "unknown".
   app.get("/api/proxy-context", async (c) => {
     const settings = d.configRepo.read().settings;
@@ -2824,7 +2824,7 @@ export function createApp(d: ApiDeps): Hono {
 
   app.put("/api/proxy-context/:key", async (c) => {
     const key = c.req.param("key");
-    // Valid keys = modelKey of proxy profiles (today gpt/grok/openrouter). From agents.ts,
+    // Valid keys = modelKey of proxy profiles (today gemini/openrouter). From agents.ts,
     // not hardcoded — a new proxy profile shows up here by itself.
     const known = AGENT_IDS.map((id) => AGENTS[id].modelKey).filter((k): k is string => !!k);
     if (!known.includes(key)) return c.json({ error: `unknown profile "${key}"` }, 400);

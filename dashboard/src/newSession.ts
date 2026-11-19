@@ -17,8 +17,6 @@ export interface AgentProfile { label: string; short: string; yolo: boolean; pro
 
 export const AGENT_PROFILES: Record<AgentName, AgentProfile> = {
   claude:        { label: "Claude Code",        short: "Claude",      yolo: true, proxy: false, runtime: "claude" },
-  "claude-gpt":  { label: "Claude Code + GPT",  short: "Claude+GPT",  yolo: true, proxy: true, runtime: "claude" },
-  "claude-grok": { label: "Claude Code + Grok", short: "Claude+Grok", yolo: true, proxy: true, runtime: "claude" },
   "claude-gemini": { label: "Claude Code + Gemini", short: "Claude+Gemini", yolo: true, proxy: true, runtime: "claude" },
   "claude-openrouter": { label: "Claude Code + OpenRouter", short: "Claude+OR", yolo: true, proxy: true, runtime: "claude" },
   codex:         { label: "Codex",              short: "Codex",       yolo: true, proxy: false, runtime: "codex" },

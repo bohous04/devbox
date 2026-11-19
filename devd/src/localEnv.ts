@@ -1,4 +1,4 @@
-// Env maps for `dev local` — running a proxy profile (claude-gpt/grok/openrouter)
+// Env maps for `dev local` — running a proxy profile (claude-gemini/openrouter)
 // directly on the Mac. TS mirror of the proxy branch of agent-launch.sh: there the env is assembled for
 // the container, here devd hands it out ready-made via GET /api/local-env and the local CLI just
 // passes it to the `claude` process. Cliproxy is not reachable from the tailnet (it binds only to
@@ -41,15 +41,11 @@ export async function localEnvProfiles(
       ANTHROPIC_MODEL: model,
       CLAUDE_CODE_SUBAGENT_MODEL: model,
       CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: "3",
-      // Grok forces tool search: xAI rejects requests with more than 350 tools,
-      // deferred loading is verified live — the full reasoning is at the same condition
-      // in image/agent-launch.sh (both places change TOGETHER).
-      ENABLE_TOOL_SEARCH: id === "claude-grok" ? "true" : "false",
+      // Same value as in image/agent-launch.sh (both places change TOGETHER).
+      ENABLE_TOOL_SEARCH: "false",
     };
     const window = await ctx(id);
     if (window !== null) env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(window);
-    // Effort is a property of GPT models, it is not forced on Grok — same as in agent-launch.
-    if (id === "claude-gpt") env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT = "1";
     if (spec.upstream === "openrouter") {
       // A subagent may ask for "Sonnet"/"Opus"/"Haiku" by name — without remapping
       // all slots it would request a model that does not exist on OpenRouter (404), or silently

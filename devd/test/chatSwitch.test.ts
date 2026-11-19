@@ -153,7 +153,7 @@ test("model: an unknown or missing model is 400, a model of another harness too"
 });
 
 test("model: a proxy profile's model comes from its settings, so it is 400", async () => {
-  const t = setup({ agent: "claude-gpt" });
+  const t = setup({ agent: "claude-gemini" });
   expect((await t.post("model", { model: "claude-sonnet-5-5" })).status).toBe(400);
   expect(t.sent).toEqual([]);
 });
@@ -302,7 +302,7 @@ test("account: Codex accounts come from the Codex pool, an unusable one is refus
 });
 
 test("account: a proxy profile has no account pool (400)", async () => {
-  const t = setup({ agent: "claude-gpt" });
+  const t = setup({ agent: "claude-gemini" });
   expect(await t.post("account", {})).toMatchObject({ status: 400, body: { error: "no-account-pool" } });
 });
 
@@ -340,21 +340,21 @@ test("harness: the same agent is a no-op", async () => {
 test("harness: a proxy profile resumes the Claude thread with the profile env", async () => {
   const t = setup();
   claudeThread(t);
-  expect(await t.post("harness", { agent: "claude-gpt" })).toEqual({ status: 202, body: { kind: "restart-resume" } });
+  expect(await t.post("harness", { agent: "claude-gemini" })).toEqual({ status: 202, body: { kind: "restart-resume" } });
   const cmd = t.sent[0] as Extract<BridgeCommand, { kind: "switchTarget" }>;
   expect(cmd.target).toEqual({
     harness: "claude", account: null, model: "gpt-x",
-    env: { ...proxyProfileEnv("claude-gpt", PROXY_INPUTS), CLAUDE_CONFIG_DIR: "/home/dev/.claude" },
+    env: { ...proxyProfileEnv("claude-gemini", PROXY_INPUTS), CLAUDE_CONFIG_DIR: "/home/dev/.claude" },
   });
   expect(cmd.resume).toBe("t-claude");
-  expect(getSession(t.db, CHAT.id)!.agent).toBe("claude-gpt");
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("claude-gemini");
   expect(activeLeases(t)).toEqual([]);
 });
 
 test("harness: a proxy profile without its key is refused before anything is sent", async () => {
   const t = setup({ proxyInputs: { ...PROXY_INPUTS, DEVD_UPSTREAM_KEY: "", DEVD_CLIPROXY_KEY: "" } });
   claudeThread(t);
-  expect(await t.post("harness", { agent: "claude-gpt" })).toMatchObject({ status: 409, body: { error: "profile-unavailable" } });
+  expect(await t.post("harness", { agent: "claude-gemini" })).toMatchObject({ status: 409, body: { error: "profile-unavailable" } });
   expect(t.sent).toEqual([]);
 });
 
@@ -367,7 +367,7 @@ test("harness: no room for any history keeps the request path and says so in a n
     { type: "run.started", runId: "r1", origin: "user", nativeThreadId: "t-codex", model: "gpt-5.6-sol" },
     { type: "run.completed", runId: "r1", nativeThreadId: "t-codex", usage: null, costUsd: null },
   ]);
-  expect(await t.post("harness", { agent: "claude-gpt" })).toEqual({ status: 202, body: { kind: "fresh-with-handoff" } });
+  expect(await t.post("harness", { agent: "claude-gemini" })).toEqual({ status: 202, body: { kind: "fresh-with-handoff" } });
   expect((t.sent[0] as Extract<BridgeCommand, { kind: "switchTarget" }>).handoff).toBeNull();
   expect(t.store.snapshot().items.map((i) => i.text)).toContain(historyOmittedNotice(1));
 });
@@ -399,8 +399,8 @@ test("the switch notice counts omitted items; a refused or unchanged switch adds
   expect((await t.post("harness", { agent: "codex" })).status).toBe(202);
   expect((await t.post("account", { accountId: "nope" })).status).toBe(400);
   expect(notices(t)).toEqual([]);
-  await t.post("harness", { agent: "claude-gpt" });
-  expect(notices(t)).toEqual(["Switched to Claude Code + GPT · no history handed over", historyOmittedNotice(1)]);
+  await t.post("harness", { agent: "claude-gemini" });
+  expect(notices(t)).toEqual(["Switched to Claude Code + Gemini · no history handed over", historyOmittedNotice(1)]);
 });
 
 test("a resumed thread with a delta says how much of it was handed over", async () => {
@@ -538,7 +538,7 @@ test("a bridge restarted after a proxy switch gets the target again, with env an
     { type: "run.started", runId: "r1", origin: "user", nativeThreadId: "t-codex", model: "gpt-5.6-sol" },
     { type: "run.completed", runId: "r1", nativeThreadId: "t-codex", usage: null, costUsd: null },
   ]);
-  await t.post("harness", { agent: "claude-gpt" });
+  await t.post("harness", { agent: "claude-gemini" });
   const first = t.sent[0] as Extract<BridgeCommand, { kind: "switchTarget" }>;
   expect(first.handoff!.preamble).toContain("[user] hello");
   t.feed([{ type: "bridge.started", version: "1.1.0", resumed: true, awaitingTarget: true }]);
@@ -557,7 +557,7 @@ test("a bridge restarted after a proxy switch gets the target again, with env an
 });
 
 test("after a devd restart the awaited target is rebuilt from the session's profile", async () => {
-  const t = setup({ agent: "claude-gpt" });
+  const t = setup({ agent: "claude-gemini" });
   t.feed([
     { type: "thread.native", harness: "claude", nativeThreadId: "t-claude", account: null, model: "gpt-x", caps: CLAUDE_CAPS },
     { type: "bridge.started", version: "1.1.0", resumed: true, awaitingTarget: true },
@@ -565,7 +565,7 @@ test("after a devd restart the awaited target is rebuilt from the session's prof
   t.handshake(true);
   await Bun.sleep(0);
   expect(t.sent).toEqual([{
-    kind: "switchTarget", target: { harness: "claude", account: null, model: "gpt-x", env: { ...proxyProfileEnv("claude-gpt", PROXY_INPUTS), CLAUDE_CONFIG_DIR: "/home/dev/.claude" } },
+    kind: "switchTarget", target: { harness: "claude", account: null, model: "gpt-x", env: { ...proxyProfileEnv("claude-gemini", PROXY_INPUTS), CLAUDE_CONFIG_DIR: "/home/dev/.claude" } },
     resume: "t-claude", handoff: null,
   }]);
 });
@@ -608,7 +608,7 @@ test("I1: a re-send after a devd restart carries no handoff, so the bridge keeps
     { type: "run.queued", runId: "r1", text: "hello", attachments: [] },
     { type: "run.completed", runId: "r1", nativeThreadId: "t-codex", usage: null, costUsd: null },
   ]);
-  await t.post("harness", { agent: "claude-gpt" });
+  await t.post("harness", { agent: "claude-gemini" });
   expect(targets(t)[0].handoff).not.toBeNull();
   // The next user message starts at once (no run.queued): the bridge delivered the handoff with it.
   t.feed([
@@ -622,7 +622,7 @@ test("I1: a re-send after a devd restart carries no handoff, so the bridge keeps
 });
 
 test("I2: a bridge awaiting its target gets it again with backoff while sends fail, with one notice, and on every handshake", async () => {
-  const t = setup({ agent: "claude-gpt" });
+  const t = setup({ agent: "claude-gemini" });
   t.feed([{ type: "thread.native", harness: "claude", nativeThreadId: "t-claude", account: null, model: "gpt-x", caps: CLAUDE_CAPS }]);
   let fail = true;
   t.setOnSend((cmd) => { if (cmd.kind === "switchTarget" && fail) throw new CommandFailed("unknown-model-window"); });
@@ -652,7 +652,7 @@ test("I2: a bridge awaiting its target gets it again with backoff while sends fa
 });
 
 test("I2: a handshake that no longer awaits stops the retries", async () => {
-  const t = setup({ agent: "claude-gpt" });
+  const t = setup({ agent: "claude-gemini" });
   t.feed([{ type: "thread.native", harness: "claude", nativeThreadId: "t-claude", account: null, model: "gpt-x", caps: CLAUDE_CAPS }]);
   t.setOnSend((cmd) => { if (cmd.kind === "switchTarget") throw new CommandFailed("nope"); });
   t.handshake(true);

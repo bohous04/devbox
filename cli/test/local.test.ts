@@ -36,15 +36,15 @@ test("uniqueDirName keeps a free name and suffixes -2, -3 on collision", () => {
 
 // ── Proxy profily z devboxu ──────────────────────────────────────────────────
 const profile = (over: Partial<LocalEnvProfile> = {}): LocalEnvProfile => ({
-  profile: "claude-gpt", label: "Claude Code + GPT", ready: true,
-  env: { ANTHROPIC_BASE_URL: "http://h:4300/api/cliproxy", ANTHROPIC_AUTH_TOKEN: "k", ANTHROPIC_MODEL: "gpt-5.6-sol" },
+  profile: "claude-gemini", label: "Claude Code + Gemini", ready: true,
+  env: { ANTHROPIC_BASE_URL: "http://h:4300/api/cliproxy", ANTHROPIC_AUTH_TOKEN: "k", ANTHROPIC_MODEL: "gemini-3-pro" },
   ...over,
 });
 
 test("launchOptions: local harnesses first, then only ready profiles from the devbox", () => {
   const found = detectHarnesses((c) => (c === "claude" || c === "agy" ? `/bin/${c}` : null));
-  const opts = launchOptions(found, [profile(), profile({ profile: "claude-grok", label: "Claude Code + Grok", ready: false, reason: "no model set", env: undefined })]);
-  expect(opts.map((o) => o.label)).toEqual(["Claude Code", "Antigravity (yolo)", "Claude Code + GPT"]);
+  const opts = launchOptions(found, [profile(), profile({ profile: "claude-openrouter", label: "Claude Code + OpenRouter", ready: false, reason: "no model set", env: undefined })]);
+  expect(opts.map((o) => o.label)).toEqual(["Claude Code", "Antigravity (yolo)", "Claude Code + Gemini"]);
   expect(opts[2]!.hint).toBe("via devbox");
 });
 
@@ -58,7 +58,7 @@ test("launchOptions: profiles are not offered without a local claude", () => {
 test("profileLaunch: claude in yolo mode, env from the API + pool disabled", () => {
   const spec = profileLaunch(profile({ unset: ["ANTHROPIC_API_KEY"] }));
   expect(spec.argv).toEqual(["claude", "--dangerously-skip-permissions"]);
-  expect(spec.env).toMatchObject({ ANTHROPIC_MODEL: "gpt-5.6-sol", CLAUDE_POOL_DIR: "/nonexistent" });
+  expect(spec.env).toMatchObject({ ANTHROPIC_MODEL: "gemini-3-pro", CLAUDE_POOL_DIR: "/nonexistent" });
   expect(spec.unset).toEqual(["ANTHROPIC_API_KEY"]);
 });
 

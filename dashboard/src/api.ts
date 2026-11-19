@@ -8,7 +8,7 @@ import type { InboxItem, ThreadSnapshot } from "../../shared/thread";
 
 export interface SessionPort { host: number; container: number }
 export type ClaudeState = "working" | "waiting" | "idle";
-export type AgentName = "claude" | "claude-gpt" | "claude-grok" | "claude-gemini" | "claude-openrouter" | "codex" | "grok" | "antigravity";
+export type AgentName = "claude" | "claude-gemini" | "claude-openrouter" | "codex" | "grok" | "antigravity";
 export interface SessionLive {
   id: string; folder: string; project: string; repo: string; container: string;
   port_base: number; status: "running" | "stopped"; solo: 0 | 1;

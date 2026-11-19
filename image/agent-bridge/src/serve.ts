@@ -155,7 +155,7 @@ function fileSize(p: string): number {
 
 export interface ServeConfig {
   harness: Harness;
-  /** The launch harness's own env: a proxy profile's (DEVD_AGENT=claude-gpt, …), else empty. */
+  /** The launch harness's own env: a proxy profile's (DEVD_AGENT=claude-gemini, …), else empty. */
   targetEnv: Record<string, string>;
   /** CLAUDE_CONFIG_DIR or CODEX_HOME. */
   configHome: string;

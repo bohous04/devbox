@@ -143,7 +143,7 @@ test("F9 offers account switching for native Claude and Codex only", () => {
   expect(codex.map(o => o.value)).toEqual(["back", "end", "rename", "agent", "account", "detach"]);
   expect(codex.find(o => o.value === "account")!.label).toContain("Codex");
   expect(exitMenuOptions(false, null, "Claude Code", "claude").find(o => o.value === "account")!.label).toBe("⇄ Change account (Claude Code)");
-  for (const agent of ["claude-gpt", "claude-grok", "claude-openrouter", "grok"] as const) {
+  for (const agent of ["claude-gemini", "claude-openrouter", "grok"] as const) {
     expect(exitMenuOptions(false, null, agent, agent).some(o => o.value === "account")).toBe(false);
   }
 });

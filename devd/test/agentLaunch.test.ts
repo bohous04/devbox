@@ -21,8 +21,6 @@ test("agent-launch: argument beats env, env beats the default claude", async () 
   expect(await printAgent({ DEVD_AGENT: "codex" }, ["claude"])).toBe("claude");
   expect(await printAgent({}, ["codex"])).toBe("codex");
   expect(await printAgent({}, ["grok"])).toBe("grok");
-  expect(await printAgent({}, ["claude-gpt"])).toBe("claude-gpt");
-  expect(await printAgent({}, ["claude-grok"])).toBe("claude-grok");
   expect(await printAgent({}, ["claude-gemini"])).toBe("claude-gemini");
   expect(await printAgent({}, ["claude-openrouter"])).toBe("claude-openrouter");
   expect(await printAgent({}, ["antigravity"])).toBe("antigravity");
@@ -149,7 +147,7 @@ import { PROFILE_ENV } from "../src/agentSwitch";
 test("every export from --print-env is in PROFILE_ENV (cleanup on agent switch)", async () => {
   const known: readonly string[] = PROFILE_ENV;
   const inputs = { DEVD_CLIPROXY_KEY: "k1", DEVD_UPSTREAM_KEY: "k1", DEVD_AGENT_MODEL: "m", DEVD_AGENT_CTX: "123" };
-  for (const profile of ["claude-gpt", "claude-grok", "claude-gemini", "claude-openrouter"]) {
+  for (const profile of ["claude-gemini", "claude-openrouter"]) {
     const names = (await printEnv(inputs, [profile])).trim().split("\n").filter(Boolean)
       .map((l) => l.split("=")[0]!)
       .filter((n) => n !== "ANTHROPIC_API_KEY" && n !== "XAI_API_KEY");
@@ -157,16 +155,15 @@ test("every export from --print-env is in PROFILE_ENV (cleanup on agent switch)"
   }
 });
 
-test("a proxy profile sets base URL, token and model; GPT also effort", async () => {
+test("a proxy profile sets base URL, token and model", async () => {
   const e = await printEnv(
-    { DEVD_CLIPROXY_KEY: "k1", DEVD_CLIPROXY_URL: "http://h:8317", DEVD_AGENT_MODEL: "gpt-5.6-sol" },
-    ["claude-gpt"]);
+    { DEVD_CLIPROXY_KEY: "k1", DEVD_CLIPROXY_URL: "http://h:8317", DEVD_AGENT_MODEL: "gemini-3-pro" },
+    ["claude-gemini"]);
   expect(e).toContain("ANTHROPIC_BASE_URL=http://h:8317");
   // The token is NEVER printed by --print-env in readable form, see the test below.
   expect(e).toContain("ANTHROPIC_AUTH_TOKEN=<set>");
-  expect(e).toContain("ANTHROPIC_MODEL=gpt-5.6-sol");
-  expect(e).toContain("CLAUDE_CODE_SUBAGENT_MODEL=gpt-5.6-sol");
-  expect(e).toContain("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1");
+  expect(e).toContain("ANTHROPIC_MODEL=gemini-3-pro");
+  expect(e).toContain("CLAUDE_CODE_SUBAGENT_MODEL=gemini-3-pro");
   expect(e).toContain("DEVBOX_PROXY_PROFILE=1");
 });
 
@@ -205,35 +202,21 @@ test("the openrouter profile also remaps the DEFAULT_SONNET/OPUS/HAIKU slots", a
 // image — the value of a key to three paid subscriptions has no business on stdout there.
 test("--print-env prints only that ANTHROPIC_AUTH_TOKEN is set, never its value", async () => {
   const e = await printEnv(
-    { DEVD_CLIPROXY_KEY: "secret-key-for-three-subscriptions", DEVD_AGENT_MODEL: "gpt-5.6-sol" },
-    ["claude-gpt"]);
+    { DEVD_CLIPROXY_KEY: "secret-key-for-three-subscriptions", DEVD_AGENT_MODEL: "gemini-3-pro" },
+    ["claude-gemini"]);
   expect(e).toContain("ANTHROPIC_AUTH_TOKEN=<set>");
   expect(e).not.toContain("secret-key-for-three-subscriptions");
 });
 
-test("the grok profile via proxy has no GPT-specific effort", async () => {
-  const e = await printEnv(
-    { DEVD_CLIPROXY_KEY: "k1", DEVD_AGENT_MODEL: "grok-4.5" }, ["claude-grok"]);
-  expect(e).toContain("ANTHROPIC_MODEL=grok-4.5");
-  expect(e).not.toContain("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT");
-});
-
-// Grok forces tool search (xAI cap of 350 tools), the other proxy profiles keep it
-// off — the full reasoning is at that condition in image/agent-launch.sh.
-test("claude-grok forces tool search (xAI cap of 350 tools), the other proxy profiles do not", async () => {
-  const grok = await printEnv({ DEVD_CLIPROXY_KEY: "k1", DEVD_AGENT_MODEL: "grok-4.6" }, ["claude-grok"]);
-  expect(grok).toContain("ENABLE_TOOL_SEARCH=true");
-  const gpt = await printEnv({ DEVD_CLIPROXY_KEY: "k1", DEVD_AGENT_MODEL: "gpt-5.6-sol" }, ["claude-gpt"]);
-  expect(gpt).toContain("ENABLE_TOOL_SEARCH=false");
+// The reasoning is at that line in image/agent-launch.sh.
+test("proxy profiles keep tool search off", async () => {
   const or = await printEnv({ DEVD_UPSTREAM_KEY: "or-key", DEVD_AGENT_MODEL: "stealth/ox-alpha" }, ["claude-openrouter"]);
   expect(or).toContain("ENABLE_TOOL_SEARCH=false");
   const gemini = await printEnv({ DEVD_CLIPROXY_KEY: "k1", DEVD_AGENT_MODEL: "gemini-3-pro" }, ["claude-gemini"]);
   expect(gemini).toContain("ENABLE_TOOL_SEARCH=false");
 });
 
-// The Gemini profile behaves like GPT/OpenRouter: cliproxy upstream, no GPT effort,
-// no forced tool search. A mirror of the tests above for claude-grok/claude-openrouter.
-test("claude-gemini: cliproxy upstream, no GPT effort", async () => {
+test("claude-gemini: cliproxy upstream, no forced effort", async () => {
   const e = await printEnv({ DEVD_CLIPROXY_KEY: "k1", DEVD_AGENT_MODEL: "gemini-3-pro" }, ["claude-gemini"]);
   expect(e).toContain("ANTHROPIC_MODEL=gemini-3-pro");
   expect(e).not.toContain("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT");
@@ -273,7 +256,7 @@ test("the grok profile without a stored key exports nothing", async () => {
 test("profiles other than grok do not read XAI_API_KEY from the volume, even when it is there", async () => {
   const home = tmpHomeWithGrokKey("xai-secret-abc");
   expect(await printEnv({ HOME: home }, ["claude"])).not.toContain("XAI_API_KEY");
-  expect(await printEnv({ HOME: home, DEVD_CLIPROXY_KEY: "k1", DEVD_AGENT_MODEL: "grok-4.5" }, ["claude-grok"]))
+  expect(await printEnv({ HOME: home, DEVD_CLIPROXY_KEY: "k1", DEVD_AGENT_MODEL: "gemini-3-pro" }, ["claude-gemini"]))
     .not.toContain("XAI_API_KEY");
   expect(await printEnv({ HOME: home }, ["codex"])).not.toContain("XAI_API_KEY");
 });
@@ -339,7 +322,7 @@ async function launch(env: Record<string, string>, args: string[]): Promise<{ ou
 }
 
 test("missing key: the message points to the host and does NOT send you to the vault", async () => {
-  const { out, err } = await launch({ DEVD_AGENT_MODEL: "gpt-5.6-sol" }, ["claude-gpt"]);
+  const { out, err } = await launch({ DEVD_AGENT_MODEL: "gemini-3-pro" }, ["claude-gemini"]);
   expect(err).toContain("/etc/devd/cliproxy/api-key");
   expect(err).toContain("setup.sh");
   // Regression: the key is NOT in the vault and never should be (see readCliproxyKey in config.ts).
@@ -351,7 +334,7 @@ test("missing key: the message points to the host and does NOT send you to the v
 });
 
 test("missing model: the message points to the config, not the vault, the session comes up without proxy variables", async () => {
-  const { out, err } = await launch({ DEVD_CLIPROXY_KEY: "k1" }, ["claude-gpt"]);
+  const { out, err } = await launch({ DEVD_CLIPROXY_KEY: "k1" }, ["claude-gemini"]);
   expect(err).toContain("model");
   expect(err).not.toContain("vault");
   expect(out).not.toContain("ANTHROPIC_BASE_URL");
@@ -430,7 +413,7 @@ test("the openrouter profile drops an inherited ANTHROPIC_API_KEY", async () => 
 test("the old DEVD_CLIPROXY_* names still work (new image, older devd)", async () => {
   const e = await printEnv(
     { DEVD_CLIPROXY_KEY: "k1", DEVD_CLIPROXY_URL: "http://h:8317",
-      DEVD_AGENT_MODEL: "gpt-5.6-sol" }, ["claude-gpt"]);
+      DEVD_AGENT_MODEL: "gemini-3-pro" }, ["claude-gemini"]);
   expect(e).toContain("ANTHROPIC_BASE_URL=http://h:8317");
   expect(e).toContain("ANTHROPIC_AUTH_TOKEN=<set>");
 });
@@ -456,14 +439,7 @@ test("a missing model for openrouter points to the dashboard, not to the config"
   expect(out).not.toContain("ANTHROPIC_BASE_URL");
 });
 
-// Cliproxy profiles have no model in the dashboard — theirs still belongs in the config.
-test("a missing model for a cliproxy profile still points to the config", async () => {
-  const { err } = await launch({ DEVD_UPSTREAM_KEY: "k1" }, ["claude-gpt"]);
-  expect(err).toContain("settings.proxyModels");
-});
-
-// claude-gemini is a cliproxy profile too (not OpenRouter) — without a model it must end
-// with the same message pointing to the devd config, not the dashboard.
+// Cliproxy profiles (claude-gemini) have no model in the dashboard — theirs still belongs in the config.
 test("a missing model for claude-gemini still points to the config", async () => {
   const { err } = await launch({ DEVD_UPSTREAM_KEY: "k1" }, ["claude-gemini"]);
   expect(err).toContain("settings.proxyModels");

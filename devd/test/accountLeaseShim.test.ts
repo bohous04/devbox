@@ -150,7 +150,7 @@ test("agent-launch: reaches for account-lease for claude, not for codex", async 
   const sh = await Bun.file(join(IMAGE, "agent-launch.sh")).text();
   expect(sh).toContain("account-lease");
   expect(sh).toContain("CLAUDE_CONFIG_DIR");
-  // the pool is only for native Claude — claude-gpt/claude-grok go through a proxy,
+  // the pool is only for native Claude — the claude-* proxy profiles go through a proxy,
   // Codex has its own mechanism (codex-home)
   expect(sh).toMatch(/if \[ "\$profile" = claude \]/);
 });

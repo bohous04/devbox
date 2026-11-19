@@ -13,15 +13,15 @@ test("hostDisabledReason: R3 — an existing repo session does not block InstaBo
   expect(hostDisabledReason(st, false)).toBeNull();
 });
 
-test("hostDisabledReason: proxy agents (claude-gpt/grok/gemini/openrouter) and Antigravity run only on the VPS", () => {
-  expect(hostDisabledReason(st, false, instaboxAgentBlock("claude-gpt"))).toBe("Proxy agents run only on the VPS");
+test("hostDisabledReason: proxy agents (claude-gemini/openrouter) and Antigravity run only on the VPS", () => {
+  expect(hostDisabledReason(st, false, instaboxAgentBlock("claude-gemini"))).toBe("Proxy agents run only on the VPS");
   expect(hostDisabledReason(st, false, instaboxAgentBlock("antigravity"))).toBe("Antigravity runs only on the VPS");
   expect(hostDisabledReason(st, false, instaboxAgentBlock("codex"))).toBeNull();
   expect(hostDisabledReason(st, false, null)).toBeNull();
   // The check order matches POST /api/sessions in devd/src/api.ts: solo before agent.
   expect(hostDisabledReason(st, true, instaboxAgentBlock("antigravity"))).toBe("claudeSolo runs only on the VPS");
   // An API outage and a missing base must report their own cause, not the agent.
-  expect(hostDisabledReason({ enabled: false }, false, instaboxAgentBlock("claude-gpt"))).toBe("InstaBox is not configured");
+  expect(hostDisabledReason({ enabled: false }, false, instaboxAgentBlock("claude-gemini"))).toBe("InstaBox is not configured");
 });
 
 test("capacityLabel, steps and job error", () => {

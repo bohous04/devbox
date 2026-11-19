@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { formatTokens, parseTokens, sourceHint, type ProxyContextRow } from "./proxyContextView";
 
 const row = (over: Partial<ProxyContextRow>): ProxyContextRow =>
-  ({ key: "gpt", label: "Claude Code + GPT", override: null, effective: 1_000_000, source: "default", ...over });
+  ({ key: "gemini", label: "Claude Code + Gemini", override: null, effective: 1_000_000, source: "default", ...over });
 
 // Input also accepts k/M shorthands, as cc writes them in docs (`950k`, `1M`). Nonsense returns
 // null — Save is then not offered at all, instead of saving something other than what the person

@@ -1,10 +1,10 @@
-// Profile = what is offered to the user as an "agent". It is not just a binary: two profiles
-// launch Claude Code, but with a foreign model via CLIProxyAPI.
+// Profile = what is offered to the user as an "agent". It is not just a binary: the proxy
+// profiles launch Claude Code, but with a foreign model (via CLIProxyAPI or OpenRouter).
 //
 // THIS IS THE SINGLE SOURCE OF TRUTH. Nowhere else in the repo may a comparison
 // against a specific value (`agent === "codex"`) appear — ask about a PROPERTY. Previously
 // `=== "codex"` was used to mean "does not run on an Anthropic account", which after proxy
-// profiles were added would silently lie and claude-grok would take a lease from a pool it does not use.
+// profiles were added would silently lie and a proxy profile would take a lease from a pool it does not use.
 export type AgentRuntime = "claude" | "codex" | "grok" | "agy";
 
 /** Where to go for a foreign model. This is NOT the same as `modelKey`: that says WHICH model,
@@ -35,8 +35,6 @@ export interface AgentSpec {
 
 const AGENTS_TABLE = {
   claude:        { runtime: "claude", label: "Claude Code",        short: "Claude",      yolo: true, anthropicAccount: true },
-  "claude-gpt":  { runtime: "claude", label: "Claude Code + GPT",  short: "Claude+GPT",  yolo: true, anthropicAccount: false, modelKey: "gpt", upstream: "cliproxy" },
-  "claude-grok": { runtime: "claude", label: "Claude Code + Grok", short: "Claude+Grok", yolo: true, anthropicAccount: false, modelKey: "grok", upstream: "cliproxy" },
   "claude-gemini": { runtime: "claude", label: "Claude Code + Gemini", short: "Claude+Gemini", yolo: true, anthropicAccount: false, modelKey: "gemini", upstream: "cliproxy" },
   "claude-openrouter": { runtime: "claude", label: "Claude Code + OpenRouter", short: "Claude+OR", yolo: true, anthropicAccount: false, modelKey: "openrouter", upstream: "openrouter" },
   codex:         { runtime: "codex",  label: "Codex",              short: "Codex",       yolo: true, anthropicAccount: false },

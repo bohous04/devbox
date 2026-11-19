@@ -500,10 +500,10 @@ test.skipIf(!hasDocker)("restartSolo brings a stopped solo back on the same port
 // and open again" forever) even after unlocking.
 test.skipIf(!hasDocker)("restartSolo: a stopped proxy session picks up the key after the vault is unlocked", async () => {
   const d = makeDeps();
-  d.cfg.settings.proxyModels = { gpt: "gpt-5.6-sol" };
+  d.cfg.settings.proxyModels = { gemini: "gemini-3-pro" };
   let key: string | null = null;                       // locked vault
   const mgr = new SessionManager({ ...d, cliproxyKey: () => key });
-  const s = await mgr.openSolo("acme", PROJECT, "claude-gpt");
+  const s = await mgr.openSolo("acme", PROJECT, "claude-gemini");
   const born = containerId(s.session.id);
   await mgr.stop(s.session.id);
 
@@ -800,12 +800,12 @@ const containerId = (id: string) => sh(process.cwd(), "docker", "inspect", "-f",
 
 test.skipIf(!hasDocker)("proxy profile: an unlocked vault propagates into an existing container", async () => {
   const d = makeDeps();
-  d.cfg.settings.proxyModels = { gpt: "gpt-5.6-sol" };
+  d.cfg.settings.proxyModels = { gemini: "gemini-3-pro" };
   let key: string | null = null;                       // locked vault
   const mgr = new SessionManager({ ...d, cliproxyKey: () => key });
   const t = { folder: "acme", project: PROJECT, repo: "app", cloneUrl: d.bareUrl };
 
-  await mgr.open({ ...t, agent: "claude-gpt" as const });
+  await mgr.open({ ...t, agent: "claude-gemini" as const });
   expect(inspectEnv(APP_ID).DEVD_CLIPROXY_KEY).toBe("");
   const born = containerId(APP_ID);
 

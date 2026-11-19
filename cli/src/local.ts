@@ -1,7 +1,7 @@
 // `dev local` — run a harness directly on the mac in the current folder, without SSH/tmux.
 // The catalog of local binaries is separate from devd agents.ts: that one is about profiles
 // in the container, this one about binaries installed on the host. Proxy profiles from the devbox
-// (claude-gpt/grok/openrouter) are added to them: devd provides their env via
+// (claude-gemini/openrouter) are added to them: devd provides their env via
 // GET /api/local-env — ready-made maps including keys (the tailnet is the trust boundary,
 // same as for leased accounts and backup).
 import { confirm, isCancel, log } from "@clack/prompts";

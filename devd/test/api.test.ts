@@ -1120,30 +1120,29 @@ test("PUT /api/openrouter/model writes proxyModels.openrouter into the config", 
 
 // ── Proxy profile context windows ────────────────────────────────────────────
 test("GET /api/proxy-context returns rows with override, effective and source", async () => {
-  const cfg = { ...DEFAULT_CONFIG, settings: { ...DEFAULT_CONFIG.settings, proxyContext: { gpt: 400_000 }, proxyModels: { openrouter: "stealth/ox-alpha" } } };
+  const cfg = { ...DEFAULT_CONFIG, settings: { ...DEFAULT_CONFIG.settings, proxyContext: { gemini: 400_000 }, proxyModels: { openrouter: "stealth/ox-alpha" } } };
   const configRepo: ConfigRepo = { read: () => cfg, write: async () => {} };
   const { a } = app(undefined, undefined, undefined, { configRepo, orCtxLookup: async () => 1048576 });
   const r = await a.request("/api/proxy-context");
   expect(r.status).toBe(200);
   const { profiles } = await r.json() as { profiles: { key: string; override: number | null; effective: number | null; source: string }[] };
-  expect(profiles.find((p) => p.key === "gpt")).toMatchObject({ override: 400_000, effective: 400_000, source: "manual" });
-  expect(profiles.find((p) => p.key === "grok")).toMatchObject({ override: null, source: "default" });
+  expect(profiles.find((p) => p.key === "gemini")).toMatchObject({ override: 400_000, effective: 400_000, source: "manual" });
   expect(profiles.find((p) => p.key === "openrouter")).toMatchObject({ override: null, effective: 1048576, source: "catalog" });
 });
 
 test("PUT /api/proxy-context/:key writes an override, null deletes it", async () => {
   let written: unknown = null;
   const configRepo: ConfigRepo = {
-    read: () => ({ ...DEFAULT_CONFIG, settings: { ...DEFAULT_CONFIG.settings, proxyContext: { grok: 2_000_000 } } }),
+    read: () => ({ ...DEFAULT_CONFIG, settings: { ...DEFAULT_CONFIG.settings, proxyContext: { openrouter: 2_000_000 } } }),
     write: async (c) => { written = c; },
   };
   const { a } = app(undefined, undefined, undefined, { configRepo });
   const put = (key: string, tokens: unknown) => a.request(`/api/proxy-context/${key}`, {
     method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ tokens }),
   });
-  expect((await put("gpt", 400_000)).status).toBe(204);
-  expect((written as typeof DEFAULT_CONFIG).settings.proxyContext).toEqual({ grok: 2_000_000, gpt: 400_000 });
-  expect((await put("grok", null)).status).toBe(204);
+  expect((await put("gemini", 400_000)).status).toBe(204);
+  expect((written as typeof DEFAULT_CONFIG).settings.proxyContext).toEqual({ openrouter: 2_000_000, gemini: 400_000 });
+  expect((await put("openrouter", null)).status).toBe(204);
   expect((written as typeof DEFAULT_CONFIG).settings.proxyContext).toEqual({});
 });
 
@@ -1154,15 +1153,18 @@ test("PUT /api/proxy-context rejects nonsense: unknown profile, zero, negative, 
     method: "PUT", headers: { "content-type": "application/json" }, body,
   });
   expect((await put("nope", JSON.stringify({ tokens: 1 }))).status).toBe(400);
-  expect((await put("gpt", JSON.stringify({ tokens: 0 }))).status).toBe(400);
-  expect((await put("gpt", JSON.stringify({ tokens: -1 }))).status).toBe(400);
-  expect((await put("gpt", JSON.stringify({ tokens: "1M" }))).status).toBe(400);
-  expect((await put("gpt", "{}")).status).toBe(400);
+  // modelKeys of removed profiles are unknown now, even if an old config still holds them.
+  expect((await put("gpt", JSON.stringify({ tokens: 1 }))).status).toBe(400);
+  expect((await put("grok", JSON.stringify({ tokens: 1 }))).status).toBe(400);
+  expect((await put("gemini", JSON.stringify({ tokens: 0 }))).status).toBe(400);
+  expect((await put("gemini", JSON.stringify({ tokens: -1 }))).status).toBe(400);
+  expect((await put("gemini", JSON.stringify({ tokens: "1M" }))).status).toBe(400);
+  expect((await put("gemini", "{}")).status).toBe(400);
 });
 
 // ── Running proxy profiles locally (dev local) ───────────────────────────────
 test("GET /api/local-env returns ready env maps, cliproxy base from the Host header", async () => {
-  const cfg = { ...DEFAULT_CONFIG, settings: { ...DEFAULT_CONFIG.settings, proxyModels: { gpt: "gpt-5.6-sol", openrouter: "stealth/ox-alpha" } } };
+  const cfg = { ...DEFAULT_CONFIG, settings: { ...DEFAULT_CONFIG.settings, proxyModels: { gemini: "gemini-3-pro", openrouter: "stealth/ox-alpha" } } };
   const configRepo: ConfigRepo = { read: () => cfg, write: async () => {} };
   const { a } = app(undefined, undefined, undefined, {
     configRepo,
@@ -1172,11 +1174,9 @@ test("GET /api/local-env returns ready env maps, cliproxy base from the Host hea
   const r = await a.request("/api/local-env", { headers: { host: "100.1.2.3:4300" } });
   expect(r.status).toBe(200);
   const { profiles } = await r.json() as { profiles: { profile: string; ready: boolean; env?: Record<string, string> }[] };
-  const gpt = profiles.find((p) => p.profile === "claude-gpt")!;
-  expect(gpt.ready).toBe(true);
-  expect(gpt.env!.ANTHROPIC_BASE_URL).toBe("http://100.1.2.3:4300/api/cliproxy");
-  // Grok has no model in the config → it must not be offered.
-  expect(profiles.find((p) => p.profile === "claude-grok")!.ready).toBe(false);
+  const gemini = profiles.find((p) => p.profile === "claude-gemini")!;
+  expect(gemini.ready).toBe(true);
+  expect(gemini.env!.ANTHROPIC_BASE_URL).toBe("http://100.1.2.3:4300/api/cliproxy");
   expect(profiles.find((p) => p.profile === "claude-openrouter")!.env!.ANTHROPIC_BASE_URL).toBe("https://openrouter.ai/api");
 });
 

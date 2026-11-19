@@ -129,7 +129,7 @@ export async function switchAccount(deps: SwitchAccountDeps, sessionId: string, 
   if (s.status !== "running") return { status: "not-running" };
   // The Anthropic account pool only concerns profiles that really run on such an account.
   // We ask about a PROPERTY, not a name: `=== "codex"` would, after proxy profiles were added,
-  // silently let claude-gpt/claude-grok through and it would take a lease it does not use.
+  // silently let the proxy profiles through and it would take a lease it does not use.
   if (!specFor(s.agent).anthropicAccount) return { status: "wrong-agent" };
   if (deps.inFlight.has(sessionId)) return { status: "in-progress" };
 

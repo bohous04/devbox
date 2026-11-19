@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { AGENTS, AGENT_IDS, AGENT_RUNTIMES, isAgentName, RUNTIME_BIN, specFor, usesProxy } from "../src/agents";
 import { isAgentName as fromDb, type AgentName } from "../src/db";
 
-test("eight profiles, each with a label and a known runtime", () => {
-  expect(AGENT_IDS).toEqual(["claude", "claude-gpt", "claude-grok", "claude-gemini", "claude-openrouter", "codex", "grok", "antigravity"]);
+test("six profiles, each with a label and a known runtime", () => {
+  expect(AGENT_IDS).toEqual(["claude", "claude-gemini", "claude-openrouter", "codex", "grok", "antigravity"]);
   for (const id of AGENT_IDS) {
     expect(AGENTS[id].label.length).toBeGreaterThan(0);
     expect(AGENTS[id].short.length).toBeGreaterThan(0);
@@ -35,9 +35,9 @@ test("ONLY native claude runs on the Anthropic account", () => {
   expect(onAccount).toEqual(["claude"]);
 });
 
-test("exactly four profiles need the proxy and all have a modelKey", () => {
+test("exactly two profiles need the proxy and all have a modelKey", () => {
   const proxy = AGENT_IDS.filter(usesProxy);
-  expect(proxy).toEqual(["claude-gpt", "claude-grok", "claude-gemini", "claude-openrouter"]);
+  expect(proxy).toEqual(["claude-gemini", "claude-openrouter"]);
   for (const id of proxy) expect(AGENTS[id].modelKey).toBeTruthy();
   // proxy profiles run in Claude Code, not in their own binary
   for (const id of proxy) expect(AGENTS[id].runtime).toBe("claude");
@@ -51,8 +51,6 @@ test("every proxy profile has an upstream, native profiles none", () => {
     if (usesProxy(id)) expect(AGENTS[id].upstream).toBeTruthy();
     else expect(AGENTS[id].upstream).toBeUndefined();
   }
-  expect(AGENTS["claude-gpt"].upstream).toBe("cliproxy");
-  expect(AGENTS["claude-grok"].upstream).toBe("cliproxy");
   expect(AGENTS["claude-gemini"].upstream).toBe("cliproxy");
   expect(AGENTS["claude-openrouter"].upstream).toBe("openrouter");
 });
