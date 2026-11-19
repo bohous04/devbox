@@ -248,6 +248,10 @@ export function openDb(path: string): Database {
   db.run(`CREATE TABLE IF NOT EXISTS session_prs (
     session_id TEXT PRIMARY KEY, number INTEGER NOT NULL, url TEXT NOT NULL, state TEXT NOT NULL, checks TEXT NOT NULL,
     since INTEGER NOT NULL, merge_settled_at INTEGER, updated_at INTEGER NOT NULL)`);
+  // The worktree branch the PR was found for (S5-R29: the watch follows the current branch); NULL on rows written
+  // before the column existed.
+  const prCols = (db.query("PRAGMA table_info(session_prs)").all() as { name: string }[]).map((c) => c.name);
+  if (!prCols.includes("branch")) db.run(`ALTER TABLE session_prs ADD COLUMN branch TEXT`);
   // Dummy git tokens. In the database, not only in memory — a devd restart must not break git
   // in running sessions (the container has the dummy in a file and devd must be able to translate it).
   db.run(`CREATE TABLE IF NOT EXISTS git_placeholders (
@@ -1148,6 +1152,8 @@ export type PrChecks = "pending" | "success" | "failure" | "none";
 export interface SessionPrRow {
   session_id: string; number: number; url: string; state: PrStatus; checks: PrChecks | "unknown";
   since: number; merge_settled_at: number | null; updated_at: number;
+  /** The worktree branch the PR was found for; null on rows from before S5-R29. */
+  branch: string | null;
 }
 export function getSessionPr(db: Database, sessionId: string): SessionPrRow | null {
   return (db.query(`SELECT * FROM session_prs WHERE session_id=?`).get(sessionId) as SessionPrRow | null) ?? null;
@@ -1162,8 +1168,11 @@ export function clearPrWatchSeed(db: Database): void {
   db.run(`DELETE FROM pr_watch_seed`);
 }
 export function putSessionPr(db: Database, r: SessionPrRow): void {
-  db.query(`INSERT OR REPLACE INTO session_prs (session_id,number,url,state,checks,since,merge_settled_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?)`).run(r.session_id, r.number, r.url, r.state, r.checks, r.since, r.merge_settled_at, r.updated_at);
+  db.query(`INSERT OR REPLACE INTO session_prs (session_id,number,url,state,checks,since,merge_settled_at,updated_at,branch)
+    VALUES (?,?,?,?,?,?,?,?,?)`).run(r.session_id, r.number, r.url, r.state, r.checks, r.since, r.merge_settled_at, r.updated_at, r.branch);
+}
+export function deleteSessionPr(db: Database, sessionId: string): void {
+  db.query(`DELETE FROM session_prs WHERE session_id=?`).run(sessionId);
 }
 
 export interface PendingFirstTurn { text: string; seq: number; tag: string | null }
