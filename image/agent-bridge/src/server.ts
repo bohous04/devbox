@@ -37,6 +37,8 @@ export function startServer(o: {
   handshake: () => Handshake;
   /** A hello's `afterSeq`: devd has stored every event up to it. Called before the replay. */
   onHello?: (afterSeq: number) => void;
+  /** A periodic ack's `seq` (S6-R21): devd's store holds every event up to it durably. */
+  onAck?: (seq: number) => void;
   logError?: (msg: string) => void;
 }): {
   publish(e: BridgeEvent): LoggedEvent;
@@ -106,6 +108,11 @@ export function startServer(o: {
   const handleLine = (c: Client, line: string) => {
     const frame = parseClientFrame(line);
     if (frame.t === "cmd") return runCommand(c, frame.id, frame.cmd);
+    if (frame.t === "ack") {
+      if (!c.hello) throw new Error("ack before hello");
+      o.onAck?.(frame.seq);
+      return;
+    }
     if (c.hello) throw new Error("duplicate hello");
     c.hello = true;
     c.replaying = true;

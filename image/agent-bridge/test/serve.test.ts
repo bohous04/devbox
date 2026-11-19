@@ -947,6 +947,43 @@ async function handshake(afterSeq = 1_000_000): Promise<Extract<ServerFrame, { t
   }
 }
 
+/** A connection that stays open after its hello (devd's link): `ack` sends a periodic ack and waits until the
+ *  bridge has handled it (a command sent after it is answered). */
+async function liveLink(afterSeq: number): Promise<{ ack(seq: number): Promise<void>; close(): void }> {
+  let buf = "";
+  const waiting = new Map<string, () => void>();
+  let ready: () => void = () => {};
+  const isReady = new Promise<void>((r) => (ready = r));
+  const socket = await Bun.connect({
+    unix: socketPath,
+    socket: {
+      data(_s, chunk) {
+        buf += chunk.toString("utf8");
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const f = JSON.parse(buf.slice(0, nl)) as ServerFrame;
+          buf = buf.slice(nl + 1);
+          if (f.t === "ready") ready();
+          if (f.t === "res") waiting.get(f.id)?.();
+        }
+      },
+    },
+  });
+  socket.write(JSON.stringify({ t: "hello", afterSeq }) + "\n");
+  await isReady;
+  let n = 0;
+  return {
+    async ack(seq) {
+      const id = `probe-${++n}`;
+      const answered = new Promise<void>((r) => waiting.set(id, r));
+      // An unknown request id answers with an error after the ack was handled (frames are handled in order).
+      socket.write(JSON.stringify({ t: "ack", seq }) + "\n" + JSON.stringify({ t: "cmd", id, cmd: { kind: "answer", requestId: "none", answer: "" } }) + "\n");
+      await answered;
+    },
+    close: () => socket.end(),
+  };
+}
+
 describe("final review fixes", () => {
   test("C1: a thread that cannot be resumed at start keeps serve up, reports resume-failed and holds the queue for devd's fresh target", async () => {
     saveState(join(dir, "state.json"), baseState({ harness: "codex", nativeThreadId: "step2-thread", queue: [{ runId: "r-q", text: "queued", attachments: [] }], pendingHandoff: { preamble: "stale delta" } }));
@@ -1341,6 +1378,22 @@ describe("step 6 hardening", () => {
     await new Promise((r) => setTimeout(r, 30));
     expect(state()).toMatchObject({ trimSeq: 0, ackCandidate: { seq: 2 } });
     expect(keptSeqs().slice(0, 4)).toEqual([1, 2, 3, 4]);
+  });
+
+  test("S6-R21: periodic acks on one long-lived connection trim it one ack behind, like hellos", async () => {
+    let clock = NOW;
+    const last = await finishedThenOpen({ now: () => clock });
+    const link = await liveLink(3);
+    // devd's first periodic ack 10 minutes later: the hello's ack is promoted, this one waits.
+    clock += 10 * MIN;
+    await link.ack(last);
+    expect(state()).toMatchObject({ trimSeq: 3, ackCandidate: { seq: last, at: clock } });
+    expect(keptSeqs()).toEqual([1, ...Array.from({ length: last - 3 }, (_, i) => i + 4)]);
+    // An ack below the candidate (it cannot be, on a live link; a store that went back) replaces it, nothing is trimmed.
+    clock += 10 * MIN;
+    await link.ack(2);
+    expect(state()).toMatchObject({ trimSeq: 3, ackCandidate: { seq: 2, at: clock } });
+    link.close();
   });
 
   test("S6-R19: hellos in quick succession do not reset the candidate's age", async () => {

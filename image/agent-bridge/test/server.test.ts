@@ -74,10 +74,12 @@ async function connect(): Promise<TestClient> {
 
 let errors: string[] = [];
 let acks: number[] = [];
+let periodicAcks: number[] = [];
 function start(onCommand: CommandHandler = async () => {}, log = new EventLog(logPath)) {
   errors = [];
   acks = [];
-  const server = startServer({ socketPath, log, onCommand, handshake: () => ({ version: "9.9.9", awaitingTarget: false }), onHello: (s) => acks.push(s), logError: (m) => errors.push(m) });
+  periodicAcks = [];
+  const server = startServer({ socketPath, log, onCommand, handshake: () => ({ version: "9.9.9", awaitingTarget: false }), onHello: (s) => acks.push(s), onAck: (s) => periodicAcks.push(s), logError: (m) => errors.push(m) });
   closers.push(() => server.close());
   return server;
 }
@@ -248,4 +250,29 @@ test("a replay larger than the socket buffer waits for drain and arrives whole, 
   const s = seqs(c.frames);
   expect(s.slice(0, N)).toEqual(Array.from({ length: N }, (_, i) => i + 1));
   expect(s.slice(N)).toEqual([N + 1, `ready${N + 1}`]);
+});
+
+test("S6-R21: an ack on a live connection reports devd's durable seq and keeps the connection", async () => {
+  const server = start();
+  server.publish(ev("a"));
+  const c = await connect();
+  c.send({ t: "hello", afterSeq: 0 });
+  await c.waitFor(2);
+  c.send({ t: "ack", seq: 1 });
+  c.send({ t: "cmd", id: "1", cmd: { kind: "interrupt" } });
+  await c.waitFor(3);
+  server.publish(ev("b"));
+  expect(seqs(await c.waitFor(4))).toEqual([1, "ready1", "res", 2]);
+  expect(acks).toEqual([0]);
+  expect(periodicAcks).toEqual([1]);
+  expect(errors).toEqual([]);
+});
+
+test("S6-R21: an ack before the hello closes that client", async () => {
+  start();
+  const c = await connect();
+  c.send({ t: "ack", seq: 1 });
+  await c.closed;
+  expect(periodicAcks).toEqual([]);
+  expect(errors).toEqual(["agent-bridge: closing client: ack before hello"]);
 });

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { Socket } from "bun";
 import { Database, type SQLiteError } from "bun:sqlite";
 import { BRIDGE_VERSION } from "../../image/agent-bridge/src/version";
+import { ACK_MIN_BRIDGE_VERSION } from "../../shared/bridgeVersion";
 import { AgentDisconnected, BridgeLinks, CommandFailed, CommandTimeout, POISON_LIMIT } from "../src/bridgeLink";
 import { ThreadStore } from "../src/threadStore";
 import type { LinkStatus, LoggedEvent } from "../../shared/thread";
@@ -20,6 +21,7 @@ type CmdReply = { ok: true } | { ok: false; error: string } | "never";
 function fakeBridge(path: string, o: { events?: LoggedEvent[]; ignoreAfterSeq?: boolean; ready?: Record<string, unknown> } = {}) {
   const events = [...(o.events ?? [])];
   const hellos: number[] = [];
+  const acks: number[] = [];
   const cmds: unknown[] = [];
   let reply: CmdReply = { ok: true };
   const clients = new Set<Socket<{ buf: string; hello: boolean }>>();
@@ -39,6 +41,8 @@ function fakeBridge(path: string, o: { events?: LoggedEvent[]; ignoreAfterSeq?: 
             for (const e of events) if (o.ignoreAfterSeq || e.seq > f.afterSeq) write(s, { t: "event", e });
             s.data.hello = true;
             write(s, { t: "ready", lastSeq: events.length ? events[events.length - 1].seq : 0, version: BRIDGE_VERSION, ...o.ready });
+          } else if (f.t === "ack") {
+            acks.push(f.seq);
           } else if (f.t === "cmd") {
             cmds.push(f.cmd);
             if (reply !== "never") write(s, { t: "res", id: f.id, ...reply });
@@ -49,7 +53,7 @@ function fakeBridge(path: string, o: { events?: LoggedEvent[]; ignoreAfterSeq?: 
     },
   });
   return {
-    hellos, cmds,
+    hellos, acks, cmds,
     setReply(r: CmdReply) { reply = r; },
     publish(e: LoggedEvent) { events.push(e); for (const c of clients) if (c.data.hello) write(c, { t: "event", e }); },
     raw(line: string) { for (const c of clients) c.write(line); },
@@ -69,7 +73,7 @@ async function waitFor(cond: () => boolean, what: string, ms = 2000) {
 const cleanups: (() => void)[] = [];
 afterEach(() => { for (const c of cleanups.splice(0)) c(); });
 
-function setup(prior: LoggedEvent[] = []) {
+function setup(prior: LoggedEvent[] = [], o: { ackMs?: number } = {}) {
   const root = mkdtempSync(join(tmpdir(), "bl-"));
   mkdirSync(join(root, ID));
   const store = ThreadStore.open(root, ID);
@@ -88,13 +92,14 @@ function setup(prior: LoggedEvent[] = []) {
     onStatus: (id, s) => t.onStatus(id, s),
     onBehind: (id) => t.onBehind(id),
     retryMs: RETRY,
+    ...(o.ackMs === undefined ? {} : { ackMs: o.ackMs }),
     log: (m) => { logs.push(m); },
   });
   const sock = join(root, ID, "agent.sock");
   const servers: ReturnType<typeof fakeBridge>[] = [];
   const serve = (o?: Parameters<typeof fakeBridge>[1]) => { const s = fakeBridge(sock, o); servers.push(s); return s; };
   cleanups.push(() => { links.drop(ID); for (const s of servers) s.close(); store.close(); rmSync(root, { recursive: true, force: true }); });
-  return { links, store, seen, statuses, logs, serve, t };
+  return { links, store, seen, statuses, logs, serve, t, root };
 }
 
 test("reconnect replays only events after the stored seq", async () => {
@@ -528,4 +533,45 @@ test("M12: a bridge older than this devd's is said once per version in the threa
   await waitFor(() => links.status(ID) === "connected", "current bridge");
   await Bun.sleep(RETRY);
   expect(store.snapshot().items.filter((i) => i.kind === "notice")).toHaveLength(1);
+});
+
+test("S6-R21: a bridge from 1.5.0 gets a periodic ack with the store's durable seq; older bridges never get one", async () => {
+  const { links, serve, store } = setup([ev(1), ev(2)], { ackMs: 15 });
+  const a = serve({ events: [ev(1), ev(2), ev(3)], ready: { version: ACK_MIN_BRIDGE_VERSION } });
+  links.ensure(ID);
+  await waitFor(() => a.acks.length >= 2, "two acks");
+  expect(a.acks.every((s) => s === 3)).toBe(true);
+  a.publish(ev(4));
+  await waitFor(() => a.acks.at(-1) === 4, "ack of the live event");
+  expect(store.lastSeq()).toBe(4);
+  a.close();
+  await waitFor(() => links.status(ID) === "disconnected", "disconnect");
+  const sent = a.acks.length;
+  for (const version of ["1.4.0", undefined]) {
+    const old = serve({ events: [ev(1), ev(2), ev(3), ev(4)], ready: { version } });
+    await waitFor(() => links.status(ID) === "connected", "older bridge");
+    await Bun.sleep(60);
+    expect(old.acks).toEqual([]);
+    expect(old.clients()).toBe(1);
+    old.close();
+    await waitFor(() => links.status(ID) === "disconnected", "disconnect");
+  }
+  expect(a.acks).toHaveLength(sent);
+});
+
+test("S6-R21: no ack while the store cannot say what is durable; it is logged and the link carries on", async () => {
+  const { links, serve, logs, root } = setup([ev(1)], { ackMs: 15 });
+  // Another connection holds a read snapshot from before event 2: the checkpoint cannot copy event 2's commit.
+  const reader = new Database(ThreadStore.path(root, ID));
+  reader.run("BEGIN");
+  reader.query("SELECT count(*) FROM items").get();
+  const a = serve({ events: [ev(1), ev(2)], ready: { version: ACK_MIN_BRIDGE_VERSION } });
+  links.ensure(ID);
+  await waitFor(() => logs.some((l) => l.includes("no ack")), "the skipped ack logged");
+  expect(a.acks).toEqual([]);
+  expect(links.status(ID)).toBe("connected");
+  reader.run("COMMIT");
+  reader.close();
+  await waitFor(() => a.acks.length >= 1, "ack once the checkpoint completes");
+  expect(a.acks[0]).toBe(2);
 });

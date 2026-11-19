@@ -91,6 +91,15 @@ export class ThreadStore {
 
   lastSeq(): number { return this.meta("last_seq"); }
 
+  /** `lastSeq` once it is on disk, for the bridge's periodic ack (S6-R21): with synchronous=NORMAL the newest WAL
+   *  commits are synced only by a checkpoint, so this runs one (PASSIVE: it never waits). null when the checkpoint
+   *  could not copy the whole WAL (another connection's read snapshot holds part of it). */
+  durableSeq(): number | null {
+    const seq = this.lastSeq();
+    const r = this.db.query("PRAGMA wal_checkpoint(PASSIVE)").get() as { busy: number; log: number; checkpointed: number };
+    return r.busy === 0 && r.checkpointed === r.log ? seq : null;
+  }
+
   private meta(key: string): number {
     const r = this.db.query("SELECT value FROM meta WHERE key=?").get(key) as { value: number } | null;
     return r ? r.value : 0;

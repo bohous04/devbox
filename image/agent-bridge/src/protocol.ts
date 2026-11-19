@@ -38,7 +38,12 @@ export type BridgeCommand =
   | { kind: "setModel"; model: string }
   | { kind: "switchTarget"; target: SwitchTarget; resume: string | null; handoff: HandoffDelivery | null };
 
-export type ClientFrame = { t: "hello"; afterSeq: number } | { t: "cmd"; id: string; cmd: BridgeCommand };
+export type ClientFrame =
+  | { t: "hello"; afterSeq: number }
+  | { t: "cmd"; id: string; cmd: BridgeCommand }
+  // 1.5.0+ (S6-R21): devd's store holds every event up to `seq` durably; sent periodically on a live link. Older
+  // bridges refuse an unknown frame type and close the link, so devd sends it only to a bridge that is new enough.
+  | { t: "ack"; seq: number };
 export type ServerFrame =
   | { t: "event"; e: LoggedEvent }
   | { t: "res"; id: string; ok: boolean; error?: string; result?: unknown }
@@ -145,6 +150,12 @@ export function parseClientFrame(line: string): ClientFrame {
       throw new ProtocolError("hello.afterSeq must be a non-negative integer");
     }
     return { t: "hello", afterSeq: raw.afterSeq };
+  }
+  if (raw.t === "ack") {
+    if (typeof raw.seq !== "number" || !Number.isInteger(raw.seq) || raw.seq < 0) {
+      throw new ProtocolError("ack.seq must be a non-negative integer");
+    }
+    return { t: "ack", seq: raw.seq };
   }
   if (raw.t === "cmd") {
     return { t: "cmd", id: nonEmptyString(raw.id, "cmd.id"), cmd: parseCommand(raw.cmd) };

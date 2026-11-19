@@ -734,24 +734,30 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   // Runs whose `run.queued` is in the log: their user message is stored already.
   const announced = new Set([...scan.openRuns].filter(([, r]) => r.queued !== null).map(([id]) => id));
 
-  /** A hello: devd has stored everything up to `afterSeq`, but its store may still lose the newest of them in a power
-   *  loss (WAL, synchronous=NORMAL). So the trim lags one ack (ruling S6-R19): an ack becomes the trim point only when
-   *  a later hello comes at least ACK_TRIM_DELAY_MS after it and is not below it (a devd that came back lower
-   *  replaces the candidate and keeps everything it misses). Persisted, so the next start trims with it too; a failure here
-   *  is logged and never drops the link (the log just stays longer). */
+  /** A hello: devd has stored everything up to `afterSeq`. Below the trim point it is told what it can no longer get. */
+  function onHello(afterSeq: number): void {
+    if (afterSeq < state.trimSeq) {
+      // devd's store went back (restored from an older backup?): what was trimmed above its seq is gone here too.
+      const text = `devd's thread store asked for events after seq ${afterSeq}, but the agent bridge's log was trimmed `
+        + `through seq ${state.trimSeq}: events ${afterSeq + 1}-${state.trimSeq} are no longer available, except runs and `
+        + `questions still open and the latest thread announcement.`;
+      logError(`agent-bridge: ${text}`);
+      try { server.publish({ type: "bridge.notice", text }); }
+      catch (e) { logError(`agent-bridge: cannot publish the trim notice: ${errorText(e)}`); }
+    }
+    acknowledge(afterSeq);
+  }
+
+  /** devd has stored everything up to `seq` (a hello's afterSeq, or a periodic ack on a live link, S6-R21), but its
+   *  store may still lose the newest of them in a power loss (WAL, synchronous=NORMAL). So the trim lags one ack
+   *  (ruling S6-R19): an ack becomes the trim point only when a later ack comes at least ACK_TRIM_DELAY_MS after it and
+   *  is not below it (a devd that came back lower replaces the candidate and keeps everything it misses). Persisted, so
+   *  the next start trims with it too; a failure here is logged and never drops the link (the log just stays longer). */
   /** devd re-acknowledged `state.ackCandidate` in this process (never true for a candidate loaded from disk). */
   let candidateConfirmed = false;
-  function onHello(afterSeq: number): void {
+  function acknowledge(seq: number): void {
     try {
-      if (afterSeq < state.trimSeq) {
-        // devd's store went back (restored from an older backup?): what was trimmed above its seq is gone here too.
-        const text = `devd's thread store asked for events after seq ${afterSeq}, but the agent bridge's log was trimmed `
-          + `through seq ${state.trimSeq}: events ${afterSeq + 1}-${state.trimSeq} are no longer available, except runs and `
-          + `questions still open and the latest thread announcement.`;
-        logError(`agent-bridge: ${text}`);
-        server.publish({ type: "bridge.notice", text });
-      }
-      const ack = Math.min(afterSeq, log.lastSeq());
+      const ack = Math.min(seq, log.lastSeq());
       const t = now();
       const c = state.ackCandidate;
       if (c === null || ack < c.seq) {
@@ -775,7 +781,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     }
   }
 
-  /** Promotes a candidate that devd confirmed in this process (a later hello with an ack not below it) once it is
+  /** Promotes a candidate that devd confirmed in this process (a later hello or ack not below it) once it is
    *  ACK_TRIM_DELAY_MS old (S6-R19), and compacts the log once it has grown past the thresholds (one fstat per sweep
    *  otherwise; a compaction is one streamed pass, at most once per doubling of the log). Age alone never promotes: a
    *  candidate loaded from disk may predate a power loss that devd's store did not survive whole. Failures are logged;
@@ -796,7 +802,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     }
   }
 
-  const server = startServer({ socketPath: o.socketPath, log, onCommand: handle, handshake: () => ({ version: BRIDGE_VERSION, awaitingTarget }), onHello, logError });
+  const server = startServer({ socketPath: o.socketPath, log, onCommand: handle, handshake: () => ({ version: BRIDGE_VERSION, awaitingTarget }), onHello, onAck: acknowledge, logError });
   const sweep = setInterval(() => {
     maintainLog();
     waits.sweep();
