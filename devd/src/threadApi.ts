@@ -13,6 +13,8 @@ import { threadImageByName, threadImageFile } from "./threadImages";
 import type { ThreadStore } from "./threadStore";
 
 export const SSE_PING_MS = 25_000;
+/** S5-R23; the dashboard's Composer stops at the same number. */
+export const MAX_IMAGES_PER_MESSAGE = 10;
 
 export interface ThreadApiDeps {
   db: Database;
@@ -97,6 +99,7 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
     if (typeof body.text !== "string" || body.text.trim() === "") return c.json({ error: "text must be a non-empty string" }, 400);
     const attachments = body.attachments === undefined ? [] : body.attachments;
     if (!Array.isArray(attachments)) return c.json({ error: "attachments must be an array of {path}" }, 400);
+    if (attachments.length > MAX_IMAGES_PER_MESSAGE) return c.json({ error: `at most ${MAX_IMAGES_PER_MESSAGE} images per message` }, 400);
     const paths: string[] = [];
     for (const a of attachments) {
       if (!isRecord(a) || Object.keys(a).some((k) => k !== "path") || typeof a.path !== "string" || threadImageFile(d.root, id, a.path) === null) {

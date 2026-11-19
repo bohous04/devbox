@@ -11,6 +11,7 @@ import { Inbox } from "../src/sessionInbox";
 import type { ResetTarget } from "../src/sessionAttention";
 import { ThreadStore } from "../src/threadStore";
 import { stageThreadImage } from "../src/threadImages";
+import { png } from "./helpers/images";
 import type { BridgeCommand } from "../../image/agent-bridge/src/protocol";
 import type { BridgeEvent, LoggedEvent, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
@@ -153,7 +154,7 @@ test("POST messages: empty text, missing text and extra fields are 400; nothing 
 
 // --- images ---
 
-const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2]);
+const PNG = png(10, 10);
 
 test("POST messages with attachments staged for this session sends them with startTurn", async () => {
   const t = setup();
@@ -177,6 +178,16 @@ test("POST messages: attachments that are not this session's staged images are 4
     expect(r.status).toBe(400);
   }
   expect(t.sent).toEqual([]);
+});
+
+test("POST messages: at most 10 images per message (11 is 400, nothing is sent)", async () => {
+  const t = setup();
+  const paths = Array.from({ length: 11 }, () => ({ path: stageThreadImage(t.dir, CHAT.id, PNG) }));
+  const over = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/messages`, { text: "many", attachments: paths }));
+  expect(over.status).toBe(400);
+  expect(((await over.json()) as { error: string }).error).toBe("at most 10 images per message");
+  expect(t.sent).toEqual([]);
+  expect((await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/messages`, { text: "ten", attachments: paths.slice(0, 10) }))).status).toBe(202);
 });
 
 test("POST messages with attachments to a bridge older than 1.4.0 is 409 bridge-too-old; text alone still goes", async () => {

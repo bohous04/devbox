@@ -70,7 +70,9 @@ export function negotiate(initResult: unknown): { version: 1 | 2; caps: Capabili
   if (typeof initResult.protocolVersion !== "number") throw new Error(`initialize response has no protocolVersion: ${JSON.stringify(initResult).slice(0, 200)}`);
   if ("info" in initResult) {
     const session = initResult.capabilities?.session;
-    return { version: 2, caps: { ...BASE_CAPABILITIES, resume: resumeMethod(2, initResult) !== null, images: session?.prompt?.image != null } };
+    // v2 marks a capability by a present object (`image: {}`); `false` or null is no.
+    const image = session?.prompt?.image;
+    return { version: 2, caps: { ...BASE_CAPABILITIES, resume: resumeMethod(2, initResult) !== null, images: image === true || isObject(image) } };
   }
   const agent = initResult.agentCapabilities ?? {};
   return {

@@ -48,7 +48,7 @@ afterEach(async () => {
 // `deferStart` holds every turn, as Codex does before its thread is ready.
 // `readyErrors[i]` makes the i-th open fail to become ready (the session then ends, as the adapters do);
 // `readyGates[i]` holds the i-th open's readiness until it resolves.
-function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities; readyErrors?: (Error | undefined)[]; readyGates?: (Promise<void> | undefined)[] } = {}) {
+function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities | (() => Capabilities); readyErrors?: (Error | undefined)[]; readyGates?: (Promise<void> | undefined)[] } = {}) {
   const ends: ((r: { error?: string }) => void)[] = [];
   const f = {
     opens: [] as HarnessOpenOptions[],
@@ -89,7 +89,7 @@ function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities; readyErr
       if (readyError) end({ error: readyError.message });
       return {
         ready,
-        capabilities: () => opts.caps ?? CLAUDE_CAPABILITIES,
+        capabilities: () => (typeof opts.caps === "function" ? opts.caps() : opts.caps ?? CLAUDE_CAPABILITIES),
         async setModel(m) {
           f.models.push(m);
         },
@@ -305,15 +305,45 @@ describe("serve", () => {
   });
 
   test("a queued message keeps its attachments in run.queued, in state and across a bridge restart", async () => {
+    const img = join(dir, "a.png");
+    writeFileSync(img, "x");
     const f = fakeHarness({ deferStart: true });
     const bridge = await start(f);
-    const r = (await cmd({ kind: "startTurn", text: "look", attachments: ["/inbox/s/a.png"] })) as { runId: string };
-    expect(events()).toContainEqual({ type: "run.queued", runId: r.runId, text: "look", attachments: ["/inbox/s/a.png"] });
-    expect(state().queue).toEqual([{ runId: r.runId, text: "look", attachments: ["/inbox/s/a.png"] }]);
+    const r = (await cmd({ kind: "startTurn", text: "look", attachments: [img] })) as { runId: string };
+    expect(events()).toContainEqual({ type: "run.queued", runId: r.runId, text: "look", attachments: [img] });
+    expect(state().queue).toEqual([{ runId: r.runId, text: "look", attachments: [img] }]);
     await bridge.close();
     const g = fakeHarness();
     await start(g);
-    expect(g.turns).toEqual([{ runId: r.runId, text: "look", origin: "user", images: ["/inbox/s/a.png"] }]);
+    expect(g.turns).toEqual([{ runId: r.runId, text: "look", origin: "user", images: [img] }]);
+  });
+
+  test("recovery: a queued message whose image is gone fails visibly and the rest of the queue still runs", async () => {
+    const gone = join(dir, "gone.png");
+    saveState(join(dir, "state.json"), baseState({ nativeThreadId: "thread-1", queue: [
+      { runId: "r-img", text: "look", attachments: [gone] },
+      { runId: "r-next", text: "next", attachments: [] },
+    ] }));
+    const f = fakeHarness({ deferStart: true });
+    await start(f);
+    expect(f.turns).toEqual([{ runId: "r-next", text: "next", origin: "user" }]);
+    expect(events()).toContainEqual({ type: "run.queued", runId: "r-img", text: "look", attachments: [gone] });
+    expect(events()).toContainEqual({ type: "run.failed", runId: "r-img", error: `attachment missing: ${gone}` });
+    expect(state().queue).toEqual([{ runId: "r-next", text: "next", attachments: [] }]);
+  });
+
+  test("an early turn on a harness still negotiating (an ACP agent before initialize) gets the image paths in its text", async () => {
+    let negotiated = true;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const f = fakeHarness({ caps: () => ({ ...CLAUDE_CAPABILITIES, images: negotiated }), readyGates: [undefined, gate] });
+    await start(f);
+    negotiated = false; // the restarted harness reports no images until it has negotiated
+    await cmd({ kind: "restartAgent" });
+    const r = (await cmd({ kind: "startTurn", text: "look", attachments: ["/inbox/s/a.png"] })) as { runId: string };
+    expect(f.turns.at(-1)).toEqual({ runId: r.runId, text: withImagePaths("look", ["/inbox/s/a.png"]), origin: "user" });
+    negotiated = true;
+    release();
   });
 
   test("restartAgent while a run is active is refused", async () => {

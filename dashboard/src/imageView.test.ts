@@ -1,10 +1,17 @@
 import { expect, test } from "bun:test";
-import { attachmentUrl, MAX_IMAGE_BYTES, MAX_IMAGE_SIDE, planImage } from "./imageView";
+import { attachmentUrl, MAX_IMAGE_BYTES, MAX_IMAGE_SIDE, MAX_IMAGES_PER_MESSAGE, planImage, takeImages } from "./imageView";
 
 const MB = 1024 * 1024;
 
-test("a small image of a supported type is sent as it is", () => {
-  for (const type of ["image/png", "image/jpeg", "image/webp", "image/gif"]) {
+test("a small jpeg is re-encoded once (drops its EXIF, GPS included), then kept", () => {
+  expect(planImage({ type: "image/jpeg", bytes: 200_000, width: 1200, height: 800 })).toEqual({ action: "resize", width: 1200, height: 800, type: "image/jpeg" });
+  expect(planImage({ type: "image/jpeg", bytes: 200_000, width: 1200, height: 800, encoded: true })).toEqual({ action: "keep" });
+  // An encoded result that is still too big is planned again.
+  expect(planImage({ type: "image/jpeg", bytes: 6 * MB, width: 2000, height: 1500, encoded: true }).action).toBe("resize");
+});
+
+test("a small png, webp or gif is sent as it is", () => {
+  for (const type of ["image/png", "image/webp", "image/gif"]) {
     expect(planImage({ type, bytes: 200_000, width: 1200, height: 800 })).toEqual({ action: "keep" });
   }
   expect(planImage({ type: "image/png", bytes: MAX_IMAGE_BYTES, width: MAX_IMAGE_SIDE, height: 10 })).toEqual({ action: "keep" });
@@ -35,6 +42,13 @@ test("other types are rejected with a message", () => {
 
 test("a resize never ends at zero pixels", () => {
   expect(planImage({ type: "image/png", bytes: 1 * MB, width: 10_000, height: 1 })).toEqual({ action: "resize", width: 2048, height: 1, type: "image/png" });
+});
+
+test("at most 10 images per message: the rest are left out with a message", () => {
+  expect(MAX_IMAGES_PER_MESSAGE).toBe(10);
+  expect(takeImages(0, 3)).toEqual({ take: 3, message: null });
+  expect(takeImages(8, 3)).toEqual({ take: 2, message: "At most 10 images per message; 1 was left out" });
+  expect(takeImages(10, 2)).toEqual({ take: 0, message: "At most 10 images per message; 2 were left out" });
 });
 
 test("attachmentUrl points at the session's thread attachment route", () => {

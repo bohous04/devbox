@@ -63,6 +63,16 @@ test("file changes appear as paths only", () => {
   expect(h.preamble).not.toContain("SECRET");
 });
 
+test("a user message's images are listed by path after its text", () => {
+  const items = [
+    item({ kind: "user", text: "what is this?", attachments: ["/inbox/s/a.png", "/inbox/s/b.gif"] }),
+    user("plain"),
+  ];
+  const h = buildHandoff({ ...base, items });
+  expect(h.preamble).toContain("[user] what is this? (images: /inbox/s/a.png, /inbox/s/b.gif)\n");
+  expect(h.preamble).toEndWith("[user] plain");
+});
+
 test("commands, errors and plans are carried; other tool calls and notices are not", () => {
   const items = [
     user("go"),

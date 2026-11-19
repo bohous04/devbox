@@ -1,4 +1,4 @@
-import { mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { ACP_AGENTS, isAcpAgent } from "./acpAgents";
 import { openAcpSession } from "./acpSession";
@@ -724,6 +724,15 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     }
     // Messages queued before the restart were accepted; they start after the continuation, in order.
     for (const q of queued) {
+      // An image deleted meanwhile fails that message, visibly; the ones behind it still run.
+      const missing = q.attachments.find((p) => !existsSync(p));
+      if (missing !== undefined) {
+        state.queue = state.queue.filter((x) => x.runId !== q.runId);
+        persist();
+        if (!announced.has(q.runId)) announceQueued(q.runId, q.text, q.origin ?? "user", q.attachments);
+        server.publish({ type: "run.failed", runId: q.runId, error: `attachment missing: ${missing}` });
+        continue;
+      }
       let sent = q.harnessText;
       if (sent === undefined) {
         // Queued while no harness was open: a pending handoff goes with the first of them.

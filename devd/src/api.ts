@@ -54,7 +54,7 @@ import { join } from "node:path";
 import { readUpload, UploadError } from "./uploads";
 import { stageFile, stageShared } from "./inbox";
 import { registerThreadRoutes, type ThreadApiDeps } from "./threadApi";
-import { sniffImage, stageThreadImage, THREAD_IMAGE_KINDS } from "./threadImages";
+import { stageThreadImage, ThreadImageError } from "./threadImages";
 import type { SshKeyRef } from "./op";
 import { resolveSshTarget, type SshServer } from "./sshServers";
 import { createScopeGrant, keyCovered, listScopeGrants, liveScopeGrant, revokeScopeGrant, scopeIssue, scopeLabel } from "./sshScopeGrants";
@@ -1489,12 +1489,11 @@ export function createApp(d: ApiDeps): Hono {
     if (c.req.query("for") === "thread") {
       try {
         const bytes = await readUpload(c.req.raw);
-        if (sniffImage(bytes) === null) return c.json({ error: `Only ${THREAD_IMAGE_KINDS} images can be attached` }, 415);
         const path = stageThreadImage(d.root, session.id, bytes);
         logEvent(d.db, session.id, "file_inbox", { name: path.split("/").pop(), size: bytes.length, source: "browser", thread: true });
         return c.json({ path, size: bytes.length }, 201);
       } catch (e) {
-        if (e instanceof UploadError) return c.json({ error: e.message }, e.status);
+        if (e instanceof UploadError || e instanceof ThreadImageError) return c.json({ error: e.message }, e.status);
         return c.json({ error: "Could not save the image" }, 400);
       }
     }

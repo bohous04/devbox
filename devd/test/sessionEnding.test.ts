@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "../src/sessions";
@@ -45,6 +45,38 @@ test("end() releases the chat thread after the backup and container removal, sti
     });
     await mgr.end("dev-a-b");
     expect(order).toEqual(["preserve", "release ending=true"]);
+    db.close();
+  } finally {
+    process.env.PATH = orig;
+  }
+});
+
+// S5-R23: a session's chat images go with it, but only once its container (and bridge) is gone and its thread is archived.
+test("end() deletes the session's chat images after the container is gone and the thread released; the shared inbox stays", async () => {
+  const bin = mkdtempSync(join(tmpdir(), "fake-docker-"));
+  writeFileSync(join(bin, "docker"), "#!/usr/bin/env bash\nexit 0\n");
+  chmodSync(join(bin, "docker"), 0o755);
+  const orig = process.env.PATH;
+  process.env.PATH = `${bin}:${orig}`;
+  try {
+    const db = openDb(":memory:");
+    const root = mkdtempSync(join(tmpdir(), "end-images-"));
+    mkdirSync(join(root, "_inbox", "dev-a-b"), { recursive: true });
+    writeFileSync(join(root, "_inbox", "dev-a-b", "00000000-0000-4000-8000-000000000000.png"), "x");
+    writeFileSync(join(root, "_inbox", "shared.png"), "x");
+    insertSession(db, {
+      id: "dev-a-b", folder: "acme", project: "a", repo: "b", container: "dev-a-b", port_base: 41500,
+      status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0, runtime: "chat",
+    });
+    const seen: boolean[] = [];
+    const mgr = new SessionManager({
+      db, cfg: DEFAULT_CONFIG, root, image: "unused", extraMounts: [], cmd: [], controlRoot: join(root, "ctl"),
+      releaseThread: () => { seen.push(existsSync(join(root, "_inbox", "dev-a-b"))); },
+    });
+    await mgr.end("dev-a-b");
+    expect(seen).toEqual([true]);
+    expect(existsSync(join(root, "_inbox", "dev-a-b"))).toBe(false);
+    expect(existsSync(join(root, "_inbox", "shared.png"))).toBe(true);
     db.close();
   } finally {
     process.env.PATH = orig;

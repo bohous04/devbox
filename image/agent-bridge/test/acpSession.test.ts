@@ -187,6 +187,15 @@ describe("negotiate", () => {
     expect(r.caps).toMatchObject({ resume: true, images: true });
   });
 
+  test("v2 images only when the prompt capability says so: true or a present object; false, null or absent is no", () => {
+    const v2 = (image: unknown) => negotiate({ ...INIT.v2, capabilities: { session: { ...INIT.v2.capabilities.session, prompt: image === undefined ? {} : { image } } } }).caps.images;
+    expect(v2({})).toBe(true);
+    expect(v2(true)).toBe(true);
+    expect(v2(false)).toBe(false);
+    expect(v2(null)).toBe(false);
+    expect(v2(undefined)).toBe(false);
+  });
+
   test("v2 reported with v1 shape is version 1", () => {
     expect(INIT["v2-reported-v1-shape"].protocolVersion).toBe(2);
     const r = negotiate(INIT["v2-reported-v1-shape"]);
@@ -268,6 +277,14 @@ describe("openAcpSession", () => {
     expect(fake.requests("session/new")[0]!.params.mcpServers).toEqual([
       { type: "stdio", name: "devbox", command: "agent-bridge", args: ["mcp"], env: [{ name: "DEVD_URL", value: "http://devd.test" }] },
     ]);
+  });
+
+  test("before initialize an image-capable agent reports no images (the bridge then sends paths), after it does", async () => {
+    const fake = fakeAgent(INIT["v1-no-load"]);
+    const { session } = open(fake);
+    expect(session.capabilities().images).toBe(false);
+    await session.ready;
+    expect(session.capabilities().images).toBe(true);
   });
 
   test("images go to session/prompt as ACP image content read from their files", async () => {

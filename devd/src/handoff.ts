@@ -74,7 +74,11 @@ type Kind = "user" | "assistant" | "command" | "file" | "plan" | "error";
 
 /** One candidate entry: the item rendered whole, or null when it is not part of the handoff. */
 function render(it: ThreadItem, runs: Map<string, RunRow>): { kind: Kind; text: string } | null {
-  if (it.kind === "user") return { kind: "user", text: `[user] ${it.text}` };
+  if (it.kind === "user") {
+    // The images stay in /inbox: the next agent can open them by path.
+    const images = it.attachments === undefined ? "" : ` (images: ${it.attachments.join(", ")})`;
+    return { kind: "user", text: `[user] ${it.text}${images}` };
+  }
   if (it.kind === "assistant") return { kind: "assistant", text: `[assistant] ${it.text}` };
   if (it.kind === "notice") {
     // A failed run's error is stored as a notice carrying run.error; other notices are bookkeeping.

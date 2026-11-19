@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Send, Square, X } from "lucide-react";
+import { ImagePlus, Send, Square, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ApiError } from "../../api";
-import { prepareImage } from "../../imageView";
+import { MAX_IMAGES_PER_MESSAGE, prepareImage, takeImages } from "../../imageView";
 import { composerErrorText } from "../../threadView";
 
 interface Attached { key: number; blob: Blob; url: string }
@@ -10,7 +10,7 @@ interface Attached { key: number; blob: Blob; url: string }
 /** Message input: with a mouse/trackpad Enter sends and Shift+Enter is a newline; on touch Enter is a newline and
  *  the Send button sends. A message sent while a run is active is queued by the
  *  bridge and shows as queued in the thread. On a failed send the text stays and nothing is retried.
- *  Images pasted or dropped are scaled down (imageView.ts), previewed and go with the next message. */
+ *  Images pasted, dropped or picked (at most 10) are scaled down (imageView.ts), previewed and go with the next message. */
 export function Composer({ running, onSend, onStop, toolbar }: {
   running: boolean;
   /** Above the input: the session's model, account and harness switchers. */
@@ -24,14 +24,16 @@ export function Composer({ running, onSend, onStop, toolbar }: {
   const [stopping, setStopping] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const nextKey = useRef(0);
+  const picker = useRef<HTMLInputElement>(null);
   const urls = useRef(new Set<string>());
   useEffect(() => () => { for (const u of urls.current) URL.revokeObjectURL(u); }, []);
 
   const errorText = (e: unknown) => (e instanceof ApiError ? composerErrorText(e.status, e.body) : (e as Error).message);
 
   async function attach(files: File[]) {
-    setErr(null);
-    for (const file of files) {
+    const { take, message } = takeImages(images.length, files.length);
+    setErr(message);
+    for (const file of files.slice(0, take)) {
       try {
         const blob = await prepareImage(file);
         const url = URL.createObjectURL(blob);
@@ -91,6 +93,16 @@ export function Composer({ running, onSend, onStop, toolbar }: {
         </ul>
       )}
       <div className="flex items-end gap-2">
+        <input
+          ref={picker} type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple className="hidden"
+          onChange={(e) => { const files = Array.from(e.target.files ?? []); e.target.value = ""; void attach(files); }}
+        />
+        <Button
+          type="button" variant="outline" size="icon-lg" disabled={images.length >= MAX_IMAGES_PER_MESSAGE}
+          onClick={() => picker.current?.click()} aria-label="Attach images" title={images.length >= MAX_IMAGES_PER_MESSAGE ? `At most ${MAX_IMAGES_PER_MESSAGE} images per message` : "Attach images"}
+        >
+          <ImagePlus />
+        </Button>
         <textarea
           aria-label="Message"
           rows={2}

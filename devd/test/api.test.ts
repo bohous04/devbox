@@ -20,6 +20,7 @@ import type { ApiDeps } from "../src/api";
 import { terminalGuard } from "../src/terminal";
 import { hasDocker } from "./helpers/docker";
 import { recordWeeklyUsage } from "../src/weeklyUsage";
+import { gif, jpeg, png, webp } from "./helpers/images";
 
 const PROD_CATALOG = join(import.meta.dir, "..", "..", "image", "prod-db", "catalog.json");
 
@@ -1354,12 +1355,7 @@ test("chat image upload (?for=thread): png, jpeg, webp, gif land in the session'
     method: "POST", headers: { "content-type": "application/octet-stream", origin: "https://dev.example.com", ...headers }, body,
   });
   const enc = (s: string) => new TextEncoder().encode(s);
-  const images: [Uint8Array, string][] = [
-    [new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]), "png"],
-    [new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1]), "jpg"],
-    [enc("RIFF\x10\x00\x00\x00WEBPVP8 "), "webp"],
-    [enc("GIF89a...."), "gif"],
-  ];
+  const images: [Uint8Array, string][] = [[png(64, 48), "png"], [jpeg(64, 48), "jpg"], [webp(64, 48), "webp"], [gif(64, 48), "gif"]];
   for (const [bytes, ext] of images) {
     const r = await upload(bytes);
     expect(r.status).toBe(201);
@@ -1372,4 +1368,9 @@ test("chat image upload (?for=thread): png, jpeg, webp, gif land in the session'
   expect(svg.status).toBe(415);
   expect(((await svg.json()) as { error: string }).error).toContain("png, jpeg, webp or gif");
   expect((await upload(images[0]![0], { "content-length": String(26 * 1024 * 1024) })).status).toBe(413);
+  // Per-image cap: over 5 MB or over 8000 px on a side.
+  const heavy = await upload(jpeg(64, 48, 5 * 1024 * 1024 + 1));
+  expect(heavy.status).toBe(413);
+  expect(((await heavy.json()) as { error: string }).error).toBe("The image is 5.0 MB; chat images may be at most 5 MB");
+  expect((await upload(png(8001, 10))).status).toBe(413);
 });
