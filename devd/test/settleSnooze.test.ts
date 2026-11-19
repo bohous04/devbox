@@ -7,10 +7,11 @@ import type { UsageLimit } from "../src/accountUsage";
 import type { CodexView } from "../src/codexPoller";
 import { ChatHub } from "../src/chatHub";
 import {
-  deleteSession, getSession, getSessionAttention, insertSession, listNotifyLog, listSessions, openDb, type SessionRow,
+  deleteSession, getSession, getSessionAttention, insertLease, insertSession, listNotifyLog, listSessions, openDb, upsertAccountUsage,
+  putSessionAttention, type SessionRow,
 } from "../src/db";
 import { EventBus } from "../src/eventBus";
-import { AUTO_SETTLE_IDLE_MS, untilReset, type ResetDeps } from "../src/sessionAttention";
+import { AUTO_SETTLE_IDLE_MS, hubShelfDeps, resetDeps, untilReset, type ResetDeps } from "../src/sessionAttention";
 import { Inbox } from "../src/sessionInbox";
 import { ThreadStore } from "../src/threadStore";
 import type { BackgroundWork, BridgeEvent, InboxItem } from "../../shared/thread";
@@ -32,9 +33,28 @@ const failed = (runId: string): BridgeEvent => ({ type: "run.failed", runId, err
 const asked = (runId: string, requestId: string): BridgeEvent => ({ type: "request.opened", runId, requestId, kind: "question", prompt: "Which one?" });
 const wakeup: BackgroundWork = { id: "w1", kind: "wakeup", label: "check CI", holding: true };
 
+/** Timers the test fires by hand: `due()` runs every timer whose time has come on the test clock. */
+function fakeTimers(clock: () => number) {
+  let next = 0;
+  const pending = new Map<number, { at: number; fn: () => void }>();
+  return {
+    timers: {
+      set: (fn: () => void, ms: number) => { pending.set(++next, { at: clock() + ms, fn }); return next; },
+      clear: (h: unknown) => { pending.delete(h as number); },
+    },
+    pending: () => [...pending.values()].map((p) => p.at),
+    due: () => {
+      for (const [h, p] of [...pending]) if (p.at <= clock()) { pending.delete(h); p.fn(); }
+    },
+  };
+}
+
 /** A hub, a chat hub and an inbox over one clock, wired like index.ts. Chat events are stamped with that clock. */
-function setup() {
+function setup(opts: { snoozedThrows?: boolean; activityThrows?: boolean } = {}) {
   let now = T0;
+  const clock = () => now;
+  const timers = fakeTimers(clock);
+  const logs: string[] = [];
   const db = openDb(":memory:");
   const dir = mkdtempSync(join(tmpdir(), "settle-"));
   const stores = new Map<string, ThreadStore>();
@@ -47,16 +67,18 @@ function setup() {
   const notified: string[] = [];
   const bus = new EventBus();
   let inbox: Inbox; // assigned below: the hub and the inbox refer to each other, as in index.ts
+  const shelf = hubShelfDeps({
+    activity: (id, kind) => { if (opts.activityThrows) throw new Error("db locked"); inbox.activity(id, kind); },
+    snoozed: (id) => { if (opts.snoozedThrows) throw new Error("db locked"); return inbox.snoozed(id); },
+  }, (m) => logs.push(m));
   const hub = new AgentEventHub({
-    db, notify: (title, message) => notified.push(`${title}: ${message}`), now: () => now, quietMs: 1000,
-    onActivity: (id, kind) => inbox.activity(id, kind),
-    snoozed: (id) => inbox.snoozed(id),
+    db, notify: (title, message) => notified.push(`${title}: ${message}`), now: () => now, quietMs: 1000, ...shelf,
   });
   const chatHub = new ChatHub({ hub, session: (id) => getSession(db, id), now: () => now });
   inbox = new Inbox({
     db, sessions: () => listSessions(db), session: (id) => getSession(db, id), threads,
     chatLink: () => ({ status: "connected", since: 1 }), tmuxLive: (id) => hub.liveSnapshot(id), bus,
-    now: () => now, coalesceMs: 0,
+    now: () => now, coalesceMs: 0, timers: timers.timers,
   });
   const published: InboxItem[] = [];
   bus.subscribe(["inbox"], (_t, data) => published.push(data as InboxItem));
@@ -71,7 +93,7 @@ function setup() {
   insertSession(db, { ...CHAT, created_at: T0, last_active_at: T0 });
   insertSession(db, { ...TMUX, created_at: T0, last_active_at: T0 });
   const section = (id: string) => inbox.item(getSession(db, id)!).attention.section;
-  return { db, hub, inbox, threads, feed, notified, published, section, tick: (ms: number) => { now += ms; }, now: () => now };
+  return { db, hub, inbox, threads, feed, notified, published, section, timers, logs, tick: (ms: number) => { now += ms; }, now: () => now };
 }
 
 // --- manual settle ---
@@ -130,17 +152,37 @@ test("a completion does not unsettle", () => {
 
 // --- snooze ---
 
-test("a snooze until a time hides the session until then, and it comes back on its own", async () => {
+test("a snooze until a time hides the session until then, and it comes back on its own", () => {
   const t = setup();
   t.feed(CHAT.id, [started("r1"), completed("r1")]);
   t.tick(10_000);
-  t.inbox.snooze(CHAT.id, t.now() + 50, "time");
-  const it = t.inbox.item(getSession(t.db, CHAT.id)!);
-  expect(it.attention).toMatchObject({ section: "snoozed", until: t.now() + 50 });
-  t.tick(60);
-  await Bun.sleep(120); // the inbox re-publishes when the snooze ends
+  const until = t.now() + 3_600_000;
+  t.inbox.snooze(CHAT.id, until, "time");
+  expect(t.inbox.item(getSession(t.db, CHAT.id)!).attention).toMatchObject({ section: "snoozed", until });
+  t.timers.due(); // the coalesce window (0 ms)
+  expect(t.timers.pending()).toEqual([until + 1]);
+  t.tick(3_600_000);
+  t.timers.due();
+  expect(t.published.at(-1)!.attention.section).toBe("snoozed"); // not yet
+  t.tick(1);
+  t.timers.due(); // the inbox re-publishes when the snooze ends
   expect(t.published.at(-1)).toMatchObject({ sessionId: CHAT.id, attention: { section: "needs_you", reason: "completed" } });
   expect(t.published.at(-1)!.attention.until).toBeUndefined();
+});
+
+test("after a devd restart every snooze still ending later gets its timer, stopped sessions too", () => {
+  const t = setup();
+  t.db.run("UPDATE sessions SET status='stopped' WHERE id=?", [TMUX.id]);
+  const until = t.now() + DAY;
+  // Rows a previous devd wrote: one still running, one already over.
+  putSessionAttention(t.db, { session_id: TMUX.id, settled_at: null, settled_reason: null, snooze_until: until, snooze_kind: "time", updated_at: 1 });
+  putSessionAttention(t.db, { session_id: CHAT.id, settled_at: null, settled_reason: null, snooze_until: t.now() - 1, snooze_kind: "time", updated_at: 1 });
+  t.inbox.armSnoozes();
+  t.timers.due(); // the coalesce window (0 ms)
+  expect(t.timers.pending()).toEqual([until + 1]);
+  t.tick(DAY + 1);
+  t.timers.due();
+  expect(t.published.at(-1)).toMatchObject({ sessionId: TMUX.id, attention: { section: "idle" } });
 });
 
 test("snooze and settle replace each other; unsettle ends a snooze too", () => {
@@ -199,6 +241,24 @@ test("a snoozed completion sends no notification; the sweep still reports it (au
   t.tick(2000);
   t.hub.sweep();
   expect(t.notified).toEqual(["a/tmux: Claude finished working"]);
+});
+
+test("an unreadable snooze state still sends the done notification, and is logged (S5-R14)", () => {
+  const t = setup({ snoozedThrows: true });
+  t.feed(CHAT.id, [started("r1"), completed("r1")]);
+  t.tick(2000);
+  expect(t.hub.sweep()).toEqual([CHAT.id]);
+  expect(t.notified).toEqual(["a/chat: Claude finished working"]);
+  expect(t.logs.join("\n")).toContain("db locked");
+});
+
+test("a shelf that cannot be updated is logged; the hook is still handled", () => {
+  const t = setup({ activityThrows: true });
+  t.inbox.settle(TMUX.id, "manual");
+  t.hub.handle(getSession(t.db, TMUX.id)!, "permission_request");
+  expect(t.logs.join("\n")).toContain("db locked");
+  expect(t.notified).toEqual(["a/tmux: Claude is waiting for permission"]);
+  expect(t.section(TMUX.id)).toBe("settled"); // what the user sees: the session stays on the shelf until unsettled
 });
 
 // --- auto-settle ---
@@ -296,4 +356,27 @@ test("until-reset for Codex: the latest reset among windows at their limit", () 
 test("until-reset is unavailable for ACP agents and proxy profiles, with a reason", () => {
   expect(untilReset({ ...CHAT, agent: "vibe" }, deps(), NOW)).toEqual({ reason: "Mistral Vibe has no usage limit devbox can read" });
   expect(untilReset({ ...CHAT, agent: "claude-gemini" }, deps(), NOW)).toEqual({ reason: "Claude Code + Gemini has no usage limit devbox can read" });
+});
+
+test("until-reset finds a chat Claude session's account: the lease its bridge launch took (account-lease)", () => {
+  const t = setup();
+  // agent-bridge-launch.sh runs account-lease, which leases as client=devbox with the session id.
+  insertLease(t.db, { account_id: "acct-1", client: "devbox", session_id: CHAT.id, label: "a/chat", created_at: 1, released_at: null });
+  upsertAccountUsage(t.db, {
+    account_id: "acct-1", five_hour_pct: 100, five_hour_resets_at: NOW + 5000, seven_day_pct: 10, seven_day_resets_at: NOW + 9000,
+    limits_json: JSON.stringify([limit({ isActive: true, resetsAt: NOW + 5000 })]), fetched_at: 1, error: null, error_count: 0, org_id: null,
+  });
+  const d = resetDeps({ db: t.db, threads: t.threads, codexAccounts: { list: () => ({ accounts: [] }) } });
+  expect(untilReset(getSession(t.db, CHAT.id)!, d, NOW)).toEqual({ resetsAt: NOW + 5000 });
+});
+
+test("until-reset finds a chat Codex session's account in its thread", () => {
+  const t = setup();
+  const codex = { ...CHAT, id: "dev-a-codex", container: "dev-a-codex", port_base: 40300, agent: "codex" as const };
+  insertSession(t.db, codex);
+  t.feed(codex.id, [{ type: "thread.native", harness: "codex", nativeThreadId: "n1", account: "cx-1", model: null } as BridgeEvent]);
+  const view = codexView([{ kind: "primary", usedPct: 100, windowMinutes: 300, resetsAt: NOW + 1000 }]);
+  const d = resetDeps({ db: t.db, threads: t.threads, codexAccounts: { list: () => ({ accounts: [{ id: "cx-1", usage: view }] }) } });
+  expect(untilReset(codex, d, NOW)).toEqual({ resetsAt: NOW + 1000 });
+  expect(untilReset({ ...codex, runtime: "tmux" }, d, NOW)).toEqual({ reason: "The account of this session is not known" });
 });

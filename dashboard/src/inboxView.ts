@@ -16,10 +16,16 @@ export function groupInbox(items: InboxItem[]): {
   };
 }
 
-/** The snooze menu's fixed times: one hour from now, and tomorrow at 9:00 local time. */
-export function snoozeTimes(now: Date): { hour: number; tomorrow: number } {
-  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 9, 0);
-  return { hour: now.getTime() + 3_600_000, tomorrow: tomorrow.getTime() };
+/** The snooze menu's fixed times: one hour from now, and the next 9:00 local time (today before 9:00, else tomorrow). */
+export function snoozeTimes(now: Date): { hour: number; morning: { at: number; label: string } } {
+  const today = now.getHours() < 9;
+  const at = new Date(now.getFullYear(), now.getMonth(), now.getDate() + (today ? 0 : 1), 9, 0).getTime();
+  return { hour: now.getTime() + 3_600_000, morning: { at, label: today ? "9:00" : "Tomorrow 9:00" } };
+}
+
+/** Why a row cannot be settled or snoozed (devd refuses it with 409 request-open), or null. */
+export function shelfBlock(i: InboxItem): string | null {
+  return i.attention.reason === "request" ? "Answer the open request first" : null;
 }
 
 /** An SSE `inbox` event carries one session's current item: it replaces that session's row. A removal drops it. */

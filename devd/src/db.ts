@@ -1111,6 +1111,10 @@ export interface SessionAttentionRow {
 export function getSessionAttention(db: Database, sessionId: string): SessionAttentionRow | null {
   return (db.query(`SELECT * FROM session_attention WHERE session_id=?`).get(sessionId) as SessionAttentionRow | null) ?? null;
 }
+/** Sessions whose snooze ends after `now`. */
+export function snoozedSessionIds(db: Database, now: number): string[] {
+  return (db.query(`SELECT session_id FROM session_attention WHERE snooze_until > ?`).all(now) as { session_id: string }[]).map((r) => r.session_id);
+}
 export function putSessionAttention(db: Database, r: SessionAttentionRow): void {
   db.query(`INSERT OR REPLACE INTO session_attention (session_id,settled_at,settled_reason,snooze_until,snooze_kind,updated_at)
     VALUES (?,?,?,?,?,?)`).run(r.session_id, r.settled_at, r.settled_reason, r.snooze_until, r.snooze_kind, r.updated_at);

@@ -11,7 +11,7 @@ import {
 import { api } from "../api";
 import { AppPage, Chevron, Collapse, EmptyState, RowsSkeleton, Section, StatusDot } from "../components/primitives";
 import { agoLabel } from "../format";
-import { groupInbox, inboxHref, reasonLabel, snoozeTimes, upsertInbox } from "../inboxView";
+import { groupInbox, inboxHref, reasonLabel, shelfBlock, snoozeTimes, upsertInbox } from "../inboxView";
 import { profileFor } from "../newSession";
 import { useNow } from "../store";
 import { useEventStream } from "../useEventStream";
@@ -30,8 +30,9 @@ function RowMenu({ item, onItem }: { item: InboxItem; onItem: (i: InboxItem) => 
     setError(null);
     p.then(onItem, (e: Error) => setError(e.message || "action failed"));
   };
+  const blocked = shelfBlock(item);
   const open = (o: boolean) => {
-    if (!o || section === "settled" || section === "snoozed") return;
+    if (!o || section === "settled" || section === "snoozed" || blocked !== null) return;
     setReset(null);
     api.snoozeReset(item.sessionId).then(setReset, (e: Error) => setReset({ reason: e.message || "could not ask devd" }));
   };
@@ -47,20 +48,21 @@ function RowMenu({ item, onItem }: { item: InboxItem; onItem: (i: InboxItem) => 
             <DropdownMenuItem onSelect={() => run(api.unsettle(item.sessionId))}>Back to the inbox</DropdownMenuItem>
           ) : (
             <>
-              <DropdownMenuItem onSelect={() => run(api.settle(item.sessionId))}>Settle</DropdownMenuItem>
+              {blocked && <p className="px-2 py-1.5 text-xs text-muted-foreground">{blocked}</p>}
+              <DropdownMenuItem disabled={blocked !== null} onSelect={() => run(api.settle(item.sessionId))}>Settle</DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuLabel className="text-xs text-muted-foreground">Snooze</DropdownMenuLabel>
-              <DropdownMenuItem onSelect={() => run(api.snooze(item.sessionId, { until: t.hour }))}>1 hour</DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => run(api.snooze(item.sessionId, { until: t.tomorrow }))}>Tomorrow 9:00</DropdownMenuItem>
+              <DropdownMenuItem disabled={blocked !== null} onSelect={() => run(api.snooze(item.sessionId, { until: t.hour }))}>1 hour</DropdownMenuItem>
+              <DropdownMenuItem disabled={blocked !== null} onSelect={() => run(api.snooze(item.sessionId, { until: t.morning.at }))}>{t.morning.label}</DropdownMenuItem>
               <DropdownMenuItem
-                disabled={reset === null || "reason" in reset}
+                disabled={blocked !== null || reset === null || "reason" in reset}
                 onSelect={() => run(api.snooze(item.sessionId, { untilReset: true }))}
                 className="items-start data-[disabled]:opacity-100"
               >
                 <span className="flex min-w-0 flex-col">
-                  <span className={reset === null || "reason" in reset ? "opacity-50" : undefined}>Until the limit resets</span>
+                  <span className={blocked !== null || reset === null || "reason" in reset ? "opacity-50" : undefined}>Until the limit resets</span>
                   <span className="text-xs text-muted-foreground">
-                    {reset === null ? "Checking…" : "reason" in reset ? reset.reason : untilLabel(reset.resetsAt)}
+                    {blocked !== null ? "" : reset === null ? "Checking…" : "reason" in reset ? reset.reason : untilLabel(reset.resetsAt)}
                   </span>
                 </span>
               </DropdownMenuItem>

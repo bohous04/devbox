@@ -1,8 +1,13 @@
+import type { Database } from "bun:sqlite";
 import type { Attention } from "../../shared/thread";
+import { currentAccount } from "./accountLease";
+import { parseLimits } from "./accounts";
 import type { UsageLimit } from "./accountUsage";
 import { specFor } from "./agents";
 import type { CodexView } from "./codexPoller";
-import type { SessionAttentionRow, SessionRow } from "./db";
+import { getAccountUsage, leaseHistory, type SessionAttentionRow, type SessionRow } from "./db";
+import { storedRuntime } from "./sessions";
+import type { ThreadStore } from "./threadStore";
 
 /** The Settled and Snoozed shelves of the inbox. The state is one `session_attention` row per session; the Inbox
  *  (sessionInbox.ts) writes it and lays it over the attention a session has on its own.
@@ -15,6 +20,30 @@ export const AUTO_SETTLE_TICK_MS = 10 * 60_000;
 
 /** What the AgentEventHub reports for the shelves: a new run (prompt), a request (question, approval), a failure. */
 export type Activity = "run" | "request" | "failure";
+
+/** Settling or snoozing a session that waits for the user would hide the question it asks. */
+export const REQUEST_OPEN = "Answer the open request first: a session waiting for you cannot be settled or snoozed";
+
+/** The AgentEventHub's shelf deps over the inbox. Neither may fail the hook or bridge event it is called from:
+ *  - an unsettle/wake that cannot be written is logged; the session stays on its shelf until unsettled (S5-R16),
+ *    the hub's own notification still goes out;
+ *  - a snooze state that cannot be read counts as not snoozed: the "finished" is sent and the error logged
+ *    (S5-R14, fail toward notifying: notifications may not get less reliable). */
+export function hubShelfDeps(
+  inbox: { activity: (id: string, kind: Activity) => void; snoozed: (id: string) => boolean },
+  log: (msg: string) => void,
+): { onActivity: (id: string, kind: Activity) => void; snoozed: (id: string) => boolean } {
+  return {
+    onActivity: (id, kind) => {
+      try { inbox.activity(id, kind); }
+      catch (e) { log(`inbox shelf of ${id} not updated after ${kind}: ${(e as Error).message}`); }
+    },
+    snoozed: (id) => {
+      try { return inbox.snoozed(id); }
+      catch (e) { log(`snooze state of ${id} unreadable, notifying: ${(e as Error).message}`); return false; }
+    },
+  };
+}
 
 export function snoozeActive(row: SessionAttentionRow | null, now: number): boolean {
   return row !== null && row.snooze_until !== null && row.snooze_until > now;
@@ -76,4 +105,24 @@ export function untilReset(s: SessionRow, d: ResetDeps, now: number): ResetTarge
   const future = resets.filter((r): r is number => r !== null && r > now);
   if (future.length) return { resetsAt: Math.max(...future) };
   return { reason: resets.includes(null) ? "The active limit has no known reset time" : NO_ACTIVE_LIMIT };
+}
+
+/** ResetDeps over devd's records. Claude: the session's newest devbox lease, which the bridge launch (account-lease,
+ *  client=devbox) and chat switches (ChatSwitch) write as for tmux sessions. Codex: the account the chat thread
+ *  recorded; devd does not track a tmux session's (codexSessionAccounts probes the container for it). */
+export function resetDeps(d: {
+  db: Database;
+  threads: (id: string) => ThreadStore;
+  codexAccounts: { list(): { accounts: { id: string; usage: CodexView | null }[] } };
+}): ResetDeps {
+  return {
+    claudeAccount: (id) => currentAccount(leaseHistory(d.db, "devbox", id)),
+    claudeLimits: (account) => { const u = getAccountUsage(d.db, account); return u ? parseLimits(u.limits_json) : null; },
+    codexAccount: (s) => {
+      if (storedRuntime(s) !== "chat") return null;
+      const n = d.threads(s.id).snapshot({ limit: 0 }).native;
+      return n?.harness === "codex" ? n.account : null;
+    },
+    codexUsage: (account) => d.codexAccounts.list().accounts.find((a) => a.id === account)?.usage ?? null,
+  };
 }

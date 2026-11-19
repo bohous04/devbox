@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { InboxItem, InboxRemoved, InboxSection } from "../../shared/thread";
 import type { AgentLiveSnapshot } from "./agentEvents";
 import { chatAttention, lastEndedRun, tmuxAttention, WORKING_GRACE_MS, type LinkState } from "./attention";
-import { getSessionAttention, putSessionAttention, type SessionRow, type SettleReason, type SnoozeKind } from "./db";
+import { getSessionAttention, putSessionAttention, snoozedSessionIds, type SessionRow, type SettleReason, type SnoozeKind } from "./db";
 import type { EventBus } from "./eventBus";
 import { autoSettleDue, shelve, snoozeActive, type Activity } from "./sessionAttention";
 import { storedRuntime } from "./sessions";
@@ -33,7 +33,8 @@ const clip = (t: string) => (t.length > LAST_TEXT_MAX ? `${t.slice(0, LAST_TEXT_
 export class Inbox {
   private lastPublished = new Map<string, string>();
   private windows = new Map<string, { dirty: boolean }>();
-  private rechecks = new Map<string, ReturnType<typeof setTimeout>>();
+  private rechecks = new Map<string, unknown>();
+  private timers: { set: (fn: () => void, ms: number) => unknown; clear: (handle: unknown) => void };
   /** Last logged store error per session, so a broken store is logged once per message, not per inbox read. */
   private brokenLogged = new Map<string, string>();
   private coalesceMs: number;
@@ -53,8 +54,11 @@ export class Inbox {
     now?: () => number;
     coalesceMs?: number;
     log?: (msg: string) => void;
+    /** The coalesce and re-check timers (tests drive them by hand). */
+    timers?: { set: (fn: () => void, ms: number) => unknown; clear: (handle: unknown) => void };
   }) {
     this.coalesceMs = d.coalesceMs ?? INBOX_COALESCE_MS;
+    this.timers = d.timers ?? { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) };
     this.log = d.log ?? ((msg) => console.error(msg));
   }
 
@@ -97,6 +101,11 @@ export class Inbox {
       ...(wake ? { snooze_until: null, snooze_kind: null } : {}), updated_at: this.now(),
     });
     this.changedSafe(sessionId);
+  }
+
+  /** At startup: a snooze set before a devd restart still ends with an inbox update. Publishing arms its timer. */
+  armSnoozes(): void {
+    for (const id of snoozedSessionIds(this.d.db, this.now())) this.changedSafe(id);
   }
 
   /** The idle rule (index.ts runs it every AUTO_SETTLE_TICK_MS): settles every session that is due. Returns their ids. */
@@ -167,7 +176,7 @@ export class Inbox {
     if (w) { w.dirty = true; return; }
     const win = { dirty: false };
     this.windows.set(sessionId, win);
-    setTimeout(() => {
+    this.timers.set(() => {
       this.windows.delete(sessionId);
       if (win.dirty) this.changedSafe(sessionId);
     }, this.coalesceMs);
@@ -191,9 +200,9 @@ export class Inbox {
     }
     const { item, recheckAt } = this.build(s);
     const old = this.rechecks.get(sessionId);
-    if (old) { clearTimeout(old); this.rechecks.delete(sessionId); }
+    if (old !== undefined) { this.timers.clear(old); this.rechecks.delete(sessionId); }
     if (recheckAt !== null) {
-      this.rechecks.set(sessionId, setTimeout(() => {
+      this.rechecks.set(sessionId, this.timers.set(() => {
         this.rechecks.delete(sessionId);
         this.changedSafe(sessionId);
       }, Math.min(recheckAt - this.now() + 1, MAX_TIMER_MS)));

@@ -28,7 +28,7 @@ const completed = (runId: string): BridgeEvent => ({ type: "run.completed", runI
 const said = (runId: string, itemId: string, text: string): BridgeEvent => ({ type: "message.final", runId, itemId, role: "assistant", text });
 const asked = (runId: string, requestId: string): BridgeEvent => ({ type: "request.opened", runId, requestId, kind: "question", prompt: "Which one?" });
 
-function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown>; untilReset?: (s: SessionRow) => ResetTarget } = {}) {
+function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown>; untilReset?: (s: SessionRow) => ResetTarget; noUntilReset?: boolean } = {}) {
   const db = openDb(":memory:");
   for (const r of [CHAT, CHAT2, TMUX]) insertSession(db, r);
   const dir = mkdtempSync(join(tmpdir(), "thread-api-"));
@@ -64,7 +64,7 @@ function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown
     cfg: { version: 1, settings: { autoStopHours: 4, portRangeStart: 40100, portsPerSession: 10, diskWarnPercent: 80 }, folders: {} },
     root: dir, tree: async () => [], listener: {} as never, notify: () => {}, stats: () => ({ sessions: [], disk: {} }),
     cloneQueue: {} as never, configRepo: {} as never, dashboardDir: dir, agentEvents: hub,
-    links, threads, bus, inbox, untilReset: opts.untilReset ?? (() => ({ reason: "No usage limit is active on this account" })),
+    links, threads, bus, inbox, untilReset: opts.noUntilReset ? undefined : opts.untilReset ?? (() => ({ reason: "No usage limit is active on this account" })),
   } as never);
   /** Applies events to a session's store and publishes them like index.ts does (store first, then the bus). */
   const feed = (id: string, events: BridgeEvent[]) => {
@@ -520,4 +520,23 @@ test("GET snooze-reset tells when the active limit resets, or why snoozing until
   const t = setup({ untilReset: (s) => (s.runtime === "tmux" ? { resetsAt: 5_000_000 } : { reason: "Mistral Vibe has no usage limit devbox can read" }) });
   expect(await (await t.a.fetch(req("GET", `/api/sessions/${TMUX.id}/snooze-reset`))).json()).toEqual({ resetsAt: 5_000_000 });
   expect(await (await t.a.fetch(req("GET", `/api/sessions/${CHAT.id}/snooze-reset`))).json()).toEqual({ reason: "Mistral Vibe has no usage limit devbox can read" });
+});
+
+test("settle and snooze refuse a session with an open request: 409 request-open; nothing is written", async () => {
+  const t = setup();
+  t.feed(CHAT.id, [started("r1"), asked("r1", "q1")]);
+  for (const [path, body] of [["settle", undefined], ["snooze", { until: 2_000_000 }]] as const) {
+    const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/${path}`, body));
+    expect(r.status).toBe(409);
+    expect(await r.json()).toEqual({ error: "request-open", message: "Answer the open request first: a session waiting for you cannot be settled or snoozed" });
+  }
+  expect(t.inbox.item(getSession(t.db, CHAT.id)!).attention.section).toBe("needs_you");
+});
+
+test("snooze until reset without the usage dependency is 503; settle and the thread routes still work", async () => {
+  const t = setup({ noUntilReset: true });
+  expect((await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/snooze`, { untilReset: true }))).status).toBe(503);
+  expect((await t.a.fetch(req("GET", `/api/sessions/${TMUX.id}/snooze-reset`))).status).toBe(503);
+  expect((await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/settle`))).status).toBe(200);
+  expect((await t.a.fetch(req("GET", `/api/sessions/${CHAT.id}/thread`))).status).toBe(200);
 });

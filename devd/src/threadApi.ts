@@ -5,7 +5,7 @@ import { AgentDisconnected, CommandFailed, CommandTimeout, type BridgeLinks } fr
 import { SwitchRefused, type ChatSwitch, type SwitchRequest } from "./chatSwitch";
 import { getSession, type SessionRow } from "./db";
 import type { BusTopic, EventBus } from "./eventBus";
-import type { ResetTarget } from "./sessionAttention";
+import { REQUEST_OPEN, type ResetTarget } from "./sessionAttention";
 import type { Inbox } from "./sessionInbox";
 import { storedRuntime } from "./sessions";
 import type { ThreadStore } from "./threadStore";
@@ -22,8 +22,9 @@ export interface ThreadApiDeps {
   inbox: Inbox;
   /** Model, account and harness switching (chatSwitch.ts); without it those routes answer 503. */
   switcher?: Pick<ChatSwitch, "switch" | "target">;
-  /** When the session's active usage limit resets, or why that is not known (sessionAttention.untilReset). */
-  untilReset: (s: SessionRow) => ResetTarget;
+  /** When the session's active usage limit resets, or why that is not known (sessionAttention.untilReset); without
+   *  it only "snooze until reset" and snooze-reset answer 503. */
+  untilReset?: (s: SessionRow) => ResetTarget;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -169,10 +170,16 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
     if (d.mgr.isEnding(id)) return { res: c.json({ error: "session-ending" }, 409) };
     return { s };
   };
+  /** Settle and snooze would hide a question or approval the session waits on: 409 request-open. */
+  const requestOpen = (c: Context, s: SessionRow): Response | null =>
+    d.inbox.item(s).attention.reason === "request" ? c.json({ error: "request-open", message: REQUEST_OPEN }, 409) : null;
+  const noUsage = (c: Context) => c.json({ error: "usage limits are not configured" }, 503);
   /** Each answers the session's new inbox item. */
   app.post("/api/sessions/:id/settle", (c) => {
     const r = anySession(c, c.req.param("id"));
     if ("res" in r) return r.res;
+    const open = requestOpen(c, r.s);
+    if (open) return open;
     d.inbox.settle(r.s.id, "manual");
     return c.json(d.inbox.item(r.s));
   });
@@ -193,6 +200,8 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
     if (!isRecord(body) || keys.length !== 1 || !(keys[0] === "until" || keys[0] === "untilReset")) {
       return c.json({ error: "body must be {until} or {untilReset: true}" }, 400);
     }
+    const open = requestOpen(c, r.s);
+    if (open) return open;
     if ("until" in body) {
       const until = body.until;
       if (typeof until !== "number" || !Number.isSafeInteger(until) || until <= d.inbox.now()) {
@@ -202,6 +211,7 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
       return c.json(d.inbox.item(r.s));
     }
     if (body.untilReset !== true) return c.json({ error: "body must be {until} or {untilReset: true}" }, 400);
+    if (!d.untilReset) return noUsage(c);
     const target = d.untilReset(r.s);
     if ("reason" in target) return c.json({ error: "no-active-limit", message: target.reason }, 409);
     d.inbox.snooze(r.s.id, target.resetsAt, "reset");
@@ -211,6 +221,7 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
   app.get("/api/sessions/:id/snooze-reset", (c) => {
     const r = anySession(c, c.req.param("id"));
     if ("res" in r) return r.res;
+    if (!d.untilReset) return noUsage(c);
     return c.json(d.untilReset(r.s));
   });
 
