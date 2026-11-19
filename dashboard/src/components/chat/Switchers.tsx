@@ -16,14 +16,11 @@ type Which = "harness" | "model" | "account";
 const errorText = (e: unknown) => (e instanceof ApiError ? switchErrorText(e.status, e.body) : (e as Error).message);
 
 /** Model, account and harness menus of a chat session. devd applies a switch between turns and records it in the
- *  thread as a notice; `onSwitched` reloads the thread to show it. The menus show the target devd plans the next
- *  switch from (GET thread/target), re-read when the thread announces a new native thread or a run ends. */
-export function Switchers({ sessionId, thread, onSwitched }: {
-  sessionId: string;
-  thread: ThreadSnapshot;
-  onSwitched: () => Promise<void>;
-}) {
+ *  thread as a notice, which arrives over the stream. The menus show the target devd plans the next switch from
+ *  (GET thread/target), re-read when the thread announces a new native thread or a run ends. */
+export function Switchers({ sessionId, thread }: { sessionId: string; thread: ThreadSnapshot }) {
   const [target, setTarget] = useState<ChatTarget | null>(null);
+  const [targetErr, setTargetErr] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<SwitchOption[] | null>(null);
   const [accountsErr, setAccountsErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<Which | null>(null);
@@ -32,11 +29,14 @@ export function Switchers({ sessionId, thread, onSwitched }: {
 
   const n = thread.native;
   const ended = thread.runs.filter((r) => r.endedSeq !== null).length;
-  const loadTarget = useCallback(
-    () => api.chatTarget(sessionId).then(setTarget, (e) => setErr(`could not read the current agent: ${errorText(e)}`)),
-    [sessionId],
-  );
+  const loadTarget = useCallback(() => api.chatTarget(sessionId).then(
+    (t) => { setTarget(t); setTargetErr(null); },
+    (e) => setTargetErr(`Could not read the current agent: ${errorText(e)}`),
+  ), [sessionId]);
   useEffect(() => { void loadTarget(); }, [loadTarget, n?.harness, n?.nativeThreadId, n?.model, n?.account, ended]);
+  // A result note belongs to the last switch; the next message the user sends is a new action.
+  const runs = thread.runs.length;
+  useEffect(() => { setNote(null); }, [runs]);
 
   const loadAccounts = useCallback(async (t: ChatTarget) => {
     setAccounts(null); setAccountsErr(null);
@@ -51,24 +51,32 @@ export function Switchers({ sessionId, thread, onSwitched }: {
     } catch (e) { setAccountsErr(errorText(e)); }
   }, []);
 
+  // Loaded with the target, so the account trigger shows the label from the start; re-read when the menu opens.
+  const accountKey = target ? `${target.harness}:${target.account}` : null;
+  // Keyed on harness and account only: every target read is a new object.
+  useEffect(() => { if (target && accountMenuBlocked(target) === null) void loadAccounts(target); }, [accountKey, loadAccounts]);
+
   async function doSwitch(which: Which, value: string, call: () => Promise<ChatSwitchResult>) {
     setBusy(which); setErr(null); setNote(null);
-    let r: ChatSwitchResult;
-    try { r = await call(); }
+    try { setNote(switchResultText(await call())); }
     catch (e) {
       setErr(`${which === "harness" ? "Agent" : which === "model" ? "Model" : "Account"} switch to ${value} failed: ${errorText(e)}`);
-      setBusy(null);
-      return;
     }
-    setNote(switchResultText(r));
-    // The switch happened; a failed reload only hides its notice until the next load.
-    if (!r.unchanged) await onSwitched().catch((e) => setErr(`Switched, but reloading the thread failed: ${errorText(e)}`));
+    // Also after a timeout: the bridge may have switched, and the triggers should say where it is.
     await loadTarget();
     setBusy(null);
   }
 
+  if (!target) {
+    if (!targetErr) return null;
+    return (
+      <p role="alert" className="flex flex-wrap items-center gap-2 text-xs text-destructive">
+        {targetErr}
+        <Button type="button" variant="outline" size="xs" onClick={() => void loadTarget()}>Retry</Button>
+      </p>
+    );
+  }
   const blocked = switchBlocked(thread);
-  if (!target) return err ? <p role="alert" className="text-xs text-destructive">{err}</p> : null;
   const profile = profileFor(target.agent);
   const currentAccount = accounts?.find((a) => a.current)?.label ?? target.account;
 
@@ -93,8 +101,11 @@ export function Switchers({ sessionId, thread, onSwitched }: {
           onPick={(o) => void doSwitch("account", o.label, () => api.switchChatAccount(sessionId, o.value))}
         />
       </div>
+      {/* Visible, not only a tooltip: touch has no hover. */}
+      {blocked && <p className="text-xs text-muted-foreground">{blocked}</p>}
       {note && <p role="status" className="text-xs text-amber-700 dark:text-amber-300">{note}</p>}
       {err && <p role="alert" className="text-xs text-destructive">{err}</p>}
+      {targetErr && <p role="alert" className="text-xs text-destructive">{targetErr}</p>}
     </div>
   );
 }
@@ -125,18 +136,19 @@ function Menu({ which, title, label, options, loadErr, busy, blocked, onOpen, on
           </Button>
         </DropdownMenuTrigger>
       </span>
-      <DropdownMenuContent align="start" className="w-72 max-w-[calc(100vw-2rem)]">
+      <DropdownMenuContent align="start" collisionPadding={16} className="w-72 max-w-[calc(100vw-2rem)]">
         <DropdownMenuLabel className="text-xs text-muted-foreground">{title}</DropdownMenuLabel>
         <DropdownMenuSeparator />
         {loadErr ? <p role="alert" className="px-2 py-1.5 text-xs text-destructive">{loadErr}</p>
           : options === null ? <p className="px-2 py-1.5 text-xs text-muted-foreground">Loading…</p>
           : options.length === 0 ? <p className="px-2 py-1.5 text-xs text-muted-foreground">Nothing to switch to</p>
           : options.map((o) => (
-            <DropdownMenuItem key={o.value} disabled={o.disabled !== null} onSelect={() => { if (!o.current) onPick(o); }} className="items-start">
+            // A disabled option dims only its name: the reason under it stays readable.
+            <DropdownMenuItem key={o.value} disabled={o.disabled !== null} onSelect={() => { if (!o.current) onPick(o); }} className="items-start data-[disabled]:opacity-100">
               <Check className={o.current ? "mt-0.5" : "invisible mt-0.5"} aria-hidden="true" />
               <span className="flex min-w-0 flex-col">
-                <span className="truncate">{o.label}</span>
-                {o.detail && <span className="text-xs text-muted-foreground">{o.detail}</span>}
+                <span className={o.disabled ? "truncate opacity-50" : "truncate"}>{o.label}</span>
+                {o.detail && <span className={o.disabled ? "text-xs text-muted-foreground opacity-50" : "text-xs text-muted-foreground"}>{o.detail}</span>}
                 {o.warning && <span className="text-xs font-medium text-amber-700 dark:text-amber-300">{o.warning}</span>}
                 {o.disabled && <span className="text-xs text-muted-foreground">{o.disabled}</span>}
               </span>

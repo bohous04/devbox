@@ -176,6 +176,13 @@ export function mergeSnapshot(t: ThreadSnapshot, m: { afterSeq: number; snapshot
   return { lastSeq: Math.max(t.lastSeq, s.lastSeq), seenSeq: s.seenSeq, items, runs, pending: s.pending, background: s.background, native: s.native };
 }
 
+/** A devd notice from the stream (`thread-notice`, devd's ThreadStore.addNotice): it has an item id `notice:<n>` and no
+ *  seq of its own, so lastSeq stays; the same notice again (live and in a replay snapshot) is not added twice. */
+export function applyNotice(t: ThreadSnapshot, item: ThreadItem): ThreadSnapshot {
+  if (t.items.some((i) => i.itemId === item.itemId)) return t;
+  return { ...t, items: [...t.items, item] };
+}
+
 /** The run the Stop button interrupts. */
 export const activeRun = (t: ThreadSnapshot): RunRow | undefined => t.runs.find((r) => r.status === "running");
 
