@@ -702,6 +702,20 @@ describe("switching: fix round 1", () => {
     expect(f.turns.map((t) => t.text)).toEqual(["[user] earlier\n\nUser message:\nhi"]);
   });
 
+  test("a session switched to an ACP agent keeps no account across a bridge restart", async () => {
+    const f = fakeHarness();
+    const bridge = await start(f, { account: "a" });
+    await switchCmd({ harness: "vibe", account: null, model: "mistral-large-4-0", env: {} }, null);
+    f.emit({ type: "thread.native", harness: "vibe", nativeThreadId: "vibe-thread", account: null, model: "mistral-large-4-0" });
+    await bridge.close();
+    const g = fakeHarness();
+    await start(g, { account: "a" }); // launched as claude with account a
+    expect(g.opens[0]).toMatchObject({ resume: "vibe-thread", target: { harness: "vibe", account: null } });
+    expect(state()).toMatchObject({ harness: "vibe", account: null, target: { harness: "vibe", account: null } });
+    g.emit({ type: "thread.native", harness: "vibe", nativeThreadId: "vibe-thread", account: null, model: "mistral-large-4-0" });
+    expect(events().at(-1)).toMatchObject({ type: "thread.native", harness: "vibe", account: null });
+  });
+
   test("an ACP target with an account, or without its binary, is refused before the current harness is retired", async () => {
     const f = fakeHarness();
     await start(f, { acpBins: ["vibe-acp"] });

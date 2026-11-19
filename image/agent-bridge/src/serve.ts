@@ -307,9 +307,10 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     target: null,
     pendingHandoff: null,
   };
-  // A target without its own home (a setModel on the launch target) keeps only the model choice: the account is the
-  // one this launch leased, which a recreated container may have changed.
-  if (state.target !== null && !state.target.env.CLAUDE_CONFIG_DIR && !state.target.env.CODEX_HOME) {
+  // A Claude/Codex target without its own home (a setModel on the launch target) keeps only the model choice: the
+  // account is the one this launch leased, which a recreated container may have changed. An ACP target has no home
+  // either, but it runs on the agent's own login and must never inherit the launch account.
+  if (state.target !== null && !isAcpAgent(state.target.harness) && !state.target.env.CLAUDE_CONFIG_DIR && !state.target.env.CODEX_HOME) {
     state.target = persistableTarget({ harness: state.target.harness, account: o.account, model: state.target.model, env: o.targetEnv ?? {} });
   }
   state.account = state.target === null ? o.account : state.target.account;
