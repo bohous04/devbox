@@ -39,6 +39,14 @@ final class ThreadStoreTests: XCTestCase {
         return try JSONDecoder().decode(Fixture.self, from: Data(contentsOf: url))
     }
 
+    /// The Mac app saves open threads as JSON and reads them back after a relaunch: every fixture thread survives.
+    func testThreadSnapshotRoundTripsThroughJSON() throws {
+        for c in try fixture().cases {
+            let back = try JSONDecoder().decode(ThreadSnapshot.self, from: JSONEncoder().encode(c.expect))
+            XCTAssertEqual(back, c.expect, c.name)
+        }
+    }
+
     func testSharedFixtureCases() throws {
         let cases = try fixture().cases
         XCTAssertGreaterThan(cases.count, 20)
@@ -117,6 +125,25 @@ final class ThreadStoreLiveTests: XCTestCase {
         XCTAssertEqual(store.thread?.items.map(\.text), ["hi", "Switched"])
         for l in ["event: thread", "data: {not json", ""] { feed?.yield(l) }
         try await waitUntil { store.badFrame != nil }
+        store.stop()
+    }
+
+    /// The Mac reopens a window's thread from its saved copy: no full reload, the stream asks from the saved seq
+    /// (devd answers with a thread-snapshot of what changed after it).
+    func testRestoredThreadStreamsFromItsSeqWithoutAReload() async throws {
+        MockURLProtocol.handler = { _ in .init(statusCode: 204) }
+        let saved = try JSONDecoder().decode(ThreadSnapshot.self, from: snapshot(lastSeq: 10, seenSeq: 10))
+        var paths: [String] = []
+        var feed: AsyncThrowingStream<String, Error>.Continuation?
+        let store = ThreadStore(sessionId: "s1", client: client(), restored: saved, connect: { path, _ in
+            paths.append(path)
+            return AsyncThrowingStream { feed = $0 }
+        })
+        XCTAssertEqual(store.thread, saved)
+        await store.start()
+        try await waitUntil { feed != nil }
+        XCTAssertEqual(paths, ["/api/stream?session=s1&afterSeq=10"])
+        XCTAssertFalse(requests.contains { $0.hasPrefix("GET /api/sessions/s1/thread") }, "\(requests)")
         store.stop()
     }
 

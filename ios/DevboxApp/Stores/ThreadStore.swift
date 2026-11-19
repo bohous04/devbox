@@ -272,10 +272,12 @@ final class ThreadStore: ObservableObject {
     /// The seq last reported seen, so the same seq is not posted again.
     private var postedSeen = 0
 
-    init(sessionId: String, client: DevdClient, connect: Connect? = nil) {
+    /// `restored`: the thread as the Mac app saved it at quit; `start` then streams from its seq instead of loading it.
+    init(sessionId: String, client: DevdClient, restored: ThreadSnapshot? = nil, connect: Connect? = nil) {
         self.sessionId = sessionId
         self.client = client
         self.connect = connect ?? { path, id in try await client.streamLines(path, lastEventId: id) }
+        if let restored { setThread(restored) }
     }
 
     private var base: String { "/api/sessions/\(pathSegment(sessionId))" }

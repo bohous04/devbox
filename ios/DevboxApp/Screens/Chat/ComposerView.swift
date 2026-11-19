@@ -14,7 +14,7 @@ struct ComposerView: View {
     private struct Attached: Identifiable {
         let id = UUID()
         let data: Data
-        let preview: UIImage?
+        let preview: PlatformImage?
     }
 
     @State private var text = ""
@@ -35,7 +35,7 @@ struct ComposerView: View {
                         ForEach(images) { a in
                             ZStack(alignment: .topTrailing) {
                                 Group {
-                                    if let p = a.preview { Image(uiImage: p).resizable().scaledToFill() } else { Color.gray }
+                                    if let p = a.preview { Image(platformImage: p).resizable().scaledToFill() } else { Color.gray }
                                 }
                                 .frame(width: 56, height: 56).clipShape(RoundedRectangle(cornerRadius: Theme.R.md))
                                 Button { images.removeAll { $0.id == a.id } } label: {
@@ -56,7 +56,7 @@ struct ComposerView: View {
                         Label("Photo library", systemImage: "photo.on.rectangle")
                     }
                     Button { pasteImages() } label: { Label("Paste image", systemImage: "doc.on.clipboard") }
-                        .disabled(!UIPasteboard.general.hasImages)
+                        .disabled(!ImagePasteboard.hasImages)
                 } label: {
                     Image(systemName: "photo.badge.plus").frame(width: 36, height: 36)
                 }
@@ -89,7 +89,7 @@ struct ComposerView: View {
     }
 
     private func pasteImages() {
-        let providers = UIPasteboard.general.itemProviders.filter { $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) }
+        let providers = ImagePasteboard.providers()
         Task {
             await attach(providers.count) { i in
                 try await withCheckedThrowingContinuation { (c: CheckedContinuation<Data?, Error>) in
@@ -111,7 +111,7 @@ struct ComposerView: View {
             do {
                 guard let raw = try await load(i) else { error = "An image could not be read"; continue }
                 let data = try await Task.detached(priority: .userInitiated) { try ImagePrep.prepare(raw) }.value
-                images.append(Attached(data: data, preview: UIImage(data: data)))
+                images.append(Attached(data: data, preview: PlatformImage(data: data)))
             } catch {
                 self.error = "Image: \(chatErrorText(error))"
             }

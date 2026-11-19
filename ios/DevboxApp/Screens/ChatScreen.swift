@@ -15,10 +15,23 @@ struct ChatScreen: View {
     private let sessionId: String
     private let client: DevdClient
 
+    /// The Mac shows the terminal in a tab of the thread's window; it passes how to switch to it. nil: a full-screen
+    /// terminal from the toolbar (iPhone).
+    private let openTerminal: (() -> Void)?
+
     init(sessionId: String, client: DevdClient) {
         self.sessionId = sessionId
         self.client = client
+        openTerminal = nil
         _store = StateObject(wrappedValue: ThreadStore(sessionId: sessionId, client: client))
+    }
+
+    /// The Mac keeps the store outside the screen: its window restores it and saves its seq at quit.
+    init(store: ThreadStore, client: DevdClient, openTerminal: (() -> Void)?) {
+        self.sessionId = store.sessionId
+        self.client = client
+        self.openTerminal = openTerminal
+        _store = StateObject(wrappedValue: store)
     }
 
     private var title: String {
@@ -35,7 +48,7 @@ struct ChatScreen: View {
                 } description: {
                     Text("It has no chat thread; its agent runs in the terminal.")
                 } actions: {
-                    Button("Open the terminal") { showTerminal = true }
+                    Button("Open the terminal") { if let openTerminal { openTerminal() } else { showTerminal = true } }
                 }
             } else if let thread = store.thread {
                 conversation(thread)
@@ -47,13 +60,15 @@ struct ChatScreen: View {
         }
         .background(Theme.C.background)
         .navigationTitle(title)
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button { showTerminal = true } label: { Label("Terminal", systemImage: "terminal") }
+            if openTerminal == nil {
+                ToolbarItem(placement: .primaryAction) {
+                    Button { showTerminal = true } label: { Label("Terminal", systemImage: "terminal") }
+                }
             }
         }
-        .fullScreenCover(isPresented: $showTerminal) {
+        .fullScreenOrSheet(isPresented: $showTerminal) {
             TerminalScreen(sessionId: sessionId, title: title, client: client)
         }
         .task { await store.start() }

@@ -96,7 +96,7 @@ struct SshApprovalsScreen: View {
             set: { if !$0 { customMinutesRowId = nil } }
         )) {
             TextField("minutes", text: $customMinutesText)
-                .keyboardType(.numberPad)
+                .numberPadEntry()
             Button("Approve") {
                 if let id = customMinutesRowId {
                     if let minutes = Self.customMinutes(customMinutesText) {

@@ -33,7 +33,7 @@ struct CronScreen: View {
                         Section { Text(actionError).font(.caption).foregroundStyle(Theme.C.dangerText) }
                     }
                 }
-                .listStyle(.insetGrouped)
+                .insetGroupedList()
             } else if let error = store.error {
                 ContentUnavailableView(
                     "Couldn't load schedules",

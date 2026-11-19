@@ -52,13 +52,9 @@ final class KeychainStore: KeychainReading {
     }
 
     func read(_ key: String) -> KeychainRead {
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
+        var query = itemQuery(key)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
         // The vault passphrase is behind biometrics — reading it brings up the system Face ID dialog, which
         // without its own context shows only a generic "DevboxApp wants to use Face ID". A context
         // with a reason says WHY (unlocking the vault), same as for SSH key approvals.
@@ -90,11 +86,7 @@ final class KeychainStore: KeychainReading {
     /// unlocked device. `vaultPassphrase` does not belong here — its protection (biometrics) does not change.
     func migrateAccessibility(keys: [String]) {
         for key in keys where key != Self.vaultPassphrase {
-            let query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: service,
-                kSecAttrAccount as String: key,
-            ]
+            let query = itemQuery(key)
             let update: [String: Any] = [
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             ]
@@ -126,11 +118,7 @@ final class KeychainStore: KeychainReading {
     /// background) — otherwise the app would look unconfigured and show onboarding. Update also sets
     /// the accessibility, so the write also migrates an old `WhenUnlocked` item.
     private func upsert(_ key: String, _ data: Data) -> OSStatus {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key,
-        ]
+        let query = itemQuery(key)
         let update: [String: Any] = [
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
@@ -144,12 +132,8 @@ final class KeychainStore: KeychainReading {
 
     private func replaceVaultPassphrase(_ data: Data) -> OSStatus {
         delete(Self.vaultPassphrase)
-        var attributes: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: Self.vaultPassphrase,
-            kSecValueData as String: data,
-        ]
+        var attributes = itemQuery(Self.vaultPassphrase)
+        attributes[kSecValueData as String] = data
         if requireBiometryForVault {
             let accessControl = SecAccessControlCreateWithFlags(
                 nil,
@@ -178,22 +162,28 @@ final class KeychainStore: KeychainReading {
     func exists(_ key: String) -> Bool {
         let context = LAContext()
         context.interactionNotAllowed = true
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key,
-            kSecUseAuthenticationContext as String: context,
-        ]
+        var query = itemQuery(key)
+        query[kSecUseAuthenticationContext as String] = context
         let status = SecItemCopyMatching(query as CFDictionary, nil)
         return status == errSecSuccess || status == errSecInteractionNotAllowed
     }
 
     func delete(_ key: String) {
-        let query: [String: Any] = [
+        let query = itemQuery(key)
+        SecItemDelete(query as CFDictionary)
+    }
+
+    /// The item's identity. The Mac uses the data protection keychain: it has the iOS semantics this store relies
+    /// on (accessibility classes, the biometry ACL), which the legacy file keychain ignores.
+    private func itemQuery(_ key: String) -> [String: Any] {
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: key,
         ]
-        SecItemDelete(query as CFDictionary)
+        #if os(macOS)
+        query[kSecUseDataProtectionKeychain as String] = true
+        #endif
+        return query
     }
 }

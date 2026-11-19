@@ -1,5 +1,4 @@
 import SwiftUI
-import UIKit
 
 /// One thread item (dashboard/src/components/chat/MessageList.tsx): the user's message (right, with its images,
 /// "queued" while it waits, "from the critic" for the critic's follow-up), the assistant's text, a tool call, a
@@ -106,14 +105,14 @@ struct ChatText: View {
 struct AttachmentThumbnail: View {
     let path: String
     let client: DevdClient
-    @State private var image: UIImage?
+    @State private var image: PlatformImage?
     @State private var failed: String?
     @State private var full = false
 
     var body: some View {
         Group {
             if let image {
-                Image(uiImage: image).resizable().scaledToFill()
+                Image(platformImage: image).resizable().scaledToFill()
                     .onTapGesture { full = true }
             } else if let failed {
                 Image(systemName: "photo.badge.exclamationmark").accessibilityLabel("Image not loaded: \(failed)")
@@ -126,17 +125,17 @@ struct AttachmentThumbnail: View {
         .task(id: path) {
             do {
                 let data = try await client.getData(path)
-                guard let img = UIImage(data: data) else { failed = "not an image"; return }
+                guard let img = PlatformImage(data: data) else { failed = "not an image"; return }
                 image = img
             } catch {
                 failed = errorText(error)
             }
         }
-        .fullScreenCover(isPresented: $full) {
+        .fullScreenOrSheet(isPresented: $full) {
             if let image {
                 ZStack(alignment: .topTrailing) {
                     Color.black.ignoresSafeArea()
-                    Image(uiImage: image).resizable().scaledToFit().frame(maxWidth: .infinity, maxHeight: .infinity)
+                    Image(platformImage: image).resizable().scaledToFit().frame(maxWidth: .infinity, maxHeight: .infinity)
                     Button("Close") { full = false }.padding().foregroundStyle(.white)
                 }
             }

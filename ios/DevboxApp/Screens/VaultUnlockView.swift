@@ -148,7 +148,7 @@ struct VaultUnlockSheet: View {
                 }
             }
             .navigationTitle("Unlock vault")
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavigationTitle()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }

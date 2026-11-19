@@ -96,6 +96,8 @@ final class AppModel: ObservableObject {
     /// decide whether the client and `clientIdentity` should be rebuilt.
     private var loadedEndpoints: DevdEndpoints?
 
+    // Push and Live Activities are iOS only (the Mac app gets its notifications from the listener, S5-R9).
+    #if os(iOS)
     /// APNs registration/categories/ack — owned by AppModel (survives UI redraws and client
     /// changes), `lazy` because the closures below capture `self`, which is allowed only after full initialization.
     lazy var pushManager: PushManager = PushManager(
@@ -111,6 +113,7 @@ final class AppModel: ObservableObject {
     /// Cleanup of orphaned per-session Live Activities from build 12 (see LegacySessionActivityCleanup.swift);
     /// DevboxAppApp runs it at launch and on return to the foreground. Delete together with that file.
     lazy var legacySessionActivityCleanup = LegacySessionActivityCleanup()
+    #endif
 
     /// `reader` = where the configuration is read from; the default is `keychain` itself, tests inject a fake
     /// (a locked Keychain cannot be triggered in the simulator).
@@ -212,9 +215,11 @@ final class AppModel: ObservableObject {
         // A new path/token in Settings builds a new client — but devd on the other side (or a new
         // devd, if the hostname changed) does not know it yet. After the first grant of
         // permission the system does not give the app a second token, so the last known one is sent again (no-op without a client).
+        #if os(iOS)
         if configured {
             pushManager.reregisterCurrentToken()
         }
+        #endif
         return ok ? .success(()) : .failure(.keychainWriteFailed)
     }
 
@@ -448,12 +453,14 @@ final class AppModel: ObservableObject {
         }
         // New client = new path or credentials. The manager itself unregisters on the original server
         // (with the old client) before the new server gets the tokens; the same server just re-registers.
+        #if os(iOS)
         if client !== previousClient {
             liveActivityManager.configure(
                 client: client,
                 serverID: client == nil ? nil : AgentLiveActivityManager.serverID(for: endpoints)
             )
         }
+        #endif
     }
 
     /// The CF path is usable only with the complete triple (hostname + id + secret) — a hostname

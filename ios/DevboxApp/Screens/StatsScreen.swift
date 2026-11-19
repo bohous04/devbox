@@ -106,7 +106,7 @@ struct StatsScreen: View {
                 DatePicker("To", selection: $customTo, in: ...Date(), displayedComponents: .date)
             }
             .navigationTitle("Custom range")
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavigationTitle()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { showCustomSheet = false }
@@ -532,15 +532,19 @@ private extension Color {
     /// Dynamic light/dark color from hex — only for the `MetricCard` tones, which are not in the theme
     /// palette (asset catalog) because nothing else uses them.
     init(light: UInt32, dark: UInt32) {
-        func ui(_ hex: UInt32) -> UIColor {
-            UIColor(
+        func ui(_ hex: UInt32) -> PlatformColor {
+            PlatformColor(
                 red: CGFloat((hex >> 16) & 0xFF) / 255,
                 green: CGFloat((hex >> 8) & 0xFF) / 255,
                 blue: CGFloat(hex & 0xFF) / 255,
                 alpha: 1
             )
         }
+        #if os(iOS)
         self.init(uiColor: UIColor { $0.userInterfaceStyle == .dark ? ui(dark) : ui(light) })
+        #else
+        self.init(nsColor: NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? ui(dark) : ui(light) })
+        #endif
     }
 }
 

@@ -9,21 +9,47 @@ private typealias Color = SwiftUI.Color
 
 /// Dark terminal background — same value as the web (`Terminal.tsx`: `bg-[#0b0e14]`).
 private let terminalBackground = Color(red: 0x0b / 255, green: 0x0e / 255, blue: 0x14 / 255)
-private let terminalBackgroundUIColor = UIColor(red: 0x0b / 255, green: 0x0e / 255, blue: 0x14 / 255, alpha: 1)
+#if os(iOS)
+private let terminalBackgroundNativeColor = UIColor(red: 0x0b / 255, green: 0x0e / 255, blue: 0x14 / 255, alpha: 1)
+#else
+private let terminalBackgroundNativeColor = NSColor(red: 0x0b / 255, green: 0x0e / 255, blue: 0x14 / 255, alpha: 1)
+#endif
 
 /// `TerminalView` with a controlled read-only lock. `canBecomeFirstResponder` returns `false` until
 /// `isInputEnabled` is `true` — so in read-only mode the soft keyboard on the phone never
 /// appears (the web handles read-only only by not forwarding `onData`, keyboard/focus are not
 /// affected — on the phone the whole point is that the keyboard does not slide up by itself).
+///
+/// On the Mac SwiftTerm's responder and mouse-mode members cannot be overridden (public, not open) and there is no
+/// soft keyboard to keep down: there the read-only lock is the model's `granted` check alone, and mouse reporting is
+/// off so a drag selects text locally (scrolling goes to tmux through `TerminalHostView`'s wheel monitor).
 private final class DevboxTerminalView: TerminalView {
     var isInputEnabled = false
 
+    #if os(iOS)
     override var canBecomeFirstResponder: Bool { isInputEnabled }
 
     /// tmux (`mouse on`) enables mouse reporting and SwiftTerm would then add its own pan gesture,
     /// which sends a drag as a mouse drag (in tmux = text selection) and would fight our scrolling
     /// (`TerminalScrollController`). Taps for mouse reporting remain.
     override func mouseModeChanged(source: Terminal) {}
+    #endif
+
+    func focus() {
+        #if os(iOS)
+        _ = becomeFirstResponder()
+        #else
+        window?.makeFirstResponder(self)
+        #endif
+    }
+
+    func unfocus() {
+        #if os(iOS)
+        _ = resignFirstResponder()
+        #else
+        if window?.firstResponder === self { window?.makeFirstResponder(nil) }
+        #endif
+    }
 }
 
 /// Controller state of one terminal screen — owns the `TerminalSession` (WS) and holds a weak
@@ -73,7 +99,7 @@ final class TerminalScreenModel: ObservableObject {
             if state == .open {
                 granted = false
                 terminalView?.isInputEnabled = false
-                _ = terminalView?.resignFirstResponder() // the keyboard must not stay up in read-only
+                terminalView?.unfocus() // the keyboard must not stay up in read-only
                 if let cols = lastCols, let rows = lastRows {
                     self.session.send(TerminalProto.encodeResize(cols: cols, rows: rows))
                 }
@@ -97,19 +123,19 @@ final class TerminalScreenModel: ObservableObject {
         granted = true
         terminalView?.isInputEnabled = true
         session.send(TerminalProto.encodeUnlock())
-        _ = terminalView?.becomeFirstResponder()
+        terminalView?.focus()
     }
 
     func sendKey(_ key: String) {
         guard granted, let seq = TerminalProto.keySeq[key] else { return }
         sendInput(seq)
-        _ = terminalView?.becomeFirstResponder()
+        terminalView?.focus()
     }
 
     func sendText(_ text: String) {
         guard granted, !text.isEmpty else { return }
         sendInput(text)
-        _ = terminalView?.becomeFirstResponder()
+        terminalView?.focus()
     }
 
     /// Scrolling tmux history — even in read-only (devd allows it, it writes nothing to the shell).
@@ -158,6 +184,7 @@ final class TerminalScreenModel: ObservableObject {
     }
 }
 
+#if os(iOS)
 /// UIKit `TerminalView` wrapped for SwiftUI — feeds incoming data, forwards keys and size
 /// changes (SwiftTerm itself calls `sizeChanged` from `layoutSubviews` whenever the bounds change).
 private struct TerminalHostView: UIViewRepresentable {
@@ -166,7 +193,7 @@ private struct TerminalHostView: UIViewRepresentable {
     func makeUIView(context: Context) -> DevboxTerminalView {
         let view = DevboxTerminalView(frame: .zero)
         view.terminalDelegate = context.coordinator
-        view.nativeBackgroundColor = terminalBackgroundUIColor
+        view.nativeBackgroundColor = terminalBackgroundNativeColor
         // SwiftTerm's own scrollback is empty under tmux — scrolling goes through tmux.
         view.isScrollEnabled = false
         context.coordinator.scroller.install(on: view)
@@ -297,6 +324,84 @@ final class TerminalScrollController: NSObject, UIGestureRecognizerDelegate {
     }
 }
 
+#else
+/// AppKit `TerminalView` wrapped for SwiftUI. The scroll wheel over the terminal goes to tmux as wheel steps
+/// (SwiftTerm's own scrollback is empty under tmux), the same `ScrollStepper` the iPhone's drag uses.
+private struct TerminalHostView: NSViewRepresentable {
+    @ObservedObject var model: TerminalScreenModel
+
+    func makeNSView(context: Context) -> DevboxTerminalView {
+        let view = DevboxTerminalView(frame: .zero)
+        view.terminalDelegate = context.coordinator
+        view.nativeBackgroundColor = terminalBackgroundNativeColor
+        view.allowMouseReporting = false
+        context.coordinator.installWheel(on: view)
+        model.attach(view)
+        return view
+    }
+
+    func updateNSView(_ nsView: DevboxTerminalView, context: Context) {
+        nsView.isInputEnabled = model.granted
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(model: model) }
+
+    static func dismantleNSView(_ nsView: DevboxTerminalView, coordinator: Coordinator) {
+        coordinator.removeWheel()
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, TerminalViewDelegate {
+        let model: TerminalScreenModel
+        private var monitor: Any?
+        private var stepper = ScrollStepper(lineHeight: 16)
+
+        init(model: TerminalScreenModel) {
+            self.model = model
+        }
+
+        /// SwiftTerm's `scrollWheel` is not overridable, so a local monitor takes wheel events over this view first.
+        func installWheel(on view: TerminalView) {
+            let font = view.font
+            let lineHeight = Double(font.ascender - font.descender + font.leading)
+            stepper = ScrollStepper(lineHeight: lineHeight)
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self, weak view] event in
+                guard let self, let view, event.window === view.window,
+                      view.bounds.contains(view.convert(event.locationInWindow, from: nil)) else { return event }
+                // Trackpads report points, wheel mice lines. Positive = content down = towards history, like the
+                // iPhone drag.
+                let dy = Double(event.scrollingDeltaY) * (event.hasPreciseScrollingDeltas ? 1 : lineHeight)
+                if let r = stepper.feed(dy) { model.scroll(r.direction, steps: r.steps) }
+                return nil
+            }
+        }
+
+        func removeWheel() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+        }
+
+        func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+            model.handleSizeChanged(cols: newCols, rows: newRows)
+        }
+
+        func send(source: TerminalView, data: ArraySlice<UInt8>) {
+            model.handleTerminalInput(data)
+        }
+
+        func setTerminalTitle(source: TerminalView, title: String) {}
+        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+        func scrolled(source: TerminalView, position: Double) {}
+        func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {}
+        func bell(source: TerminalView) {}
+        func clipboardCopy(source: TerminalView, content: Data) {}
+        func clipboardRead(source: TerminalView) -> Data? { nil }
+        func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
+        func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+    }
+}
+#endif
+
 /// Native terminal over the devd WS — behavior 1:1 with `dashboard/src/components/Terminal.tsx`: default
 /// READ-ONLY (keyboard/key bar send nothing until the user taps "Take control", which
 /// sends `unlock` and only then enables input), read-only/control taken badge, status text
@@ -308,8 +413,12 @@ struct TerminalScreen: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model: TerminalScreenModel
 
-    init(sessionId: String, title: String, client: DevdClient) {
+    /// The Mac shows the terminal as a tab of the thread window: nothing to close there.
+    private let closable: Bool
+
+    init(sessionId: String, title: String, client: DevdClient, closable: Bool = true) {
         self.title = title
+        self.closable = closable
         _model = StateObject(wrappedValue: TerminalScreenModel(sessionId: sessionId, client: client))
     }
 
@@ -356,9 +465,11 @@ struct TerminalScreen: View {
                     .tint(.white)
                     .disabled(model.connectionState != .open)
             }
-            Button("Close") { dismiss() }
-                .buttonStyle(.borderless)
-                .tint(Color(white: 0.62))
+            if closable {
+                Button("Close") { dismiss() }
+                    .buttonStyle(.borderless)
+                    .tint(Color(white: 0.62))
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)

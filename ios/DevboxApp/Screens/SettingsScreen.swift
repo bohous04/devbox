@@ -50,20 +50,15 @@ struct SettingsScreen: View {
 
                 SettingsCard("Cloudflare Access", footer: "Leave blank to use the tailnet address only.") {
                     TextField("Hostname", text: $hostname)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.URL)
+                        .plainEntry(url: true)
                     TextField("Client Id", text: $cfId)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                        .plainEntry()
                     SecureField("Client Secret", text: $cfSecret)
                 }
 
                 SettingsCard("Tailnet") {
                     TextField("Tailnet URL", text: $tailnet)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.URL)
+                        .plainEntry(url: true)
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -88,7 +83,9 @@ struct SettingsScreen: View {
                 }
 
                 if prefill, let client = appModel.client {
+                    #if os(iOS)
                     AgentActivitySection(manager: appModel.liveActivityManager)
+                    #endif
                     VaultSection(appModel: appModel)
                     AccountsSection(client: client)
                     ConfigurationSection(client: client)
@@ -200,6 +197,7 @@ private struct SettingsCard<Content: View>: View {
 
 // MARK: - Live Activity
 
+#if os(iOS)
 /// Agent Live Activity (Dynamic Island + lock screen) driven from the server — enabling,
 /// registration state and restoring after a manual dismissal (swipe away is respected until "Show again").
 private struct AgentActivitySection: View {
@@ -226,6 +224,7 @@ private struct AgentActivitySection: View {
         }
     }
 }
+#endif
 
 // MARK: - Vault
 

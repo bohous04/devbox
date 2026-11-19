@@ -54,7 +54,7 @@ struct SessionDetailView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.C.background)
         .navigationTitle(session.map(displayTitle) ?? "Session")
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
         .onAppear(perform: consumeDeepLinkIfNeeded)
         .onChange(of: appModel.pendingDeepLink) { _, _ in consumeDeepLinkIfNeeded() }
     }
@@ -414,7 +414,7 @@ struct SessionDetailView: View {
                 .background(Theme.C.background)
             }
         }
-        .fullScreenCover(isPresented: $showTerminal) {
+        .fullScreenOrSheet(isPresented: $showTerminal) {
             if let client = appModel.client {
                 TerminalScreen(sessionId: session.id, title: displayTitle(session), client: client)
             } else {
@@ -725,7 +725,7 @@ struct ShareSessionSheet: View {
                 }
             }
             .navigationTitle("Share terminal")
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavigationTitle()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(created == nil ? "Cancel" : "Done") { dismiss() }

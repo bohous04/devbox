@@ -1,5 +1,7 @@
 import Foundation
+#if os(iOS)
 import UIKit
+#endif
 import UserNotifications
 import os
 
@@ -43,15 +45,19 @@ final class PushManager: ObservableObject {
     /// on the MainActor.
     private let onDeepLink: (PushDeepLink) -> Void
 
+    #if os(iOS)
     /// Last device token (hex) kept only in memory, never persisted — used for re-registration after
     /// a network path change in Settings (the system does not give the app a new token until authorization changes).
     private(set) var lastToken: String?
+    #endif
 
     init(clientProvider: @escaping () -> DevdClient?, onDeepLink: @escaping (PushDeepLink) -> Void) {
         self.clientProvider = clientProvider
         self.onDeepLink = onDeepLink
     }
 
+    // APNs registration is iOS only: on the Mac the listener notifies and its click opens the thread (S5-R9).
+    #if os(iOS)
     /// Registers categories/actions and requests permission; on consent calls
     /// `UIApplication.registerForRemoteNotifications()`, whose result arrives in
     /// `handleDeviceToken`/AppDelegate `didFailToRegister...` (see `DevboxAppApp.swift`). The caller
@@ -109,6 +115,8 @@ final class PushManager: ObservableObject {
             Self.logger.warning("registrace push tokenu selhala: \(String(describing: error))")
         }
     }
+
+    #endif
 
     private struct AckBody: Encodable { let alertId: String }
 

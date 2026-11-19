@@ -126,7 +126,7 @@ struct InboxScreen: View {
     }
 }
 
-private struct InboxRow: View {
+struct InboxRow: View {
     let item: InboxItem
 
     private var tone: StatusTone {
@@ -180,7 +180,7 @@ private struct InboxRow: View {
 
 /// Settle, unsettle and snooze for one row. "Until the limit resets" asks devd when the sheet opens; it stays
 /// disabled with devd's reason when there is no active limit. devd's refusals (409 request-open…) are shown.
-private struct InboxRowActions: View {
+struct InboxRowActions: View {
     let item: InboxItem
     @ObservedObject var store: InboxStore
     @Environment(\.dismiss) private var dismiss
@@ -222,7 +222,7 @@ private struct InboxRowActions: View {
             }
             .disabled(busy)
             .navigationTitle(item.title)
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavigationTitle()
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
         }
         .task {

@@ -899,7 +899,7 @@ struct OpenrouterView: Decodable {
 
 /// Arbitrary JSON (a tool call's `input`). `null` is a value of its own: a tool started with `input: null` keeps it,
 /// as in the dashboard (`it.input !== undefined`).
-enum JSONValue: Decodable, Equatable {
+enum JSONValue: Codable, Equatable {
     case null
     case bool(Bool)
     case number(Double)
@@ -915,6 +915,18 @@ enum JSONValue: Decodable, Equatable {
         else if let s = try? c.decode(String.self) { self = .string(s) }
         else if let a = try? c.decode([JSONValue].self) { self = .array(a) }
         else { self = .object(try c.decode([String: JSONValue].self)) }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .null: try c.encodeNil()
+        case .bool(let b): try c.encode(b)
+        case .number(let n): try c.encode(n)
+        case .string(let s): try c.encode(s)
+        case .array(let a): try c.encode(a)
+        case .object(let o): try c.encode(o)
+        }
     }
 
     /// Indented JSON for the tool call's details (keys sorted, so the same input always reads the same).
@@ -936,25 +948,25 @@ enum JSONValue: Decodable, Equatable {
     }
 }
 
-struct TokenUsage: Decodable, Equatable {
+struct TokenUsage: Codable, Equatable {
     let input: Int
     let output: Int
     let cacheCreation: Int
     let cacheRead: Int
 }
 
-enum RunOrigin: String, Decodable {
+enum RunOrigin: String, Codable {
     case user, agent, continuation, critic
 }
 
-enum RequestKind: String, Decodable {
+enum RequestKind: String, Codable {
     case question, plan, approval
 }
 
 /// One row of the conversation (`ThreadItem` in shared/thread.ts).
-struct ThreadItem: Decodable, Equatable {
-    enum Kind: String, Decodable { case user, assistant, tool, request, notice }
-    enum Status: String, Decodable { case streaming, done, open, answered, expired }
+struct ThreadItem: Codable, Equatable {
+    enum Kind: String, Codable { case user, assistant, tool, request, notice }
+    enum Status: String, Codable { case streaming, done, open, answered, expired }
 
     var seq: Int
     var runId: String?
@@ -996,8 +1008,8 @@ struct ThreadItem: Decodable, Equatable {
     }
 }
 
-struct RunRow: Decodable, Equatable {
-    enum Status: String, Decodable { case queued, running, completed, interrupted, failed }
+struct RunRow: Codable, Equatable {
+    enum Status: String, Codable { case queued, running, completed, interrupted, failed }
 
     var runId: String
     var origin: RunOrigin
@@ -1017,13 +1029,13 @@ struct RunRow: Decodable, Equatable {
     var failureReason: String?
 }
 
-struct RequestOption: Decodable, Equatable {
+struct RequestOption: Codable, Equatable {
     let label: String
     let description: String?
 }
 
 /// What `request.opened` carries, plus when it opened.
-struct PendingRequest: Decodable, Equatable {
+struct PendingRequest: Codable, Equatable {
     let requestId: String
     let runId: String
     let kind: RequestKind
@@ -1033,7 +1045,7 @@ struct PendingRequest: Decodable, Equatable {
     let openedAt: Int
 }
 
-struct BackgroundWork: Decodable, Equatable {
+struct BackgroundWork: Codable, Equatable {
     /// subagent, workflow, monitor, wakeup, declared-wait or command; shown as is.
     let id: String
     let kind: String
@@ -1042,14 +1054,15 @@ struct BackgroundWork: Decodable, Equatable {
     let until: Int?
 }
 
-struct NativeThread: Decodable, Equatable {
+struct NativeThread: Codable, Equatable {
     let harness: String
     let nativeThreadId: String
     let account: String?
     let model: String?
 }
 
-struct ThreadSnapshot: Decodable, Equatable {
+/// Encodable too: the Mac app keeps the threads of its open windows across a relaunch (`ThreadWindows`).
+struct ThreadSnapshot: Codable, Equatable {
     var lastSeq: Int
     var seenSeq: Int
     var runs: [RunRow]
