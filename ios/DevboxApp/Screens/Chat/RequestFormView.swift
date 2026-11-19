@@ -19,6 +19,7 @@ struct RequestFormView: View {
         case .plan: return "Plan for approval"
         case .approval: return "Approval needed"
         case .question: return "Question"
+        case .unknown: return "Request" // a kind of a later devd: answered like a question (options, free text)
         }
     }
 

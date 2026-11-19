@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 // Mirror of the TypeScript types from `dashboard/src/api.ts` — dashboard/src/api.ts is the source of truth for
 // shapes. Keys are 1:1 with JSON (no CodingKeys renaming); TS `?` and `| null` both map to
@@ -955,18 +956,41 @@ struct TokenUsage: Codable, Equatable {
     let cacheRead: Int
 }
 
+/// The step 5 inbox and thread enums decode tolerantly like `ClaudeState`: a value from a later devd becomes `.unknown`
+/// (logged with its raw value) instead of failing the whole `/api/inbox`, thread snapshot or SSE frame.
+private let modelsLogger = Logger(subsystem: "com.example.devbox", category: "Models")
+
+private func tolerant<T: RawRepresentable>(_ decoder: Decoder, unknown: T) throws -> T where T.RawValue == String {
+    let raw = try decoder.singleValueContainer().decode(String.self)
+    if let value = T(rawValue: raw) { return value }
+    modelsLogger.notice("unknown \(String(describing: T.self), privacy: .public) value '\(raw, privacy: .public)' from devd")
+    return unknown
+}
+
 enum RunOrigin: String, Codable {
     case user, agent, continuation, critic
+    case unknown
+    init(from decoder: Decoder) throws { self = try tolerant(decoder, unknown: .unknown) }
 }
 
 enum RequestKind: String, Codable {
     case question, plan, approval
+    case unknown
+    init(from decoder: Decoder) throws { self = try tolerant(decoder, unknown: .unknown) }
 }
 
 /// One row of the conversation (`ThreadItem` in shared/thread.ts).
 struct ThreadItem: Codable, Equatable {
-    enum Kind: String, Codable { case user, assistant, tool, request, notice }
-    enum Status: String, Codable { case streaming, done, open, answered, expired }
+    enum Kind: String, Codable {
+        case user, assistant, tool, request, notice
+        case unknown
+        init(from decoder: Decoder) throws { self = try tolerant(decoder, unknown: .unknown) }
+    }
+    enum Status: String, Codable {
+        case streaming, done, open, answered, expired
+        case unknown
+        init(from decoder: Decoder) throws { self = try tolerant(decoder, unknown: .unknown) }
+    }
 
     var seq: Int
     var runId: String?
@@ -1009,7 +1033,11 @@ struct ThreadItem: Codable, Equatable {
 }
 
 struct RunRow: Codable, Equatable {
-    enum Status: String, Codable { case queued, running, completed, interrupted, failed }
+    enum Status: String, Codable {
+        case queued, running, completed, interrupted, failed
+        case unknown
+        init(from decoder: Decoder) throws { self = try tolerant(decoder, unknown: .unknown) }
+    }
 
     var runId: String
     var origin: RunOrigin
@@ -1155,9 +1183,12 @@ struct ThreadSnapshotFrame: Decodable {
 }
 
 /// The inbox's sections; `settled` and `snoozed` are shelves (devd/src/sessionAttention.ts).
+/// `.unknown` (a section of a later devd) is shown with the idle sessions (`InboxView.group`).
 enum InboxSection: String, Decodable {
     case needsYou = "needs_you"
     case working, idle, settled, snoozed
+    case unknown
+    init(from decoder: Decoder) throws { self = try tolerant(decoder, unknown: .unknown) }
 }
 
 enum AttentionReason: String, Decodable {
@@ -1166,6 +1197,8 @@ enum AttentionReason: String, Decodable {
     case bridgeBehind = "bridge-behind"
     case prChecks = "pr-checks"
     case ciFailed = "ci-failed"
+    case unknown
+    init(from decoder: Decoder) throws { self = try tolerant(decoder, unknown: .unknown) }
 }
 
 struct Attention: Decodable, Equatable {
@@ -1179,7 +1212,11 @@ struct Attention: Decodable, Equatable {
 
 /// One session in the inbox (`GET /api/inbox`, SSE `inbox`).
 struct InboxItem: Decodable, Equatable, Identifiable {
-    enum Runtime: String, Decodable { case tmux, chat }
+    enum Runtime: String, Decodable {
+        case tmux, chat
+        case unknown
+        init(from decoder: Decoder) throws { self = try tolerant(decoder, unknown: .unknown) }
+    }
 
     let sessionId: String
     let runtime: Runtime

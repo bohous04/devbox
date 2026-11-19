@@ -28,6 +28,12 @@ final class InboxStoreTests: XCTestCase {
         XCTAssertEqual(list.items.map(\.attention.reason), [.completed, nil, .ciFailed, .prChecks])
     }
 
+    /// A section this app does not know yet (a later devd) shows with the idle sessions rather than nowhere.
+    func testUnknownSectionGroupsWithIdle() throws {
+        let g = InboxView.group([try item("i1", "idle", since: 1), try item("u1", "parked", since: 2)])
+        XCTAssertEqual(g.idle.map(\.sessionId), ["u1", "i1"])
+    }
+
     func testGroupingNeedsYouOldestFirstTheRestNewestFirst() throws {
         let items = [
             try item("n1", "needs_you", since: 30), try item("n2", "needs_you", since: 10),

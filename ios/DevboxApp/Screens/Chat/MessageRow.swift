@@ -32,7 +32,7 @@ struct MessageRow: View, Equatable {
             .frame(maxWidth: .infinity, alignment: .leading)
         case .tool: ToolCallView(item: item)
         case .request: request
-        case .notice:
+        case .notice, .unknown: // an item kind of a later devd: its text, shown like a notice rather than dropped
             Label { Text(item.text) } icon: { Image(systemName: "info.circle") }
                 .font(Theme.F.meta)
                 .foregroundStyle(Theme.C.mutedForeground)

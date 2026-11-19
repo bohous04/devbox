@@ -19,7 +19,7 @@ enum InboxView {
         return Groups(
             needsYou: of(.needsYou).sorted { $0.attention.since < $1.attention.since },
             working: of(.working).sorted(by: newestFirst),
-            idle: of(.idle).sorted(by: newestFirst),
+            idle: items.filter { [.idle, .unknown].contains($0.attention.section) }.sorted(by: newestFirst),
             snoozed: of(.snoozed).sorted(by: newestFirst),
             settled: of(.settled).sorted(by: newestFirst)
         )
@@ -72,6 +72,7 @@ enum InboxView {
         case .queued: return "queued"
         case .prChecks: return "waiting for CI checks"
         case .ciFailed: return "CI failed"
+        case .unknown: return "" // a reason of a later devd: the row still shows its section
         }
     }
 

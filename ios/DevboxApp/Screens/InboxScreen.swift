@@ -134,7 +134,7 @@ struct InboxRow: View {
         switch item.attention.section {
         case .needsYou: return .warn
         case .working: return .ok
-        case .idle, .snoozed, .settled: return .idle
+        case .idle, .snoozed, .settled, .unknown: return .idle
         }
     }
 
