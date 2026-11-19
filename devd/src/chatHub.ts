@@ -143,7 +143,7 @@ export class ChatHub {
     if (!st || st.subagents.size === 0) return;
     const s = this.d.session(sessionId);
     if (!s) return; // a session that is gone has no counters left to correct
-    for (let i = 0; i < st.subagents.size; i++) this.d.hub.handle(s, "subagent_stop");
+    for (let i = 0; i < st.subagents.size; i++) this.d.hub.handle(s, "subagent_stop", { correction: "drop-correction" });
   }
 
   private subagentStart(s: SessionRow, st: ChatState, id: string) {

@@ -496,6 +496,8 @@ test("T10: a session stopped and started again before the hub forgot it does not
   expect(f.hub.counters(f.row.id).inflight).toBe(1);
   // stop (releaseThread drops the chat state), start: the link connects again and seeds from the store.
   f.chat.drop(f.row.id);
+  // The corrective subagent_stop says why in notify_log, so it does not read as a real subagent ending.
+  expect(f.log("subagent_stop").map((r) => r.reason)).toEqual(["drop-correction"]);
   f.chat.onStatus(f.row.id, "connected", () => f.store.snapshot({ limit: 0 }));
   expect(f.hub.counters(f.row.id).inflight).toBe(1);
   f.feed(background());
