@@ -342,27 +342,12 @@ final class ThreadStore: ObservableObject {
         guard stream == nil else { return }
         let session = pathSegment(sessionId)
         let s = EventStream(
-            connect: { [weak self, connect, endingRetry] id in
+            connect: { [weak self, endingRetry] id in
                 while true {
-                    // Gone with its screen: no reconnect for nobody (the loop ends on the error, see EventStream).
-                    guard let self else { throw CancellationError() }
-                    // Each (re)connect asks from the seq the store holds now; devd prefers Last-Event-ID when sent.
-                    let after = self.thread?.lastSeq ?? 0
-                    do {
-                        let lines = try await connect("/api/stream?session=\(session)&afterSeq=\(after)", id)
-                        self.ending = false
-                        return lines
-                    } catch let e as DevdHTTPError where e.statusCode == 409 && e.serverMessage == "session-ending" {
-                        Self.logger.info("thread stream: session is ending, retrying")
-                        self.ending = true
-                    } catch let e as DevdHTTPError
-                                where e.statusCode == 404 || (e.statusCode == 409 && e.serverMessage == "not-a-chat-session") {
-                        Self.logger.notice("thread stream refused (HTTP \(e.statusCode) \(e.serverMessage ?? "", privacy: .public)): session ended")
-                        self.ending = false
-                        self.ended = true
-                        // Ends EventStream's loop: there is nothing to reconnect to.
-                        throw CancellationError()
-                    }
+                    // Only a weak reference across the sleep: a store let go while its session is ending is not kept
+                    // alive by its retries. Gone with its screen: no reconnect for nobody (see EventStream).
+                    if let lines = try await self?.connectOnce(session: session, lastEventId: id) { return lines }
+                    if self == nil { throw CancellationError() }
                     try await Task.sleep(for: endingRetry) // throws CancellationError when the stream is stopped
                 }
             },
@@ -375,6 +360,27 @@ final class ThreadStore: ObservableObject {
         )
         stream = s
         s.start()
+    }
+
+    /// One stream connect. nil: the session is ending (409 session-ending), try again later. Throws
+    /// CancellationError when the session is gone (404, 409 not-a-chat-session), which ends EventStream's loop.
+    private func connectOnce(session: String, lastEventId: String?) async throws -> AsyncThrowingStream<String, Error>? {
+        // Each (re)connect asks from the seq the store holds now; devd prefers Last-Event-ID when sent.
+        let after = thread?.lastSeq ?? 0
+        do {
+            let lines = try await connect("/api/stream?session=\(session)&afterSeq=\(after)", lastEventId)
+            ending = false
+            return lines
+        } catch let e as DevdHTTPError where e.statusCode == 409 && e.serverMessage == "session-ending" {
+            Self.logger.info("thread stream: session is ending, retrying")
+            ending = true
+            return nil
+        } catch let e as DevdHTTPError where e.statusCode == 404 || (e.statusCode == 409 && e.serverMessage == "not-a-chat-session") {
+            Self.logger.notice("thread stream refused (HTTP \(e.statusCode) \(e.serverMessage ?? "", privacy: .public)): session ended")
+            ending = false
+            ended = true
+            throw CancellationError()
+        }
     }
 
     private func handle(_ e: SSEParser.Event) {

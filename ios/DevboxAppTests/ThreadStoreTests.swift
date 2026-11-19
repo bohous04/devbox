@@ -168,6 +168,19 @@ final class ThreadStoreLiveTests: XCTestCase {
         store.stop()
     }
 
+    /// A screen let go of its store while the session is ending: the 20 s wait must not keep the store alive.
+    func testAStoreWaitingOnAnEndingSessionIsReleased() async throws {
+        let saved = try JSONDecoder().decode(ThreadSnapshot.self, from: snapshot(lastSeq: 10, seenSeq: 10))
+        var store: ThreadStore? = ThreadStore(sessionId: "s1", client: client(), restored: saved, endingRetry: .seconds(30),
+                                              connect: { _, _ in throw DevdHTTPError(statusCode: 409, serverMessage: "session-ending") })
+        weak let released = store
+        await store?.start()
+        try await waitUntil { released?.ending == true }
+        try await Task.sleep(for: .milliseconds(20)) // into the wait
+        store = nil
+        try await waitUntil { released == nil }
+    }
+
     /// The end went through while the store waited: the next try gets 404 and that is final.
     func testSessionEndingThen404Ends() async throws {
         let saved = try JSONDecoder().decode(ThreadSnapshot.self, from: snapshot(lastSeq: 10, seenSeq: 10))

@@ -92,6 +92,10 @@ final class EventStream {
 
     // The task does not hold the stream: when its owner lets go of it (a screen's store released without stop()),
     // the connection ends here rather than reconnecting forever for nobody.
+    // A deinit is nonisolated, so reading the main-actor `task` here only compiles in Swift 5 mode (SWIFT_VERSION
+    // 5.0); it relies on the owners (main-actor stores) releasing it on the main actor. Under Swift 6 make it
+    // `isolated deinit` (iOS 18 / macOS 15+; until those are the minimum, keep the task in a `nonisolated(unsafe)`
+    // or lock-protected property and cancel that).
     deinit {
         task?.cancel()
     }
