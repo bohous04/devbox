@@ -29,9 +29,13 @@ test("agent-launch: argument beats env, env beats the default claude", async () 
 
 test("agent-launch: vibe is a known profile that runs only in chat sessions", async () => {
   expect(await printAgent({ DEVD_AGENT: "vibe" })).toBe("vibe");
+  // Both paths exec zsh: a stub keeps the test independent of the host's shell (CI has no zsh).
+  const bin = mkdtempSync(join(tmpdir(), "agent-launch-zsh-"));
+  writeFileSync(join(bin, "zsh"), "#!/bin/sh\nexit 0\n");
+  chmodSync(join(bin, "zsh"), 0o755);
   for (const runtime of ["chat", "tmux"]) {
     const p = Bun.spawn(["bash", join(IMAGE, "agent-launch.sh"), "vibe"], {
-      env: { ...process.env, DEVD_AGENT: "", DEVD_RUNTIME: runtime },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, DEVD_AGENT: "", DEVD_RUNTIME: runtime },
       stdin: "ignore", stdout: "ignore", stderr: "pipe",
     });
     const err = await new Response(p.stderr).text();
