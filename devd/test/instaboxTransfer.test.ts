@@ -6,7 +6,7 @@ const remote = ["docker", "-H", "ssh://ibx-m_1"];
 test("volumesToCopy: shared volumes + all pool profiles, invalid ids dropped", () => {
   const ids = { claude: ["a1", "bad id"], codex: ["default", "g1", "BAD"] };
   expect(poolVolumes(ids)).toEqual(["claude-acct-a1", "codex-acct-g1"]);
-  expect(volumesToCopy(ids)).toEqual(["claude-home", "codex-home", "grok-home", "claude-acct-a1", "codex-acct-g1"]);
+  expect(volumesToCopy(ids)).toEqual(["claude-home", "codex-home", "grok-home", "vibe-home", "claude-acct-a1", "codex-acct-g1"]);
 });
 
 test("copyVolumeCmd: tar from the local volume to the remote one, pipefail, root with numeric-owner", () => {
