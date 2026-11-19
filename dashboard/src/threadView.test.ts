@@ -223,3 +223,11 @@ test("resume-failed for a run id never announced adds no item (devd's notice say
   expect(t.lastSeq).toBeGreaterThan(0);
 });
 
+test("a thread.native without a model keeps the harness's known model, like the store", () => {
+  const t = run(emptyThread(), [
+    { type: "thread.native", harness: "claude", nativeThreadId: "t1", account: "a", model: "claude-opus-5-5" },
+    { type: "thread.native", harness: "claude", nativeThreadId: "t1", account: "b", model: null },
+  ]);
+  expect(t.native).toEqual({ harness: "claude", nativeThreadId: "t1", account: "b", model: "claude-opus-5-5" });
+  expect(run(t, [{ type: "thread.native", harness: "codex", nativeThreadId: "x1", account: "c", model: null }]).native!.model).toBeNull();
+});

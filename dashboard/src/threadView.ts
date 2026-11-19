@@ -53,7 +53,8 @@ function terminal(n: ThreadSnapshot, seq: number, ts: number, runId: string, sta
 function dispatch(n: ThreadSnapshot, { seq, ts, event: ev }: LoggedEvent) {
   switch (ev.type) {
     case "thread.native":
-      n.native = { harness: ev.harness, nativeThreadId: ev.nativeThreadId, account: ev.account, model: ev.model };
+      // A resumed Claude thread is announced before the CLI names its model: null keeps the harness's known one (as in ThreadStore).
+      n.native = { harness: ev.harness, nativeThreadId: ev.nativeThreadId, account: ev.account, model: ev.model ?? (n.native?.harness === ev.harness ? n.native.model : null) };
       return;
     case "run.queued":
       insertRun(n, ev.runId, { origin: "user", status: "queued", nativeThreadId: null, model: null, queuedAt: ts, startedAt: null });
