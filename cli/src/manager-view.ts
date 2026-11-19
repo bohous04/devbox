@@ -126,7 +126,7 @@ export function exitMenuOptions(worktree: boolean, name?: string | null, agentNo
     // it reattaches back (handled by handleExit in main.ts).
     ...(switches ? [] : [{ value: "agent" as const, label: `⇄ Change agent${agentNow ? ` (now: ${agentNow})` : ""}` }]),
     ...(switches ? [] : account),
-    { value: "detach", label: "↩︎ Just detach (Claude keeps running)" },
+    { value: "detach", label: "↩︎ Just detach (the session keeps running)" },
   ];
 }
 

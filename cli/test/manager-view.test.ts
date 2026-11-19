@@ -126,7 +126,7 @@ test("exitMenuOptions: Back / End / Rename / Change agent / Just detach (no Stop
   expect(opts.map((o) => o.value)).toEqual(["back", "end", "rename", "agent", "detach"]);
   expect(opts[0].label).toContain("Back");
   expect(opts[1].label).toContain("End");
-  expect(opts[4].label).toContain("detach");
+  expect(opts[4].label).toBe("↩︎ Just detach (the session keeps running)");
 });
 
 // F9 is the fastest path in the real flow "the OR agent got stuck → switch to claude":
