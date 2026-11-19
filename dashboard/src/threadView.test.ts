@@ -96,6 +96,8 @@ test("terminal events close streaming items; usage only from run.completed; fail
   expect(t.runs[0]).toMatchObject({ status: "failed", failureReason: "rate-limited" });
   t = run(t, [{ type: "run.failed", runId: "r1", error: "later" }]);
   expect(t.runs[0].failureReason).toBeUndefined();
+  t = run(t, [{ type: "run.failed", runId: "r1", error: "x", reason: "quota-exceeded" } as never]);
+  expect(t.runs[0].failureReason).toBeUndefined();
   t = run(t, [{ type: "run.interrupted", runId: "nope" }]);
   expect(t.items.at(-1)).toMatchObject({ kind: "notice", text: "interrupted event for unknown run nope" });
 });

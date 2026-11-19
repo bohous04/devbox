@@ -87,6 +87,12 @@ test("a rate-limited run is needs-you with that reason; a later run that ends cl
   expect(chatAttention(s.snapshot(), connected, LATER)).toEqual({ section: "needs_you", reason: "failed", since: 4000 });
 });
 
+test("an unknown failure reason is not stored: the run is just failed", () => {
+  const s = thread([started("r1"), { type: "run.failed", runId: "r1", error: "x", reason: "quota-exceeded" } as unknown as BridgeEvent]);
+  expect(s.snapshot().runs[0].failureReason).toBeUndefined();
+  expect(chatAttention(s.snapshot(), connected, LATER)).toEqual({ section: "needs_you", reason: "failed", since: 2000 });
+});
+
 test("a thread store created before failure reasons opens and records them", () => {
   const dir = mkdtempSync(join(tmpdir(), "attention-"));
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));

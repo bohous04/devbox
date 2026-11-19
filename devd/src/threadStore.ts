@@ -190,7 +190,8 @@ export class ThreadStore {
         // resume-failed and open-failed come for a switch or the bridge's start, not a run: their run id was never
         // announced (contract with the bridge). devd says them in notices of its own (chatSwitch), so the event adds none.
         if ((ev.error === "resume-failed" || ev.error === "open-failed") && !db.query("SELECT 1 FROM runs WHERE run_id=?").get(ev.runId)) return;
-        this.terminal(seq, ts, ev.runId, "failed", { error: ev.error, failureReason: ev.reason ?? null });
+        // Only reasons devd knows reach the inbox; any other value from a newer bridge leaves the run plainly failed.
+        this.terminal(seq, ts, ev.runId, "failed", { error: ev.error, failureReason: ev.reason === "rate-limited" ? ev.reason : null });
         this.insertItem(seq, ts, { runId: ev.runId, itemId: null, kind: "notice", text: ev.error, status: "done" });
         return;
       case "bridge.started":

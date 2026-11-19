@@ -142,7 +142,8 @@ function dispatch(n: ThreadSnapshot, { seq, ts, event: ev }: LoggedEvent) {
       // resume-failed or open-failed for a run id never announced is a switch's or the bridge start's: devd's own
       // notice says it (as in ThreadStore).
       if ((ev.error === "resume-failed" || ev.error === "open-failed") && !n.runs.some((r) => r.runId === ev.runId)) return;
-      terminal(n, seq, ts, ev.runId, "failed", { error: ev.error, failureReason: ev.reason });
+      // Only known reasons, as in ThreadStore.
+      terminal(n, seq, ts, ev.runId, "failed", { error: ev.error, failureReason: ev.reason === "rate-limited" ? ev.reason : undefined });
       insertItem(n, seq, ts, { runId: ev.runId, itemId: null, kind: "notice", text: ev.error, status: "done" });
       return;
     case "bridge.started":
