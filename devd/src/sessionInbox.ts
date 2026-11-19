@@ -35,8 +35,9 @@ export class Inbox {
   private windows = new Map<string, { dirty: boolean }>();
   private rechecks = new Map<string, unknown>();
   private timers: { set: (fn: () => void, ms: number) => unknown; clear: (handle: unknown) => void };
-  /** Last logged store error per session, so a broken store is logged once per message, not per inbox read. */
-  private brokenLogged = new Map<string, string>();
+  /** Sessions whose store is unreadable: the logged message (logged once per message, not per inbox read) and since
+   *  when it fails (the item's `since`, so an unchanged failure is not published again). Cleared once it reads again. */
+  private broken = new Map<string, { msg: string; since: number }>();
   private coalesceMs: number;
   private log: (msg: string) => void;
 
@@ -157,19 +158,24 @@ export class Inbox {
     if (runtime === "tmux") {
       return { item: { ...base, attention: tmuxAttention(this.d.tmuxLive(s.id), pr), lastText: null }, recheckAt: null };
     }
-    try { return this.buildChat(s, base, pr); }
+    let built: { item: InboxItem; recheckAt: number | null };
+    try { built = this.buildChat(s, base, pr); }
     catch (e) {
       // One broken store must not take the whole inbox down; the session shows up as needing the user.
       const msg = (e as Error).message;
-      if (this.brokenLogged.get(s.id) !== msg) {
-        this.brokenLogged.set(s.id, msg);
+      let b = this.broken.get(s.id);
+      if (b?.msg !== msg) {
+        b = { msg, since: b?.since ?? this.now() };
+        this.broken.set(s.id, b);
         this.log(`inbox: thread store of ${s.id} unreadable: ${msg}`);
       }
       return {
-        item: { ...base, attention: { section: "needs_you", reason: "failed", since: this.now() }, lastText: `thread store unreadable: ${msg}` },
+        item: { ...base, attention: { section: "needs_you", reason: "failed", since: b.since }, lastText: `thread store unreadable: ${msg}` },
         recheckAt: null,
       };
     }
+    if (this.broken.delete(s.id)) this.log(`inbox: thread store of ${s.id} readable again`);
+    return built;
   }
 
   private buildChat(s: SessionRow, base: Omit<InboxItem, "attention" | "lastText">, pr: PrHold | null): { item: InboxItem; recheckAt: number | null } {
@@ -209,6 +215,9 @@ export class Inbox {
     const s = this.d.session(sessionId);
     if (!s) {
       this.lastPublished.delete(sessionId);
+      this.broken.delete(sessionId);
+      const recheck = this.rechecks.get(sessionId);
+      if (recheck !== undefined) { this.timers.clear(recheck); this.rechecks.delete(sessionId); }
       const removed: InboxRemoved = { sessionId, removed: true };
       this.d.bus.publish("inbox", removed);
       return;
