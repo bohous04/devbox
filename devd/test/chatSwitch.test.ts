@@ -426,12 +426,12 @@ test("GET thread/target is the target devd plans the next switch from", async ()
     const r = await t.app.fetch(new Request(`http://x/api/sessions/${CHAT.id}/thread/target`));
     return { status: r.status, body: await r.json() };
   };
-  expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "primary", model: null } });
+  expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "primary", model: null, awaitingTarget: false } });
   claudeThread(t);
   await t.post("account", { accountId: "backup" });
-  expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "backup", model: "claude-opus-5-5" } });
+  expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "backup", model: "claude-opus-5-5", awaitingTarget: false } });
   await t.post("harness", { agent: "codex" });
-  expect(await get()).toEqual({ status: 200, body: { agent: "codex", harness: "codex", account: "default", model: null } });
+  expect(await get()).toEqual({ status: 200, body: { agent: "codex", harness: "codex", account: "default", model: null, awaitingTarget: false } });
 });
 
 test("after a failed resume the switch notice says so", async () => {
@@ -681,6 +681,19 @@ test("I2: while the bridge awaits its target the user can switch despite queued 
   await Bun.sleep(80);
   expect(t.sent.length).toBe(n);
   expect((await t.post("model", { model: "claude-opus-5-5" })).status).toBe(409);
+});
+
+test("P24a: GET thread/target says whether the bridge awaits its target", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.setOnSend((cmd) => { if (cmd.kind === "switchTarget") throw new CommandFailed("not yet"); });
+  t.handshake(true);
+  await waitUntil(() => t.sent.length >= 1, "first re-send");
+  expect(t.sw.target(CHAT.id).awaitingTarget).toBe(true);
+  const r = await t.app.fetch(new Request(`http://x/api/sessions/${CHAT.id}/thread/target`));
+  expect(((await r.json()) as Record<string, unknown>).awaitingTarget).toBe(true);
+  t.handshake(false);
+  expect(t.sw.target(CHAT.id).awaitingTarget).toBe(false);
 });
 
 test("I2: picking the current target while the bridge awaits it sends it instead of answering unchanged", async () => {

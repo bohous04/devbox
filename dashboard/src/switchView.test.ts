@@ -3,15 +3,15 @@ import type { RunRow } from "../../shared/thread";
 import type { AccountView, ChatTarget, CodexAccountView } from "./api";
 import {
   accountMenuBlocked, claudeAccountOptions, codexAccountOptions, harnessOptions, modelMenuBlocked, modelOptions,
-  switchBlocked, switchErrorText, switchResultText,
+  awaitingTargetText, switchBlocked, switchErrorText, switchResultText,
 } from "./switchView";
 // Tests may import devd (see newSession.test.ts): the model list is the one devd accepts.
 import { CHAT_MODELS as DEVD_CHAT_MODELS } from "../../devd/src/chatSwitch";
 
 const NOW = 1_800_000_000_000;
 const HOUR = 3_600_000;
-const CLAUDE: ChatTarget = { agent: "claude", harness: "claude", account: "primary", model: "claude-opus-5-5" };
-const CODEX: ChatTarget = { agent: "codex", harness: "codex", account: "default", model: null };
+const CLAUDE: ChatTarget = { agent: "claude", harness: "claude", account: "primary", model: "claude-opus-5-5", awaitingTarget: false };
+const CODEX: ChatTarget = { agent: "codex", harness: "codex", account: "default", model: null, awaitingTarget: false };
 
 const run = (over: Partial<RunRow>): RunRow => ({
   runId: "r", origin: "user", status: "completed", nativeThreadId: null, model: null, harness: "claude",
@@ -35,9 +35,16 @@ const codex = (id: string, over: Partial<CodexAccountView> = {}, usage: Partial<
 });
 
 test("switching is blocked while a run is active or a message is queued (devd answers 409 run-active)", () => {
-  expect(switchBlocked({ runs: [run({})] })).toBeNull();
-  expect(switchBlocked({ runs: [run({}), run({ status: "running", endedSeq: null })] })).toMatch(/run is active/);
-  expect(switchBlocked({ runs: [run({ status: "queued", endedSeq: null })] })).toMatch(/queued/);
+  expect(switchBlocked({ runs: [run({})] }, CLAUDE)).toBeNull();
+  expect(switchBlocked({ runs: [run({}), run({ status: "running", endedSeq: null })] }, CLAUDE)).toMatch(/run is active/);
+  expect(switchBlocked({ runs: [run({ status: "queued", endedSeq: null })] }, CLAUDE)).toMatch(/queued/);
+  expect(awaitingTargetText(CLAUDE)).toBeNull();
+});
+
+test("P24a: while the agent waits for a target, switching is allowed despite queued messages and the reason says so", () => {
+  const waiting = { ...CLAUDE, awaitingTarget: true };
+  expect(switchBlocked({ runs: [run({ status: "queued", endedSeq: null })] }, waiting)).toBeNull();
+  expect(awaitingTargetText(waiting)).toMatch(/waiting for a target/);
 });
 
 test("model menu: the models devd accepts for the current harness, the current one marked", () => {

@@ -73,8 +73,9 @@ export type SwitchRequest = { kind: "model"; model: string } | { kind: "account"
  *  transition.ts). `exhausted`: the target account is over its usage threshold (allowed, as for `dev switch`). */
 export interface SwitchResult { kind: Transition["kind"]; unchanged?: true; exhausted?: true }
 const UNCHANGED: SwitchResult = { kind: "set-model", unchanged: true };
-/** GET .../thread/target: the profile and the target devd plans the next switch from. */
-export interface CurrentTarget extends Target { agent: AgentName }
+/** GET .../thread/target: the profile and the target devd plans the next switch from. `awaitingTarget`: the bridge
+ *  holds no harness until it gets a target (devd keeps sending it; a switch is allowed despite queued messages). */
+export interface CurrentTarget extends Target { agent: AgentName; awaitingTarget: boolean }
 
 export interface ChatSwitchDeps {
   db: Database;
@@ -165,7 +166,7 @@ export class ChatSwitch {
     const s = getSession(this.d.db, sessionId);
     if (!s) throw new Error(`unknown session ${sessionId}`);
     const { harness, account, model } = this.current(s, this.d.threads(sessionId));
-    return { agent: agentNameFor(s.agent), harness, account, model };
+    return { agent: agentNameFor(s.agent), harness, account, model, awaitingTarget: this.awaiting.has(sessionId) };
   }
 
   async switch(sessionId: string, req: SwitchRequest): Promise<SwitchResult> {

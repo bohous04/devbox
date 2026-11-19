@@ -22,11 +22,18 @@ export interface SwitchOption {
 const option = (value: string, label: string, current: boolean, o: Partial<SwitchOption> = {}): SwitchOption =>
   ({ value, label, detail: null, current, disabled: null, warning: null, ...o });
 
-/** devd refuses a switch with 409 run-active while a run is active or a message is queued: it applies between turns. */
-export function switchBlocked(t: { runs: RunRow[] }): string | null {
+/** devd refuses a switch with 409 run-active while a run is active or a message is queued: it applies between turns.
+ *  Not while the bridge awaits its target: the queued messages wait for exactly that. */
+export function switchBlocked(t: { runs: RunRow[] }, target: Pick<ChatTarget, "awaitingTarget">): string | null {
+  if (target.awaitingTarget) return null;
   if (t.runs.some((r) => r.status === "running")) return "A run is active: stop it or wait for it to end, then switch";
   if (t.runs.some((r) => r.endedSeq === null)) return "A message is queued: switch after it has run";
   return null;
+}
+
+/** Shown while the bridge awaits its target: picking any model, account or agent (also the current one) sends it. */
+export function awaitingTargetText(t: Pick<ChatTarget, "awaitingTarget">): string | null {
+  return t.awaitingTarget ? "Agent is waiting for a target: pick a model, account or agent to continue" : null;
 }
 
 /** A proxy profile's model is set in settings.proxyModels (devd: 400 model-set-by-profile). */

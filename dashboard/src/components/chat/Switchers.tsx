@@ -8,7 +8,7 @@ import {
 import { api, ApiError, type ChatSwitchResult, type ChatTarget } from "../../api";
 import { profileFor } from "../../newSession";
 import {
-  accountMenuBlocked, claudeAccountOptions, codexAccountOptions, harnessOptions, modelMenuBlocked, modelOptions,
+  accountMenuBlocked, awaitingTargetText, claudeAccountOptions, codexAccountOptions, harnessOptions, modelMenuBlocked, modelOptions,
   switchBlocked, switchErrorText, switchResultText, type SwitchOption,
 } from "../../switchView";
 
@@ -29,11 +29,14 @@ export function Switchers({ sessionId, thread }: { sessionId: string; thread: Th
 
   const n = thread.native;
   const ended = thread.runs.filter((r) => r.endedSeq !== null).length;
+  // A queued message or a devd notice (a bridge restart, a failed resume) may mean the bridge now awaits its target.
+  const notices = thread.items.filter((i) => i.kind === "notice").length;
+  const runCount = thread.runs.length;
   const loadTarget = useCallback(() => api.chatTarget(sessionId).then(
     (t) => { setTarget(t); setTargetErr(null); },
     (e) => setTargetErr(`Could not read the current agent: ${errorText(e)}`),
   ), [sessionId]);
-  useEffect(() => { void loadTarget(); }, [loadTarget, n?.harness, n?.nativeThreadId, n?.model, n?.account, ended]);
+  useEffect(() => { void loadTarget(); }, [loadTarget, n?.harness, n?.nativeThreadId, n?.model, n?.account, ended, runCount, notices]);
   // A result note belongs to the last switch; the next message the user sends is a new action.
   const runs = thread.runs.length;
   useEffect(() => { setNote(null); }, [runs]);
@@ -76,7 +79,8 @@ export function Switchers({ sessionId, thread }: { sessionId: string; thread: Th
       </p>
     );
   }
-  const blocked = switchBlocked(thread);
+  const blocked = switchBlocked(thread, target);
+  const awaiting = awaitingTargetText(target);
   const profile = profileFor(target.agent);
   const currentAccount = accounts?.find((a) => a.current)?.label ?? target.account;
 
@@ -103,6 +107,7 @@ export function Switchers({ sessionId, thread }: { sessionId: string; thread: Th
       </div>
       {/* Visible, not only a tooltip: touch has no hover. */}
       {blocked && <p className="text-xs text-muted-foreground">{blocked}</p>}
+      {awaiting && <p role="status" className="text-xs text-muted-foreground">{awaiting}</p>}
       {note && <p role="status" className="text-xs text-amber-700 dark:text-amber-300">{note}</p>}
       {err && <p role="alert" className="text-xs text-destructive">{err}</p>}
       {targetErr && <p role="alert" className="text-xs text-destructive">{targetErr}</p>}

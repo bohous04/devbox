@@ -258,7 +258,9 @@ export interface SwitchAgentResponse {
 }
 /** GET /api/sessions/:id/thread/target — the target devd plans a chat session's next switch from
  *  (devd/src/chatSwitch.ts CurrentTarget). `model: null` = the harness default. */
-export interface ChatTarget { agent: AgentName; harness: string; account: string | null; model: string | null }
+/** `awaitingTarget`: the agent bridge waits for a target (after a restart or a failed resume); devd then allows a
+ *  switch even with queued messages. */
+export interface ChatTarget { agent: AgentName; harness: string; account: string | null; model: string | null; awaitingTarget: boolean }
 /** 202 of the chat switch routes. `unchanged`: nothing was switched; `exhausted`: the target account is over its usage
  *  threshold (allowed, as for `dev switch`). Refusals come back as ApiError with the body (see switchErrorText). */
 export interface ChatSwitchResult {
