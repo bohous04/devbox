@@ -30,9 +30,10 @@ export function allowedPreviewUrl(raw: string): string | null {
 // userInfo/session from devd: only safe segments are allowed (it goes into AppleScript
 // and the launch config yaml in actions).
 export function parseSession(v: unknown): NotifySession | undefined {
-  const s = v as { id?: unknown; project?: unknown; repo?: unknown } | null;
+  const s = v as { id?: unknown; project?: unknown; repo?: unknown; runtime?: unknown } | null;
   const ok = (x: unknown): x is string => typeof x === "string" && /^[A-Za-z0-9._-]+$/.test(x);
-  return s && ok(s.id) && ok(s.project) && ok(s.repo) ? { id: s.id, project: s.project, repo: s.repo } : undefined;
+  return s && ok(s.id) && ok(s.project) && ok(s.repo) ? { id: s.id, project: s.project, repo: s.repo, ...(s.runtime === "chat" || s.runtime === "tmux" ? { runtime: s.runtime } : {}) }
+    : undefined;
 }
 
 // Bun.serve also passes the server object to the handler — the source address of the
@@ -160,7 +161,9 @@ export function createListener(cfg: ListenerConfig, actions: Actions) {
       if (url.pathname === "/clicked") {
         try {
           const session = parseSession(body);
-          if (session) {
+          if (session?.runtime === "chat") {
+            actions.openThread(session.id);
+          } else if (session) {
             if (!actions.focusWarp(session.repo)) actions.openWarpAttach(session.id);
           } else {
             actions.openDashboard();

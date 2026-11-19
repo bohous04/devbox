@@ -6,7 +6,7 @@ import type { SshApprovalAnswer, SshApprovalReq } from "../src/sshPrompt";
 const cfg = { token: "secret", host: "127.0.0.1", port: 7777, mappings: [{ from: "/srv/dev", to: "/Volumes/dev" }] };
 function fixture() {
   const opened: string[] = []; const notified: [string, string, unknown][] = [];
-  const focused: string[] = []; const attached: string[] = []; let dashboardOpened = 0;
+  const threads: string[] = []; const focused: string[] = []; const attached: string[] = []; let dashboardOpened = 0;
   let focusHit = false;
   let clipTargets: string[] = []; let clipImage: Uint8Array | null = null; let clipText: string | null = null;
   let clipFile: { name: string; bytes: Uint8Array } | { tooBig: true } | null = null;
@@ -21,6 +21,7 @@ function fixture() {
     focusWarp: (n) => { focused.push(n); return focusHit; },
     openWarpAttach: (id) => { attached.push(id); return { code: 0 }; },
     openDashboard: () => { dashboardOpened++; return { code: 0 }; },
+    openThread: (id) => { threads.push(id); return { code: 0, via: "app" }; },
     clipboardTargets: () => clipTargets,
     clipboardImage: () => clipImage,
     clipboardText: () => clipText,
@@ -34,7 +35,7 @@ function fixture() {
     setFocusHit: (v: boolean) => { focusHit = v; },
     setClip: (t: string[], i: Uint8Array | null, x: string | null) => { clipTargets = t; clipImage = i; clipText = x; },
     setClipFile: (f: { name: string; bytes: Uint8Array } | { tooBig: true } | null) => { clipFile = f; },
-    sshAsked, setSshAnswer: (a: SshApprovalAnswer | null) => { sshAnswer = a; },
+    sshAsked, threads, setSshAnswer: (a: SshApprovalAnswer | null) => { sshAnswer = a; },
   };
 }
 const post = (app: { fetch(r: Request): Promise<Response> }, path: string, body: unknown, token?: string) =>
@@ -89,6 +90,7 @@ test("open action failure surfaces as 500 with an error body", async () => {
     focusWarp: () => false,
     openWarpAttach: () => ({ code: 0 }),
     openDashboard: () => ({ code: 0 }),
+    openThread: () => ({ code: 0, via: "app" }),
     clipboardTargets: () => [],
     clipboardImage: () => null,
     clipboardText: () => null,
@@ -115,6 +117,24 @@ test("clicked: session → focus, on miss a new tab; no session → dashboard; a
   expect(f.attached).toEqual(["dev-shop-cms"]);
   await post(f.app, "/clicked", {}, "secret");
   expect(f.dashboard()).toBe(1);
+});
+
+test("clicked: a chat session opens its thread, never Warp; tmux keeps Warp", async () => {
+  const f = fixture();
+  f.setFocusHit(true);
+  await post(f.app, "/clicked", { id: "dev-shop-cms", project: "shop", repo: "cms", runtime: "chat" }, "secret");
+  expect(f.threads).toEqual(["dev-shop-cms"]);
+  expect(f.focused).toEqual([]);
+  expect(f.attached).toEqual([]);
+  await post(f.app, "/clicked", { id: "dev-shop-cms", project: "shop", repo: "cms", runtime: "tmux" }, "secret");
+  expect(f.threads).toEqual(["dev-shop-cms"]);
+  expect(f.focused).toEqual(["cms"]);
+});
+
+test("notify passes runtime through to the notifier session", async () => {
+  const f = fixture();
+  await post(f.app, "/notify", { title: "t", message: "m", session: { id: "a", project: "p", repo: "r", runtime: "chat" } }, "secret");
+  expect(f.notified[0][2]).toMatchObject({ session: { id: "a", runtime: "chat" } });
 });
 
 const get = (app: { fetch(r: Request): Promise<Response> }, path: string, token?: string) =>

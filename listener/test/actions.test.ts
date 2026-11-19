@@ -270,3 +270,29 @@ test("a failed SSH dialog process cannot approve from partial stdout", async () 
   }));
   expect(await actions.askSshApproval({ id: "test", title: "test", why: "test" })).toBeNull();
 });
+
+test("openThread: opens devbox://thread/<id> when an app handles the scheme", () => {
+  const calls: string[][] = [];
+  const a = realActions((...cmd) => { calls.push(cmd); return { code: 0 }; }, null, { dashboardUrl: "https://dev.example.com" },
+    {}, (...cmd) => { calls.push(cmd); return { code: 0, stdout: "/Applications/Devbox.app\n" }; });
+  expect(a.openThread("dev-a-b")).toEqual({ code: 0, via: "app" });
+  expect(calls.at(-1)).toEqual(["open", "devbox://thread/dev-a-b"]);
+});
+
+test("openThread: no handler -> dashboard /#/s/<id>", () => {
+  const calls: string[][] = [];
+  const a = realActions((...cmd) => { calls.push(cmd); return { code: 0 }; }, null, { dashboardUrl: "https://dev.example.com/" },
+    {}, () => ({ code: 0, stdout: "\n" }));
+  expect(a.openThread("dev-a-b")).toEqual({ code: 0, via: "dashboard" });
+  expect(calls.at(-1)).toEqual(["open", "https://dev.example.com/#/s/dev-a-b"]);
+});
+
+test("openThread: a failing handler probe is not 'no app' and is not hidden", () => {
+  const a = realActions(() => ({ code: 0 }), null, { dashboardUrl: "https://dev.example.com" }, {}, () => ({ code: 1, stdout: "" }));
+  expect(a.openThread("dev-a-b")).toEqual({ code: 1, via: "app" });
+});
+
+test("openThread: no app and no dashboardUrl -> nothing to open, reported as failure", () => {
+  const a = realActions(() => ({ code: 0 }), null, {}, {}, () => ({ code: 0, stdout: "" }));
+  expect(a.openThread("dev-a-b")).toEqual({ code: 1, via: "dashboard" });
+});

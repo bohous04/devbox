@@ -41,6 +41,16 @@ export function defaultNotifierBin(): string {
   return join(homedir(), "Applications", "Devbox Notifier.app", "Contents", "MacOS", "devbox-notify");
 }
 
+// JXA: path of the app LaunchServices would use for the devbox:// scheme, empty when none is
+// registered (browsers do not claim custom schemes, so an empty answer means "app not installed").
+// Chosen over `open -Ra` (needs an app NAME, not a scheme) and a plain `open devbox://` (on no handler it
+// shows a macOS error dialog instead of failing quietly).
+export const THREAD_HANDLER_SCRIPT = [
+  'ObjC.import("AppKit");',
+  'const u = $.NSWorkspace.sharedWorkspace.URLForApplicationToOpenURL($.NSURL.URLWithString("devbox://thread/x"));',
+  'u.isNil() ? "" : ObjC.unwrap(u.path)',
+].join("\n");
+
 export function mapPath(mappings: Mapping[], path: string): string | null {
   const segments = path.split("/");
   if (segments.includes("..") || segments.includes(".")) return null;
@@ -50,7 +60,7 @@ export function mapPath(mappings: Mapping[], path: string): string | null {
   return hit ? hit.to + path.slice(hit.from.length) : null;
 }
 
-export interface NotifySession { id: string; project: string; repo: string }
+export interface NotifySession { id: string; project: string; repo: string; runtime?: "tmux" | "chat" }
 export interface NotifyOpts { sound?: boolean; session?: NotifySession }
 
 // AppleScript: walk Warp's windows and focus the first one whose title contains needle
@@ -146,6 +156,9 @@ export interface Actions {
   focusWarp(needle: string): boolean;
   openWarpAttach(sessionId: string): { code: number };
   openDashboard(): { code: number };
+  /** Chat session click: `devbox://thread/<id>` when the Devbox Mac app is installed, else the dashboard
+   *  thread (`/#/s/<id>`, the spec's "dashboard as fallback"). `via` says which path was taken. */
+  openThread(sessionId: string): { code: number; via: "app" | "dashboard" };
   clipboardTargets(): string[];
   clipboardImage(): Uint8Array | null;
   clipboardText(): string | null;
@@ -250,6 +263,18 @@ export function realActions(
       return run("open", "warp://launch/devbox-attach.yaml"); // nastartuje i Warp
     },
     openDashboard: () => (click.dashboardUrl ? run("open", click.dashboardUrl) : { code: 0 }),
+    openThread: (sessionId) => {
+      const probe = textRun("osascript", "-l", "JavaScript", "-e", THREAD_HANDLER_SCRIPT);
+      // A failed probe is not "app missing": report it instead of guessing a path.
+      if (probe.code !== 0) { console.error("thread click: handler probe failed, nothing opened"); return { code: 1, via: "app" }; }
+      if (probe.stdout.trim()) {
+        console.log(`thread click: ${sessionId} -> Devbox app`);
+        return { ...run("open", `devbox://thread/${sessionId}`), via: "app" };
+      }
+      if (!click.dashboardUrl) { console.error("thread click: no Devbox app and no dashboardUrl, nothing opened"); return { code: 1, via: "dashboard" }; }
+      console.log(`thread click: ${sessionId} -> dashboard (Devbox app not installed)`);
+      return { ...run("open", `${click.dashboardUrl.replace(/\/+$/, "")}/#/s/${sessionId}`), via: "dashboard" };
+    },
     clipboardTargets: () => {
       if (clipBin) {
         const r = out(clipBin, "targets");
