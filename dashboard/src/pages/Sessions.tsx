@@ -16,7 +16,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { agoLabel, bytes, compactNumber, czCurrency, durationLabel, stateLabel } from "../format";
-import { AGENT_IDS, AGENT_PROFILES, SOLO, agentNameFor, chatRuntimeBlock, defaultAgentFor, folderChoices, instaboxAgentBlock, profileFor, projectChoices, repoChoices, sessionsFor, soleProject, tmuxRuntimeBlock } from "../newSession";
+import { AGENT_IDS, AGENT_PROFILES, SOLO, agentNameFor, chatRuntimeBlock, defaultAgentFor, folderChoices, instaboxAgentBlock, profileFor, projectChoices, repoChoices, runtimeChoice, sessionsFor, soleProject, tmuxRuntimeBlock } from "../newSession";
+import { getDefaultRuntime, validateConfig } from "../configEdit";
 import { CC_EVENT_TYPES, fleetBadge, historyLine, rowState, type HistoryTone } from "../ccUpkeepView";
 import { agentSwitchError, openedNotice } from "../sessionsView";
 import { terminalTabUrl } from "../terminalRoute";
@@ -53,6 +54,7 @@ function NewSession({ open, onClose, onStarted }: { open: boolean; onClose: () =
   const [repo, setRepo] = useState("");
   const [agent, setAgent] = useState<AgentName>("claude");
   const [host, setHost] = useState<"vps" | "instabox">("vps");
+  // The runtime the user wants (the configured default until they pick); `choice` below is what actually starts.
   const [runtime, setRuntime] = useState<SessionRuntime>("tmux");
   const [ibxStatus, setIbxStatus] = useState<IbxStatusDto>({ enabled: false });
   const [placement, setPlacement] = useState<PlacementDto | null>(null);
@@ -73,18 +75,25 @@ function NewSession({ open, onClose, onStarted }: { open: boolean; onClose: () =
     api.tree().then(setTree).catch((e) => setErr((e as Error).message));
   }, [open, tree]);
 
-  // VPS capacity and load change between openings → read on every opening.
+  // VPS capacity and load change between openings → read on every opening, with the default runtime.
   // An InstaBox API outage must not break the form: status is then "not configured", host VPS.
   useEffect(() => {
     if (!open) return;
     let alive = true;
-    void Promise.allSettled([api.instaboxStatus(), api.placement()]).then(([st, pl]) => {
+    void Promise.allSettled([api.instaboxStatus(), api.placement(), api.config()]).then(([st, pl, cfg]) => {
       if (!alive) return;
       const status: IbxStatusDto = st.status === "fulfilled" ? st.value : { enabled: false };
       const p = pl.status === "fulfilled" ? pl.value : null;
+      let def: SessionRuntime | null = null;
+      try {
+        if (cfg.status === "rejected") throw cfg.reason;
+        def = getDefaultRuntime(validateConfig(cfg.value));
+        setRuntime(def);
+      } catch (e) { setErr(`Could not read the default runtime: ${(e as Error).message}`); }
       setIbxStatus(status);
       setPlacement(p);
-      setHost(p?.suggest === "instabox" && hostDisabledReason(status, false, instaboxAgentBlock(agent)) === null ? "instabox" : "vps");
+      // Under a chat default the suggestion stays a hint: InstaBox is tmux-only, picking it would switch the runtime.
+      setHost(p?.suggest === "instabox" && def === "tmux" && hostDisabledReason(status, false, instaboxAgentBlock(agent)) === null ? "instabox" : "vps");
     });
     return () => { alive = false; };
   }, [open]);
@@ -95,14 +104,16 @@ function NewSession({ open, onClose, onStarted }: { open: boolean; onClose: () =
   const selected = repos.find((r) => r.value === repo);
   // Solo has no repo of its own (see SOLO) and the server does not accept `fresh` for it (openSolo),
   // so the "New session" option makes sense only for a real repo.
-  // devd attaches only to a session of the same runtime; one of the other runtime does not count as existing.
-  const existing = repo && repo !== SOLO
-    ? sessionsFor(live?.sessions ?? [], project, repo).filter((s) => (s.runtime ?? "tmux") === runtime)
-    : [];
   const ibxDisabled = hostDisabledReason(ibxStatus, repo === SOLO, runtime === "chat" ? chatRuntimeBlock(agent, "instabox") : instaboxAgentBlock(agent));
   const onIbx = host === "instabox" && !ibxDisabled;
   const chatDisabled = repo === SOLO ? "Chat sessions need a repo (no claudeSolo)" : chatRuntimeBlock(agent, onIbx ? "instabox" : "vps");
   const tmuxDisabled = tmuxRuntimeBlock(agent);
+  // An agent/host the wanted runtime cannot run starts in the other one, said under the toggle, never silently.
+  const choice = runtimeChoice(runtime, chatDisabled, tmuxDisabled);
+  // The form names its runtime, so devd attaches only to a session of that runtime; another does not count as existing.
+  const existing = repo && repo !== SOLO
+    ? sessionsFor(live?.sessions ?? [], project, repo).filter((s) => (s.runtime ?? "tmux") === choice.runtime)
+    : [];
 
   // A folder with a single project → we fill in the project ourselves, so the user on mobile
   // immediately sees the repo picker instead of a confusing empty middle step.
@@ -117,14 +128,6 @@ function NewSession({ open, onClose, onStarted }: { open: boolean; onClose: () =
   useEffect(() => {
     if (host === "instabox" && ibxDisabled) setHost("vps");
   }, [host, ibxDisabled]);
-  // Same for chat: an agent the chat bridge cannot run puts the form back on tmux.
-  useEffect(() => {
-    if (runtime === "chat" && chatDisabled) setRuntime("tmux");
-  }, [runtime, chatDisabled]);
-  // And a chat-only agent puts it on chat, where chat can run it.
-  useEffect(() => {
-    if (runtime === "tmux" && tmuxDisabled && !chatDisabled) setRuntime("chat");
-  }, [runtime, tmuxDisabled, chatDisabled]);
 
   if (!open) return null;
 
@@ -134,9 +137,9 @@ function NewSession({ open, onClose, onStarted }: { open: boolean; onClose: () =
     try {
       const r = repo === SOLO
         ? await api.openSolo({ folder, project, agent })
-        : await api.openSession({ folder, project, repo, cloneUrl: selected?.cloneUrl, agent, fresh, runtime });
+        : await api.openSession({ folder, project, repo, cloneUrl: selected?.cloneUrl, agent, fresh, runtime: choice.runtime });
       setRepo("");
-      if (runtime === "chat") {
+      if (choice.runtime === "chat") {
         onClose();
         navigate(`/s/${encodeURIComponent(r.session.id)}`, { state: { notice: openedNotice(r.pull, "chat") } });
         return;
@@ -153,7 +156,8 @@ function NewSession({ open, onClose, onStarted }: { open: boolean; onClose: () =
     if (!selected?.cloneUrl) { setErr("This repo has no clone URL."); return; }
     setErr(null); setIbxFailed(false); setBusy(true); setStep("preflight");
     try {
-      const { jobId, sessionId } = await api.openInstabox({ folder, project, repo, cloneUrl: selected.cloneUrl, agent });
+      // The form names the runtime (InstaBox is tmux-only), so devd has no runtime to pick and sends no runtimeNotice.
+      const { jobId, sessionId } = await api.openInstabox({ folder, project, repo, cloneUrl: selected.cloneUrl, agent, runtime: "tmux" });
       for (;;) {
         if (!aliveRef.current) return;
         const job = await api.instaboxJob(jobId);
@@ -214,12 +218,13 @@ function NewSession({ open, onClose, onStarted }: { open: boolean; onClose: () =
           <fieldset className="sm:col-span-2">
             <legend className={labelCls}>Interface</legend>
             <div className="mt-2 flex gap-2">
-              <Button type="button" variant={runtime === "tmux" ? "default" : "outline"} disabled={busy || !!tmuxDisabled} title={tmuxDisabled ?? undefined} onClick={() => setRuntime("tmux")}>Terminal (tmux)</Button>
-              <Button type="button" variant={runtime === "chat" ? "default" : "outline"} disabled={busy || !!chatDisabled} title={chatDisabled ?? undefined} onClick={() => setRuntime("chat")}>Chat</Button>
+              <Button type="button" variant={choice.runtime === "tmux" ? "default" : "outline"} disabled={busy || !!tmuxDisabled} title={tmuxDisabled ?? undefined} onClick={() => setRuntime("tmux")}>Terminal (tmux)</Button>
+              <Button type="button" variant={choice.runtime === "chat" ? "default" : "outline"} disabled={busy || !!chatDisabled} title={chatDisabled ?? undefined} onClick={() => setRuntime("chat")}>Chat</Button>
             </div>
-            {runtime === "chat" && <p className="mt-2 text-sm text-muted-foreground">The agent runs behind the chat view; its terminal stays available as a tab.</p>}
-            {repo && chatDisabled && <p className="mt-2 text-xs text-muted-foreground">{chatDisabled}</p>}
-            {repo && tmuxDisabled && <p className="mt-2 text-xs text-muted-foreground">{tmuxDisabled}</p>}
+            {choice.runtime === "chat" && <p className="mt-2 text-sm text-muted-foreground">The agent runs behind the chat view; its terminal stays available as a tab.</p>}
+            {repo && choice.notice && <p role="status" className="mt-2 text-sm text-amber-600 dark:text-amber-400">{choice.notice}</p>}
+            {repo && !choice.notice && chatDisabled && <p className="mt-2 text-xs text-muted-foreground">{chatDisabled}</p>}
+            {repo && !choice.notice && tmuxDisabled && <p className="mt-2 text-xs text-muted-foreground">{tmuxDisabled}</p>}
           </fieldset>
           <fieldset className="sm:col-span-2">
             <legend className={labelCls}>Where it runs</legend>

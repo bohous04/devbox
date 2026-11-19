@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { agoLabel } from "../format";
+import { getDefaultRuntime, validateConfig } from "../configEdit";
 import { AGENT_IDS, AGENT_PROFILES, chatRuntimeBlock, folderChoices, projectChoices, repoChoices, soleProject } from "../newSession";
 
 const selectCls = "h-11 w-full rounded-md border bg-background px-2 text-sm text-foreground disabled:cursor-not-allowed disabled:opacity-50";
@@ -22,6 +23,11 @@ function NewSchedule({ open, onClose, onCreated }: { open: boolean; onClose: () 
   const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => { if (open && tree === null) api.tree().then(setTree).catch((e) => setErr((e as Error).message)); }, [open, tree]);
+  // Preselect the configured default runtime; the form always sends the runtime it shows.
+  useEffect(() => {
+    if (!open) return;
+    api.config().then((c) => setRuntime(getDefaultRuntime(validateConfig(c)))).catch((e) => setErr(`Could not read the default runtime: ${(e as Error).message}`));
+  }, [open]);
   useEffect(() => { if (tree && folder) { const sp = soleProject(tree, folder); if (sp) setProject(sp); } }, [folder, tree]);
   const folders = tree ? folderChoices(tree) : [];
   const projects = tree && folder ? projectChoices(tree, folder) : [];

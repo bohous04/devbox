@@ -16,8 +16,8 @@ import {
 } from "../authView";
 import { useStore } from "../store";
 import {
-  SETTING_BOUNDS, addGiteaInstance, cloneConfig, configIssues, criticModelSuggestions, giteaIssues, getAccountPool, getCritic, mergeSettings,
-  removeGiteaInstance, removeProjectPin, setAccountPool, setCritic, setProjectPin, updateGiteaInstance,
+  SETTING_BOUNDS, addGiteaInstance, cloneConfig, configIssues, criticModelSuggestions, giteaIssues, getAccountPool, getCritic, getDefaultRuntime, mergeSettings,
+  removeGiteaInstance, removeProjectPin, setAccountPool, setCritic, setDefaultRuntime, setProjectPin, updateGiteaInstance,
   updateSetting, validateConfig,
   type DevConfig, type NumericSettingKey,
 } from "../configEdit";
@@ -427,8 +427,19 @@ export function Settings() {
               <NumField label="Port range start" hint="first port of the assigned range" unit="port" k="portRangeStart" value={draft.settings.portRangeStart} onChange={(k, v) => draft && mutate(updateSetting(draft, k, v))} />
               <NumField label="Ports per session" hint="how many ports each session gets" unit="ports" k="portsPerSession" value={draft.settings.portsPerSession} onChange={(k, v) => draft && mutate(updateSetting(draft, k, v))} />
               <SliderField label="Disk warning" hint="disk usage at which a warning fires" k="diskWarnPercent" value={draft.settings.diskWarnPercent} onChange={(k, v) => draft && mutate(updateSetting(draft, k, v))} />
+              <div className="flex min-w-0 flex-col gap-1.5">
+                <span id="default-runtime-label" className="text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">Default runtime</span>
+                <Select value={getDefaultRuntime(draft)} onValueChange={(v) => mutate(setDefaultRuntime(draft, v as "tmux" | "chat"))}>
+                  <SelectTrigger className="h-8 max-w-[180px]" aria-labelledby="default-runtime-label"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="tmux">Terminal (tmux)</SelectItem>
+                    <SelectItem value="chat">Chat</SelectItem>
+                  </SelectContent>
+                </Select>
+                <span className="text-[10.5px] text-muted-foreground">runtime of new sessions and schedules that do not pick one; running sessions keep theirs</span>
+              </div>
             </>
-          ) : [0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-[68px] rounded-md" />)}
+          ) : [0, 1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-[68px] rounded-md" />)}
         </CardContent></Card>
       </Section>
 

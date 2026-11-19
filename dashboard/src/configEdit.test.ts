@@ -3,7 +3,7 @@ import {
   addFolder, addGiteaInstance, addProject, addRepo, addSource, addSshServer, cloneConfig, configIssues,
   mergeFolders, mergeSettings, mergeSshServers,
   criticModelSuggestions,
-  findSource, getAccountPool, getCritic, giteaIssues, hasRepo, hasUpstreamRepo, removeUpstreamRepo, uniqueRepoName, removeFolder, removeGiteaInstance,
+  findSource, getAccountPool, getDefaultRuntime, setDefaultRuntime, getCritic, giteaIssues, hasRepo, hasUpstreamRepo, removeUpstreamRepo, uniqueRepoName, removeFolder, removeGiteaInstance,
   removeProject, removeProjectPin, removeRepo, removeSource, removeSshServer, setAccountPool, setCritic,
   setProjectPin, settingsIssues, sourceKey, sourceLabel, sshServerIssues, targetLabel,
   updateGiteaInstance, updateSetting, updateSshServer, validateConfig, validSeg, visibilityLabel,
@@ -467,4 +467,15 @@ test("sshServerIssues: key is a 1Password title and may contain spaces", () => {
   const base = { name: "shop", user: "main", host: "192.0.2.11", port: 2222 };
   expect(sshServerIssues([{ ...base, key: "SSH Key - Client shop" }])).toEqual([]);
   expect(sshServerIssues([{ ...base, key: "  " }])).toHaveLength(1);
+});
+
+test("defaultRuntime: absent = tmux, set keeps the rest of settings, validateConfig rejects other values", () => {
+  const cfg = { version: 1, settings: { autoStopHours: 4, portRangeStart: 1, portsPerSession: 2, diskWarnPercent: 3 }, folders: {} } as DevConfig;
+  expect(getDefaultRuntime(cfg)).toBe("tmux");
+  const chat = setDefaultRuntime(cfg, "chat");
+  expect(getDefaultRuntime(chat)).toBe("chat");
+  expect(chat.settings.autoStopHours).toBe(4);
+  expect(cfg.settings.defaultRuntime).toBeUndefined();   // the original is untouched
+  expect(validateConfig(chat).settings.defaultRuntime).toBe("chat");
+  expect(() => validateConfig({ ...cfg, settings: { ...cfg.settings, defaultRuntime: "vm" } })).toThrow("config.settings.defaultRuntime must be tmux or chat");
 });

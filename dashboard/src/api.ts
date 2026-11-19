@@ -119,6 +119,8 @@ export interface OpenResult {
   created: boolean;
   pull?: { status: string; files?: string[] };
   claudePrompt?: string;
+  /** Set when devd started the session in another runtime than the default, because the default cannot run the agent. */
+  runtimeNotice?: string;
 }
 export interface Schedule {
   id: string; name: string; cron: string; folder: string; project: string; repo: string;
@@ -533,8 +535,8 @@ export const api = {
   // (`d.mgr.openSolo`), see devd/src/api.ts.
   openSession: (t: { folder: string; project: string; repo: string; cloneUrl?: string; agent?: AgentName; fresh?: boolean; runtime?: SessionRuntime }) => j<OpenResult>("/api/sessions", post(t)),
   openSolo: (t: { folder: string; project: string; agent?: AgentName }) => j<OpenResult>("/api/sessions", post({ ...t, solo: true })),
-  openInstabox: (t: { folder: string; project: string; repo: string; cloneUrl: string; agent?: AgentName }) =>
-    j<{ jobId: string; sessionId: string }>("/api/sessions", post({ ...t, host: "instabox" })),
+  openInstabox: (t: { folder: string; project: string; repo: string; cloneUrl: string; agent?: AgentName; runtime?: "tmux" }) =>
+    j<{ jobId: string; sessionId: string; runtime: "tmux"; runtimeNotice?: string }>("/api/sessions", post({ ...t, host: "instabox" })),
   instaboxJob: (id: string) => j<IbxJobDto>(`/api/instabox/jobs/${encodeURIComponent(id)}`),
   instaboxStatus: () => j<IbxStatusDto>("/api/instabox/status"),
   placement: () => j<PlacementDto>("/api/placement"),

@@ -66,6 +66,17 @@ export function tmuxRuntimeBlock(agent: AgentName): string | null {
   return chatOnly ? `${label} runs only in chat sessions` : null;
 }
 
+/** The runtime the form starts a session in: the wanted one, unless it is blocked for this agent/host and the other
+ *  is not — then the other, with the notice shown under the toggle (mirrors runtimeForOmitted in devd/src/agents.ts,
+ *  which does the same for a request that names no runtime). */
+export function runtimeChoice(wanted: "tmux" | "chat", chatBlock: string | null, tmuxBlock: string | null): { runtime: "tmux" | "chat"; notice: string | null } {
+  const other = wanted === "chat" ? "tmux" : "chat";
+  const blocked = wanted === "chat" ? chatBlock : tmuxBlock;
+  const otherBlocked = wanted === "chat" ? tmuxBlock : chatBlock;
+  if (blocked === null || otherBlocked !== null) return { runtime: wanted, notice: null };
+  return { runtime: other, notice: `${blocked}, so this session runs in ${other}` };
+}
+
 /** Normalizes text to a profile — mirrors `agentNameFor` from devd/src/agents.ts
  *  (it cannot be imported here — this is a vite bundle for the browser). `agent` comes
  *  from the API as a plain string; the fallback to claude is the same as in devd and
