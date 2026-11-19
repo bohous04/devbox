@@ -27,7 +27,7 @@ export const AGENT_PROFILES: Record<AgentName, AgentProfile> = {
   codex:         { label: "Codex",              short: "Codex",       yolo: true, proxy: false, runtime: "codex" },
   grok:          { label: "Grok Build",         short: "Grok",        yolo: true, proxy: false, runtime: "grok", acp: "grok" },
   antigravity:   { label: "Antigravity",        short: "Antigravity", yolo: true, proxy: false, runtime: "agy", acp: "antigravity" },
-  vibe:          { label: "Mistral Vibe",       short: "Vibe",        yolo: true, proxy: false, runtime: "vibe", acp: "vibe", chatOnly: true },
+  vibe:          { label: "Mistral Vibe",       short: "Vibe",        yolo: true, proxy: false, runtime: "vibe", acp: "vibe", acpLive: true, chatOnly: true },
 };
 
 export const AGENT_IDS = Object.keys(AGENT_PROFILES) as AgentName[];

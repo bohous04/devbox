@@ -376,6 +376,65 @@ test("harness: no room for any history keeps the request path and says so in a n
   expect(t.store.snapshot().items.map((i) => i.text)).toContain(historyOmittedNotice(1));
 });
 
+const VIBE_CAPS: Capabilities = { resume: true, injectItems: false, liveModelSwitch: true, questions: false, images: true, backgroundVisibility: false };
+/** A Vibe turn on its own thread, as the bridge announces it. */
+function vibeTurn(t: ReturnType<typeof setup>, runId: string, caps = VIBE_CAPS, model = "mistral-large-4-0") {
+  t.feed([
+    { type: "thread.native", harness: "vibe", nativeThreadId: "t-vibe", account: null, model, caps },
+    { type: "run.queued", runId, text: `ask ${runId}`, attachments: [] },
+    { type: "run.started", runId, origin: "user", nativeThreadId: "t-vibe", model },
+    { type: "message.final", runId, itemId: `m-${runId}`, role: "assistant", text: `answer ${runId}` },
+    { type: "run.completed", runId, nativeThreadId: "t-vibe", usage: null, costUsd: null },
+  ]);
+}
+
+test("harness: Claude → Vibe is a fresh thread with the handoff, on no account, and releases the Anthropic lease", async () => {
+  const t = setup();
+  claudeThread(t);
+  expect(await t.post("harness", { agent: "vibe" })).toEqual({ status: 202, body: { kind: "fresh-with-handoff" } });
+  const cmd = t.sent[0] as Extract<BridgeCommand, { kind: "switchTarget" }>;
+  expect(cmd.target).toEqual({ harness: "vibe", account: null, model: null, env: {} });
+  expect(cmd.resume).toBeNull();
+  expect(cmd.handoff!.preamble).toContain("[user] Fix the login bug");
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("vibe");
+  expect(activeLeases(t)).toEqual([]);
+});
+
+test("harness: back to Vibe resumes its thread with a delta; an ACP agent that cannot resume gets a fresh thread", async () => {
+  for (const [caps, kind, resume] of [[VIBE_CAPS, "resume-with-delta", "t-vibe"], [{ ...VIBE_CAPS, resume: false }, "fresh-with-handoff", null]] as const) {
+    const t = setup({ agent: "vibe" });
+    vibeTurn(t, "r1", caps);
+    expect(await t.post("harness", { agent: "claude" })).toMatchObject({ status: 202 });
+    t.feed([
+      { type: "thread.native", harness: "claude", nativeThreadId: "t-claude", account: "primary", model: "claude-opus-5-5", caps: CLAUDE_CAPS },
+      { type: "run.queued", runId: "r2", text: "now on claude", attachments: [] },
+      { type: "run.started", runId: "r2", origin: "user", nativeThreadId: "t-claude", model: "claude-opus-5-5" },
+      { type: "run.completed", runId: "r2", nativeThreadId: "t-claude", usage: null, costUsd: null },
+    ]);
+    expect(await t.post("harness", { agent: "vibe" })).toEqual({ status: 202, body: { kind } });
+    const cmd = t.sent.at(-1) as Extract<BridgeCommand, { kind: "switchTarget" }>;
+    // Another harness's model does not carry over: Vibe runs its own default (as Codex after Claude).
+    expect(cmd.target).toEqual({ harness: "vibe", account: null, model: null, env: {} });
+    expect(cmd.resume).toBe(resume);
+    expect(cmd.handoff!.preamble).toContain("now on claude");
+  }
+});
+
+test("model: Vibe switches among its models live; another harness's model is 400", async () => {
+  const t = setup({ agent: "vibe" });
+  vibeTurn(t, "r1");
+  expect(await t.post("model", { model: "mistral-medium-3.5" })).toEqual({ status: 202, body: { kind: "set-model" } });
+  expect(t.sent).toEqual([{ kind: "setModel", model: "mistral-medium-3.5" }]);
+  expect(await t.post("model", { model: "claude-opus-5-5" })).toMatchObject({ status: 400, body: { error: "unknown-model" } });
+  // A reloaded Vibe session names Medium 3.5 "mistral-medium-latest": an alias with a window, not a default.
+  expect(MODEL_WINDOW_ALIASES["mistral-medium-latest"]).toBe("mistral-medium-3.5");
+});
+
+test("account: an ACP agent runs on its own CLI login, not on an account pool (400)", async () => {
+  const t = setup({ agent: "vibe" });
+  expect(await t.post("account", {})).toMatchObject({ status: 400, body: { error: "no-account-pool" } });
+});
+
 // --- the switch notice and the current target ---
 
 const notices = (t: ReturnType<typeof setup>) => t.store.snapshot().items.filter((i) => i.kind === "notice").map((i) => i.text);

@@ -23,8 +23,9 @@ export const ACP_AGENTS: Record<AcpAgentId, AcpAgentSpec> = {
   // Full access: Grok approves its own tool calls. grok 1.0.13 (live): ACP v1, session/resume, no image prompts, models
   // in initialize `_meta.modelState`. Not offered in chat yet: no login in grok-home to record a turn with.
   grok: { id: "grok", argv: ["grok", "agent", "--always-approve", "stdio"] },
-  // -31001 is Mistral Vibe's rate-limit code, outside ACP.
-  vibe: { id: "vibe", argv: ["vibe-acp"], rateLimitCodes: [-31001] },
+  // -31001 is Mistral Vibe's rate-limit code, outside ACP. mistral-vibe 3.1.3 (live): ACP v1, session/load only, image
+  // prompts, model as a config option; sessions open in "accept-edits", devbox runs them in "auto-approve".
+  vibe: { id: "vibe", argv: ["vibe-acp"], rateLimitCodes: [-31001], modes: { allowed: ["auto-approve"] } },
   // Releases before 1.5.1 offer non-Gemini models only to allowlisted editors such as Zed. The agy CLI rejects the
   // "yolo" and "auto_edit" modes; in "default" it asks before acting and devbox allows every request.
   antigravity: { id: "antigravity", argv: ["agy", "acp"], clientName: "zed", modes: { allowed: ["default"] } },

@@ -125,7 +125,8 @@ shared volumes (`claude-home`, `codex-home`, `grok-home`), so every later sessio
 Mistral Vibe (`vibe`, ACP entry `vibe-acp`) uses its own login too: run `vibe --setup` once in a
 chat session's Terminal tab. Vibe keeps the key in the OS keyring and falls back to
 `~/.vibe/.env` when there is none, as in the container, so it lands on the shared `vibe-home`
-volume together with Vibe's sessions. OpenCode is not installed.
+volume together with Vibe's sessions. Vibe is offered in chat sessions only (it has no tmux launcher);
+devbox runs it in its auto-approve mode. OpenCode is not installed.
 If plugins or MCP servers were provisioned before the login, run the sync again:
 
 ```bash

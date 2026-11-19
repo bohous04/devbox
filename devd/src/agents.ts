@@ -46,7 +46,7 @@ const AGENTS_TABLE = {
   codex:         { runtime: "codex",  label: "Codex",              short: "Codex",       yolo: true, anthropicAccount: false },
   grok:          { runtime: "grok",   label: "Grok Build",         short: "Grok",        yolo: true, anthropicAccount: false, acp: "grok" },
   antigravity:   { runtime: "agy",    label: "Antigravity",        short: "Antigravity", yolo: true, anthropicAccount: false, acp: "antigravity" },
-  vibe:          { runtime: "vibe",   label: "Mistral Vibe",       short: "Vibe",        yolo: true, anthropicAccount: false, acp: "vibe", chatOnly: true },
+  vibe:          { runtime: "vibe",   label: "Mistral Vibe",       short: "Vibe",        yolo: true, anthropicAccount: false, acp: "vibe", acpLive: true, chatOnly: true },
 } as const satisfies Record<string, AgentSpec>;
 
 export type AgentName = keyof typeof AGENTS_TABLE;

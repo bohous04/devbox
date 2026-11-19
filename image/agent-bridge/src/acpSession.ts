@@ -498,6 +498,8 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
     if (replaying) return;
     const u = params?.update;
     const kind = isObject(u) ? u.sessionUpdate : undefined;
+    // Before the session check: Vibe reports usage for the session session/new is still creating.
+    if (typeof kind === "string" && IGNORED_UPDATES.has(kind)) return;
     if (params?.sessionId !== sessionId) {
       logError(`${spec.id}: ${String(kind)} for session ${String(params?.sessionId)}, not ${sessionId}, dropped`);
       return;
@@ -506,7 +508,7 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
       logError(`${spec.id}: session/update without an update kind dropped`);
       return;
     }
-    if (IGNORED_UPDATES.has(kind) || (kind === "state_update" && u.state !== "idle")) return;
+    if (kind === "state_update" && u.state !== "idle") return;
     const run = active;
     if (run === null) {
       logError(`${spec.id}: ${kind} outside a run dropped`);

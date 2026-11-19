@@ -717,3 +717,87 @@ describe("Grok (live)", () => {
     expect(logs.some((l) => l.includes("_x.ai/mcp/servers_updated"))).toBe(true);
   });
 });
+
+/** Answers each request the session sends from a live recording: per method, in recorded order, it pushes what the
+ *  agent sent between that request and the next one (its response renumbered to the session's request id). */
+function replay(fake: ReturnType<typeof fakeAgent>, lines: any[]) {
+  const segments = new Map<string, any[][]>();
+  let current: any[] | null = null;
+  let recordedId: unknown = null;
+  for (const l of lines) {
+    if (l.out?.method !== undefined && l.out.id !== undefined) {
+      current = [];
+      recordedId = l.out.id;
+      const q = segments.get(l.out.method) ?? [];
+      q.push(current);
+      segments.set(l.out.method, q);
+    } else if (l.in !== undefined && current !== null) current.push(l.in.id === recordedId && l.in.method === undefined ? { ...l.in, id: "@response" } : l.in);
+  }
+  for (const [method, queue] of segments) {
+    fake.responders[method] = (_p, id) => {
+      const msgs = queue.shift();
+      if (msgs === undefined) throw new Error(`recording has no further ${method}`);
+      queueMicrotask(() => fake.push(...msgs.map((m) => (m.id === "@response" ? { ...m, id } : m))));
+      return undefined;
+    };
+  }
+}
+
+describe("Mistral Vibe (live)", () => {
+  const lines = recording("acp-vibe-live.jsonl");
+
+  test("a turn with a shell tool call, then a reload with session/load and a second turn", async () => {
+    const fake = fakeAgent();
+    replay(fake, lines);
+    const { session, events, logs } = open(fake, { spec: ACP_AGENTS.vibe, model: "mistral-medium-3.5", instructions: "<devbox-instructions>x</devbox-instructions>" });
+    await session.ready;
+    expect(fake.spawns[0]!.argv).toEqual(["vibe-acp"]);
+    // Vibe opens in accept-edits; devbox runs it with everything approved.
+    expect(fake.requests("session/set_mode")[0]!.params).toEqual({ sessionId: "sess-1", modeId: "auto-approve" });
+    expect(fake.requests("session/set_config_option")[0]!.params).toEqual({ sessionId: "sess-1", configId: "model", value: "mistral-medium-3.5" });
+    expect(events[0]).toEqual({
+      type: "thread.native", harness: "vibe", nativeThreadId: "sess-1", account: null, model: "mistral-medium-3.5",
+      caps: { resume: true, injectItems: false, liveModelSwitch: true, questions: false, images: true, backgroundVisibility: false },
+    });
+
+    await session.startTurn("run-1", "list the files", "user");
+    await until(() => events.some((e) => e.type === "run.completed"));
+    expect(fake.requests("session/prompt")[0]!.params.prompt[0].text).toStartWith("<devbox-instructions>");
+    expect(events.find((e) => e.type === "tool.started")).toMatchObject({ itemId: "effect-1", tool: "execute", input: { title: "bash: echo hi > note.txt && ls", rawInput: { command: "echo hi > note.txt && ls" } } });
+    expect(events.find((e) => e.type === "tool.finished")).toMatchObject({ itemId: "effect-1", isError: false, output: "README.md\nnote.txt\n" });
+    expect(events.filter((e) => e.type === "message.final")).toEqual([{ type: "message.final", runId: "run-1", itemId: "assistant-1", role: "assistant", text: "Files: README.md, note.txt" }]);
+    expect(events.at(-1)).toEqual({ type: "run.completed", runId: "run-1", nativeThreadId: "sess-1", usage: { input: 14950, output: 261, cacheCreation: 0, cacheRead: 8448 }, costUsd: null });
+
+    // The process dies between turns: the next message reloads the session; the replayed history is not shown again.
+    fake.exit(137);
+    await until(() => logs.some((l) => l.includes("restarting it with the next message")));
+    // The reloaded session reports Medium 3.5 as "mistral-medium-latest" (not recorded after the load): the
+    // adapter selects the requested id again.
+    fake.responders["session/set_config_option"] = () => ({ configOptions: [] });
+    const before = events.length;
+    await session.startTurn("run-2", "which file?", "user");
+    await until(() => events.filter((e) => e.type === "run.completed").length === 2);
+    expect(fake.requests("session/load")[0]!.params).toMatchObject({ sessionId: "sess-1", cwd: "/workspace" });
+    expect(fake.requests("session/set_config_option")[1]!.params).toEqual({ sessionId: "sess-1", configId: "model", value: "mistral-medium-3.5" });
+    expect(fake.requests("session/prompt")[1]!.params.prompt[0].text).toBe("which file?");
+    const second = events.slice(before);
+    expect(second.filter((e) => e.type === "tool.started")).toEqual([]);
+    expect(second.filter((e) => e.type === "message.final").map((e) => (e as { text: string }).text)).toEqual(["note.txt"]);
+    // Nothing of what Vibe sent was left unhandled.
+    expect(logs.filter((l) => !l.includes("restarting it with the next message"))).toEqual([]);
+  });
+
+  test("Vibe -31001 is run.failed rate-limited", async () => {
+    const fake = fakeAgent();
+    fake.responders["session/prompt"] = () => {
+      throw Object.assign(new Error("Rate limit exceeded"), { code: -31001 });
+    };
+    const { session, events } = open(fake, { spec: ACP_AGENTS.vibe });
+    await session.ready;
+    await session.startTurn("run-1", "go", "user");
+    await until(() => events.some((e) => e.type === "run.failed"));
+    expect(events.at(-1)).toMatchObject({ type: "run.failed", runId: "run-1", reason: "rate-limited" });
+    // No retry loop: the prompt was sent once.
+    expect(fake.requests("session/prompt")).toHaveLength(1);
+  });
+});
