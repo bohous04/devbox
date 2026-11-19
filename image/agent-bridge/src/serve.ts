@@ -371,8 +371,14 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   const persist = () => saveState(statePath, state);
   persist();
   // What devd acknowledged before this start is dropped from the log (once it is big), then what is still open read.
-  const dropped = log.compact(state.trimSeq);
-  if (dropped !== null) logError(`agent-bridge: trimmed ${dropped} acknowledged events from events.jsonl at start`);
+  // A failed trim is an explicit, logged degrade, not a silent fallback: the untrimmed log is complete and safe to run
+  // on, while exiting would put the launcher into a restart loop over a size optimisation.
+  try {
+    const dropped = log.compact(state.trimSeq);
+    if (dropped !== null) logError(`agent-bridge: trimmed ${dropped} acknowledged events from events.jsonl at start`);
+  } catch (e) {
+    logError(`agent-bridge: trimming events.jsonl at start failed, running on the untrimmed log: ${errorText(e)}`);
+  }
   const scan = log.scan();
 
   let adapterWork: BackgroundWork[] = [];

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLAUDE_CAPABILITIES, ResumeFailedError, type HarnessSession } from "../src/claudeSession";
@@ -1304,6 +1304,24 @@ describe("step 6 hardening", () => {
     clock += 5 * MIN;
     await handshake(last);
     expect(state()).toMatchObject({ trimSeq: 3, ackCandidate: { seq: last, at: clock } });
+  });
+
+  test("a start whose log trim fails logs it and runs on the untrimmed log", async () => {
+    priorLog(
+      { type: "run.started", runId: "r-1", origin: "user", nativeThreadId: null, model: null },
+      { type: "run.completed", runId: "r-1", nativeThreadId: "thread-1", usage: null, costUsd: null },
+      { type: "background.changed", work: [] },
+    );
+    saveState(join(dir, "state.json"), baseState({ nativeThreadId: "thread-1", trimSeq: 3 }));
+    // The compaction's temp file cannot be created (a dangling symlink into a missing directory).
+    symlinkSync(join(dir, "missing", "x"), join(dir, "events.jsonl.tmp"));
+    const logged: string[] = [];
+    const f = fakeHarness();
+    await start(f, { logCompactMinBytes: 0, logError: (m) => logged.push(m) });
+    expect(logged).toContainEqual(expect.stringContaining("trimming events.jsonl at start failed"));
+    expect(events().slice(0, 3).map((e) => e.type)).toEqual(["run.started", "run.completed", "background.changed"]);
+    expect(f.opens.length).toBe(1);
+    expect(() => lstatSync(join(dir, "events.jsonl.tmp"))).toThrow("ENOENT");
   });
 
   test("I8: the next start trims with the ack persisted earlier and never past it", async () => {
