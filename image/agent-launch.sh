@@ -153,7 +153,7 @@ if [ "$printenv" = 1 ]; then
            CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY ENABLE_TOOL_SEARCH CLAUDE_CODE_ALWAYS_ENABLE_EFFORT \
            DEVBOX_PROXY_PROFILE XAI_API_KEY; do
     [ -z "${!v:-}" ] && continue
-    # ANTHROPIC_AUTH_TOKEN is the key to three paid subscriptions (proxy). --print-env
+    # ANTHROPIC_AUTH_TOKEN is the key to paid subscriptions (proxy). --print-env
     # exists only so tests can peek into the exported environment, but
     # this script ships in the image — the value has nowhere to leak, but whatever is printable
     # to stdout can be found in production in `docker logs`/build cache too. The other variables

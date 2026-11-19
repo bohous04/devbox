@@ -199,13 +199,13 @@ test("the openrouter profile also remaps the DEFAULT_SONNET/OPUS/HAIKU slots", a
 });
 
 // --print-env exists only for this test suite, but the script ships in the production
-// image — the value of a key to three paid subscriptions has no business on stdout there.
+// image — the value of a key to paid subscriptions has no business on stdout there.
 test("--print-env prints only that ANTHROPIC_AUTH_TOKEN is set, never its value", async () => {
   const e = await printEnv(
-    { DEVD_CLIPROXY_KEY: "secret-key-for-three-subscriptions", DEVD_AGENT_MODEL: "gemini-3-pro" },
+    { DEVD_CLIPROXY_KEY: "secret-proxy-key", DEVD_AGENT_MODEL: "gemini-3-pro" },
     ["claude-gemini"]);
   expect(e).toContain("ANTHROPIC_AUTH_TOKEN=<set>");
-  expect(e).not.toContain("secret-key-for-three-subscriptions");
+  expect(e).not.toContain("secret-proxy-key");
 });
 
 // The reasoning is at that line in image/agent-launch.sh.
@@ -248,7 +248,7 @@ test("the grok profile does not overwrite an XAI_API_KEY that already came from 
   expect(e).not.toContain("from-file");
 });
 
-test("the grok profile without a stored key exports nothing", async () => {
+test("the grok profile without a stored key exports no XAI_API_KEY", async () => {
   const home = tmpHomeWithGrokKey(null);
   expect(await printEnv({ HOME: home }, ["grok"])).not.toContain("XAI_API_KEY");
 });

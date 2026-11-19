@@ -190,7 +190,7 @@ export function upstreamKey(d: Pick<SessionDeps, "cliproxyKey" | "openrouterKey"
   return (u) => (u === "openrouter" ? d.openrouterKey?.() : d.cliproxyKey?.()) ?? null;
 }
 
-/** Default window for cliproxy models (gpt-5.6-sol, grok-4.5): the public catalog has no windows
+/** Default window for cliproxy models (e.g. the Gemini models): the public catalog has no windows
  *  for them, and cc's assumed 200k made them compact over and over (with ~120k of MCP tools
  *  at baseline, immediately). User decision 2026-08-22: rather 1M with the risk that a model
  *  with a smaller real window hits an API error instead of compacting (handled by a manual /compact),

@@ -2795,7 +2795,7 @@ export function createApp(d: ApiDeps): Hono {
   });
 
   // Passthrough to CLIProxyAPI: it binds only to 127.0.0.1 + the docker bridge (its key
-  // covers three paid subscriptions) and is not reachable from the tailnet — tunneling through devd
+  // covers paid subscriptions) and is not reachable from the tailnet — tunneling through devd
   // keeps it private and requires no change to its binding. It handles authorization itself
   // (the Authorization header passes through unchanged). The response is returned as a stream —
   // content-encoding/length are dropped, fetch has already decompressed the body.

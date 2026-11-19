@@ -2,7 +2,7 @@
 // directly on the Mac. TS mirror of the proxy branch of agent-launch.sh: there the env is assembled for
 // the container, here devd hands it out ready-made via GET /api/local-env and the local CLI just
 // passes it to the `claude` process. Cliproxy is not reachable from the tailnet (it binds only to
-// 127.0.0.1 + docker bridge — its key covers three paid subscriptions), so
+// 127.0.0.1 + docker bridge — its key covers paid subscriptions), so
 // cliproxy profiles point at the devd passthrough /api/cliproxy (see api.ts).
 import { AGENT_IDS, AGENTS, type AgentName, type Upstream } from "./agents";
 import type { Settings } from "./config";
