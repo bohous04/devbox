@@ -2,12 +2,12 @@ import type { Database } from "bun:sqlite";
 import { sessionTitle, type NotifyFn, type NotifySession } from "./agentEvents";
 import type { PrHold } from "./attention";
 import {
-  clearPrWatchSeed, getSessionPr, listSessionPrs, logEvent, prWatchSeedPending, putSessionPr,
+  clearPrWatchSeed, deleteSessionPr, getSessionPr, listSessionPrs, logEvent, prWatchSeedPending, putSessionPr,
   type PrChecks, type PrStatus, type SessionPrRow, type SessionRow, type SettleReason,
 } from "./db";
 import type { Activity } from "./sessionAttention";
 import { workspacePath } from "./tree";
-import { baseBranch, findPr, giteaUrlFor, remoteHead, remoteInfo, remoteNames, type Fetcher, type GhRunner } from "./unpushed";
+import { baseBranch, currentBranch, findPr, giteaUrlFor, remoteHead, remoteInfo, remoteNames, type Fetcher, type GhRunner } from "./unpushed";
 
 /** How often index.ts runs the PR watch; a PR with pending checks is polled on every tick. */
 export const PR_WATCH_TICK_MS = 2 * 60_000;
@@ -19,9 +19,10 @@ export const PR_ERROR_BACKOFF_MAX_MS = 30 * 60_000;
 export const PR_ERRORS_RELEASE = 3;
 
 export interface PrState { sessionId: string; number: number; url: string; state: PrStatus; checks: PrChecks }
-/** One session's poll: its branch head on the remote (null = not pushed, or no branch) and its PR (null = none, or
- *  nothing to watch: other host, the default branch). */
-export interface PrPoll { sessionId: string; head: string | null; pr: PrState | null }
+/** One session's poll: the branch its worktree is on now (S5-R29; a shared checkout: its registered branch; null = none), that branch's
+ *  head on the remote (null = not pushed, or no branch) and its PR (null = none, or nothing to watch: other host, the
+ *  default branch). */
+export interface PrPoll { sessionId: string; branch: string | null; head: string | null; pr: PrState | null }
 
 /** Polls the given sessions one by one: the remote head of the branch, then, when `want` agrees, the provider's PR.
  *  A session `want` declines is left out of the result; an error is reported through `onError` and the session left
@@ -41,25 +42,36 @@ export async function checkPrs(d: {
 }): Promise<PrPoll[]> {
   const out: PrPoll[] = [];
   for (const s of d.sessions) {
-    if (!s.branch) { out.push({ sessionId: s.id, head: null, pr: null }); continue; }
     try {
       const dir = s.worktree ?? workspacePath(d.root, s.folder, s.project, s.repo);
+      // S5-R29: a session's own worktree is watched by the branch it is on now, not `sessions.branch` (fixed at
+      // creation; the agent may have switched). A detached HEAD (a rebase in progress) skips this poll, the row stays;
+      // a git failure throws (onError, backoff). A session in a shared checkout (no worktree of its own) keeps its
+      // registered branch: the checkout's branch belongs to no single session.
+      let branch: string | null;
+      if (s.worktree) {
+        branch = await currentBranch(dir);
+        if (branch === null) continue;
+      } else {
+        branch = s.branch ?? null;
+      }
+      if (branch === null) { out.push({ sessionId: s.id, branch, head: null, pr: null }); continue; }
       const remote = await remoteInfo(dir, d.giteaUrls);
       if (!remote) {
         const names = await remoteNames(dir);
         if (names.length) throw new Error(`no remote named origin (has ${names.join(", ")}): the PR watch reads origin only`);
-        out.push({ sessionId: s.id, head: null, pr: null });
+        out.push({ sessionId: s.id, branch, head: null, pr: null });
         continue;
       }
-      const head = await remoteHead(dir, s.branch);
-      if (head === null) { out.push({ sessionId: s.id, head, pr: null }); continue; }
+      const head = await remoteHead(dir, branch);
+      if (head === null) { out.push({ sessionId: s.id, branch, head, pr: null }); continue; }
       if (d.want && !d.want(s.id, head)) continue;
-      if (remote.provider === "other" || (await baseBranch(dir)) === s.branch) { out.push({ sessionId: s.id, head, pr: null }); continue; }
+      if (remote.provider === "other" || (await baseBranch(dir)) === branch) { out.push({ sessionId: s.id, branch, head, pr: null }); continue; }
       const pr = await findPr({
-        dir, branch: s.branch, remote, giteaToken: d.giteaToken(remote.host), giteaUrl: giteaUrlFor(d.giteaUrls, remote),
+        dir, branch, remote, giteaToken: d.giteaToken(remote.host), giteaUrl: giteaUrlFor(d.giteaUrls, remote),
         ghRun: d.gh, fetcher: d.fetcher,
       });
-      out.push({ sessionId: s.id, head, pr: pr ? { sessionId: s.id, ...pr } : null });
+      out.push({ sessionId: s.id, branch, head, pr: pr ? { sessionId: s.id, ...pr } : null });
     } catch (e) {
       d.onError(s.id, e as Error);
     }
@@ -121,7 +133,7 @@ export class PrWatch {
   pending(sessionId: string): boolean { return this.hold(sessionId)?.checks === "pending"; }
 
   /** InstaBox sessions are left out: their worktree lives in the VM, not on this host. */
-  private watchable(s: SessionRow): boolean { return !!s.branch && s.host === "vps"; }
+  private watchable(s: SessionRow): boolean { return s.host === "vps" && (!!s.branch || !!s.worktree); }
 
   async tick(): Promise<void> {
     const seedTick = prWatchSeedPending(this.d.db);
@@ -192,8 +204,15 @@ export class PrWatch {
     const row0 = getSessionPr(this.d.db, s.id);
     if (p.pr && row0?.checks === "unknown" && this.unknownAt.has(s.id) && this.unknownAt.get(s.id) === p.head
         && p.pr.number === row0.number && p.pr.state === "open" && p.pr.checks === "pending") return; // still released
-    if (p.pr) { this.apply(cur, p.pr, seeding); return; }
+    if (p.pr) { this.apply(cur, p.pr, p.branch, seeding); return; }
     const row = getSessionPr(this.d.db, s.id);
+    if (row && row.branch !== p.branch) {
+      // The worktree left the branch of that PR (or the row predates S5-R29): it no longer speaks for the session.
+      deleteSessionPr(this.d.db, s.id);
+      this.log(`pr watch: ${s.id} is on ${p.branch ?? "no branch"} now; PR #${row.number} of ${row.branch ?? "an unrecorded branch"} dropped`);
+      this.d.inbox.changedSafe(s.id);
+      return;
+    }
     if (row?.state === "open" && row.checks === "pending") this.release(s.id, row, "none", "its PR is no longer found");
   }
 
@@ -233,14 +252,14 @@ export class PrWatch {
   }
 
   /** `seeding`: the first-deploy pass records what is there, without notifying or settling. */
-  private apply(s: SessionRow, pr: PrState, seeding: boolean): void {
+  private apply(s: SessionRow, pr: PrState, branch: string | null, seeding: boolean): void {
     const prev = getSessionPr(this.d.db, s.id);
-    if (prev && prev.number === pr.number && prev.state === pr.state && prev.checks === pr.checks) return;
+    if (prev && prev.number === pr.number && prev.state === pr.state && prev.checks === pr.checks && prev.branch === branch) return;
     const now = this.now();
     const sameMerge = prev?.number === pr.number ? prev.merge_settled_at : null;
     putSessionPr(this.d.db, {
       session_id: s.id, number: pr.number, url: pr.url, state: pr.state, checks: pr.checks, since: now,
-      merge_settled_at: seeding && pr.state === "merged" ? now : sameMerge, updated_at: now,
+      merge_settled_at: seeding && pr.state === "merged" ? now : sameMerge, updated_at: now, branch,
     });
     if (!seeding) {
       if (pr.state === "open" && pr.checks === "failure") this.ciFailed(s, pr);

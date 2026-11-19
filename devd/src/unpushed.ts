@@ -295,6 +295,15 @@ export async function remoteHead(dir: string, branch: string): Promise<string | 
   throw new Error((r.stderr || r.stdout).trim() || `git rev-parse failed (${r.code})`);
 }
 
+/** The branch checked out in `dir`; null = detached HEAD (e.g. a rebase in progress). A git failure (missing or
+ *  broken worktree) throws: unlike git.ts worktreeBranch, the PR watch must tell the two apart (S5-R29). */
+export async function currentBranch(dir: string): Promise<string | null> {
+  const r = await git(dir, "symbolic-ref", "--quiet", "--short", "HEAD");
+  if (r.code === 0 && r.stdout.trim()) return r.stdout.trim();
+  if (r.code === 1) return null; // --quiet: 1 = HEAD is not a symbolic ref
+  throw new Error((r.stderr || r.stdout).trim() || `git symbolic-ref failed (${r.code})`);
+}
+
 /** The repo's remote names. */
 export async function remoteNames(dir: string): Promise<string[]> {
   const r = await git(dir, "remote");

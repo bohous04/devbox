@@ -102,23 +102,24 @@ test("GitHub: an unknown check conclusion is an error, not a guess", async () =>
   expect(errors).toEqual([expect.stringContaining("WEIRD")]);
 });
 
-test("only sessions with a pushed branch are polled; no PR yet means no state", async () => {
+test("only a pushed, non-default current branch is asked about; the registered branch does not matter (S5-R29)", async () => {
   const unpushed = await repo("https://github.com/o/n.git", { push: false });
+  const onMain = await repo("https://github.com/o/k.git");
+  await sh(onMain.work, "git", "checkout", "-q", "main");
   const pushed = await repo("https://github.com/o/m.git");
   const gh = fakeGh([]);
   const polls = await checkPrs({
     sessions: [
       { ...ROW, id: "dev-unpushed", worktree: unpushed.work, branch: "feat" },
-      { ...ROW, id: "dev-nobranch", worktree: pushed.work, branch: null },
-      { ...ROW, id: "dev-default", worktree: pushed.work, branch: "main" },
-      { ...ROW, id: "dev-pushed", worktree: pushed.work, branch: "feat" },
+      { ...ROW, id: "dev-default", worktree: onMain.work, branch: "feat" },
+      { ...ROW, id: "dev-pushed", worktree: pushed.work, branch: "main" },
     ],
     root: pushed.root, gh: gh.run, fetcher: noFetch, giteaUrls: [], giteaToken: () => undefined, onError: (_id, e) => { throw e; },
   });
-  expect(polls.map((x) => [x.sessionId, x.head === null, x.pr])).toEqual([
-    ["dev-unpushed", true, null], ["dev-nobranch", true, null], ["dev-default", false, null], ["dev-pushed", false, null],
+  expect(polls.map((x) => [x.sessionId, x.branch, x.head === null, x.pr])).toEqual([
+    ["dev-unpushed", "feat", true, null], ["dev-default", "main", false, null], ["dev-pushed", "feat", false, null],
   ]);
-  expect(gh.calls.map((c) => c[4])).toEqual(["o/m"]);
+  expect(gh.calls.map((c) => [c[4], c[6]])).toEqual([["o/m", "feat"]]);
 });
 
 test("a repo whose remote is not named origin is reported, not skipped silently", async () => {
@@ -270,7 +271,7 @@ function setup(opts: { dbPath?: string; seed?: boolean; dir?: string; now?: numb
         const head = heads.has(s.id) ? heads.get(s.id)! : "h1";
         if (head !== null && want && !want(s.id, head)) continue;
         polled.push(s.id);
-        out.push({ sessionId: s.id, head, pr: prs.get(s.id) ?? null });
+        out.push({ sessionId: s.id, branch: s.branch ?? null, head, pr: prs.get(s.id) ?? null });
       }
       return out;
     },
@@ -517,7 +518,7 @@ test("polls of one session are serialized: an older result never overwrites a ne
     check: (sessions) => { calls.push(sessions[0].id); return new Promise((res) => answers.push(res)); },
     inbox: t.inbox, notify: () => {}, log: () => {},
   });
-  const pollOf = (checks: PrState["checks"]): PrPoll[] => [{ sessionId: CHAT.id, head: "h1", pr: { sessionId: CHAT.id, number: 7, url: "u", state: "open", checks } }];
+  const pollOf = (checks: PrState["checks"]): PrPoll[] => [{ sessionId: CHAT.id, branch: CHAT.branch!, head: "h1", pr: { sessionId: CHAT.id, number: 7, url: "u", state: "open", checks } }];
   const tick = w.tick();
   const now = w.checkNow(CHAT.id);
   await Bun.sleep(0);
@@ -750,4 +751,108 @@ test("a hold that reaches its deadline marks the checks unknown: inbox leaves pr
   t.heads.set(CHAT.id, "h2");
   await t.feed(CHAT.id, [started("r3"), completed("r3")]);
   expect(t.watch.pending(CHAT.id)).toBe(true);
+});
+
+// ---------------------------------------------------------------- S5-R29: the worktree's current branch
+
+test("S5-R29: a session registered on main whose worktree is on a feature branch is watched by that branch", async () => {
+  const t = setup();
+  const { root, work } = await repo("https://github.com/o/n.git"); // checked out on `feat`, pushed
+  t.db.run("UPDATE sessions SET branch='main', worktree=? WHERE id=?", [work, CHAT.id]);
+  let rollup: unknown[] = [{ __typename: "CheckRun", status: "IN_PROGRESS", conclusion: "" }];
+  const heads: string[] = [];
+  const gh = async (_cwd: string, ...cmd: string[]) => {
+    const head = cmd[cmd.indexOf("--head") + 1];
+    heads.push(head);
+    const out = head === "feat" ? [{ number: 7, url: "https://github.com/o/n/pull/7", state: "OPEN", mergedAt: null, statusCheckRollup: rollup }] : [];
+    return { code: 0, stdout: JSON.stringify(out), stderr: "" };
+  };
+  const w = new PrWatch({
+    db: t.db, sessions: () => [getSession(t.db, CHAT.id)!], session: (id) => getSession(t.db, id),
+    check: (sessions, onError, want) => checkPrs({ sessions, root, gh, giteaUrls: [], giteaToken: () => undefined, onError, want }),
+    inbox: t.inbox, notify: (title, message, extra) => t.notified.push({ title, message, extra }), log: (m) => t.logs.push(m),
+  });
+  await w.tick();
+  expect(heads).toEqual(["feat"]);
+  expect(getSessionPr(t.db, CHAT.id)).toMatchObject({ number: 7, checks: "pending", branch: "feat" });
+  expect(t.attention(CHAT.id)).toMatchObject({ section: "working", reason: "pr-checks" });
+
+  rollup = [{ __typename: "CheckRun", status: "COMPLETED", conclusion: "FAILURE" }];
+  await w.tick();
+  expect(t.attention(CHAT.id)).toMatchObject({ section: "needs_you", reason: "ci-failed" });
+  expect(t.messages()).toEqual(["CI failed on PR #7"]);
+
+  // A detached HEAD (a rebase in progress) skips the poll: the row stays as it was.
+  await sh(work, "git", "checkout", "-q", "--detach");
+  await w.checkNow(CHAT.id);
+  expect(getSessionPr(t.db, CHAT.id)).toMatchObject({ number: 7, checks: "failure", branch: "feat" });
+  await sh(work, "git", "checkout", "-q", "feat");
+
+  // The agent switches to another branch without a PR: the old branch's PR no longer speaks for the session.
+  await sh(work, "git", "checkout", "-q", "-b", "other");
+  await w.checkNow(CHAT.id);
+  expect(getSessionPr(t.db, CHAT.id)).toBeNull();
+  expect(t.attention(CHAT.id).reason).not.toBe("ci-failed");
+  expect(w.pending(CHAT.id)).toBe(false);
+});
+
+test("S5-R29: a session with no registered branch but a worktree is watched; a detached HEAD skips the poll", async () => {
+  const { root, work } = await repo("https://github.com/o/n.git");
+  const gh = fakeGh([{ number: 3, url: "u", state: "OPEN", mergedAt: null, statusCheckRollup: [] }]);
+  const s = { ...ROW, worktree: work, branch: null };
+  expect(await found(checkPrs({ sessions: [s], root, gh: gh.run, fetcher: noFetch, giteaUrls: [], giteaToken: () => undefined, onError: (_id, e) => { throw e; } })))
+    .toMatchObject([{ number: 3 }]);
+  await sh(work, "git", "checkout", "-q", "--detach");
+  const polls = await checkPrs({ sessions: [s], root, gh: gh.run, fetcher: noFetch, giteaUrls: [], giteaToken: () => undefined, onError: (_id, e) => { throw e; } });
+  expect(polls).toEqual([]); // skipped: no answer for this poll, nothing changes
+  expect(gh.calls).toHaveLength(1);
+});
+
+test("S5-R29: a worktree git cannot read is an error for the poll (onError, backoff), not \"no branch\"", async () => {
+  const { root } = await repo("https://github.com/o/n.git");
+  const errors: string[] = [];
+  const polls = await checkPrs({
+    sessions: [{ ...ROW, worktree: join(root, "missing"), branch: "feat" }], root, gh: fakeGh([]).run, fetcher: noFetch,
+    giteaUrls: [], giteaToken: () => undefined, onError: (_id, e) => errors.push(e.message),
+  });
+  expect(polls).toEqual([]);
+  expect(errors).toHaveLength(1);
+});
+
+test("S5-R29: a session without its own worktree (shared checkout) keeps watching its registered branch", async () => {
+  const { root, work } = await repo("https://github.com/o/n.git");
+  await sh(work, "git", "checkout", "-q", "main"); // the shared checkout is elsewhere now
+  const gh = fakeGh([]);
+  // workspacePath(root, "", "", "work") = <root>/work: the session works in the shared checkout.
+  const s = { ...ROW, folder: "", project: "", repo: "work", worktree: null, branch: "feat" };
+  const polls = await checkPrs({ sessions: [s], root, gh: gh.run, fetcher: noFetch, giteaUrls: [], giteaToken: () => undefined, onError: (_id, e) => { throw e; } });
+  expect(polls.map((x) => x.branch)).toEqual(["feat"]);
+  expect(gh.calls.map((c) => c[6])).toEqual(["feat"]);
+});
+
+test("S5-R29 deploy: adding the branch column re-arms the seed, so old rows and newly watched sessions notify nothing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "prwatch-migrate-"));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  const dbPath = join(dir, "devd.db");
+  // A database from before S5-R29: session_prs without `branch`, the first-deploy seed long done, a failing row.
+  const old = openDb(dbPath);
+  old.run("ALTER TABLE session_prs DROP COLUMN branch");
+  old.run("DELETE FROM pr_watch_seed");
+  old.run(`INSERT INTO session_prs (session_id,number,url,state,checks,since,merge_settled_at,updated_at) VALUES (?,7,'u','open','failure',1,NULL,1)`, [CHAT.id]);
+  old.close();
+  const t = setup({ dbPath, seed: true });
+  t.pr(CHAT.id, "open", "failure", 7);
+  t.pr(TMUX.id, "open", "failure", 9); // newly watched, already failing
+  await t.watch.tick();
+  expect(t.notified).toEqual([]);
+  expect(getSessionPr(t.db, CHAT.id)).toMatchObject({ checks: "failure", branch: CHAT.branch });
+  expect(getSessionPr(t.db, TMUX.id)).toMatchObject({ checks: "failure" });
+  // After the seed, a new failure notifies as usual.
+  t.pr(TMUX.id, "open", "pending", 9);
+  t.tick(PR_SETTLED_POLL_MS);
+  await t.watch.tick();
+  t.pr(TMUX.id, "open", "failure", 9);
+  t.tick(2 * MIN);
+  await t.watch.tick();
+  expect(t.messages()).toEqual(["CI failed on PR #9"]);
 });
