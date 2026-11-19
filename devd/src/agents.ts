@@ -5,7 +5,7 @@
 // against a specific value (`agent === "codex"`) appear — ask about a PROPERTY. Previously
 // `=== "codex"` was used to mean "does not run on an Anthropic account", which after proxy
 // profiles were added would silently lie and a proxy profile would take a lease from a pool it does not use.
-export type AgentRuntime = "claude" | "codex" | "grok" | "agy";
+export type AgentRuntime = "claude" | "codex" | "grok" | "agy" | "vibe";
 
 /** Where to go for a foreign model. This is NOT the same as `modelKey`: that says WHICH model,
  *  this says WHERE to go for it — a different base URL, a different key, a different reason it does not run.
@@ -31,6 +31,12 @@ export interface AgentSpec {
    *  Without it the URL and key would be hard-wired from CLIProxyAPI and the OpenRouter profile would
    *  get a key OpenRouter does not know — i.e. a 401 only inside cc. */
   upstream?: Upstream;
+  /** In chat sessions this profile runs as this ACP agent (ACP_AGENTS in image/agent-bridge/src/acpAgents.ts). */
+  acp?: "grok" | "antigravity" | "vibe";
+  /** The ACP agent passed its live check (step 4 Task 3 report); without it chatRuntimeBlock refuses the profile. */
+  acpLive?: true;
+  /** No tmux launcher: the profile runs only in chat sessions (tmuxRuntimeBlock). */
+  chatOnly?: true;
 }
 
 const AGENTS_TABLE = {
@@ -38,8 +44,9 @@ const AGENTS_TABLE = {
   "claude-gemini": { runtime: "claude", label: "Claude Code + Gemini", short: "Claude+Gemini", yolo: true, anthropicAccount: false, modelKey: "gemini", upstream: "cliproxy" },
   "claude-openrouter": { runtime: "claude", label: "Claude Code + OpenRouter", short: "Claude+OR", yolo: true, anthropicAccount: false, modelKey: "openrouter", upstream: "openrouter" },
   codex:         { runtime: "codex",  label: "Codex",              short: "Codex",       yolo: true, anthropicAccount: false },
-  grok:          { runtime: "grok",   label: "Grok Build",         short: "Grok",        yolo: true, anthropicAccount: false },
-  antigravity:   { runtime: "agy",    label: "Antigravity",        short: "Antigravity", yolo: true, anthropicAccount: false },
+  grok:          { runtime: "grok",   label: "Grok Build",         short: "Grok",        yolo: true, anthropicAccount: false, acp: "grok" },
+  antigravity:   { runtime: "agy",    label: "Antigravity",        short: "Antigravity", yolo: true, anthropicAccount: false, acp: "antigravity" },
+  vibe:          { runtime: "vibe",   label: "Mistral Vibe",       short: "Vibe",        yolo: true, anthropicAccount: false, acp: "vibe", acpLive: true, chatOnly: true },
 } as const satisfies Record<string, AgentSpec>;
 
 export type AgentName = keyof typeof AGENTS_TABLE;
@@ -53,7 +60,8 @@ export const AGENTS: Record<AgentName, AgentSpec> = AGENTS_TABLE;
 /** The order is the UI order: default first, then proxy variants, then standalone CLIs. */
 export const AGENT_IDS = Object.keys(AGENTS) as AgentName[];
 
-export const RUNTIME_BIN: Record<AgentRuntime, string> = { claude: "cc", codex: "co", grok: "gr", agy: "ag" };
+// vibe has no tmux launcher (chatOnly): its entry is the ACP binary the chat bridge starts.
+export const RUNTIME_BIN: Record<AgentRuntime, string> = { claude: "cc", codex: "co", grok: "gr", agy: "ag", vibe: "vibe-acp" };
 
 /** Names of agent processes in `ps` (= runtime). The single derivation for the watchdog
  *  (AGENT_PROCS) and the agent swap — two local copies would drift when a runtime is added. */
@@ -102,20 +110,38 @@ export function usesProxy(a: AgentName): boolean {
   return specFor(a).modelKey !== undefined;
 }
 
-/** Why the agent must not run on an InstaBox (null = it may). Proxy profiles run via
- *  CLIProxyAPI/an upstream key on the VPS (unreachable from the VM, keys must not go into the VM); Antigravity
- *  depends on VPS-only login and the harvester (M10). Applies to create and to a live swap (I4). */
-/** Why a chat-runtime session cannot use this agent/host (null = it may). The chat bridge speaks only
- *  to the Claude and Codex harnesses (proxy profiles are the Claude harness with another upstream) and runs
- *  only in VPS containers. */
+export type ChatHarness = "claude" | "codex" | NonNullable<AgentSpec["acp"]>;
+
+/** The harness a chat session runs this profile on: claude/codex (proxy profiles are the Claude harness), else its
+ *  ACP agent; null when the chat bridge has none for it. */
+export function chatHarness(a: AgentName): ChatHarness | null {
+  const s = AGENTS[a];
+  if (s.runtime === "claude" || s.runtime === "codex") return s.runtime;
+  return s.acp ?? null;
+}
+
+/** Why a chat-runtime session cannot use this agent/host (null = it may). The chat bridge runs the Claude and Codex
+ *  harnesses (proxy profiles are the Claude harness with another upstream) and the ACP agents that passed their live
+ *  check, and runs only in VPS containers. */
 export function chatRuntimeBlock(a: AgentName, host: "vps" | "instabox"): string | null {
   if (host === "instabox") return "Chat sessions run only on the VPS";
-  const runtime = AGENTS[a].runtime;
-  if (runtime !== "claude" && runtime !== "codex") return `${AGENTS[a].label} is not available in chat sessions yet`;
+  const s = AGENTS[a];
+  if (chatHarness(a) === null || (s.acp !== undefined && !s.acpLive)) return `${s.label} is not available in chat sessions yet`;
   return null;
 }
 
+/** Why a tmux session (VPS or InstaBox) cannot use this agent (null = it may). */
+export function tmuxRuntimeBlock(a: AgentName): string | null {
+  return AGENTS[a].chatOnly ? `${AGENTS[a].label} runs only in chat sessions` : null;
+}
+
+/** Why the agent must not run on an InstaBox (null = it may). Proxy profiles run via
+ *  CLIProxyAPI/an upstream key on the VPS (unreachable from the VM, keys must not go into the VM); Antigravity
+ *  depends on VPS-only login and the harvester (M10). Applies to create and to a live swap (I4). */
 export function instaboxAgentBlock(a: AgentName): string | null {
+  // InstaBox sessions are tmux sessions.
+  const tmux = tmuxRuntimeBlock(a);
+  if (tmux) return tmux;
   if (usesProxy(a)) return `Agent ${a} is not supported on InstaBox (proxy agents run only on the VPS)`;
   if (a === "antigravity") return `Agent ${a} is not supported on InstaBox (Antigravity runs only on the VPS)`;
   return null;

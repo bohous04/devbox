@@ -95,4 +95,21 @@ describe("JsonRpcPeer", () => {
     expect(await p.catch((e) => e.message)).toBe("turn/start: codex app-server exited with code 1");
     expect(await peer.request("turn/interrupt", {}).catch((e) => e.message)).toBe("turn/interrupt: codex app-server exited with code 1");
   });
+  test("the JSON-RPC 2.0 dialect stamps every message it writes", async () => {
+    const written: Record<string, unknown>[] = [];
+    let deliver: ((line: string) => void) | null = null;
+    const peer = new JsonRpcPeer({ write: (line) => written.push(JSON.parse(line)), onLine: (cb) => (deliver = cb) }, () => {}, { jsonrpc: "2.0" });
+    peer.onRequest(async () => ({ ok: true }));
+    const r = peer.request("initialize", {});
+    peer.notify("session/cancel", { sessionId: "s" });
+    deliver!(JSON.stringify({ jsonrpc: "2.0", id: "agent-1", method: "session/request_permission", params: {} }));
+    deliver!(JSON.stringify({ jsonrpc: "2.0", id: 0, result: { protocolVersion: 1 } }));
+    expect(await r).toEqual({ protocolVersion: 1 });
+    await flush();
+    expect(written).toEqual([
+      { jsonrpc: "2.0", id: 0, method: "initialize", params: {} },
+      { jsonrpc: "2.0", method: "session/cancel", params: { sessionId: "s" } },
+      { jsonrpc: "2.0", id: "agent-1", result: { ok: true } },
+    ]);
+  });
 });

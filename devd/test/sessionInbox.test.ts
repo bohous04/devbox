@@ -171,6 +171,14 @@ test("event bus: a throwing subscriber is logged and does not stop the others", 
   expect(logs[0]).toContain("boom");
 });
 
+test("a rate-limited chat run is a needs-you item that says so", () => {
+  const t = setup();
+  chat(t, { ...BASE, agent: "vibe" }, [started("r1"), said("r1", "working on it"),
+    { type: "run.failed", runId: "r1", error: "rate-limited: usage limit reached", reason: "rate-limited" }]);
+  const it = t.inbox.item(getSession(t.db, BASE.id)!);
+  expect(it.attention).toEqual({ section: "needs_you", reason: "rate-limited", since: 3000 });
+});
+
 test("a broken chat store is one needs-you item, logged once per message, not a failed inbox", () => {
   const logs: string[] = [];
   const t = setup();

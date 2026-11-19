@@ -17,6 +17,7 @@ import {
   harnessEnv,
   BRIDGE_VERSION,
   NO_THREAD_ERROR,
+  OPEN_FAILED,
   RESTART_LOOP_ERROR,
   serve,
   resolveTarget,
@@ -24,6 +25,7 @@ import {
   type HarnessOpenOptions,
 } from "../src/serve";
 import type { ServerFrame, SwitchTarget } from "../src/protocol";
+import { ACP_MIN_BRIDGE_VERSION } from "../../../shared/bridgeVersion";
 import { loadState, saveState, type BridgeState } from "../src/state";
 
 const MIN = 60_000;
@@ -115,7 +117,7 @@ function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities; readyErr
 }
 
 function baseState(over: Partial<BridgeState> = {}): BridgeState {
-  return { harness: "claude", nativeThreadId: null, account: null, model: null, activeRunId: null, queue: [], continuations: [], usageBaseline: null, target: null, pendingHandoff: null, ...over };
+  return { harness: "claude", nativeThreadId: null, account: null, model: null, activeRunId: null, queue: [], continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, ...over };
 }
 
 // Account homes for switch targets, under the test dir.
@@ -138,7 +140,7 @@ function codexAccount(id: string, auth = '{"tokens":{}}'): void {
   writeFileSync(join(homes().sharedHome, "config.toml"), 'model = "x"\n');
 }
 
-async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string | null; claudeExecutable?: string | null } = {}) {
+async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string | null; claudeExecutable?: string | null; acpBins?: string[] } = {}) {
   const bridge = await serve({
     bridgeDir: dir,
     socketPath,
@@ -146,7 +148,12 @@ async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string
     account: over.account ?? null,
     model: null,
     openHarness: (o) => f.open(o),
-    resolveTarget: (t) => resolveTarget(t, { codexAccountsRoot: codexRoot(), homes: homes(), claudeExecutable: over.claudeExecutable === undefined ? "/usr/local/bin/claude" : over.claudeExecutable }),
+    resolveTarget: (t) => resolveTarget(t, {
+      codexAccountsRoot: codexRoot(),
+      homes: homes(),
+      claudeExecutable: over.claudeExecutable === undefined ? "/usr/local/bin/claude" : over.claudeExecutable,
+      which: (bin) => ((over.acpBins ?? ["vibe-acp"]).includes(bin) ? `/usr/local/bin/${bin}` : null),
+    }),
     now: () => NOW,
     logError: () => {},
   });
@@ -687,6 +694,96 @@ describe("switching: fix round 1", () => {
     expect(f.models).toEqual(["m"]);
   });
 
+  test("a switch to an ACP agent opens it without an account and hands the context over as a preamble", async () => {
+    const f = fakeHarness();
+    await start(f, { account: "a" });
+    await switchCmd({ harness: "vibe", account: null, model: "mistral-large-4-0", env: {} }, null, { preamble: "[user] earlier" });
+    expect(f.opens[1]).toMatchObject({ resume: null, target: { harness: "vibe", account: null, model: "mistral-large-4-0", env: {} } });
+    expect(state()).toMatchObject({ harness: "vibe", account: null, model: "mistral-large-4-0", target: { harness: "vibe" } });
+    await cmd({ kind: "startTurn", text: "hi" });
+    expect(f.turns.map((t) => t.text)).toEqual(["[user] earlier\n\nUser message:\nhi"]);
+  });
+
+  test("a session switched to an ACP agent keeps no account across a bridge restart", async () => {
+    const f = fakeHarness();
+    const bridge = await start(f, { account: "a" });
+    await switchCmd({ harness: "vibe", account: null, model: "mistral-large-4-0", env: {} }, null);
+    f.emit({ type: "thread.native", harness: "vibe", nativeThreadId: "vibe-thread", account: null, model: "mistral-large-4-0" });
+    await bridge.close();
+    const g = fakeHarness();
+    await start(g, { account: "a" }); // launched as claude with account a
+    expect(g.opens[0]).toMatchObject({ resume: "vibe-thread", target: { harness: "vibe", account: null } });
+    expect(state()).toMatchObject({ harness: "vibe", account: null, target: { harness: "vibe", account: null } });
+    g.emit({ type: "thread.native", harness: "vibe", nativeThreadId: "vibe-thread", account: null, model: "mistral-large-4-0" });
+    expect(events().at(-1)).toMatchObject({ type: "thread.native", harness: "vibe", account: null });
+  });
+
+  test("S4-P3: a new thread gets the instructions until a prompt got through, also across a bridge restart", async () => {
+    const f = fakeHarness();
+    const bridge = await start(f, { account: "a" });
+    f.emit({ type: "thread.native", harness: "claude", nativeThreadId: "thread-a", account: null, model: "m" });
+    f.opens[0].onInstructionsDelivered(); // Claude has a system prompt; the flag only matters to ACP agents
+    await switchCmd({ harness: "vibe", account: null, model: null, env: {} }, null);
+    expect(f.opens[1].instructionsPending).toBe(true);
+    f.emit({ type: "thread.native", harness: "vibe", nativeThreadId: "vibe-thread", account: null, model: null });
+    await bridge.close();
+    // Restarted before any prompt: the reopened thread still owes them.
+    const g = fakeHarness();
+    const again = await start(g, { account: "a" });
+    expect(g.opens[0]).toMatchObject({ resume: "vibe-thread", instructionsPending: true });
+    g.opens[0].onInstructionsDelivered();
+    expect(state().instructionsPending).toBe(false);
+    await again.close();
+    const h = fakeHarness();
+    await start(h, { account: "a" });
+    expect(h.opens[0]).toMatchObject({ resume: "vibe-thread", instructionsPending: false });
+  });
+
+  test("a switch to an ACP agent that cannot open goes back to the previous target and fails with the agent's error", async () => {
+    const f = fakeHarness({ readyErrors: [undefined, new Error("Authentication required")] });
+    const bridge = await start(f, { account: "a" });
+    f.emit({ type: "thread.native", harness: "claude", nativeThreadId: "thread-a", account: null, model: "m" });
+    await expect(switchCmd({ harness: "vibe", account: null, model: null, env: {} }, null, { preamble: "[user] earlier" }))
+      .rejects.toThrow("Authentication required");
+    // The previous target is open again on its own thread; no crash loop on the target that cannot open.
+    expect(f.opens.length).toBe(3);
+    expect(f.opens[2]).toMatchObject({ resume: "thread-a", target: { harness: "claude", account: "a" } });
+    const status = await Promise.race([bridge.closed, new Promise((r) => setTimeout(() => r("open"), 20))]);
+    expect(status).toBe("open");
+    expect(state()).toMatchObject({ harness: "claude", account: "a", nativeThreadId: "thread-a", target: null, pendingHandoff: null });
+    expect((await handshake()).awaitingTarget).toBe(false);
+    await cmd({ kind: "startTurn", text: "hi" });
+    expect(f.turns.map((t) => t.text)).toEqual(["hi"]);
+  });
+
+  test("a persisted ACP target that cannot open at start awaits devd's target instead of exiting, and says so", async () => {
+    saveState(join(dir, "state.json"), baseState({
+      harness: "vibe", nativeThreadId: "vibe-thread",
+      target: { harness: "vibe", account: null, model: null, env: {}, droppedEnvKeys: [] },
+      queue: [{ runId: "r-q", text: "queued", attachments: [] }],
+    }));
+    const f = fakeHarness({ readyErrors: [new Error("Authentication required")] });
+    const bridge = await start(f, { account: "a" });
+    const status = await Promise.race([bridge.closed, new Promise((r) => setTimeout(() => r("open"), 20))]);
+    expect(status).toBe("open");
+    expect((await handshake()).awaitingTarget).toBe(true);
+    expect(events().filter((e) => e.type === "run.failed")).toEqual([{ type: "run.failed", runId: expect.any(String), error: OPEN_FAILED }]);
+    // The user switches back: the queued message goes to the harness that opens.
+    await switchCmd({ harness: "claude", account: "a", model: null, env: { CLAUDE_CONFIG_DIR: claudeProfile("a") } }, null, { preamble: "P" });
+    expect(f.turns.map((t) => t.text)).toEqual(["P\n\nUser message:\nqueued"]);
+  });
+
+  test("an ACP target with an account, or without its binary, is refused before the current harness is retired", async () => {
+    const f = fakeHarness();
+    await start(f, { acpBins: ["vibe-acp"] });
+    await expect(switchCmd({ harness: "grok", account: null, model: null, env: {} })).rejects.toThrow("grok (grok) not found");
+    await expect(switchCmd({ harness: "vibe", account: "acct-1", model: null, env: {} })).rejects.toThrow("own CLI login");
+    // History items alone cannot reach an ACP agent.
+    await expect(switchCmd({ harness: "vibe", account: null, model: null, env: {} }, null, { preamble: null, injectItems: [{}] })).rejects.toThrow("cannot inject");
+    expect(f.closes).toBe(0);
+    expect(f.opens.length).toBe(1);
+  });
+
   test("a missing claude binary refuses the switch before the current harness is retired", async () => {
     const f = fakeHarness();
     await start(f, { claudeExecutable: null });
@@ -844,6 +941,10 @@ describe("final review fixes", () => {
     expect(BRIDGE_VERSION).not.toBe("1.0.0");
     expect(await handshake()).toMatchObject({ version: BRIDGE_VERSION, awaitingTarget: false });
   });
+
+  test("this bridge knows ACP harnesses: its version is the one devd and the dashboard require for them", () => {
+    expect(BRIDGE_VERSION).toBe(ACP_MIN_BRIDGE_VERSION);
+  });
 });
 
 describe("launch env", () => {
@@ -879,7 +980,9 @@ describe("launch env", () => {
     expect(serveConfigFromEnv({ ...env, DEVD_AGENT_MODEL: "opus" }).model).toBe("opus");
     expect(() => serveConfigFromEnv({ ...env, DEVD_RUNTIME: "tmux" })).toThrow(ConfigError);
     expect(() => serveConfigFromEnv({ ...env, DEVD_RUNTIME: "tmux" })).toThrow("DEVD_RUNTIME");
-    expect(() => serveConfigFromEnv({ ...env, DEVD_AGENT: "grok" })).toThrow("DEVD_AGENT");
+    expect(() => serveConfigFromEnv({ ...env, DEVD_AGENT: "gemini" })).toThrow("DEVD_AGENT");
+    // An ACP agent runs on its own CLI login: no config home, no account.
+    expect(serveConfigFromEnv({ DEVD_RUNTIME: "chat", DEVD_AGENT: "vibe" })).toMatchObject({ harness: "vibe", configHome: null, account: null, model: null });
     expect(() => serveConfigFromEnv({ DEVD_RUNTIME: "chat", DEVD_AGENT: "codex" })).toThrow("CODEX_HOME");
     expect(serveConfigFromEnv({ DEVD_RUNTIME: "chat", DEVD_AGENT: "codex", CODEX_HOME: "/c" })).toMatchObject({
       harness: "codex",

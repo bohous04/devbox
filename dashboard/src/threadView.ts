@@ -35,17 +35,18 @@ function insertRun(n: ThreadSnapshot, runId: string, r: Pick<RunRow, "origin" | 
 }
 
 function terminal(n: ThreadSnapshot, seq: number, ts: number, runId: string, status: RunRow["status"],
-  f: { nativeThreadId?: string; usage?: RunRow["usage"]; error: string | null }, setUsage = false) {
+  f: { nativeThreadId?: string; usage?: RunRow["usage"]; error: string | null; failureReason?: RunRow["failureReason"] }, setUsage = false) {
   const idx = n.runs.findIndex((r) => r.runId === runId);
   if (idx < 0) {
     insertItem(n, seq, ts, { runId, itemId: null, kind: "notice", text: `${status} event for unknown run ${runId}`, status: "done" });
     return;
   }
-  const r = n.runs[idx];
+  const { failureReason: _, ...r } = n.runs[idx];
   n.runs[idx] = {
     ...r, status, endedAt: ts, endedSeq: seq, error: f.error,
     nativeThreadId: f.nativeThreadId ?? r.nativeThreadId,
     usage: setUsage ? (f.usage ?? null) : r.usage,
+    ...(f.failureReason ? { failureReason: f.failureReason } : {}),
   };
   n.items = n.items.map((i) => (i.runId === runId && i.status === "streaming" ? { ...i, status: "done" } : i));
 }
@@ -138,9 +139,11 @@ function dispatch(n: ThreadSnapshot, { seq, ts, event: ev }: LoggedEvent) {
       terminal(n, seq, ts, ev.runId, "interrupted", { error: null });
       return;
     case "run.failed":
-      // resume-failed for a run id never announced is a switch's: devd's own notice says it (as in ThreadStore).
-      if (ev.error === "resume-failed" && !n.runs.some((r) => r.runId === ev.runId)) return;
-      terminal(n, seq, ts, ev.runId, "failed", { error: ev.error });
+      // resume-failed or open-failed for a run id never announced is a switch's or the bridge start's: devd's own
+      // notice says it (as in ThreadStore).
+      if ((ev.error === "resume-failed" || ev.error === "open-failed") && !n.runs.some((r) => r.runId === ev.runId)) return;
+      // Only known reasons, as in ThreadStore.
+      terminal(n, seq, ts, ev.runId, "failed", { error: ev.error, failureReason: ev.reason === "rate-limited" ? ev.reason : undefined });
       insertItem(n, seq, ts, { runId: ev.runId, itemId: null, kind: "notice", text: ev.error, status: "done" });
       return;
     case "bridge.started":

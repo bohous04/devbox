@@ -8,7 +8,7 @@ import type { InboxItem, ThreadSnapshot } from "../../shared/thread";
 
 export interface SessionPort { host: number; container: number }
 export type ClaudeState = "working" | "waiting" | "idle";
-export type AgentName = "claude" | "claude-gemini" | "claude-openrouter" | "codex" | "grok" | "antigravity";
+export type AgentName = "claude" | "claude-gemini" | "claude-openrouter" | "codex" | "grok" | "antigravity" | "vibe";
 export interface SessionLive {
   id: string; folder: string; project: string; repo: string; container: string;
   port_base: number; status: "running" | "stopped"; solo: 0 | 1;
@@ -260,7 +260,8 @@ export interface SwitchAgentResponse {
  *  (devd/src/chatSwitch.ts CurrentTarget). `model: null` = the harness default. */
 /** `awaitingTarget`: the agent bridge waits for a target (after a restart or a failed resume); devd then allows a
  *  switch even with queued messages. */
-export interface ChatTarget { agent: AgentName; harness: string; account: string | null; model: string | null; awaitingTarget: boolean }
+/** `bridgeVersion`: of the bridge's latest handshake; null before one (or for a 1.0.0 bridge). */
+export interface ChatTarget { agent: AgentName; harness: string; account: string | null; model: string | null; awaitingTarget: boolean; bridgeVersion: string | null }
 /** 202 of the chat switch routes. `unchanged`: nothing was switched; `exhausted`: the target account is over its usage
  *  threshold (allowed, as for `dev switch`). Refusals come back as ApiError with the body (see switchErrorText). */
 export interface ChatSwitchResult {

@@ -166,11 +166,13 @@ enum AgentProfiles {
         .codex: AgentProfile(label: "Codex", short: "Codex", yolo: true),
         .grok: AgentProfile(label: "Grok Build", short: "Grok", yolo: true),
         .antigravity: AgentProfile(label: "Antigravity", short: "Antigravity", yolo: true),
+        .vibe: AgentProfile(label: "Mistral Vibe", short: "Vibe", yolo: true),
     ]
 
     /// Order of options in the picker — same as `AGENT_IDS` on the web (default first, then proxy
     /// variants, then standalone CLIs). `.unknown` (tolerant decoding fallback) is not offered —
-    /// it is not a real profile one could switch to.
+    /// it is not a real profile one could switch to. `.vibe` is not offered either: it runs only in chat
+    /// sessions (devd `tmuxRuntimeBlock`), and both pickers here open or swap tmux sessions.
     static let ids: [AgentName] = [.claude, .claudeGemini, .claudeOpenrouter, .codex, .grok, .antigravity]
 
     /// Profile for a value that may be nil/unknown — mirrors `agentNameFor`/`profileFor`

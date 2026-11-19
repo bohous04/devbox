@@ -55,7 +55,7 @@ export function chatAttention(t: ThreadSnapshot, link: LinkState | null, now: nu
   }
   const endedAt = required(last.endedAt, "endedAt", last);
   const unseen = t.seenSeq < required(last.endedSeq, "endedSeq", last);
-  if (last.status === "failed" && unseen) return { section: "needs_you", reason: "failed", since: endedAt };
+  if (last.status === "failed" && unseen) return { section: "needs_you", reason: last.failureReason ?? "failed", since: endedAt };
   if (holding) return { section: "working", reason: "background", since: endedAt };
   if (now - endedAt < WORKING_GRACE_MS) return { section: "working", reason: "running", since: endedAt };
   if (last.status === "completed" && unseen) {

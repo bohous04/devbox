@@ -1,5 +1,7 @@
 import { mkdirSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { ACP_AGENTS, isAcpAgent } from "./acpAgents";
+import { openAcpSession } from "./acpSession";
 import { CLAUDE_CAPABILITIES, openClaudeSession, ResumeFailedError, type HarnessSession } from "./claudeSession";
 import { prepareShadowHome, type HomesPaths } from "./codexHomes";
 import { CODEX_CAPABILITIES, openCodexSession } from "./codexSession";
@@ -7,14 +9,14 @@ import { CONTINUATION_TEXT, CONTINUATION_WINDOW_MS, mayContinue } from "./contin
 import { EventLog } from "./eventLog";
 import type { BackgroundWork, BridgeEvent, UsageBaseline } from "./events";
 import { DEFAULT_SOCKET } from "./mcp";
-import { APPENDED_SYSTEM_PROMPT, claudeMcpServers, codexMcpArgs } from "./prompts";
+import { ACP_INSTRUCTIONS, acpMcpServers, APPENDED_SYSTEM_PROMPT, claudeMcpServers, codexMcpArgs } from "./prompts";
 import type { BridgeCommand, HandoffDelivery, SwitchTarget } from "./protocol";
 import { INHERITED_STRIP, isProxyProfile, proxyProfileEnv } from "./proxyProfile";
 import { startServer } from "./server";
 import { loadState, saveState, type BridgeState, type PersistedTarget } from "./state";
 import { DeclaredWaits } from "./waits";
 
-export const BRIDGE_VERSION = "1.1.0";
+export const BRIDGE_VERSION = "1.2.0";
 export const DEFAULT_BRIDGE_DIR = "/run/devd/bridge";
 export const CLAUDE_ACCOUNTS_ROOT = "/home/dev/.claude-accounts";
 export const CODEX_ACCOUNTS_ROOT = "/home/dev/.codex-accounts";
@@ -23,12 +25,18 @@ export const NO_THREAD_ERROR = "restart before the conversation started; resend 
 /** `run.failed` error for a resume that did not work, at a switch or at start (on a run id no `run.started`
  *  announced); the bridge then awaits devd's fresh target. */
 export const RESUME_FAILED = "resume-failed";
+/** `run.failed` error (on a run id no `run.started` announced) for a switched target the bridge could not open at
+ *  start, for another reason than a failed resume (an ACP agent without its login): the bridge awaits devd's target
+ *  instead of exiting into a restart loop on it. */
+export const OPEN_FAILED = "open-failed";
 const AWAITING_TARGET_ERROR = "the bridge waits for devd to send switchTarget (after a restart or a failed resume)";
 
 // Exit statuses of `agent-bridge serve`, read by agent-bridge-launch.
 export const EXIT_STOPPED = 0;
 export const EXIT_HARNESS_ENDED = 1;
 export const EXIT_CONFIG = 3;
+
+const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** A configuration problem that a restart cannot fix; serve exits with EXIT_CONFIG. */
 export class ConfigError extends Error {}
@@ -47,6 +55,9 @@ export interface HarnessOpenOptions {
   usageBaseline: UsageBaseline | null;
   emit: (e: BridgeEvent) => void;
   onUsageBaseline: (b: UsageBaseline) => void;
+  /** The thread has not had a prompt get through since it was opened new (BridgeState.instructionsPending). */
+  instructionsPending: boolean;
+  onInstructionsDelivered: () => void;
 }
 
 export type OpenHarness = (o: HarnessOpenOptions) => HarnessSession;
@@ -82,10 +93,11 @@ function accountDir(dir: string | undefined, root: string): string | null {
 }
 
 /** Account id for `thread.native`: the lease's profile dir for Claude; for Codex the explicit account,
- *  else the standalone account home codex_account_prepare selected. */
+ *  else the standalone account home codex_account_prepare selected; none for an ACP agent (its own CLI login). */
 export function accountFromEnv(harness: Harness, env: Env): string | null {
   if (harness === "claude") return accountDir(env.CLAUDE_CONFIG_DIR, CLAUDE_ACCOUNTS_ROOT);
-  return env.DEVD_CODEX_ACCOUNT_ID ? env.DEVD_CODEX_ACCOUNT_ID : accountDir(env.CODEX_HOME, CODEX_ACCOUNTS_ROOT);
+  if (harness === "codex") return env.DEVD_CODEX_ACCOUNT_ID ? env.DEVD_CODEX_ACCOUNT_ID : accountDir(env.CODEX_HOME, CODEX_ACCOUNTS_ROOT);
+  return null;
 }
 
 /** `co`'s per-account config overrides, so app-server reads the same auth and state as the TUI would. */
@@ -103,9 +115,18 @@ export interface ResolveOptions {
   homes?: Partial<HomesPaths>;
   /** The image's `claude`, or null when it is not on PATH. */
   claudeExecutable: string | null;
+  /** PATH lookup of an ACP agent's binary; Bun.which unless a test replaces it. */
+  which?: (bin: string) => string | null;
 }
 
 export function resolveTarget(t: SwitchTarget, r: ResolveOptions): SwitchTarget {
+  if (isAcpAgent(t.harness)) {
+    // An ACP agent runs on its own CLI login in its volume; devbox has no account to pick for it.
+    if (t.account !== null) throw new Error(`switch target: ${t.harness} runs on its own CLI login, not on account ${t.account}`);
+    const bin = ACP_AGENTS[t.harness].argv[0]!;
+    if ((r.which ?? Bun.which)(bin) === null) throw new Error(`switch target: ${bin} (${t.harness}) not found on PATH`);
+    return t;
+  }
   if (t.harness === "claude") {
     if (r.claudeExecutable === null) throw new Error("switch target: claude binary not found on PATH");
     const dir = t.env.CLAUDE_CONFIG_DIR;
@@ -157,8 +178,8 @@ export interface ServeConfig {
   harness: Harness;
   /** The launch harness's own env: a proxy profile's (DEVD_AGENT=claude-gemini, …), else empty. */
   targetEnv: Record<string, string>;
-  /** CLAUDE_CONFIG_DIR or CODEX_HOME. */
-  configHome: string;
+  /** CLAUDE_CONFIG_DIR or CODEX_HOME; null for an ACP agent (its login lives in its own volume). */
+  configHome: string | null;
   account: string | null;
   model: string | null;
   bridgeDir: string;
@@ -170,21 +191,21 @@ export function serveConfigFromEnv(env: Env): ServeConfig {
   const agent = env.DEVD_AGENT;
   // A proxy profile is Claude Code against another upstream: the claude harness with the profile's env.
   const harness = isProxyProfile(agent) ? "claude" : agent;
-  if (harness !== "claude" && harness !== "codex") {
-    throw new ConfigError(`DEVD_AGENT must be claude, codex or a proxy profile (got ${JSON.stringify(agent ?? null)})`);
+  if (harness !== "claude" && harness !== "codex" && !isAcpAgent(harness)) {
+    throw new ConfigError(`DEVD_AGENT must be claude, codex, an ACP agent (${Object.keys(ACP_AGENTS).join(", ")}) or a proxy profile (got ${JSON.stringify(agent ?? null)})`);
   }
   let targetEnv: Record<string, string> = {};
   if (isProxyProfile(agent)) {
     try { targetEnv = proxyProfileEnv(agent, env); }
     catch (e) { throw new ConfigError(e instanceof Error ? e.message : String(e)); }
   }
-  const homeVar = harness === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
-  const configHome = env[homeVar];
-  if (!configHome) throw new ConfigError(`${homeVar} is not set`);
+  const homeVar = harness === "claude" ? "CLAUDE_CONFIG_DIR" : harness === "codex" ? "CODEX_HOME" : null;
+  const configHome = homeVar === null ? null : env[homeVar];
+  if (homeVar !== null && !configHome) throw new ConfigError(`${homeVar} is not set`);
   return {
     harness,
     targetEnv,
-    configHome,
+    configHome: configHome ?? null,
     account: accountFromEnv(harness, env),
     model: env.DEVD_AGENT_MODEL ? env.DEVD_AGENT_MODEL : null,
     bridgeDir: env.DEVD_BRIDGE_DIR ?? DEFAULT_BRIDGE_DIR,
@@ -205,6 +226,22 @@ export function harnessEnv(launchEnv: Env, targetEnv: Record<string, string>): E
 function harnessOpener(launchEnv: Env, logError: (msg: string) => void): OpenHarness {
   return (o) => {
     const env = harnessEnv(launchEnv, o.target.env);
+    if (isAcpAgent(o.target.harness)) {
+      const mcpCommand = Bun.which("agent-bridge");
+      if (!mcpCommand) throw new Error("agent-bridge (the devbox MCP server) not found on PATH");
+      return openAcpSession({
+        spec: ACP_AGENTS[o.target.harness],
+        cwd: WORKSPACE,
+        model: o.target.model,
+        resume: o.resume,
+        mcpServers: acpMcpServers(mcpCommand),
+        ...(o.instructionsPending ? { instructions: ACP_INSTRUCTIONS } : {}),
+        onInstructionsDelivered: o.onInstructionsDelivered,
+        baseEnv: env,
+        emit: o.emit,
+        logError,
+      });
+    }
     if (o.target.harness === "codex") {
       if (!env.CODEX_HOME) throw new Error("CODEX_HOME is not set for the Codex harness");
       return openCodexSession({
@@ -279,10 +316,12 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     usageBaseline: null,
     target: null,
     pendingHandoff: null,
+    instructionsPending: false,
   };
-  // A target without its own home (a setModel on the launch target) keeps only the model choice: the account is the
-  // one this launch leased, which a recreated container may have changed.
-  if (state.target !== null && !state.target.env.CLAUDE_CONFIG_DIR && !state.target.env.CODEX_HOME) {
+  // A Claude/Codex target without its own home (a setModel on the launch target) keeps only the model choice: the
+  // account is the one this launch leased, which a recreated container may have changed. An ACP target has no home
+  // either, but it runs on the agent's own login and must never inherit the launch account.
+  if (state.target !== null && !isAcpAgent(state.target.harness) && !state.target.env.CLAUDE_CONFIG_DIR && !state.target.env.CODEX_HOME) {
     state.target = persistableTarget({ harness: state.target.harness, account: o.account, model: state.target.model, env: o.targetEnv ?? {} });
   }
   state.account = state.target === null ? o.account : state.target.account;
@@ -358,9 +397,14 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   const close = () => shutdown(EXIT_STOPPED);
 
   // `retired` marks a harness serve closes on purpose (restartAgent, shutdown) or, opened by a switch or at start, one
-  // whose resume failed (devd re-plans); any other end exits serve so the launcher starts a fresh bridge that resumes
-  // the thread.
-  function openHarness(handlesResumeFailure = false): { session: HarnessSession; retired: boolean } {
+  // that failed to open in a way the caller handles (`handlesFailure`: a failed resume, devd re-plans; a switched
+  // target that cannot open); any other end exits serve so the launcher starts a fresh bridge that resumes the thread.
+  function openHarness(handlesFailure: (e: unknown) => boolean = () => false): { session: HarnessSession; retired: boolean } {
+    // No thread yet: the harness opens a new one, whose first prompt is still to come.
+    if (state.nativeThreadId === null && !state.instructionsPending) {
+      state.instructionsPending = true;
+      persist();
+    }
     const h = {
       retired: false,
       session: o.openHarness({
@@ -372,14 +416,17 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
           state.usageBaseline = b;
           persist();
         },
+        instructionsPending: state.instructionsPending,
+        onInstructionsDelivered: () => {
+          state.instructionsPending = false;
+          persist();
+        },
       }),
     };
-    // Registered before the end handler, so a failed resume is retired before its session's end is looked at.
-    if (handlesResumeFailure) {
-      h.session.ready.catch((e) => {
-        if (e instanceof ResumeFailedError) h.retired = true;
-      });
-    }
+    // Registered before the end handler, so a handled failure is retired before its session's end is looked at.
+    h.session.ready.catch((e) => {
+      if (handlesFailure(e)) h.retired = true;
+    });
     const settled = h.session.ready.catch(() => {});
     void settled.then(async () => {
       const r = await h.session.ended;
@@ -484,11 +531,17 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     // Runs left by the previous bridge are not active here: they start once this switch has opened the harness.
     if (!recoveryPending) refuseWhileRunning("switch");
     const target = o.resolveTarget(cmd.target);
-    const caps = target.harness === "claude" ? CLAUDE_CAPABILITIES : CODEX_CAPABILITIES;
-    if (cmd.handoff?.injectItems && cmd.handoff.preamble === null && !caps.injectItems) {
+    // ACP agents take no raw history items (acpSession.ts).
+    const injects = target.harness === "claude" ? CLAUDE_CAPABILITIES.injectItems : target.harness === "codex" ? CODEX_CAPABILITIES.injectItems : false;
+    if (cmd.handoff?.injectItems && cmd.handoff.preamble === null && !injects) {
       throw new Error(`switch refused: ${target.harness} cannot inject handoff items and the handoff has no preamble`);
     }
     await retireHarness();
+    const previous = {
+      current, target: state.target, harness: state.harness, account: state.account, model: state.model,
+      nativeThreadId: state.nativeThreadId, pendingHandoff: state.pendingHandoff, usageBaseline: state.usageBaseline,
+      instructionsPending: state.instructionsPending,
+    };
     // A different thread (or harness) does not continue the old running usage totals.
     if (target.harness !== state.harness || cmd.resume !== state.nativeThreadId) state.usageBaseline = null;
     // The bridge owns the pending handoff: a handoff is a delta for its thread, so a switch without one that resumes
@@ -500,17 +553,35 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     state.harness = target.harness;
     state.account = target.account;
     state.model = target.model;
+    // Another thread resumed: it had its first prompt (a new one is marked when it opens).
+    if (cmd.resume !== state.nativeThreadId) state.instructionsPending = false;
     state.nativeThreadId = cmd.resume;
     if (cmd.handoff !== null || !sameThread) state.pendingHandoff = cmd.handoff;
     persist();
-    const h = openHarness(true);
+    const h = openHarness(() => true);
     harness = h;
     try {
       await h.session.ready;
     } catch (e) {
-      if (!(e instanceof ResumeFailedError)) throw e;
-      resumeFailed(e);
-      return;
+      if (e instanceof ResumeFailedError) {
+        resumeFailed(e);
+        return;
+      }
+      // Persisting a target that cannot open would restart the bridge into it forever, while devd's DB still names
+      // the previous one: go back to that and fail the switch with the agent's error.
+      logError(`agent-bridge: opening ${target.harness} failed: ${errorText(e)}; back to ${previous.harness}`);
+      current = previous.current;
+      state.target = previous.target;
+      state.harness = previous.harness;
+      state.account = previous.account;
+      state.model = previous.model;
+      state.nativeThreadId = previous.nativeThreadId;
+      state.pendingHandoff = previous.pendingHandoff;
+      state.usageBaseline = previous.usageBaseline;
+      state.instructionsPending = previous.instructionsPending;
+      persist();
+      if (current !== null) await openCurrent();
+      throw e;
     }
     awaitingTarget = false;
     if (recoveryPending) await recover();
@@ -581,18 +652,30 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       publishBackground();
     }
   }, o.sweepMs ?? SWEEP_MS);
-  /** Opens the target at start; a thread that cannot be resumed is devd's to re-plan (resumeFailed), any other
-   *  failure ends the harness and serve exits for a restart. */
-  async function startHarness(): Promise<void> {
-    const h = openHarness(true);
+  /** Opens `current` (at start, or again after a switch that could not open its target). A thread that cannot be
+   *  resumed is devd's to re-plan (resumeFailed); a switched target that cannot open awaits devd's target (the user
+   *  can switch away from it); any other failure ends the harness and serve exits for a restart. */
+  async function openCurrent(): Promise<void> {
+    const switched = state.target !== null;
+    const h = openHarness((e) => e instanceof ResumeFailedError || switched);
     harness = h;
     try {
       await h.session.ready;
     } catch (e) {
       if (e instanceof ResumeFailedError) resumeFailed(e);
+      else if (switched) openFailed(e);
       return;
     }
-    await recover();
+    awaitingTarget = false;
+    if (recoveryPending) await recover();
+  }
+
+  function openFailed(e: unknown): void {
+    logError(`agent-bridge: opening ${state.harness} failed: ${errorText(e)}; waiting for devd's target`);
+    current = null;
+    recoveryPending = true;
+    awaitingTarget = true;
+    server.publish({ type: "run.failed", runId: crypto.randomUUID(), error: OPEN_FAILED });
   }
 
   server.publish({
@@ -646,7 +729,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   }
 
   let harness: { session: HarnessSession; retired: boolean } | null = null;
-  if (!awaitingTarget) await startHarness();
+  if (!awaitingTarget) await openCurrent();
 
   return { closed, close };
 }

@@ -28,7 +28,7 @@ test("create: full flow → instabox session, alias, container on the VM path, a
   expect(client.calls.some((c) => c.startsWith("run m_1 sudo -n mkdir -p"))).toBe(true);
   expect(client.calls).toContain("desktopStart m_1");
   expect(opsCalls).toEqual(expect.arrayContaining([
-    "copy claude-home", "copy codex-home", "copy grok-home", "copy claude-acct-a1", "copy codex-acct-g1",
+    "copy claude-home", "copy codex-home", "copy grok-home", "copy vibe-home", "copy claude-acct-a1", "copy codex-acct-g1",
     "docker run --rm", "run dev-p-r /data/devbox/ws/dev-p-r",
   ]));
   expect(containers[0]!.mounts).toContain("/var/run/docker.sock:/var/run/docker.sock");

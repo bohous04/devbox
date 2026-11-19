@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { AGENT_IDS } from "../../devd/src/agents";
+import { AGENT_IDS, tmuxRuntimeBlock } from "../../devd/src/agents";
 import type { SessionRow } from "../../devd/src/db";
 import type { TreeProject } from "../../devd/src/tree";
 import { agentFlag, agentOptions, folderOptions, freshLabel, GIST_MAX_FILES, gistOutcome, gistScript, NEW_SOLO, projectOptions, repoOptions, runningSolosIn, shouldAskAgent, soloActionOptions, soloEndOptions, soloMenuOptions, stripAgentFlags } from "../src/picker";
@@ -126,14 +126,15 @@ test("stripAgentFlags also removes the VALUE of --agent so it does not stay as a
   expect(stripAgentFlags(["stop", "--all"])).toEqual(["stop", "--all"]);  // leaves other flags alone
 });
 
-test("the profile menu offers all of them and the remembered one is first with a hint", () => {
+test("the profile menu offers every tmux profile and the remembered one is first with a hint", () => {
   const opts = agentOptions("codex");
-  // The length comes from AGENT_IDS, not a number: this tests BUILDING the menu, not how
+  // The list comes from AGENT_IDS, not a number: this tests BUILDING the menu, not how
   // many profiles exist right now — that list is guarded by devd/test/agents.test.ts.
-  expect(opts).toHaveLength(AGENT_IDS.length);
+  const tmux = AGENT_IDS.filter((id) => tmuxRuntimeBlock(id) === null);
+  expect(tmux).not.toContain("vibe");
   expect(opts[0].value).toBe("codex");
   expect(opts[0].hint).toBe("last used here");
-  expect(opts.map((o) => o.value).sort()).toEqual([...AGENT_IDS].sort());
+  expect(opts.map((o) => o.value).sort()).toEqual([...tmux].sort());
   expect(opts[0].label).toBe("Codex (co · yolo)");
 });
 

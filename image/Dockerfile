@@ -65,6 +65,20 @@ RUN HOME=/opt/agy bash -c 'curl -fsSL https://antigravity.google/cli/install.sh 
     && chmod -R a+rX /opt/agy \
     && su -s /bin/sh -c 'agy --version' nobody
 
+# Mistral Vibe (PyPI `mistral-vibe`): `vibe` (TUI) and `vibe-acp` (ACP agent on stdio). Pinned.
+# Installed as root into /opt/vibe for the same reasons as grok/agy above: a tool venv under
+# /root would be invisible to `dev`, and a per-user install would drift per container.
+# `--python /usr/bin/python3` (Ubuntu's 3.12, the package needs >=3.12) keeps uv from downloading a
+# managed Python into /root. `--no-build-package mistral-vibe` makes a missing wheel fail the build
+# instead of silently compiling the bundled Rust TUI from the sdist (needs cargo, which we lack).
+# Login and sessions live in ~/.vibe (VIBE_HOME), the shared `vibe-home` volume.
+# Verification as NON-ROOT, for the same reason as with grok.
+ARG VIBE_VERSION=3.1.3
+RUN UV_NO_CACHE=1 UV_TOOL_DIR=/opt/vibe UV_TOOL_BIN_DIR=/usr/local/bin \
+      uv tool install --python /usr/bin/python3 --no-build-package mistral-vibe "mistral-vibe==${VIBE_VERSION}" \
+    && chmod -R a+rX /opt/vibe \
+    && su -s /bin/sh -c 'vibe --version && vibe-acp --version' nobody
+
 # Playwright MCP — headless Chromium so agents can drive a real browser (tests, scraping,
 # screenshots) without a display. Browsers baked to a world-readable path since the
 # container runs as uid 1000; the env makes Playwright + the MCP find them there.
@@ -118,7 +132,7 @@ RUN cd /opt/agent-bridge && bun install --production
 RUN userdel -r ubuntu 2>/dev/null || true \
     && useradd -m -u 1000 -s /bin/zsh dev \
     && echo "dev ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dev \
-    && install -d -o dev -g dev /home/dev/.claude /home/dev/.codex /home/dev/.codex-v2 /home/dev/.codex-v2/shared /home/dev/.grok /home/dev/.gemini /home/dev/.vscode-server /workspace /run/devd \
+    && install -d -o dev -g dev /home/dev/.claude /home/dev/.codex /home/dev/.codex-v2 /home/dev/.codex-v2/shared /home/dev/.grok /home/dev/.gemini /home/dev/.vibe /home/dev/.vscode-server /workspace /run/devd \
     && touch /home/dev/.zshrc && chown dev:dev /home/dev/.zshrc
 
 COPY entrypoint.sh /usr/local/bin/devbox-entrypoint

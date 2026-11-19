@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chatAttention, chatBusy, tmuxAttention, WORKING_GRACE_MS, type LinkState } from "../src/attention";
@@ -75,6 +76,38 @@ test("a failed last run is needs-you until it was seen, then idle", () => {
   expect(chatAttention(s.snapshot(), connected, LATER)).toEqual({ section: "needs_you", reason: "failed", since: 2000 });
   s.markSeen(s.lastSeq());
   expect(chatAttention(s.snapshot(), connected, LATER)).toEqual({ section: "idle", reason: null, since: 2000 });
+});
+
+test("a rate-limited run is needs-you with that reason; a later run that ends clears it", () => {
+  const s = thread([started("r1"), { type: "run.failed", runId: "r1", error: "rate-limited: usage limit", reason: "rate-limited" }]);
+  expect(s.snapshot().runs[0]).toMatchObject({ status: "failed", failureReason: "rate-limited" });
+  expect(chatAttention(s.snapshot(), connected, LATER)).toEqual({ section: "needs_you", reason: "rate-limited", since: 2000 });
+  s.apply({ seq: 3, ts: 3000, event: started("r2") });
+  s.apply({ seq: 4, ts: 4000, event: { type: "run.failed", runId: "r2", error: "boom" } });
+  expect(chatAttention(s.snapshot(), connected, LATER)).toEqual({ section: "needs_you", reason: "failed", since: 4000 });
+});
+
+test("an unknown failure reason is not stored: the run is just failed", () => {
+  const s = thread([started("r1"), { type: "run.failed", runId: "r1", error: "x", reason: "quota-exceeded" } as unknown as BridgeEvent]);
+  expect(s.snapshot().runs[0].failureReason).toBeUndefined();
+  expect(chatAttention(s.snapshot(), connected, LATER)).toEqual({ section: "needs_you", reason: "failed", since: 2000 });
+});
+
+test("a thread store created before failure reasons opens and records them", () => {
+  const dir = mkdtempSync(join(tmpdir(), "attention-"));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, "_threads"));
+  const old = new Database(ThreadStore.path(dir, "dev-a-b-1"), { create: true });
+  old.run(`CREATE TABLE runs (
+    run_id TEXT PRIMARY KEY, origin TEXT NOT NULL, status TEXT NOT NULL, harness TEXT,
+    native_thread_id TEXT, model TEXT, queued_at INTEGER, started_at INTEGER, ended_at INTEGER, ended_seq INTEGER, usage TEXT, error TEXT,
+    updated_seq INTEGER NOT NULL)`);
+  old.close();
+  const s = ThreadStore.open(dir, "dev-a-b-1");
+  cleanups.push(() => s.close());
+  s.apply({ seq: 1, ts: 1000, event: started("r1") });
+  s.apply({ seq: 2, ts: 2000, event: { type: "run.failed", runId: "r1", error: "rate-limited: x", reason: "rate-limited" } });
+  expect(s.snapshot().runs[0].failureReason).toBe("rate-limited");
 });
 
 test("a session that is not running is not working on runs or background work the store still holds", () => {

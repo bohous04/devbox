@@ -31,6 +31,9 @@ case "$profile" in
   codex) bin=co ;;
   grok)  bin=gr ;;
   antigravity) bin=ag; prompt_flag=(-i) ;;
+  # Mistral Vibe runs only in chat sessions (devd's tmuxRuntimeBlock): no TUI launcher; a chat session's shell
+  # windows still end here and pass the chat check below.
+  vibe) bin= ;;
   # Unknown value → claude, the session always starts. But not silently: a silent fallback
   # looks from outside like "I picked codex and claude started", which is indistinguishable
   # from a bug in devd. One sentence says what happened and what was entered wrong.
@@ -44,6 +47,10 @@ if [ "$print" = 1 ]; then echo "$profile"; exit 0; fi
 # Every path that re-creates a tmux window (web terminal, CLI attach, main-N) ends here, so this one check
 # keeps a second, TUI agent out of the same workspace and conversation.
 if [ "${DEVD_RUNTIME:-}" = chat ]; then exec zsh; fi
+if [ -z "$bin" ]; then
+  echo "devbox: profile ${profile} runs only in chat sessions; starting a shell." >&2
+  exec zsh
+fi
 
 # Profiles with a third-party model: Claude Code runs against a foreign upstream. Either against
 # CLIProxyAPI on the host (holds OAuth to the subscriptions, billed to them), or directly

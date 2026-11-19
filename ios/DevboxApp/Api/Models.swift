@@ -42,6 +42,7 @@ enum AgentName: String, Decodable {
     case codex
     case grok
     case antigravity
+    case vibe
     case unknown
 
     init(from decoder: Decoder) throws {

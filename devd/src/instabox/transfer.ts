@@ -2,7 +2,7 @@ import { accountMountList } from "../accountProfiles";
 import { codexAccountMountList } from "../codexAccountProfiles";
 import { run } from "../proc";
 
-export const SHARED_VOLUMES = ["claude-home", "codex-home", "grok-home"] as const;
+export const SHARED_VOLUMES = ["claude-home", "codex-home", "grok-home", "vibe-home"] as const;
 export interface PoolAccountIds { claude: string[]; codex: string[] }
 
 // Shell-quote helper — defined ONLY HERE (tasks 8 and 11 import it as `shq`).

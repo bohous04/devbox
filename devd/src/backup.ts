@@ -20,7 +20,7 @@ export interface BackupDeps { volume: string; codexVolume?: string; extraVolumes
 // ONLY carrier of secrets, and without it the bundle would be unusable for restore.
 const STAGED = ["claude-home.tgz", "codex-home.tgz", "secrets.json", "vault.age", "devd.sqlite"] as const;
 
-// `STAGED` + archives of the other agent home volumes (grok-home, antigravity-home) —
+// `STAGED` + archives of the other agent home volumes (grok-home, antigravity-home, vibe-home) —
 // their names are dynamic (d.extraVolumes), so they cannot be in a fixed array.
 const staged = (d: BackupDeps): string[] => [...STAGED, ...(d.extraVolumes ?? []).map((v) => v.file)];
 
@@ -45,7 +45,7 @@ export async function buildBackupTar(d: BackupDeps): Promise<string> {
   if (existsSync(d.secretsPath)) copyFileSync(d.secretsPath, join(d.tmpDir, "secrets.json"));
   if (d.vaultPath && existsSync(d.vaultPath)) copyFileSync(d.vaultPath, join(d.tmpDir, "vault.age"));
   if (existsSync(d.dbPath)) { d.checkpointDb?.(); copyFileSync(d.dbPath, join(d.tmpDir, "devd.sqlite")); }
-  // Other agent home volumes (grok-home, antigravity-home). Only EXISTING ones: `docker run
+  // Other agent home volumes (grok-home, antigravity-home, vibe-home). Only EXISTING ones: `docker run
   // -v name:/vol` would create a missing volume as root:root and sessions could then not write
   // into their home (same bug as with grok-home, seed-grok-hooks.sh).
   for (const v of d.extraVolumes ?? []) {

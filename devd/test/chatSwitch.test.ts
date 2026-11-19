@@ -13,10 +13,11 @@ import { PRICED_MODELS } from "../src/pricing";
 import type { CodexAccountView } from "../src/codexAccounts";
 import { ACCOUNT_POOL_DEFAULTS } from "../src/config";
 import {
-  getRepoAgent, getSession, insertAccount, insertLease, insertSession, leaseHistory, openDb, upsertAccountUsage,
+  getRepoAgent, getSession, insertAccount, insertLease, insertSession, leaseHistory, openDb, setRepoAgent, upsertAccountUsage,
   type AccountUsageRow, type SessionRow,
 } from "../src/db";
 import { EventBus } from "../src/eventBus";
+import { resolveAgent } from "../src/sessions";
 import { registerThreadRoutes } from "../src/threadApi";
 import { ThreadStore } from "../src/threadStore";
 import { historyOmittedNotice } from "../src/transition";
@@ -273,7 +274,7 @@ test("account: a reported model without a known window is a visible 409 naming i
 test("every priced Claude/GPT model id has a window; every offered model too", () => {
   const reported = PRICED_MODELS.filter((m) => /^(claude-|gpt-)/.test(m) && !m.startsWith("gpt-oss"));
   for (const m of reported) expect([m, MODEL_WINDOW_ALIASES[m]]).toEqual([m, expect.any(String)]);
-  for (const m of [...CHAT_MODELS.claude, ...CHAT_MODELS.codex]) expect(MODEL_WINDOW_ALIASES[m]).toBe(m);
+  for (const m of Object.values(CHAT_MODELS).flat()) expect(MODEL_WINDOW_ALIASES[m]).toBe(m);
 });
 
 test("account: a profile that cannot be attached is 409 before anything is sent, without the internal cause", async () => {
@@ -311,7 +312,11 @@ test("account: a proxy profile has no account pool (400)", async () => {
 test("harness: an unknown agent or one chat cannot run is 400", async () => {
   const t = setup();
   expect((await t.post("harness", { agent: "nope" })).status).toBe(400);
-  expect((await t.post("harness", { agent: "grok" })).status).toBe(400);
+  for (const agent of ["grok", "antigravity"]) {
+    const r = await t.post("harness", { agent });
+    expect(r).toMatchObject({ status: 400, body: { error: "unknown-agent" } });
+    expect(String(r.body.message)).toContain("is not available in chat sessions yet");
+  }
   expect((await t.post("harness", {})).status).toBe(400);
   expect(t.sent).toEqual([]);
 });
@@ -372,6 +377,76 @@ test("harness: no room for any history keeps the request path and says so in a n
   expect(t.store.snapshot().items.map((i) => i.text)).toContain(historyOmittedNotice(1));
 });
 
+const VIBE_CAPS: Capabilities = { resume: true, injectItems: false, liveModelSwitch: true, questions: false, images: true, backgroundVisibility: false };
+/** A Vibe turn on its own thread, as the bridge announces it. */
+function vibeTurn(t: ReturnType<typeof setup>, runId: string, caps = VIBE_CAPS, model = "mistral-large-4-0") {
+  t.feed([
+    { type: "thread.native", harness: "vibe", nativeThreadId: "t-vibe", account: null, model, caps },
+    { type: "run.queued", runId, text: `ask ${runId}`, attachments: [] },
+    { type: "run.started", runId, origin: "user", nativeThreadId: "t-vibe", model },
+    { type: "message.final", runId, itemId: `m-${runId}`, role: "assistant", text: `answer ${runId}` },
+    { type: "run.completed", runId, nativeThreadId: "t-vibe", usage: null, costUsd: null },
+  ]);
+}
+
+test("harness: Claude → Vibe is a fresh thread with the handoff, on no account, and releases the Anthropic lease", async () => {
+  const t = setup();
+  claudeThread(t);
+  expect(await t.post("harness", { agent: "vibe" })).toEqual({ status: 202, body: { kind: "fresh-with-handoff" } });
+  const cmd = t.sent[0] as Extract<BridgeCommand, { kind: "switchTarget" }>;
+  expect(cmd.target).toEqual({ harness: "vibe", account: null, model: null, env: {} });
+  expect(cmd.resume).toBeNull();
+  expect(cmd.handoff!.preamble).toContain("[user] Fix the login bug");
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("vibe");
+  expect(activeLeases(t)).toEqual([]);
+});
+
+test("harness: a switch to Vibe leaves the repo's remembered agent alone (S4-P6); a scheduled open still gets it", async () => {
+  const t = setup();
+  claudeThread(t);
+  setRepoAgent(t.db, CHAT.folder, CHAT.project, CHAT.repo, "codex", NOW - HOUR);
+  expect((await t.post("harness", { agent: "vibe" })).status).toBe(202);
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("vibe");
+  expect(getRepoAgent(t.db, CHAT.folder, CHAT.project, CHAT.repo)).toBe("codex");
+  // The scheduler opens without an agent: SessionManager.open resolves it from memory.
+  expect(resolveAgent(undefined, getRepoAgent(t.db, CHAT.folder, CHAT.project, CHAT.repo))).toBe("codex");
+});
+
+test("harness: back to Vibe resumes its thread with a delta; an ACP agent that cannot resume gets a fresh thread", async () => {
+  for (const [caps, kind, resume] of [[VIBE_CAPS, "resume-with-delta", "t-vibe"], [{ ...VIBE_CAPS, resume: false }, "fresh-with-handoff", null]] as const) {
+    const t = setup({ agent: "vibe" });
+    vibeTurn(t, "r1", caps);
+    expect(await t.post("harness", { agent: "claude" })).toMatchObject({ status: 202 });
+    t.feed([
+      { type: "thread.native", harness: "claude", nativeThreadId: "t-claude", account: "primary", model: "claude-opus-5-5", caps: CLAUDE_CAPS },
+      { type: "run.queued", runId: "r2", text: "now on claude", attachments: [] },
+      { type: "run.started", runId: "r2", origin: "user", nativeThreadId: "t-claude", model: "claude-opus-5-5" },
+      { type: "run.completed", runId: "r2", nativeThreadId: "t-claude", usage: null, costUsd: null },
+    ]);
+    expect(await t.post("harness", { agent: "vibe" })).toEqual({ status: 202, body: { kind } });
+    const cmd = t.sent.at(-1) as Extract<BridgeCommand, { kind: "switchTarget" }>;
+    // Another harness's model does not carry over: Vibe runs its own default (as Codex after Claude).
+    expect(cmd.target).toEqual({ harness: "vibe", account: null, model: null, env: {} });
+    expect(cmd.resume).toBe(resume);
+    expect(cmd.handoff!.preamble).toContain("now on claude");
+  }
+});
+
+test("model: Vibe switches among its models live; another harness's model is 400", async () => {
+  const t = setup({ agent: "vibe" });
+  vibeTurn(t, "r1");
+  expect(await t.post("model", { model: "mistral-medium-3.5" })).toEqual({ status: 202, body: { kind: "set-model" } });
+  expect(t.sent).toEqual([{ kind: "setModel", model: "mistral-medium-3.5" }]);
+  expect(await t.post("model", { model: "claude-opus-5-5" })).toMatchObject({ status: 400, body: { error: "unknown-model" } });
+  // A reloaded Vibe session names Medium 3.5 "mistral-medium-latest": an alias with a window, not a default.
+  expect(MODEL_WINDOW_ALIASES["mistral-medium-latest"]).toBe("mistral-medium-3.5");
+});
+
+test("account: an ACP agent runs on its own CLI login, not on an account pool (400)", async () => {
+  const t = setup({ agent: "vibe" });
+  expect(await t.post("account", {})).toMatchObject({ status: 400, body: { error: "no-account-pool" } });
+});
+
 // --- the switch notice and the current target ---
 
 const notices = (t: ReturnType<typeof setup>) => t.store.snapshot().items.filter((i) => i.kind === "notice").map((i) => i.text);
@@ -426,12 +501,12 @@ test("GET thread/target is the target devd plans the next switch from", async ()
     const r = await t.app.fetch(new Request(`http://x/api/sessions/${CHAT.id}/thread/target`));
     return { status: r.status, body: await r.json() };
   };
-  expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "primary", model: null, awaitingTarget: false } });
+  expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "primary", model: null, awaitingTarget: false, bridgeVersion: null } });
   claudeThread(t);
   await t.post("account", { accountId: "backup" });
-  expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "backup", model: "claude-opus-5-5", awaitingTarget: false } });
+  expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "backup", model: "claude-opus-5-5", awaitingTarget: false, bridgeVersion: null } });
   await t.post("harness", { agent: "codex" });
-  expect(await get()).toEqual({ status: 200, body: { agent: "codex", harness: "codex", account: "default", model: null, awaitingTarget: false } });
+  expect(await get()).toEqual({ status: 200, body: { agent: "codex", harness: "codex", account: "default", model: null, awaitingTarget: false, bridgeVersion: null } });
 });
 
 test("after a failed resume the switch notice says so", async () => {
@@ -730,6 +805,28 @@ test("M1: a bridge older than switching is refused with 409 bridge-too-old befor
   expect((await t.post("model", { model: "claude-sonnet-5-5" })).status).toBe(202);
 });
 
+test("a bridge older than 1.2.0 cannot take an ACP harness: 409 bridge-too-old before anything is sent", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.handshake(false, "1.1.0");
+  expect(await t.post("harness", { agent: "vibe" })).toEqual({
+    status: 409, body: { error: "bridge-too-old", message: "recreate the container to use Mistral Vibe" },
+  });
+  expect(t.sent).toEqual([]);
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("claude");
+  // Claude/Codex switches still work on it.
+  expect((await t.post("harness", { agent: "codex" })).status).toBe(202);
+  expect(t.sw.target(CHAT.id).bridgeVersion).toBe("1.1.0");
+});
+
+test("a 1.2.0 bridge takes an ACP harness", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.handshake(false, "1.2.0");
+  expect(await t.post("harness", { agent: "vibe" })).toMatchObject({ status: 202 });
+  expect(t.sw.target(CHAT.id).bridgeVersion).toBe("1.2.0");
+});
+
 test("M5: a Codex account not mounted in the container is refused with 409 account-not-mounted before anything is sent", async () => {
   const checked: string[] = [];
   const t = setup({ agent: "codex", codexMounted: async (_c, id) => { checked.push(id); return id === "default"; } });
@@ -765,4 +862,30 @@ test("proxyProfileEnv matches agent-launch.sh --print-env for each proxy profile
 
 test("proxy profile env keys are the ones an agent switch clears (PROFILE_ENV)", () => {
   expect([...PROXY_PROFILE_ENV_KEYS].sort()).toEqual([...PROFILE_ENV].sort());
+});
+
+test("a harness switch the bridge could not open says so in the thread; the session stays where it was", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.setOnSend((cmd) => { if (cmd.kind === "switchTarget") throw new CommandFailed("Authentication required"); });
+  expect(await t.post("harness", { agent: "vibe" })).toEqual({ status: 409, body: { error: "command-failed", message: "Authentication required" } });
+  expect(notices(t).at(-1)).toBe("Switching to Mistral Vibe failed: Authentication required. The session stays on Claude Code.");
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("claude");
+  expect(activeLeases(t)).toEqual(["primary"]);
+});
+
+test("open-failed: the bridge could not open its persisted target and awaits one; devd re-sends it and the user can switch away", async () => {
+  const t = setup({ agent: "vibe" });
+  vibeTurn(t, "r1");
+  t.setOnSend((cmd) => { if (cmd.kind === "switchTarget" && cmd.target.harness === "vibe") throw new CommandFailed("Authentication required"); });
+  t.feed([{ type: "run.failed", runId: "never-started", error: "open-failed" }]);
+  await waitUntil(() => t.sent.length >= 1, "the re-send");
+  // Same thread, no re-plan: the thread was fine, the agent could not start.
+  expect(t.sent[0]).toMatchObject({ kind: "switchTarget", target: { harness: "vibe" }, resume: "t-vibe" });
+  expect(t.sw.target(CHAT.id).awaitingTarget).toBe(true);
+  expect(notices(t).at(-1)).toContain("Authentication required");
+  expect(t.store.snapshot().items.some((i) => i.text.includes("never-started"))).toBe(false);
+  expect(await t.post("harness", { agent: "claude" })).toMatchObject({ status: 202 });
+  expect(t.sent.at(-1)).toMatchObject({ kind: "switchTarget", target: { harness: "claude" } });
+  expect(t.sw.target(CHAT.id).awaitingTarget).toBe(false);
 });

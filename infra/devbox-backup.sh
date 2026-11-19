@@ -100,6 +100,7 @@ PATHS=(
   /var/lib/docker/volumes/codex-home/_data       # same for Codex
   /var/lib/docker/volumes/grok-home/_data        # same for Grok
   /var/lib/docker/volumes/antigravity-home/_data # same for Antigravity
+  /var/lib/docker/volumes/vibe-home/_data        # same for Mistral Vibe
   /var/lib/devd                                  # devd.sqlite = the only source of statistics
   /etc/devd                                      # secrets.json + config
   /root/.ssh

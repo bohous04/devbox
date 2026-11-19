@@ -83,6 +83,17 @@ test("a proxy profile starts serve on the image's claude home (serve translates 
   expect(readFileSync(join(dir, "env"), "utf8").trim()).toBe("claude-gemini|/home/dev/.claude");
 });
 
+test("an ACP agent starts serve with nothing to prepare (its login is in its own volume)", () => {
+  writeFileSync(join(dir, "agent-bridge"), `#!/usr/bin/env bash\necho "$DEVD_AGENT|\${CLAUDE_CONFIG_DIR:-}|\${CODEX_HOME:-}" > "${dir}/env"\nexit 0\n`);
+  chmodSync(join(dir, "agent-bridge"), 0o755);
+  for (const agent of ["grok", "antigravity", "vibe", "opencode"]) {
+    const p = Bun.spawnSync(["bash", LAUNCHER], { env: { PATH: `${dir}:/usr/bin:/bin`, DEVD_AGENT: agent }, stderr: "pipe" });
+    expect(p.stderr.toString()).toBe("");
+    expect(p.exitCode).toBe(0);
+    expect(readFileSync(join(dir, "env"), "utf8").trim()).toBe(`${agent}||`);
+  }
+});
+
 // An old session row can still name a profile that was removed; the launcher refuses it instead of guessing.
 test("an unknown profile is refused with exit 2 and serve never starts", () => {
   writeFileSync(join(dir, "agent-bridge"), `#!/usr/bin/env bash\ntouch "${dir}/ran"\n`);

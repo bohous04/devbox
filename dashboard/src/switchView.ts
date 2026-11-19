@@ -2,7 +2,8 @@
 // harnesses can be picked and why not. devd decides (devd/src/chatSwitch.ts); these mirror its rules so the
 // menus do not offer what it would refuse, and say why.
 import type { RunRow } from "../../shared/thread";
-import { CHAT_MODELS } from "../../shared/chatModels";
+import { ACP_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
+import { CHAT_MODELS, SAME_MODEL_ALIASES } from "../../shared/chatModels";
 import type { AccountView, ChatSwitchResult, ChatTarget, CodexAccountView } from "./api";
 import { AGENT_IDS, AGENT_PROFILES, chatRuntimeBlock, profileFor } from "./newSession";
 import { codexWindowLabel } from "./subscriptionsView";
@@ -42,17 +43,19 @@ export function modelMenuBlocked(t: ChatTarget): string | null {
   return p.proxy ? `The model of ${p.label} is set in settings` : null;
 }
 
-/** The models devd accepts for the harness (shared/chatModels.ts). A reported variant (an effort or dated id) marks
- *  nothing: picking its base model is a real switch for devd. */
+/** The models devd accepts for the harness (shared/chatModels.ts). A reported id in SAME_MODEL_ALIASES marks the
+ *  model it runs; a reported variant (an effort or dated id) marks nothing: picking its base model is a real switch
+ *  for devd. */
 export function modelOptions(t: ChatTarget): SwitchOption[] {
-  const models: readonly string[] = t.harness === "claude" || t.harness === "codex" ? CHAT_MODELS[t.harness] : [];
-  return models.map((m) => option(m, m, m === t.model));
+  const models: readonly string[] = Object.hasOwn(CHAT_MODELS, t.harness) ? CHAT_MODELS[t.harness as keyof typeof CHAT_MODELS] : [];
+  const current = t.model !== null && Object.hasOwn(SAME_MODEL_ALIASES, t.model) ? SAME_MODEL_ALIASES[t.model] : t.model;
+  return models.map((m) => option(m, m, m === current));
 }
 
-/** devd: 400 no-account-pool. */
+/** devd: 400 no-account-pool. Proxy profiles and ACP agents (their own CLI login) have no account pool. */
 export function accountMenuBlocked(t: ChatTarget): string | null {
   const p = profileFor(t.agent);
-  return p.proxy ? `${p.label} runs on no account pool` : null;
+  return p.proxy || (p.runtime !== "claude" && p.runtime !== "codex") ? `${p.label} runs on no account pool` : null;
 }
 
 const pctText = (pct: number | null) => (pct === null ? "—" : `${Math.round(pct)}%`);
@@ -99,9 +102,16 @@ export function codexAccountOptions(accounts: CodexAccountView[], now: number, t
   });
 }
 
-/** Every profile, the ones chat cannot run disabled with devd's reason (chatRuntimeBlock). */
+/** Every profile, the ones chat cannot run disabled with devd's reason (chatRuntimeBlock, or an ACP agent on a bridge older
+ *  than ACP_MIN_BRIDGE_VERSION). */
 export function harnessOptions(t: ChatTarget): SwitchOption[] {
-  return AGENT_IDS.map((id) => option(id, AGENT_PROFILES[id].label, id === t.agent, { disabled: chatRuntimeBlock(id, "vps") }));
+  const oldBridge = t.bridgeVersion !== null && !versionAtLeast(t.bridgeVersion, ACP_MIN_BRIDGE_VERSION);
+  return AGENT_IDS.map((id) => {
+    const p = AGENT_PROFILES[id];
+    // devd: 409 bridge-too-old, same text.
+    const disabled = chatRuntimeBlock(id, "vps") ?? (oldBridge && p.acp !== undefined ? `recreate the container to use ${p.label}` : null);
+    return option(id, p.label, id === t.agent, { disabled });
+  });
 }
 
 /** What the switchers show when devd refused or the bridge did not confirm. The code stays visible when there is no

@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { AGENTS, AGENT_IDS, AGENT_RUNTIMES, isAgentName, RUNTIME_BIN, specFor, usesProxy } from "../src/agents";
+import { AGENTS, AGENT_IDS, AGENT_RUNTIMES, chatHarness, instaboxAgentBlock, isAgentName, RUNTIME_BIN, specFor, tmuxRuntimeBlock, usesProxy } from "../src/agents";
 import { isAgentName as fromDb, type AgentName } from "../src/db";
 
-test("six profiles, each with a label and a known runtime", () => {
-  expect(AGENT_IDS).toEqual(["claude", "claude-gemini", "claude-openrouter", "codex", "grok", "antigravity"]);
+test("seven profiles, each with a label and a known runtime", () => {
+  expect(AGENT_IDS).toEqual(["claude", "claude-gemini", "claude-openrouter", "codex", "grok", "antigravity", "vibe"]);
   for (const id of AGENT_IDS) {
     expect(AGENTS[id].label.length).toBeGreaterThan(0);
     expect(AGENTS[id].short.length).toBeGreaterThan(0);
@@ -79,4 +79,21 @@ test("specFor: unknown value, null and undefined fall back to claude", () => {
 
 test("usesProxy does not treat an unknown value as proxy and does not crash", () => {
   expect(usesProxy("nesmysl" as never)).toBe(false);
+});
+
+test("chatHarness: claude/codex runtimes (proxy profiles included), else the profile's ACP agent", () => {
+  expect(chatHarness("claude")).toBe("claude");
+  expect(chatHarness("claude-gemini")).toBe("claude");
+  expect(chatHarness("codex")).toBe("codex");
+  expect(chatHarness("grok")).toBe("grok");
+  expect(chatHarness("antigravity")).toBe("antigravity");
+  expect(chatHarness("vibe")).toBe("vibe");
+});
+
+// Mistral Vibe has no tmux launcher: it is offered in chat sessions only, and InstaBox sessions are tmux sessions.
+test("tmuxRuntimeBlock: only chat-only profiles (vibe) are refused, also on InstaBox", () => {
+  for (const id of AGENT_IDS) expect(tmuxRuntimeBlock(id)).toBe(id === "vibe" ? "Mistral Vibe runs only in chat sessions" : null);
+  expect(instaboxAgentBlock("vibe")).toBe("Mistral Vibe runs only in chat sessions");
+  expect(AGENTS.vibe.anthropicAccount).toBe(false);
+  expect(usesProxy("vibe")).toBe(false);
 });

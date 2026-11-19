@@ -234,6 +234,15 @@ test("insertSession stores the chosen agent", () => {
   expect(getSession(db, "dev-a-c")!.agent).toBe("codex");
 });
 
+test("repo_prefs: a chat-only profile is never remembered (ruling S4-P6): the earlier choice stays", () => {
+  const db = openDb(":memory:");
+  setRepoAgent(db, "acme", "shop", "app", "vibe", 50);
+  expect(getRepoAgent(db, "acme", "shop", "app")).toBeNull();
+  setRepoAgent(db, "acme", "shop", "app", "codex", 100);
+  setRepoAgent(db, "acme", "shop", "app", "vibe", 200);
+  expect(getRepoAgent(db, "acme", "shop", "app")).toBe("codex");
+});
+
 test("repo_prefs: write, overwrite, read, list; unknown value → null", () => {
   const db = openDb(":memory:");
   expect(getRepoAgent(db, "acme", "shop", "app")).toBeNull();

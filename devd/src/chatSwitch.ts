@@ -14,21 +14,22 @@
 import type { Database } from "bun:sqlite";
 import type { BridgeCommand, HandoffDelivery, SwitchTarget } from "../../image/agent-bridge/src/protocol";
 import { isProxyProfile, proxyProfileEnv, type ProxyProfile } from "../../image/agent-bridge/src/proxyProfile";
-import { CHAT_MODELS as SHARED_CHAT_MODELS } from "../../shared/chatModels";
+import { ACP_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
+import { MODEL_ALIASES, CHAT_MODELS as SHARED_CHAT_MODELS } from "../../shared/chatModels";
 import type { Capabilities, LoggedEvent } from "../../shared/thread";
 import { currentAccount, lastSwitchAt } from "./accountLease";
 import { chooseAccount, isExhausted } from "./accountPolicy";
 import { toCandidates } from "./accounts";
-import { AGENTS, agentNameFor, chatRuntimeBlock, isAgentName, specFor, type AgentName } from "./agents";
+import { AGENTS, agentNameFor, chatHarness, chatRuntimeBlock, isAgentName, specFor, type AgentName, type ChatHarness } from "./agents";
 import { codexAccountUsable, codexLimitLive, type CodexAccountView } from "./codexAccounts";
 import type { AccountPoolSettings } from "./config";
-import { AgentDisconnected, CommandTimeout, type BridgeHandshake } from "./bridgeLink";
+import { AgentDisconnected, CommandFailed, CommandTimeout, type BridgeHandshake } from "./bridgeLink";
 import { getSession, insertLease, leaseHistory, logEvent, releaseLeasesForSession, setRepoAgent, setSessionAgent, type SessionRow } from "./db";
 import type { Handoff } from "./handoff";
 import { historyOmittedNotice, planAfterResumeFailure, planTransition, resumeFailedNotice, type Target, type Transition } from "./transition";
 import type { ThreadStore } from "./threadStore";
 
-type Harness = SwitchTarget["harness"];
+type Harness = ChatHarness;
 
 /** The models a chat session can be switched to (the model route refuses anything else with 400); shared with the
  *  dashboard's model menu. */
@@ -39,17 +40,18 @@ const BASE_WINDOWS: Readonly<Record<string, number>> = {
   "gpt-6-astra": 272_000, "gpt-6.1-sol": 272_000, "gpt-6-sol": 272_000, "gpt-6-luna": 272_000,
   "gpt-5.6-sol": 272_000, "gpt-5.6-terra": 272_000, "gpt-5.6-luna": 272_000, "gpt-5.5": 272_000,
   "gpt-5.4-mini": 272_000, "gpt-5.3-codex": 272_000,
+  // ACP agents, as they reported them live (step 4 Task 3): Grok's initialize `totalContextTokens`, Vibe's and
+  // Antigravity's `usage_update` size (Vibe reported 202,144 for Medium 3.5).
+  "grok-4.6": 500_000, "grok-4.5": 500_000,
+  "mistral-large-4-0": 400_000, "mistral-medium-3.5": 200_000,
+  "gemini-4-neon": 1_048_576,
 };
-const efforts = (base: string): Record<string, string> => Object.fromEntries(["low", "medium", "high"].map((l) => [`${base}-${l}`, base]));
-/** Every model id a harness reports (thread.native, run.started) → its base model. The same ids pricing.ts prices:
- *  effort variants (`claude-opus-5-5-high`), dated snapshots and official aliases. An id outside this table has no
- *  known window and is refused (409 `unknown-model-window`), never given a default. */
+/** Every model id a harness reports (thread.native, run.started) → its base model: the base models themselves and
+ *  the shared MODEL_ALIASES (the same ids pricing.ts prices). An id outside this table has no known window and is
+ *  refused (409 `unknown-model-window`), never given a default. */
 export const MODEL_WINDOW_ALIASES: Readonly<Record<string, string>> = {
   ...Object.fromEntries(Object.keys(BASE_WINDOWS).map((m) => [m, m])),
-  ...efforts("claude-opus-5-5"), ...efforts("claude-sonnet-5-5"),
-  "gpt-5.6": "gpt-5.6-sol",
-  "gpt-5.5-2026-04-23": "gpt-5.5",
-  "gpt-5.4-mini-2026-03-17": "gpt-5.4-mini",
+  ...MODEL_ALIASES,
 };
 /** Tokens kept free for the target model's answer when budgeting a handoff. */
 export const RESERVE_TOKENS = 32_000;
@@ -75,7 +77,8 @@ export interface SwitchResult { kind: Transition["kind"]; unchanged?: true; exha
 const UNCHANGED: SwitchResult = { kind: "set-model", unchanged: true };
 /** GET .../thread/target: the profile and the target devd plans the next switch from. `awaitingTarget`: the bridge
  *  holds no harness until it gets a target (devd keeps sending it; a switch is allowed despite queued messages). */
-export interface CurrentTarget extends Target { agent: AgentName; awaitingTarget: boolean }
+/** `bridgeVersion`: from the bridge's latest handshake; null before one, or for a 1.0.0 bridge (it sends none). */
+export interface CurrentTarget extends Target { agent: AgentName; awaitingTarget: boolean; bridgeVersion: string | null }
 
 export interface ChatSwitchDeps {
   db: Database;
@@ -166,7 +169,7 @@ export class ChatSwitch {
     const s = getSession(this.d.db, sessionId);
     if (!s) throw new Error(`unknown session ${sessionId}`);
     const { harness, account, model } = this.current(s, this.d.threads(sessionId));
-    return { agent: agentNameFor(s.agent), harness, account, model, awaitingTarget: this.awaiting.has(sessionId) };
+    return { agent: agentNameFor(s.agent), harness, account, model, awaitingTarget: this.awaiting.has(sessionId), bridgeVersion: this.bridgeVersions.get(sessionId) ?? null };
   }
 
   async switch(sessionId: string, req: SwitchRequest): Promise<SwitchResult> {
@@ -188,6 +191,11 @@ export class ChatSwitch {
     // A 1.0.0 bridge (no version in its handshake) does not know setModel/switchTarget and would drop the link.
     if (this.bridgeVersions.get(s.id) === null) {
       throw new SwitchRefused(409, "bridge-too-old", "the agent bridge in this container predates switching; recreate the session's container first");
+    }
+    // An older bridge's parseTarget throws on an ACP harness and drops the whole link: refuse before sending.
+    const version = this.bridgeVersions.get(s.id);
+    if (req.kind === "harness" && specFor(profile).acp !== undefined && typeof version === "string" && !versionAtLeast(version, ACP_MIN_BRIDGE_VERSION)) {
+      throw new SwitchRefused(409, "bridge-too-old", `recreate the container to use ${specFor(profile).label}`);
     }
     // A run or a queued message would be overtaken by the switch: the user stops first. Not while the bridge awaits
     // its target: its queued messages wait for exactly that, and picking a target is how the user gets them going.
@@ -219,6 +227,13 @@ export class ChatSwitch {
       // A bridge awaiting its target has no harness to set a model on: it gets the target.
       if (plan.kind === "set-model" && !awaiting) await this.d.links.send(s.id, { kind: "setModel", model: plan.model }, SWITCH_TIMEOUT_MS);
       else await this.sendTarget(s.id, next);
+    } catch (e) {
+      // The bridge answered: it could not open the new agent (e.g. its CLI is not signed in) and is back where it was.
+      if (e instanceof CommandFailed && req.kind === "harness") {
+        const after = awaiting ? "The agent still waits for its target." : `The session stays on ${specFor(from).label}.`;
+        store.addNotice(`Switching to ${specFor(profile).label} failed: ${e.message}. ${after}`, this.d.now());
+      }
+      throw e;
     } finally {
       this.pending.delete(s.id);
     }
@@ -269,19 +284,20 @@ export class ChatSwitch {
     const l = this.last.get(s.id);
     if (l) return { harness: l.target.harness, account: l.target.account, model: l.target.model, nativeThreadId: l.resume };
     const profile = agentNameFor(s.agent);
+    const harness = harnessOf(profile);
     const n = store.snapshot({ limit: 0 }).native;
     // A thread of another harness is the one before a switch whose new thread was not announced yet.
-    if (n && n.harness === specFor(profile).runtime) return { harness: n.harness, account: n.account, model: n.model, nativeThreadId: n.nativeThreadId };
+    if (n && n.harness === harness) return { harness: n.harness, account: n.account, model: n.model, nativeThreadId: n.nativeThreadId };
     // Claude announces its thread with the first turn; until then the account is the one the launch leased.
     const account = specFor(profile).anthropicAccount ? currentAccount(leaseHistory(this.d.db, "devbox", s.id)) : null;
-    return { harness: specFor(profile).runtime, account, model: null, nativeThreadId: null };
+    return { harness, account, model: null, nativeThreadId: null };
   }
 
   /** The requested target with its env and window. Accounts are checked as accountSwitch.ts does; the profile is
    *  attached only once the target is known to differ (attachProfile). */
   private async resolve(s: SessionRow, profile: AgentName, current: Target, req: SwitchRequest): Promise<Resolved> {
     if (isProxyProfile(profile)) return this.proxyTarget(profile);
-    const harness = specFor(profile).runtime as Harness;
+    const harness = harnessOf(profile);
     // Leaving a proxy profile is not the same Claude: its model and (absent) account do not carry over.
     const keeps = harness === current.harness && !isProxyProfile(agentNameFor(s.agent));
     let model: string | null;
@@ -290,6 +306,8 @@ export class ChatSwitch {
       model = req.model;
     } else model = keeps ? current.model : null;
     const window = windowFor(harness, model);
+    // An ACP agent runs on its own CLI login in its volume: no account to choose.
+    if (harness !== "claude" && harness !== "codex") return { profile, target: { harness, account: null, model, env: {} }, window, exhausted: false };
     let choice: { account: string | null; exhausted: boolean };
     if (req.kind === "account") choice = harness === "claude" ? this.claudeAccount(s, req.accountId) : this.codexAccount(req.accountId);
     else if (keeps) choice = { account: current.account, exhausted: false };
@@ -432,6 +450,14 @@ export class ChatSwitch {
         if (l && ev.origin === "user") l.handoff = null;
         return;
       case "run.failed": {
+        if (ev.error === "open-failed") {
+          // The bridge could not open its persisted target at start (e.g. an ACP agent's login is gone) and awaits
+          // one: devd sends it again with backoff, and the failure's own text lands in the thread (retryLater); the
+          // user can switch away meanwhile. The thread itself is fine: no re-plan.
+          this.awaiting.add(sessionId);
+          this.resend(sessionId);
+          return;
+        }
         if (ev.error !== "resume-failed") return;
         // The bridge now awaits a fresh target (also at its start, e.g. a thread from before the shared Codex home).
         this.awaiting.add(sessionId);
@@ -544,17 +570,17 @@ export class ChatSwitch {
     if (!s) throw new Error("unknown session");
     const profile = agentNameFor(s.agent);
     const n = store.snapshot({ limit: 0 }).native;
-    const harness = specFor(profile).runtime;
+    const harness = harnessOf(profile);
     const resume = n?.harness === harness ? n.nativeThreadId : null;
     if (isProxyProfile(profile)) {
       const r = await this.proxyTarget(profile);
       return { profile, target: r.target, window: r.window, resume, handoff: null, resumeFailed: false };
     }
     const model = n?.harness === harness ? n.model : null;
-    const account = harness === "claude" ? currentAccount(leaseHistory(this.d.db, "devbox", sessionId)) : n?.harness === harness ? n.account : null;
+    const account = harness === "claude" ? currentAccount(leaseHistory(this.d.db, "devbox", sessionId)) : harness === "codex" && n?.harness === harness ? n.account : null;
     if (harness === "codex" && account === null) throw new Error("the Codex account of this session is unknown");
     const env: Record<string, string> = harness === "claude" ? { CLAUDE_CONFIG_DIR: account === null ? CLAUDE_HOME : `${CLAUDE_ACCOUNTS_ROOT}/${account}` } : {};
-    return { profile, target: { harness: harness as Harness, account, model, env }, window: windowFor(harness as Harness, model), resume, handoff: null, resumeFailed: false };
+    return { profile, target: { harness, account, model, env }, window: windowFor(harness, model), resume, handoff: null, resumeFailed: false };
   }
 }
 
@@ -587,6 +613,13 @@ function handedOver(plan: Transition): string | null {
   if (h === null) return null;
   if (h.preamble === null) return h.omitted > 0 ? "no history handed over" : null;
   return `context handed over (${h.includedItemSeqs.length} items${h.omitted > 0 ? `, ${h.omitted} omitted` : ""})`;
+}
+
+/** The chat harness of a chat session's profile; chatRuntimeBlock keeps profiles without one out of chat sessions. */
+function harnessOf(profile: AgentName): Harness {
+  const h = chatHarness(profile);
+  if (h === null) throw new Error(`${profile} has no chat harness`);
+  return h;
 }
 
 /** The window of `model` (any id a harness reports, see MODEL_WINDOW_ALIASES); a null model is the harness
