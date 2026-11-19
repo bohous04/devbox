@@ -1,6 +1,9 @@
+import { SQLiteError } from "bun:sqlite";
 import { join } from "node:path";
 import type { Socket } from "bun";
 import type { BridgeCommand, ClientFrame, ServerFrame } from "../../image/agent-bridge/src/protocol";
+import { BRIDGE_VERSION } from "../../image/agent-bridge/src/version";
+import { versionAtLeast } from "../../shared/bridgeVersion";
 import type { LinkStatus, LoggedEvent } from "../../shared/thread";
 import type { ThreadStore } from "./threadStore";
 
@@ -16,6 +19,11 @@ export class CommandTimeout extends AgentDisconnected {}
 export class CommandFailed extends Error {}
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+/** How often the same frame may fail at the same point of the thread before devd gives up on it (T9): an event is
+ *  skipped with a notice, a frame without a seq is said once in the thread. */
+export const POISON_LIMIT = 3;
+/** SQLite errors of the store itself (full disk, I/O, locks): every event would fail, so none is skipped for them. */
+const STORE_ERROR = /^SQLITE_(FULL|IOERR|BUSY|LOCKED|READONLY|CANTOPEN|NOMEM|CORRUPT|NOTADB|PROTOCOL|PERM|AUTH|INTERRUPT|ABORT)/;
 
 interface Pending { resolve: () => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }
 
@@ -33,9 +41,19 @@ interface Link {
   outageLogged: boolean;
   /** Since when the bridge's log is behind the store (its `ready.lastSeq` was below `store.lastSeq()`). */
   behindSince: number | null;
+  /** The frame failure this link keeps hitting: the store's seq when it failed, and how often it failed there. */
+  failure: { atSeq: number; what: string; count: number } | null;
 }
 
 class MalformedFrame extends Error {}
+
+/** The integer `e.seq` of an event frame, also of one devd cannot use; null when the line has none. */
+function eventSeq(line: string): number | null {
+  try {
+    const f = JSON.parse(line) as { t?: unknown; e?: { seq?: unknown } };
+    return f.t === "event" && Number.isInteger(f.e?.seq) ? (f.e!.seq as number) : null;
+  } catch { return null; }
+}
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -124,7 +142,7 @@ export class BridgeLinks {
     }
     const link: Link = {
       status: "connecting", socket: null, buffer: "", decoder: new TextDecoder(), outbound: [],
-      pending: new Map(), retry: null, dropped: false, outageLogged: false, behindSince: null,
+      pending: new Map(), retry: null, dropped: false, outageLogged: false, behindSince: null, failure: null,
     };
     this.links.set(sessionId, link);
     this.notifyStatus(sessionId, "connecting");
@@ -294,16 +312,17 @@ export class BridgeLinks {
     this.sendFirstTurn(sessionId);
   }
 
-  private onClose(sessionId: string, link: Link, why: string) {
+  /** `quiet`: a repeat of a failure already logged; neither this outage nor its reconnect is logged again. */
+  private onClose(sessionId: string, link: Link, why: string, quiet = false) {
     if (link.dropped) return;
     link.socket = null;
     this.failPending(link, why);
-    this.down(sessionId, link, why);
+    this.down(sessionId, link, why, quiet);
   }
 
-  private down(sessionId: string, link: Link, why: string) {
+  private down(sessionId: string, link: Link, why: string, quiet = false) {
     if (link.dropped) return;
-    if (!link.outageLogged) {
+    if (!link.outageLogged && !quiet) {
       this.log(`bridge link ${sessionId}: disconnected (${why}); retrying every ${this.retryMs} ms`);
       link.outageLogged = true;
     }
@@ -324,19 +343,58 @@ export class BridgeLinks {
         // A malformed frame or a store write error: drop this connection (onClose logs why); the reconnect's
         // hello carries the stored seq, so nothing is lost or applied twice.
         const what = err instanceof MalformedFrame ? `malformed frame: ${err.message}` : `cannot apply frame: ${err instanceof Error ? err.message : String(err)}`;
+        const repeats = this.failed(sessionId, link, err, what, eventSeq(line));
+        if (repeats === null) continue; // skipped
         const socket = link.socket;
         // Detach first: end() may call the close callback synchronously, and it must not run onClose twice.
-        this.onClose(sessionId, link, what);
+        this.onClose(sessionId, link, what, repeats > 1);
         socket?.end();
         return;
       }
     }
   }
 
+  /** Counts a frame failure at the store's current seq (T9: the bridge replays the same frame after every reconnect).
+   *  At POISON_LIMIT identical failures an event the store cannot take is skipped with a notice (returns null: carry
+   *  on with the next frame); a frame without a seq is said once in the thread; a store that cannot write at all is
+   *  logged once and never skipped past. Otherwise returns how often it failed. */
+  private failed(sessionId: string, link: Link, err: unknown, what: string, seq: number | null): number | null {
+    let atSeq: number;
+    try { atSeq = this.d.store(sessionId).lastSeq(); }
+    catch { return 1; } // no store to count against: plain drop and reconnect, logged by down()
+    const f = link.failure?.atSeq === atSeq && link.failure.what === what ? link.failure : { atSeq, what, count: 0 };
+    link.failure = f;
+    f.count++;
+    if (f.count < POISON_LIMIT) return f.count;
+    if (err instanceof SQLiteError && STORE_ERROR.test(err.code ?? "")) {
+      if (f.count === POISON_LIMIT) this.log(`bridge link ${sessionId}: the thread store cannot take events (${what}); retrying every ${this.retryMs} ms`);
+      return f.count;
+    }
+    if (seq !== null && seq > atSeq) {
+      try {
+        this.d.store(sessionId).skipEvent(seq, `devd skipped event ${seq} from the agent bridge after ${f.count} failed attempts: ${what}`, Date.now());
+      } catch (e) {
+        if (f.count === POISON_LIMIT) this.log(`bridge link ${sessionId}: cannot skip event ${seq}: ${e instanceof Error ? e.message : String(e)}`);
+        return f.count;
+      }
+      this.log(`bridge link ${sessionId}: skipped event ${seq} after ${f.count} failed attempts: ${what}`);
+      link.failure = null;
+      return null;
+    }
+    if (f.count === POISON_LIMIT) {
+      const text = `the agent bridge keeps sending a frame devd cannot read (${what}); the link reconnects every ${this.retryMs} ms`;
+      this.log(`bridge link ${sessionId}: ${text}`);
+      try { this.d.store(sessionId).addNotice(text, Date.now()); }
+      catch (e) { this.log(`bridge link ${sessionId}: cannot add a notice: ${e instanceof Error ? e.message : String(e)}`); }
+    }
+    return f.count;
+  }
+
   private handle(sessionId: string, link: Link, f: ServerFrame) {
     switch (f.t) {
       case "event":
         if (!this.d.store(sessionId).apply(f.e)) return;
+        if (link.failure !== null && f.e.seq > link.failure.atSeq) link.failure = null; // past the failing point
         try { this.d.onEvent(sessionId, f.e); }
         catch (err) { this.log(`bridge link ${sessionId}: onEvent failed for seq ${f.e.seq}: ${err instanceof Error ? err.message : String(err)}`); }
         return;
@@ -354,10 +412,19 @@ export class BridgeLinks {
       }
       case "ready":
         this.checkBehind(sessionId, link, f.lastSeq);
+        this.checkVersion(sessionId, f.version ?? null);
         try { this.d.onHandshake?.(sessionId, { version: f.version ?? null, awaitingTarget: f.awaitingTarget === true }); }
         catch (err) { this.log(`bridge link ${sessionId}: onHandshake failed: ${err instanceof Error ? err.message : String(err)}`); }
         return;
     }
+  }
+
+  /** M12: a bridge older than the one this devd ships keeps running until its container is recreated. Said once per
+   *  session and version, in the thread and the log. */
+  private checkVersion(sessionId: string, version: string | null) {
+    if (version !== null && versionAtLeast(version, BRIDGE_VERSION)) return;
+    const text = `this session's agent bridge is ${version ?? "older than 1.1.0"}, older than the current ${BRIDGE_VERSION}: it lacks the newer fixes until the session's container is recreated`;
+    if (this.d.store(sessionId).addNoticeOnce(`older-bridge:${version ?? "unknown"}`, text, Date.now())) this.log(`bridge link ${sessionId}: ${text}`);
   }
 
   /** A host crash can lose the unsynced tail of the bridge's log after devd stored it. Detection only: the link

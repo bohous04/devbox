@@ -289,12 +289,30 @@ export class ThreadStore {
    *  seq with its own item id `notice:<n>` and is announced through `onNotice` (the SSE stream). A replay from that
    *  seq still includes it (see snapshot), for a client whose stream was down when it was added. */
   addNotice(text: string, ts: number): void {
-    const seq = this.lastSeq();
+    this.notice(this.lastSeq(), text, ts, () => {});
+  }
+
+  /** `addNotice` once per `key` for the store's lifetime (persisted); false when it was said already. */
+  addNoticeOnce(key: string, text: string, ts: number): boolean {
+    if (this.db.query("SELECT 1 FROM meta WHERE key=?").get(`once:${key}`)) return false;
+    this.notice(this.lastSeq(), text, ts, () => this.setMeta(`once:${key}`, 1));
+    return true;
+  }
+
+  /** Gives up on the bridge's event `seq` (above lastSeq), which devd cannot apply: it counts as applied, and the
+   *  notice `text` takes its place at that seq. */
+  skipEvent(seq: number, text: string, ts: number): void {
+    if (seq <= this.lastSeq()) throw new Error(`skipEvent(${seq}) is not above lastSeq ${this.lastSeq()}`);
+    this.notice(seq, text, ts, () => this.setMeta("last_seq", seq));
+  }
+
+  private notice(seq: number, text: string, ts: number, also: () => void) {
     const n = this.meta("notice_count") + 1;
     const item: ThreadItem = { seq, runId: null, itemId: `notice:${n}`, kind: "notice", text, status: "done", ts };
     this.db.transaction(() => {
       this.setMeta("notice_count", n);
       this.insertItem(seq, ts, item);
+      also();
     })();
     this.onNotice(item);
   }

@@ -15,9 +15,10 @@ import type { BridgeCommand, HandoffDelivery, SwitchTarget, TurnOrigin } from ".
 import { INHERITED_STRIP, isProxyProfile, proxyProfileEnv } from "./proxyProfile";
 import { startServer } from "./server";
 import { loadState, saveState, StateCorruptError, type BridgeState, type PersistedTarget } from "./state";
+import { BRIDGE_VERSION } from "./version";
 import { DeclaredWaits } from "./waits";
 
-export const BRIDGE_VERSION = "1.5.0";
+export { BRIDGE_VERSION };
 export const DEFAULT_BRIDGE_DIR = "/run/devd/bridge";
 export const CLAUDE_ACCOUNTS_ROOT = "/home/dev/.claude-accounts";
 export const CODEX_ACCOUNTS_ROOT = "/home/dev/.codex-accounts";
