@@ -365,6 +365,15 @@ describe("openClaudeSession", () => {
     expect(events.at(-1)).toEqual({ type: "run.failed", runId: "run-1", error: "too many turns" });
   });
 
+  test("an error reported as a success result fails the run with its result text", async () => {
+    const sdk = fakeSdk();
+    const { session, events } = open(sdk);
+    await session.startTurn("run-1", "x", "user");
+    sdk.push(init(), result(usage(1, 1), 0, { is_error: true, result: "You've hit your weekly limit" }));
+    await flush();
+    expect(events.at(-1)).toEqual({ type: "run.failed", runId: "run-1", error: "You've hit your weekly limit" });
+  });
+
   test("the SDK stream ending fails the active and queued runs and refuses new turns", async () => {
     const sdk = fakeSdk();
     const { session, events } = open(sdk);

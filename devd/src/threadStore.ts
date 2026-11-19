@@ -96,7 +96,9 @@ export class ThreadStore {
           ON CONFLICT(id) DO UPDATE SET harness=excluded.harness, native_thread_id=excluded.native_thread_id,
           account=excluded.account,
           -- A resumed Claude thread is announced before the CLI names its model: null keeps the harness's known one.
-          model=COALESCE(excluded.model, CASE WHEN native.harness=excluded.harness THEN native.model END)`).run(ev.harness, ev.nativeThreadId, ev.account, ev.model);
+          -- A proxy profile has no account and its own model, so a model is never carried to or from it.
+          model=COALESCE(excluded.model, CASE WHEN native.harness=excluded.harness AND native.account IS NOT NULL
+            AND excluded.account IS NOT NULL THEN native.model END)`).run(ev.harness, ev.nativeThreadId, ev.account, ev.model);
         // caps describe the adapter that announced the thread now: an announcement without them clears old ones.
         db.query(`INSERT INTO provider_threads (harness, account, native_thread_id, last_used_at, caps) VALUES (?, ?, ?, ?, ?)
           ON CONFLICT(harness, native_thread_id) DO UPDATE SET account=excluded.account, last_used_at=excluded.last_used_at,

@@ -262,6 +262,16 @@ test("a thread.native without a model keeps the harness's known model; another h
   expect(s.snapshot().native!.model).toBeNull();
 });
 
+test("a model is not carried from a proxy profile (no account) to a subscription account or back", () => {
+  const s = store(); n = 0;
+  s.apply(ev({ type: "thread.native", harness: "claude", nativeThreadId: "t1", account: null, model: "gpt-6.1-sol" }));
+  s.apply(ev({ type: "thread.native", harness: "claude", nativeThreadId: "t1", account: "a", model: null }));
+  expect(s.snapshot().native!.model).toBeNull();
+  s.apply(ev({ type: "thread.native", harness: "claude", nativeThreadId: "t1", account: "a", model: "claude-opus-5-5" }));
+  s.apply(ev({ type: "thread.native", harness: "claude", nativeThreadId: "t1", account: null, model: null }));
+  expect(s.snapshot().native!.model).toBeNull();
+});
+
 test("resume-failed for a run id never announced adds no item: devd's own notice says it", () => {
   const s = store(); n = 0;
   expect(s.apply(ev({ type: "run.failed", runId: "never-started", error: "resume-failed" }))).toBe(true);
