@@ -85,6 +85,10 @@ export class PrWatch {
   /** Sessions whose poll failed during the first-deploy seed tick: their next successful poll is a silent seed too
    *  (in memory; a restart before that poll loses it). */
   private seedLater = new Set<string>();
+  /** The remote head at which pending checks were released as "unknown": while the branch stays there, the provider's
+   *  "pending" (a required check that never reports) does not hold again. In memory: after a restart it may hold
+   *  once more, up to the deadline. */
+  private unknownAt = new Map<string, string | null>();
   private log: (msg: string) => void;
 
   constructor(private d: {
@@ -132,7 +136,7 @@ export class PrWatch {
       if (err && now < err.nextAt) continue;
       const seeding = seedTick || this.seedLater.has(s.id);
       if (row?.state === "open") {
-        const settled = row.checks !== "pending" && row.checks !== "unknown";
+        const settled = row.checks !== "pending";
         if (settled && now - (this.lastPoll.get(s.id) ?? 0) < PR_SETTLED_POLL_MS) continue;
         await this.serial(s, undefined, seeding);
       } else {
@@ -185,6 +189,9 @@ export class PrWatch {
     this.lastHead.set(s.id, p.head);
     this.lastPoll.set(s.id, this.now());
     const cur = this.d.session(s.id) ?? s;
+    const row0 = getSessionPr(this.d.db, s.id);
+    if (p.pr && row0?.checks === "unknown" && this.unknownAt.has(s.id) && this.unknownAt.get(s.id) === p.head
+        && p.pr.number === row0.number && p.pr.state === "open" && p.pr.checks === "pending") return; // still released
     if (p.pr) { this.apply(cur, p.pr, seeding); return; }
     const row = getSessionPr(this.d.db, s.id);
     if (row?.state === "open" && row.checks === "pending") this.release(s.id, row, "none", "its PR is no longer found");
@@ -204,9 +211,16 @@ export class PrWatch {
     }
   }
 
+  /** The hub's hold of the session's "finished" reached PR_HOLD_MAX_MS: the pending checks stop holding anything. */
+  holdExpired(sessionId: string): void {
+    const row = getSessionPr(this.d.db, sessionId);
+    if (row?.state === "open" && row.checks === "pending") this.release(sessionId, row, "unknown", "its CI hold reached the deadline");
+  }
+
   /** Pending checks that devd can no longer follow stop holding the session. */
   private release(id: string, row: SessionPrRow, checks: "none" | "unknown", why: string): void {
     const now = this.now();
+    if (checks === "unknown") this.unknownAt.set(id, this.lastHead.get(id) ?? null);
     putSessionPr(this.d.db, { ...row, checks, since: now, updated_at: now });
     this.log(`pr watch: releasing the CI hold of ${id}: ${why}`);
     this.d.inbox.changedSafe(id);

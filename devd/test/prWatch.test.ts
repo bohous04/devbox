@@ -9,6 +9,7 @@ import { getSession, getSessionAttention, getSessionPr, insertSession, listNotif
 import { EventBus } from "../src/eventBus";
 import { sh } from "../src/git";
 import { checkPrs, PR_SETTLED_POLL_MS, PrWatch, type PrPoll, type PrState } from "../src/prWatch";
+import { findPr } from "../src/unpushed";
 import { hubShelfDeps } from "../src/sessionAttention";
 import { Inbox } from "../src/sessionInbox";
 import { ThreadStore } from "../src/threadStore";
@@ -222,7 +223,7 @@ const completed = (runId: string): BridgeEvent => ({ type: "run.completed", runI
 /** Hub, ChatHub, inbox and PR watch over one clock, wired like index.ts. The provider answers come from `prs`
  *  (per session), remote heads from `heads` (default "h1"), errors from `errors`. `seed: true` keeps the first-deploy
  *  seed pending (a fresh DB has it); otherwise the seed counts as done. */
-function setup(opts: { dbPath?: string; seed?: boolean; dir?: string; now?: number } = {}) {
+function setup(opts: { dbPath?: string; seed?: boolean; dir?: string; now?: number; prCheck?: (id: string) => Promise<unknown>; prCheckTimeoutMs?: number } = {}) {
   let now = opts.now ?? 1_000_000;
   const db = openDb(opts.dbPath ?? ":memory:");
   if (!opts.seed) db.run("DELETE FROM pr_watch_seed");
@@ -242,10 +243,12 @@ function setup(opts: { dbPath?: string; seed?: boolean; dir?: string; now?: numb
     db, notify: (title, message, extra) => notified.push({ title, message, extra }), now: () => now, quietMs: QUIET,
     ...hubShelfDeps({ activity: (id, k) => inbox.activity(id, k), snoozed: (id) => inbox.snoozed(id) }, (m) => logs.push(m)),
     prChecks: (id) => (getSession(db, id)?.runtime === "chat" ? watch.hold(id)?.checks ?? null : null),
+    onPrHoldExpired: (id) => watch.holdExpired(id),
   });
   const chatHub = new ChatHub({
     hub, session: (id) => getSession(db, id), now: () => now, log: (m) => logs.push(m),
-    prCheck: (id) => watch.checkNow(id), prRow: (id) => getSessionPr(db, id),
+    prCheck: opts.prCheck ?? ((id) => watch.checkNow(id)), prRow: (id) => getSessionPr(db, id),
+    ...(opts.prCheckTimeoutMs !== undefined ? { prCheckTimeoutMs: opts.prCheckTimeoutMs } : {}),
   });
   inbox = new Inbox({
     db, sessions: () => listSessions(db), session: (id) => getSession(db, id), threads,
@@ -693,4 +696,58 @@ test("a held finished already released and notified is not re-armed after a sess
   t.sweep();
   t.sweep();
   expect(t.messages()).toEqual(["Claude finished working"]);
+});
+
+// ---------------------------------------------------------------- final review fixes
+
+test("a hung Gitea request fails the poll within the timeout", async () => {
+  const hung = (_url: string, init?: RequestInit) => new Promise<Response>((_res, rej) => {
+    init?.signal?.addEventListener("abort", () => rej(init.signal!.reason));
+  });
+  const remote = { provider: "gitea" as const, url: "http://gitea.test:3000/o/n.git", host: "gitea.test:3000", owner: "o", name: "n" };
+  const t0 = Date.now();
+  await expect(findPr({ dir: "/x", branch: "feat", remote, giteaToken: "tok", giteaUrl: "http://gitea.test:3000", fetcher: hung, timeoutMs: 50 }))
+    .rejects.toThrow("timed out");
+  expect(Date.now() - t0).toBeLessThan(2000);
+});
+
+test("a hung PR read at completion does not hold the run: after the timeout the last known state decides (S5-R18)", async () => {
+  const t = setup({ prCheck: () => new Promise(() => {}), prCheckTimeoutMs: 20 });
+  await t.feed(CHAT.id, [started("r1"), completed("r1")]);
+  t.sweep();
+  expect(t.notified).toEqual([]);
+  await Bun.sleep(40);
+  t.sweep();
+  expect(t.messages()).toEqual(["Claude finished working"]);
+  expect(t.logs.some((l) => l.includes("not read at completion"))).toBe(true);
+});
+
+test("a hold that reaches its deadline marks the checks unknown: inbox leaves pr-checks, later runs are not held, 10-min cadence", async () => {
+  const t = setup();
+  t.pr(CHAT.id, "open", "pending");
+  await t.feed(CHAT.id, [started("r1"), completed("r1")]);
+  t.sweep();
+  t.tick(PR_HOLD_MAX_MS);
+  t.sweep();
+  expect(t.messages()).toEqual(["Claude finished working"]);
+  expect(getSessionPr(t.db, CHAT.id)?.checks).toBe("unknown");
+  expect(t.attention(CHAT.id).reason).not.toBe("pr-checks");
+  await t.watch.tick(); // due: the last poll was at the completion, an hour ago
+  expect(getSessionPr(t.db, CHAT.id)?.checks).toBe("unknown");
+  t.polled.length = 0;
+  t.tick(2 * MIN);
+  await t.watch.tick();
+  expect(t.polled).not.toContain(CHAT.id);
+  t.tick(PR_SETTLED_POLL_MS);
+  await t.watch.tick();
+  expect(t.polled).toContain(CHAT.id);
+  expect(getSessionPr(t.db, CHAT.id)?.checks).toBe("unknown"); // the provider still says pending: no new hold
+  await t.feed(CHAT.id, [started("r2"), completed("r2")]);
+  t.sweep();
+  t.sweep();
+  expect(t.messages()).toEqual(["Claude finished working", "Claude finished working"]);
+  // A new push starts a new CI run: pending holds again.
+  t.heads.set(CHAT.id, "h2");
+  await t.feed(CHAT.id, [started("r3"), completed("r3")]);
+  expect(t.watch.pending(CHAT.id)).toBe(true);
 });

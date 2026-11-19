@@ -345,6 +345,8 @@ export interface FindPrOpts {
   giteaUrl: string | undefined;
   ghRun?: GhRunner;
   fetcher?: Fetcher;
+  /** Per Gitea request, body included; default NET_CLI (the same cap `gh` runs under). */
+  timeoutMs?: number;
 }
 
 /** The newest PR whose head is `branch`, with the verdict of its checks (only for an open PR: merged and closed say
@@ -367,10 +369,18 @@ export async function findPr(o: FindPrOpts): Promise<FoundPr | null> {
     if (!o.giteaToken) throw new Error(`Gitea ${o.remote.host}: missing token (unlock the vault / set the token in Settings)`);
     if (!o.giteaUrl) throw new Error(`Gitea ${o.remote.host}: no configured instance`);
     const api = `${o.giteaUrl.replace(/\/+$/, "")}/api/v1/repos/${o.remote.owner}/${o.remote.name}`;
+    const timeoutMs = o.timeoutMs ?? timeoutFor("NET_CLI");
     const get = async (url: string) => {
-      const res = await (o.fetcher ?? fetch)(url, { headers: { Authorization: `token ${o.giteaToken}` } });
-      if (!res.ok) throw new Error(`Gitea ${url.slice(api.length) || "/"} failed (HTTP ${res.status})`);
-      return res.json() as Promise<unknown>;
+      const what = url.slice(api.length) || "/";
+      const signal = AbortSignal.timeout(timeoutMs);
+      try {
+        const res = await (o.fetcher ?? fetch)(url, { headers: { Authorization: `token ${o.giteaToken}` }, signal });
+        if (!res.ok) throw new Error(`Gitea ${what} failed (HTTP ${res.status})`);
+        return (await res.json()) as unknown;
+      } catch (e) {
+        if (signal.aborted) throw new Error(`Gitea ${what} timed out after ${Math.round(timeoutMs / 1000)} s`);
+        throw e;
+      }
     };
     // Gitea has no head-branch filter on the list in every version; the 50 most recently updated cover a live branch.
     const pulls = (await get(`${api}/pulls?state=all&sort=recentupdate&limit=50`)) as { number: number; html_url: string; state: string; merged: boolean; head: { ref: string; sha: string } }[];

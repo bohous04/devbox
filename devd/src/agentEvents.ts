@@ -197,6 +197,8 @@ export interface HubDeps {
    *  "finished" (at most PR_HOLD_MAX_MS); a hold that ends in a failure finishes silently: the PR watch has already
    *  sent "CI failed". Not background work: the turn is over, so the stuck detection does not watch it. */
   prChecks?: (sessionId: string) => "pending" | "failure" | null;
+  /** A hold reached PR_HOLD_MAX_MS (PrWatch.holdExpired: the checks become "unknown", so they hold nothing again). */
+  onPrHoldExpired?: (sessionId: string) => void;
 }
 
 // Translates Claude hook events (POST /api/agent-event) into notifications. The state
@@ -680,6 +682,7 @@ export class AgentEventHub {
           ts: now, session_id: id, event: "sweep_done", decision: "armed", reason: "pr-hold-deadline",
           inflight: st.inflight, teammates: st.teammates, agent_session_id: null, detail: JSON.stringify({ heldSince: st.prHeldSince }),
         });
+        this.d.onPrHoldExpired?.(id);
       }
       const ciFailed = st.prHeldSince !== null && checks === "failure";
       st.pendingDoneAt = null;

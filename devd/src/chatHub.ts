@@ -7,6 +7,8 @@ import type { SessionRow } from "./db";
 
 /** The tool name the hub's QUESTION_TOOLS treats as "waiting for input"; questions and plans pose as it. */
 const QUESTION_TOOL = "AskUserQuestion";
+/** The longest a completion waits for the PR read before the hub gets it (S5-R18). */
+export const PR_CHECK_TIMEOUT_MS = 30_000;
 
 interface ChatState {
   /** The run whose `stop` was deferred by holding work; its `stop` is re-sent once, when holding drops to 0. */
@@ -58,6 +60,8 @@ export class ChatHub {
     prCheck?: (id: string) => Promise<unknown>;
     /** The session's PR row as the PR watch last wrote it (session_prs): a devd restart re-sends a completion it held. */
     prRow?: (id: string) => { checks: string; since: number } | null;
+    /** How long a completion waits for `prCheck` (S5-R18); default PR_CHECK_TIMEOUT_MS. */
+    prCheckTimeoutMs?: number;
     /** Reviews a completed run before its `stop` goes to the hub; a block becomes a follow-up run instead. */
     critic?: ChatCritic;
     /** The session's inbox state changed outside a bridge event (the critic's verdict let the run finish). */
@@ -187,11 +191,14 @@ export class ChatHub {
       }
     }
     if (this.d.prCheck) {
-      await this.d.prCheck(sessionId).catch((err: Error) => {
-        // S5-R18 (approved fallback): the PR is read once (≤ 30 s); when that fails, the last known PR state decides
-        // the hold, and the failure is logged.
+      const ms = this.d.prCheckTimeoutMs ?? PR_CHECK_TIMEOUT_MS;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_res, rej) => { timer = setTimeout(() => rej(new Error(`no answer within ${Math.round(ms / 1000)} s`)), ms); });
+      await Promise.race([this.d.prCheck(sessionId), timeout]).catch((err: Error) => {
+        // S5-R18 (approved fallback): the PR is read once (≤ 30 s); when that fails or hangs, the last known PR state
+        // decides the hold, and the failure is logged.
         this.log(`chat hub: PR of ${sessionId} not read at completion, using its last known state: ${err.message}`);
-      });
+      }).finally(() => clearTimeout(timer));
       if (stale()) return;
     }
     st.completing = null;

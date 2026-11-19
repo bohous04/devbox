@@ -265,6 +265,10 @@ const agentEvents = new AgentEventHub({
       return s && storedRuntime(s) === "chat" ? prWatch.hold(id)?.checks ?? null : null;
     } catch (e) { console.error(`PR state of ${id} unreadable, not holding its finished:`, e); return null; }
   },
+  onPrHoldExpired: (id) => {
+    try { prWatch.holdExpired(id); }
+    catch (e) { console.error(`PR hold of ${id} not marked expired:`, e); }
+  },
 });
 // State of running sessions surviving a devd restart (see agentEvents.ts loadPersisted):
 // working/waiting come back as unknown (that state cannot be restored reliably without
