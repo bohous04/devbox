@@ -232,3 +232,23 @@ test("deltas after a run's terminal event are ignored: the item stays done", () 
   expect(s.snapshot().items.map((i) => [i.itemId, i.text, i.status])).toEqual([["m1", "Hel", "done"]]);
   expect(s.lastSeq()).toBe(5);
 });
+
+test("a devd notice is announced to the listener, keeps the bridge's seq and is in every replay that could miss it", () => {
+  n = 0;
+  const heard: unknown[] = [];
+  const s = ThreadStore.open(mkdtempSync(join(tmpdir(), "threads-")), "dev-a-b-1", { onNotice: (i) => heard.push(i) });
+  s.addNotice("before any event", 500);
+  s.apply(ev({ type: "run.queued", runId: "r1", text: "hi", attachments: [] }));
+  s.addNotice("switched", 1500);
+  // devd never takes a seq: the bridge's next event is still seq 2.
+  expect(s.lastSeq()).toBe(1);
+  expect(s.apply(ev({ type: "run.started", runId: "r1", origin: "user", nativeThreadId: null, model: null }))).toBe(true);
+  expect(heard).toEqual([
+    { seq: 0, runId: null, itemId: "notice:1", kind: "notice", text: "before any event", status: "done", ts: 500 },
+    { seq: 1, runId: null, itemId: "notice:2", kind: "notice", text: "switched", status: "done", ts: 1500 },
+  ]);
+  expect(s.snapshot().items.map((i) => i.text)).toEqual(["before any event", "hi", "switched"]);
+  // A client at seq 1 that missed the live notice gets it on replay; one past it does not.
+  expect(s.snapshot({ afterSeq: 1 }).items.map((i) => i.text)).toEqual(["switched", ]);
+  expect(s.snapshot({ afterSeq: 2 }).items.map((i) => i.text)).toEqual([]);
+});

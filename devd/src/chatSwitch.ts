@@ -194,7 +194,7 @@ export class ChatSwitch {
       return { kind: plan.kind, ...exhausted };
     }
     const done = await this.replanAfterResumeFailure(s.id, store, next, failedResume);
-    store.addNotice(switchNotice(req, profile, r.target, done), this.d.now());
+    store.addNotice(switchNotice(req, profile, r.target, done, true), this.d.now());
     return { kind: done.kind, ...exhausted };
   }
 
@@ -378,7 +378,8 @@ export class ChatSwitch {
         // No switch of this devd is waiting for it (devd restarted, or a re-sent target failed): re-plan here.
         void this.recover(sessionId, async (store, last) => {
           if (last.resume === null) throw new Error("the bridge reported a failed resume, but no thread was being resumed");
-          await this.replanAfterResumeFailure(sessionId, store, last, last.resume);
+          const t = await this.replanAfterResumeFailure(sessionId, store, last, last.resume);
+          store.addNotice([`Started a fresh ${last.target.harness} thread after the failed resume`, handedOver(t)].filter((p) => p !== null).join(" · "), this.d.now());
         }, "resume failure");
         return;
       case "bridge.started":
@@ -425,15 +426,18 @@ export class ChatSwitch {
 /** The thread's record of a confirmed switch: what it switched to and how the conversation came along. Counts are
  *  handoff items (messages, commands, file changes, plans); a handoff with no room for history says so here and in
  *  the P5 notice that follows. */
-function switchNotice(req: SwitchRequest, profile: AgentName, t: SwitchTarget, plan: Transition): string {
+function switchNotice(req: SwitchRequest, profile: AgentName, t: SwitchTarget, plan: Transition, resumeFailed = false): string {
   const what = req.kind === "harness" ? `Switched to ${AGENTS[profile].label}`
     : req.kind === "account" ? `Switched account to ${t.account}` : `Switched model to ${t.model}`;
+  const resumed = resumeFailed ? "resume failed" : plan.kind === "restart-resume" || plan.kind === "resume-with-delta" ? "resumed" : null;
+  return [what, resumed, handedOver(plan)].filter((p) => p !== null).join(" · ");
+}
+
+function handedOver(plan: Transition): string | null {
   const h = handoffOf(plan);
-  const handed = h === null ? null : h.preamble === null
-    ? (h.omitted > 0 ? "no history handed over" : null)
-    : `context handed over (${h.includedItemSeqs.length} items${h.omitted > 0 ? `, ${h.omitted} omitted` : ""})`;
-  const resumed = plan.kind === "restart-resume" || plan.kind === "resume-with-delta" ? "resumed" : null;
-  return [what, resumed, handed].filter((p) => p !== null).join(" · ");
+  if (h === null) return null;
+  if (h.preamble === null) return h.omitted > 0 ? "no history handed over" : null;
+  return `context handed over (${h.includedItemSeqs.length} items${h.omitted > 0 ? `, ${h.omitted} omitted` : ""})`;
 }
 
 /** The window of `model` (any id a harness reports, see MODEL_WINDOW_ALIASES); a null model is the harness

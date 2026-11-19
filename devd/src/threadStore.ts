@@ -24,13 +24,14 @@ export interface ProviderThread {
  *  several items); `updated_seq`
  *  is the seq of their last change, so `snapshot({afterSeq})` also returns items that kept streaming. */
 export class ThreadStore {
-  private constructor(private db: Database) {}
+  private constructor(private db: Database, private onNotice: (item: ThreadItem) => void) {}
 
   static path(root: string, sessionId: string): string {
     return join(root, "_threads", `${sessionId}.sqlite`);
   }
 
-  static open(root: string, sessionId: string): ThreadStore {
+  /** `onNotice`: a notice devd added (addNotice), for the session's SSE stream (index.ts publishes it). */
+  static open(root: string, sessionId: string, opts: { onNotice?: (item: ThreadItem) => void } = {}): ThreadStore {
     mkdirSync(join(root, "_threads"), { recursive: true });
     const db = new Database(ThreadStore.path(root, sessionId));
     db.run("PRAGMA busy_timeout = 5000");
@@ -58,7 +59,7 @@ export class ThreadStore {
       harness TEXT NOT NULL, account TEXT, native_thread_id TEXT NOT NULL, covered_through_run TEXT,
       last_used_at INTEGER NOT NULL, caps TEXT, resume_failed INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (harness, native_thread_id))`);
-    return new ThreadStore(db);
+    return new ThreadStore(db, opts.onNotice ?? (() => {}));
   }
 
   lastSeq(): number { return this.meta("last_seq"); }
@@ -248,11 +249,19 @@ export class ThreadStore {
       i.output ?? null, i.isError === undefined ? null : i.isError ? 1 : 0, i.status ?? null, ts, seq);
   }
 
-  /** A notice devd itself adds (not a bridge event): it carries the current seq, so it shows on the next full
-   *  load of the thread. */
+  /** A notice devd itself adds (not a bridge event). Seqs belong to the bridge's log (the link's hello asks for
+   *  everything after `lastSeq`, `apply` drops what is at or below it), so a notice takes none: it sits at the current
+   *  seq with its own item id `notice:<n>` and is announced through `onNotice` (the SSE stream). A replay from that
+   *  seq still includes it (see snapshot), for a client whose stream was down when it was added. */
   addNotice(text: string, ts: number): void {
     const seq = this.lastSeq();
-    this.insertItem(seq, ts, { runId: null, itemId: null, kind: "notice", text, status: "done" });
+    const n = this.meta("notice_count") + 1;
+    const item: ThreadItem = { seq, runId: null, itemId: `notice:${n}`, kind: "notice", text, status: "done", ts };
+    this.db.transaction(() => {
+      this.setMeta("notice_count", n);
+      this.insertItem(seq, ts, item);
+    })();
+    this.onNotice(item);
   }
 
   /** Without `limit` all items; with it the newest `limit` ones, oldest first. `beforeSeq` keeps only items
@@ -262,8 +271,10 @@ export class ThreadStore {
     const limit = opts.limit ?? -1;
     const before = opts.beforeSeq ?? Number.MAX_SAFE_INTEGER;
     const itemRows = this.db.query(
-      `SELECT * FROM (SELECT * FROM items WHERE updated_seq > ? AND seq < ? ORDER BY id DESC LIMIT ?) ORDER BY id`,
-    ).all(after, before, limit) as Record<string, any>[];
+      // devd notices (addNotice) at the replay's own seq too: they took no seq of their own.
+      `SELECT * FROM (SELECT * FROM items WHERE (updated_seq > ? OR (item_id LIKE 'notice:%' AND seq >= ?)) AND seq < ?
+        ORDER BY id DESC LIMIT ?) ORDER BY id`,
+    ).all(after, after, before, limit) as Record<string, any>[];
     const items: ThreadItem[] = itemRows.map((r) => {
       const it: ThreadItem = { seq: r.seq, runId: r.run_id, itemId: r.item_id, kind: r.kind, text: r.text, ts: r.ts };
       if (r.tool !== null) it.tool = r.tool;

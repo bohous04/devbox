@@ -389,7 +389,8 @@ const threadStore = (id: string): ThreadStore => {
   if (mgr.isEnding(id)) throw new Error(`session ${id} is ending`);
   const s = getSession(db, id);
   if (!s || storedRuntime(s) !== "chat") throw new Error(`session ${id} is not a chat session`);
-  const store = ThreadStore.open(root, id);
+  // `bus` is declared below; no store is opened before startup finished.
+  const store = ThreadStore.open(root, id, { onNotice: (item) => bus.publish(`thread:${id}`, { notice: item }) });
   threadStores.set(id, store);
   return store;
 };

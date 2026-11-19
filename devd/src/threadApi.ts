@@ -159,7 +159,8 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
   app.get("/api/inbox", (c) => c.json({ items: d.inbox.list() }));
 
   /** Server-sent events: `inbox` (InboxItem, coalesced per session by Inbox), `ping` every 25 s and, with
-   *  `?session=<id>`, `thread` (LoggedEvent, `id: <seq>`) for that chat session only.
+   *  `?session=<id>`, `thread` (LoggedEvent, `id: <seq>`) and `thread-notice` (a devd notice, ThreadItem with item id
+   *  `notice:<n>`, no id) for that chat session only.
    *
    *  Replay contract (dashboard): with `Last-Event-ID: <seq>` (an EventSource reconnect) or `?afterSeq=<seq>` (first
    *  connect after loading the thread at that seq; the header wins when both are present) the stream first sends
@@ -205,6 +206,8 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
         // Subscribed BEFORE the store is read, so nothing published in between is lost.
         const unsubscribe = d.bus.subscribe(topics, (topic, data) => {
           if (topic === "inbox") { send(sseFrame("inbox", data)); return; }
+          // A devd notice (ThreadStore.addNotice) has no seq of its own: no id, so Last-Event-ID stays the bridge's.
+          if (isRecord(data) && "notice" in data) { send(sseFrame("thread-notice", data.notice)); return; }
           const e = data as LoggedEvent;
           if (e.seq <= sentSeq) return;
           sentSeq = e.seq;

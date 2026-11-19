@@ -61,7 +61,8 @@ function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; pro
   insertLease(db, { account_id: "primary", client: "devbox", session_id: CHAT.id, label: "a/chat", created_at: NOW - HOUR, released_at: null });
 
   const dir = mkdtempSync(join(tmpdir(), "chat-switch-"));
-  const store = ThreadStore.open(dir, CHAT.id);
+  const published: unknown[] = [];
+  const store = ThreadStore.open(dir, CHAT.id, { onNotice: (item) => published.push(item.text) });
   cleanups.push(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
 
   const sent: BridgeCommand[] = [];
@@ -105,7 +106,7 @@ function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; pro
     }));
     return { status: r.status, body: (await r.json()) as Record<string, unknown> };
   };
-  return { db, store, sent, feed, post, sw, app, setOnSend: (f: (cmd: BridgeCommand) => void) => { onSend = f; } };
+  return { db, store, sent, feed, post, sw, app, published, setOnSend: (f: (cmd: BridgeCommand) => void) => { onSend = f; } };
 }
 
 /** A Claude conversation of one completed turn on the `primary` account. */
@@ -426,6 +427,31 @@ test("GET thread/target is the target devd plans the next switch from", async ()
   expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "backup", model: "claude-opus-5-5" } });
   await t.post("harness", { agent: "codex" });
   expect(await get()).toEqual({ status: 200, body: { agent: "codex", harness: "codex", account: "default", model: null } });
+});
+
+test("after a failed resume the switch notice says so", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.setOnSend((cmd) => {
+    if (cmd.kind === "switchTarget" && cmd.resume !== null) t.feed([{ type: "run.failed", runId: "never-started", error: "resume-failed" }]);
+  });
+  await t.post("account", { accountId: "backup" });
+  expect(notices(t).at(-1)).toBe("Switched account to backup · resume failed · context handed over (2 items)");
+});
+
+test("a resume failure re-planned out of band is published like every notice", async () => {
+  const t = setup({ agent: "codex" });
+  t.feed([
+    { type: "thread.native", harness: "codex", nativeThreadId: "t-codex", account: "default", model: "gpt-5.5", caps: CODEX_CAPS },
+    { type: "run.queued", runId: "r1", text: "hello", attachments: [] },
+    { type: "run.completed", runId: "r1", nativeThreadId: "t-codex", usage: null, costUsd: null },
+    { type: "run.failed", runId: "never-started", error: "resume-failed" },
+  ]);
+  await Bun.sleep(0);
+  expect(t.published).toEqual([
+    expect.stringMatching(/^Could not resume the earlier codex thread/),
+    "Started a fresh codex thread after the failed resume · context handed over (1 items)",
+  ]);
 });
 
 // --- bridge events ---

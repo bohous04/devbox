@@ -10,7 +10,7 @@ import { EventBus } from "../src/eventBus";
 import { Inbox } from "../src/sessionInbox";
 import { ThreadStore } from "../src/threadStore";
 import type { BridgeCommand } from "../../image/agent-bridge/src/protocol";
-import type { BridgeEvent, LoggedEvent, ThreadSnapshot } from "../../shared/thread";
+import type { BridgeEvent, LoggedEvent, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -33,9 +33,11 @@ function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown
   const dir = mkdtempSync(join(tmpdir(), "thread-api-"));
   const stores = new Map<string, ThreadStore>();
   cleanups.push(() => { for (const s of stores.values()) s.close(); rmSync(dir, { recursive: true, force: true }); });
+  const bus = new EventBus();
+  // Like index.ts: a devd notice goes out on the session's thread topic.
   const threads = (id: string) => {
     let s = stores.get(id);
-    if (!s) { s = ThreadStore.open(dir, id); stores.set(id, s); }
+    if (!s) { s = ThreadStore.open(dir, id, { onNotice: (item) => bus.publish(`thread:${id}`, { notice: item }) }); stores.set(id, s); }
     return s;
   };
   const sent: [string, BridgeCommand][] = [];
@@ -50,7 +52,6 @@ function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown
     startTurnWhenConnected: (id: string, text: string) => { firstTurns.push([id, text]); },
   };
   const hub = new AgentEventHub({ db, notify: () => {} });
-  const bus = new EventBus();
   const inbox = new Inbox({
     sessions: () => listSessions(db), session: (id) => getSession(db, id), threads,
     chatLink: () => ({ status: "connected", since: 1 }), tmuxLive: (id) => hub.liveSnapshot(id), bus,
@@ -397,6 +398,22 @@ test("SSE replay boundary: a live event already in the snapshot is not sent twic
   const [next] = t.feed(CHAT.id, [said("r1", "m1", "hi")]);
   const got = await events;
   expect(got.map((e) => [e.event, e.id])).toEqual([["thread-snapshot", "1"], ["thread", String(next.seq)]]);
+});
+
+test("SSE: a devd notice added out of band reaches a live subscriber, and a replay from its seq", async () => {
+  const t = setup();
+  t.feed(CHAT.id, [started("r1")]);
+  const res = await t.a.fetch(req("GET", `/api/stream?session=${CHAT.id}`));
+  const events = readEvents(res, 1);
+  await Bun.sleep(10);
+  t.threads(CHAT.id).addNotice("Could not resume the earlier claude thread", 5000);
+  const notice: ThreadItem = { seq: 1, runId: null, itemId: "notice:1", kind: "notice", text: "Could not resume the earlier claude thread", status: "done", ts: 5000 };
+  // No id: it does not move the client's Last-Event-ID (seqs are the bridge's).
+  expect(await events).toEqual([{ event: "thread-notice", data: notice }]);
+  // A client that was at seq 1 while it was down gets it in the replay snapshot.
+  const again = await t.a.fetch(req("GET", `/api/stream?session=${CHAT.id}`, undefined, { "last-event-id": "1" }));
+  const [snap] = await readEvents(again, 1);
+  expect((snap.data as { snapshot: ThreadSnapshot }).snapshot.items).toEqual([notice]);
 });
 
 test("SSE unsubscribes from the bus when the client goes away", async () => {
