@@ -44,7 +44,7 @@ Common commands (`dev --help` lists all of them):
 |---|---|
 | `dev` | pick a running session (preview, attach, stop) or start a new one |
 | `dev <project>/<repo>` | attach to a running session, or start another one on the same repo |
-| `dev --agent codex <target>` | start with a given agent (`claude`, `claude-gpt`, `claude-grok`, `codex`, `grok`) |
+| `dev --agent codex <target>` | start with a given agent (`claude`, `claude-gemini`, `claude-openrouter`, `codex`, `grok`) |
 | `dev ls` / `dev ports [target]` | overview / port mapping |
 | `dev stop <target>` / `dev end <target>` | stop the container / end the session |
 | `dev important <target> on` | loud phone alert for this session |
