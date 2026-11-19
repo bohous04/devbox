@@ -150,6 +150,80 @@ final class ThreadStoreLiveTests: XCTestCase {
         store.stop()
     }
 
+    /// The screen left while resume() was still fetching: the stream must not open behind its back.
+    func testStopDuringResumeFetchOpensNoStream() async throws {
+        let gate = DispatchSemaphore(value: 0)
+        MockURLProtocol.handler = { req in
+            switch (req.url?.path, req.url?.query) {
+            case ("/api/sessions/s1/thread", nil): return .init(statusCode: 200, data: self.snapshot(lastSeq: 5, seenSeq: 5))
+            case ("/api/sessions/s1/thread", "afterSeq=5"):
+                _ = gate.wait(timeout: .now() + 3)
+                return .init(statusCode: 200, data: self.snapshot(lastSeq: 5, seenSeq: 5))
+            default: return .init(statusCode: 204)
+            }
+        }
+        var connects = 0
+        let store = ThreadStore(sessionId: "s1", client: client(), connect: { _, _ in
+            connects += 1
+            return AsyncThrowingStream { _ in }
+        })
+        await store.start()
+        try await waitUntil { connects == 1 }
+        let resuming = Task { await store.resume() }
+        try await waitUntil { self.requests.contains("GET /api/sessions/s1/thread?afterSeq=5") }
+        store.stop()
+        gate.signal()
+        await resuming.value
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(connects, 1)
+    }
+
+    func testStopDuringFirstLoadOpensNoStream() async throws {
+        let gate = DispatchSemaphore(value: 0)
+        MockURLProtocol.handler = { _ in
+            _ = gate.wait(timeout: .now() + 3)
+            return .init(statusCode: 200, data: self.snapshot(lastSeq: 5, seenSeq: 5))
+        }
+        var connects = 0
+        let store = ThreadStore(sessionId: "s1", client: client(), connect: { _, _ in
+            connects += 1
+            return AsyncThrowingStream { _ in }
+        })
+        let starting = Task { await store.start() }
+        try await waitUntil { !MockURLProtocol.capturedRequests.isEmpty }
+        store.stop()
+        gate.signal()
+        await starting.value
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertNotNil(store.thread)
+        XCTAssertEqual(connects, 0)
+    }
+
+    /// The view reads rows with their flags precomputed per update, not re-derived on every render.
+    func testRowsCarryTheirRunFlagsAndOpenRequest() async throws {
+        let runs = #"[{"runId":"r1","origin":"user","status":"completed","endedSeq":3},{"runId":"r2","origin":"critic","status":"queued"}]"#
+        let items = #"[{"seq":1,"runId":"r1","itemId":"u1","kind":"user","text":"hi","status":"done","ts":1},"# +
+            #"{"seq":2,"runId":"r1","itemId":"q1","kind":"request","text":"ok?","status":"open","ts":2},"# +
+            #"{"seq":4,"runId":"r2","itemId":"u2","kind":"user","text":"again","status":"done","ts":3}]"#
+        MockURLProtocol.handler = { req in
+            if req.url?.path == "/api/sessions/s1/thread" {
+                var body = String(decoding: self.snapshot(lastSeq: 4, seenSeq: 4, items: items, runs: runs), as: UTF8.self)
+                body = body.replacingOccurrences(of: #""pending":[]"#,
+                    with: #""pending":[{"requestId":"q1","runId":"r1","kind":"question","prompt":"ok?","options":[],"openedAt":2}]"#)
+                return .init(statusCode: 200, data: Data(body.utf8))
+            }
+            return .init(statusCode: 204)
+        }
+        let store = ThreadStore(sessionId: "s1", client: client(), connect: { _, _ in AsyncThrowingStream { _ in } })
+        await store.start()
+        XCTAssertEqual(store.rows.map(\.id), [0, 1, 2])
+        XCTAssertEqual(store.rows.map(\.queued), [false, false, true])
+        XCTAssertEqual(store.rows.map(\.critic), [false, false, true])
+        XCTAssertEqual(store.rows.map { $0.pending?.requestId }, [nil, "q1", nil])
+        XCTAssertEqual(store.switchKey, ThreadView.switchKey(try XCTUnwrap(store.thread)))
+        store.stop()
+    }
+
     func testTmuxSessionIsReportedNotStreamed() async throws {
         MockURLProtocol.handler = { _ in .init(statusCode: 409, data: Data(#"{"error":"not-a-chat-session"}"#.utf8)) }
         var connects = 0

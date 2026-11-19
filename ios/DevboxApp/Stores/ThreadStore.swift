@@ -54,6 +54,14 @@ enum ThreadView {
     /// Runs devd's critic started: their user message is the critic's, not the user's.
     static func criticRunIds(_ t: ThreadSnapshot) -> [String] { t.runs.filter { $0.origin == .critic }.map(\.runId) }
 
+    /// What makes the chat switchers re-read their target (the dashboard's effect dependencies): the native
+    /// thread, a run queued or ended, a notice.
+    static func switchKey(_ t: ThreadSnapshot) -> String {
+        let n = t.native
+        return [n?.harness, n?.nativeThreadId, n?.model, n?.account].map { $0 ?? "-" }.joined(separator: "|")
+            + "|\(t.runs.filter { $0.endedSeq != nil }.count)|\(t.runs.count)|\(t.items.filter { $0.kind == .notice }.count)"
+    }
+
     /// The newest seq at which a run ended: reaching it while the thread is open counts as seen.
     static func lastEndedSeq(_ t: ThreadSnapshot) -> Int { t.runs.compactMap(\.endedSeq).max() ?? 0 }
 
@@ -225,6 +233,17 @@ func chatErrorText(_ error: Error) -> String {
 /// One chat session's thread: loaded once, then kept live over devd's stream (`?session=<id>&afterSeq=<seq>`, which
 /// replays what changed after that seq as one `thread-snapshot`). iOS drops the stream in the background:
 /// `resume()` fetches the thread after its seq, merges it and resubscribes (plan review focus 3).
+/// One conversation row as the view shows it, its flags derived once per thread update.
+struct ChatRow: Identifiable, Equatable {
+    /// The item's position (items are append-only; an item id may repeat across kinds).
+    let id: Int
+    let item: ThreadItem
+    /// The open request this item asks, if any.
+    let pending: PendingRequest?
+    let queued: Bool
+    let critic: Bool
+}
+
 @MainActor
 final class ThreadStore: ObservableObject {
     typealias Connect = (_ path: String, _ lastEventId: String?) async throws -> AsyncThrowingStream<String, Error>
@@ -239,11 +258,17 @@ final class ThreadStore: ObservableObject {
     /// The last frame that could not be read (also logged); the thread may miss that update until a reload.
     @Published private(set) var badFrame: String?
     @Published private(set) var seenError: String?
+    /// Derived from `thread` once per update (set before it, so a render sees them together), not on every render.
+    private(set) var rows: [ChatRow] = []
+    private(set) var switchKey = ""
 
     private static let logger = Logger(subsystem: "com.example.devbox", category: "Thread")
     private let client: DevdClient
     private let connect: Connect
+    /// Owned only here: released with the store, it ends its connection (EventStream's deinit).
     private var stream: EventStream?
+    /// The screen wants the stream (between start/resume and stop): an await that ends after stop() opens nothing.
+    private var wantsStream = false
     /// The seq last reported seen, so the same seq is not posted again.
     private var postedSeen = 0
 
@@ -257,13 +282,15 @@ final class ThreadStore: ObservableObject {
 
     /// Loads the thread (once) and opens the stream from its seq.
     func start() async {
+        wantsStream = true
         if thread == nil { await load() }
-        guard thread != nil else { return }
+        guard thread != nil, wantsStream else { return }
         openStream()
         markSeenIfNeeded()
     }
 
     func stop() {
+        wantsStream = false
         stream?.stop()
         stream = nil
         paused = false
@@ -273,6 +300,7 @@ final class ThreadStore: ObservableObject {
     func resume() async {
         stop()
         guard let t = thread else { return await start() }
+        wantsStream = true
         do {
             let s: ThreadSnapshot = try await client.get("\(base)/thread?afterSeq=\(t.lastSeq)")
             update(ThreadView.mergeSnapshot(t, ThreadSnapshotFrame(afterSeq: t.lastSeq, snapshot: s)))
@@ -281,13 +309,14 @@ final class ThreadStore: ObservableObject {
             Self.logger.error("thread resume fetch failed: \(String(describing: error), privacy: .public)")
             badFrame = "could not catch up after the app was away: \(errorText(error))"
         }
+        guard wantsStream else { return }
         openStream()
         markSeenIfNeeded()
     }
 
     private func load() async {
         do {
-            thread = try await client.get("\(base)/thread")
+            setThread(try await client.get("\(base)/thread"))
             loadError = nil
             isTmux = false
         } catch let e as DevdHTTPError where e.statusCode == 409 && e.serverMessage == "not-a-chat-session" {
@@ -299,11 +328,13 @@ final class ThreadStore: ObservableObject {
 
     private func openStream() {
         guard stream == nil else { return }
+        let session = pathSegment(sessionId)
         let s = EventStream(
             connect: { [weak self, connect] id in
+                // Gone with its screen: no reconnect for nobody (the loop ends on the error, see EventStream).
+                guard let self else { throw CancellationError() }
                 // Each (re)connect asks from the seq the store holds now; devd prefers Last-Event-ID when sent.
-                let after = self?.thread?.lastSeq ?? 0
-                let session = self.map { pathSegment($0.sessionId) } ?? ""
+                let after = self.thread?.lastSeq ?? 0
                 return try await connect("/api/stream?session=\(session)&afterSeq=\(after)", id)
             },
             onOpen: { [weak self] in self?.paused = false },
@@ -336,9 +367,21 @@ final class ThreadStore: ObservableObject {
 
     private func update(_ next: ThreadSnapshot) {
         let endedBefore = thread.map(ThreadView.lastEndedSeq) ?? 0
-        thread = next
+        setThread(next)
         // A run ending while the thread is open counts as seen.
         if ThreadView.lastEndedSeq(next) != endedBefore { markSeenIfNeeded() }
+    }
+
+    private func setThread(_ t: ThreadSnapshot) {
+        let queued = Set(ThreadView.queuedRunIds(t))
+        let critic = Set(ThreadView.criticRunIds(t))
+        let open = Dictionary(t.pending.map { ($0.requestId, $0) }, uniquingKeysWith: { a, _ in a })
+        rows = t.items.enumerated().map { i, it in
+            ChatRow(id: i, item: it, pending: it.itemId.flatMap { open[$0] },
+                    queued: it.runId.map(queued.contains) ?? false, critic: it.runId.map(critic.contains) ?? false)
+        }
+        switchKey = ThreadView.switchKey(t)
+        thread = t
     }
 
     /// Opening the thread, a run ending while it is open and coming back to it mark it seen.

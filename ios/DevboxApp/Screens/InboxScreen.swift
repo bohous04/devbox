@@ -14,6 +14,8 @@ struct InboxScreen: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var actionsFor: InboxItem?
     @State private var openShelves: Set<String> = []
+    /// On screen (not under a pushed chat or another tab): only then does coming back reopen the stream.
+    @State private var visible = false
     private let client: DevdClient
 
     init(client: DevdClient) {
@@ -35,10 +37,14 @@ struct InboxScreen: View {
         .background(Theme.C.background)
         .navigationTitle("Inbox")
         .task { store.start() }
-        .onDisappear { store.stop() }
+        .onAppear { visible = true }
+        .onDisappear {
+            visible = false
+            store.stop()
+        }
         // iOS drops the stream in the background; the inbox reloads when the stream reopens.
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { store.start() } else if phase == .background { store.stop() }
+            if phase == .active, visible { store.start() } else if phase == .background { store.stop() }
         }
         .sheet(item: $actionsFor) { item in
             InboxRowActions(item: item, store: store)

@@ -108,6 +108,38 @@ final class EventStreamTests: XCTestCase {
         stream.stop()
         XCTAssertEqual(dropErrors, ["closed", "HTTP 502"])
     }
+
+    /// The owner (a screen's store) went away without stop(): the open connection ends with it.
+    func testReleasedStreamEndsItsConnection() async throws {
+        let ended = expectation(description: "connection ended")
+        var opened = false
+        var stream: EventStream? = EventStream(
+            connect: { _ in
+                opened = true
+                return AsyncThrowingStream { c in c.onTermination = { _ in ended.fulfill() } }
+            },
+            retryDelay: .zero, onOpen: {}, onEvent: { _ in }, onDrop: { _ in }
+        )
+        stream?.start()
+        try await waitUntil { opened }
+        stream = nil
+        await fulfillment(of: [ended], timeout: 2)
+    }
+
+    /// A connect that throws CancellationError (its owner is gone) ends the loop instead of retrying.
+    func testCancellationFromConnectEndsTheLoop() async throws {
+        var connects = 0
+        var drops = 0
+        let stream = EventStream(
+            connect: { _ in connects += 1; throw CancellationError() },
+            retryDelay: .zero, onOpen: {}, onEvent: { _ in }, onDrop: { _ in drops += 1 }
+        )
+        stream.start()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(connects, 1)
+        XCTAssertEqual(drops, 0)
+        XCTAssertFalse(stream.isRunning)
+    }
 }
 
 /// `DevdClient.streamLines`: the stream request carries the CF headers, Last-Event-ID and a timeout above devd's
@@ -146,6 +178,33 @@ final class DevdClientStreamTests: XCTestCase {
         MockURLProtocol.handler = { _ in .init(statusCode: 200, data: Data()) }
         for try await _ in try await client().streamLines("/api/stream", lastEventId: nil) {}
         XCTAssertNil(MockURLProtocol.capturedRequests.first?.value(forHTTPHeaderField: "Last-Event-ID"))
+    }
+
+    func testStreamLinesWithEmptyLastEventIdSendsNoHeader() async throws {
+        MockURLProtocol.handler = { _ in .init(statusCode: 200, data: Data()) }
+        for try await _ in try await client().streamLines("/api/stream", lastEventId: "") {}
+        XCTAssertNil(MockURLProtocol.capturedRequests.first?.value(forHTTPHeaderField: "Last-Event-ID"))
+    }
+
+    /// A dead active path while a chat is open: the connect tries the other path once and keeps it active.
+    func testStreamConnectFallsBackToTheOtherPathOnce() async throws {
+        MockURLProtocol.handler = { req in
+            if req.url?.host == "cf.example.com" { return .init(statusCode: 0, error: URLError(.cannotConnectToHost)) }
+            return .init(statusCode: 200, data: Data(": open\n\n".utf8))
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let client = DevdClient(endpoints: DevdEndpoints(cfBase: cfBase, cfId: "id-1", cfSecret: "secret-1",
+                                                         tailnetBase: URL(string: "http://tailnet.test")!),
+                                session: URLSession(configuration: config))
+        var lines: [String] = []
+        for try await l in try await client.streamLines("/api/stream", lastEventId: nil) { lines.append(l) }
+        XCTAssertEqual(lines, [": open", ""])
+        let _: InboxList = try await { () async throws -> InboxList in
+            MockURLProtocol.handler = { _ in .init(statusCode: 200, data: Data(#"{"items":[]}"#.utf8)) }
+            return try await client.get("/api/inbox")
+        }()
+        XCTAssertEqual(MockURLProtocol.capturedRequests.map { $0.url!.host! }, ["cf.example.com", "tailnet.test", "tailnet.test"])
     }
 
     func testStreamErrorStatusThrowsWithDevdsMessage() async throws {

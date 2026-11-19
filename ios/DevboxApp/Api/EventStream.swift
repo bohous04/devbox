@@ -90,9 +90,18 @@ final class EventStream {
 
     var isRunning: Bool { task != nil }
 
+    // The task does not hold the stream: when its owner lets go of it (a screen's store released without stop()),
+    // the connection ends here rather than reconnecting forever for nobody.
+    deinit {
+        task?.cancel()
+    }
+
     func start() {
         guard task == nil else { return }
-        task = Task { [weak self] in await self?.run() }
+        task = Task { [weak self, connect, retryDelay, onOpen, onEvent, onDrop] in
+            await Self.run(connect: connect, retryDelay: retryDelay, onOpen: onOpen, onEvent: onEvent, onDrop: onDrop)
+            if !Task.isCancelled { self?.task = nil }
+        }
     }
 
     func stop() {
@@ -100,7 +109,8 @@ final class EventStream {
         task = nil
     }
 
-    private func run() async {
+    private static func run(connect: Connect, retryDelay: Duration, onOpen: () -> Void,
+                            onEvent: (SSEParser.Event) -> Void, onDrop: (Error?) -> Void) async {
         var parser = SSEParser()
         while !Task.isCancelled {
             do {
@@ -113,6 +123,8 @@ final class EventStream {
                 }
                 if Task.isCancelled { return }
                 onDrop(nil)
+            } catch is CancellationError {
+                return // the owner is gone (its connect says so): nothing to reconnect for
             } catch {
                 if Task.isCancelled { return }
                 onDrop(error)

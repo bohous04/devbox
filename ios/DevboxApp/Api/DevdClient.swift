@@ -200,32 +200,28 @@ actor DevdClient {
 
     // MARK: - Chat (devd/src/threadApi.ts)
 
-    /// devd's SSE stream as lines, blank ones included (`EventStream` parses them). On the active path only: a
-    /// long-lived stream gets no fallback; `EventStream` reconnects, and by then a REST call may have moved the
-    /// active path. Returns once devd answered 2xx; a non-2xx answer throws `DevdHTTPError` with its `{error}`.
+    /// devd's SSE stream as lines, blank ones included (`EventStream` parses them). The connect falls back like a
+    /// GET (one try on the other path, which then stays active), so a dead path does not keep an open chat from
+    /// reconnecting; an open stream never switches paths, it ends and `EventStream` reconnects. Returns once devd
+    /// answered 2xx; a non-2xx answer throws `DevdHTTPError` with its `{error}`.
     func streamLines(_ path: String, lastEventId: String?) async throws -> AsyncThrowingStream<String, Error> {
-        guard let base = baseURL(for: active) else {
-            // User-visible — must be in English.
-            throw DevdClientError(description: "No network path configured")
-        }
-        var request = URLRequest(url: try Self.resolve(path, against: base))
-        // The session's 8 s request timeout is the longest gap between bytes; devd pings every 25 s.
-        request.timeoutInterval = 60
-        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        if let lastEventId { request.setValue(lastEventId, forHTTPHeaderField: "Last-Event-ID") }
-        try addCfHeaders(&request, on: active)
-        let (bytes, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw DevdClientError(description: "invalid response (\(label(active)))")
-        }
-        guard (200..<300).contains(http.statusCode) else {
-            var body = Data()
-            for try await b in bytes {
-                body.append(b)
-                if body.count > 4096 { break }
+        let bytes: URLSession.AsyncBytes
+        do {
+            bytes = try await openStream(on: active, path: path, lastEventId: lastEventId)
+        } catch let firstError {
+            let fallback = otherPath(than: active)
+            guard !Self.isCancellation(firstError), shouldFallback(firstError, method: "GET"), baseURL(for: fallback) != nil else {
+                throw firstError
             }
-            let parsed = try? JSONDecoder().decode(ErrorBody.self, from: body)
-            throw DevdHTTPError(statusCode: http.statusCode, serverMessage: parsed?.error, serverDetail: parsed?.message)
+            do {
+                bytes = try await openStream(on: fallback, path: path, lastEventId: lastEventId)
+                active = fallback
+            } catch let secondError {
+                throw DevdClientError(
+                    description: "\(label(active)): \(firstError); \(label(fallback)): \(secondError)",
+                    underlying: [firstError, secondError]
+                )
+            }
         }
         return AsyncThrowingStream { continuation in
             let reader = Task {
@@ -241,6 +237,38 @@ actor DevdClient {
             }
             continuation.onTermination = { _ in reader.cancel() }
         }
+    }
+
+    private func openStream(on path: Path, path urlPath: String, lastEventId: String?) async throws -> URLSession.AsyncBytes {
+        guard let base = baseURL(for: path) else {
+            // User-visible — must be in English.
+            throw DevdClientError(description: "No network path configured")
+        }
+        var request = URLRequest(url: try Self.resolve(urlPath, against: base))
+        // The session's 8 s request timeout is the longest gap between bytes; devd pings every 25 s.
+        request.timeoutInterval = 60
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        if let lastEventId, !lastEventId.isEmpty { request.setValue(lastEventId, forHTTPHeaderField: "Last-Event-ID") }
+        try addCfHeaders(&request, on: path)
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw DevdClientError(description: "invalid response (\(label(path)))")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            var body = Data()
+            for try await b in bytes {
+                body.append(b)
+                if body.count > 4096 { break }
+            }
+            let parsed = try? JSONDecoder().decode(ErrorBody.self, from: body)
+            throw DevdHTTPError(statusCode: http.statusCode, serverMessage: parsed?.error, serverDetail: parsed?.message)
+        }
+        return bytes
+    }
+
+    /// The caller (a stopped stream) gave up: not a reason to try the other path.
+    private static func isCancellation(_ error: Error) -> Bool {
+        error is CancellationError || (error as? URLError)?.code == .cancelled
     }
 
     /// Raw bytes (a chat image for its thumbnail); GET fallback as `get`.

@@ -10,6 +10,8 @@ struct ChatScreen: View {
     @State private var showTerminal = false
     @State private var atEnd = true
     @State private var wentAway = false
+    /// On screen (not under a pushed screen or another tab): only then does coming back reopen the stream.
+    @State private var visible = false
     private let sessionId: String
     private let client: DevdClient
 
@@ -55,12 +57,16 @@ struct ChatScreen: View {
             TerminalScreen(sessionId: sessionId, title: title, client: client)
         }
         .task { await store.start() }
-        .onDisappear { store.stop() }
+        .onAppear { visible = true }
+        .onDisappear {
+            visible = false
+            store.stop()
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background {
                 wentAway = true
                 store.stop()
-            } else if phase == .active, wentAway {
+            } else if phase == .active, wentAway, visible {
                 wentAway = false
                 Task { await store.resume() }
             }
@@ -68,21 +74,17 @@ struct ChatScreen: View {
     }
 
     private func conversation(_ t: ThreadSnapshot) -> some View {
-        let queued = Set(ThreadView.queuedRunIds(t))
-        let critic = Set(ThreadView.criticRunIds(t))
-        return ScrollViewReader { proxy in
+        ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     banners
                     if t.items.isEmpty {
                         EmptyState("No messages yet — write the first message below.", systemImage: "bubble.left")
                     }
-                    ForEach(Array(t.items.enumerated()), id: \.offset) { _, it in
-                        MessageRow(item: it, sessionId: sessionId, client: client,
-                                   pending: t.pending.first { $0.requestId == it.itemId },
-                                   queued: it.runId.map(queued.contains) ?? false,
-                                   critic: it.runId.map(critic.contains) ?? false,
+                    ForEach(store.rows) { row in
+                        MessageRow(row: row, sessionId: sessionId, client: client,
                                    onAnswer: { try await store.answer(requestId: $0, answer: $1) })
+                            .equatable()
                     }
                     if !t.background.isEmpty {
                         Text("background: \(t.background.map(\.label).joined(separator: ", "))")
@@ -97,12 +99,13 @@ struct ChatScreen: View {
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
-            .onChange(of: t.lastSeq) { _, _ in
+            // lastSeq moves with events; a notice adds an item without one.
+            .onChange(of: [t.lastSeq, t.items.count]) { _, _ in
                 if atEnd { proxy.scrollTo("end", anchor: .bottom) }
             }
             .safeAreaInset(edge: .bottom) {
                 VStack(alignment: .leading, spacing: 6) {
-                    ChatSwitchers(sessionId: sessionId, thread: t, client: client)
+                    ChatSwitchers(sessionId: sessionId, thread: t, targetKey: store.switchKey, client: client)
                     ComposerView(running: ThreadView.activeRun(t) != nil,
                                  onSend: { try await store.send(text: $0, images: $1) },
                                  onStop: { try await store.interrupt() })

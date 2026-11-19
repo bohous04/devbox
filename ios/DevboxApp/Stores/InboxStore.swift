@@ -104,6 +104,10 @@ final class InboxStore: ObservableObject {
     private let pollInterval: Duration
     private var stream: EventStream?
     private var poll: Task<Void, Never>?
+    /// Frames that arrived while a list load was in flight: the fetched list may predate them, so they are applied
+    /// over it. Kept while any load runs (they overlap: the poll and a stream open).
+    private var framesDuringLoad: [InboxChange] = []
+    private var loadsInFlight = 0
 
     init(client: DevdClient, connect: Connect? = nil, pollInterval: Duration = .seconds(5)) {
         self.client = client
@@ -112,9 +116,15 @@ final class InboxStore: ObservableObject {
     }
 
     func load() async {
+        loadsInFlight += 1
+        let mark = framesDuringLoad.count
+        defer {
+            loadsInFlight -= 1
+            if loadsInFlight == 0 { framesDuringLoad = [] }
+        }
         do {
             let list: InboxList = try await client.get("/api/inbox")
-            items = list.items
+            items = framesDuringLoad[mark...].reduce(list.items, InboxView.upsert)
             loadError = nil
         } catch {
             loadError = errorText(error)
@@ -169,6 +179,7 @@ final class InboxStore: ObservableObject {
         guard e.name == "inbox" else { return } // ping; thread frames come only with ?session=
         do {
             let change = try JSONDecoder().decode(InboxChange.self, from: Data(e.data.utf8))
+            if loadsInFlight > 0 { framesDuringLoad.append(change) }
             if let cur = items { items = InboxView.upsert(cur, change) }
         } catch {
             Self.logger.error("unreadable inbox frame: \(String(describing: error), privacy: .public)")
@@ -197,6 +208,7 @@ final class InboxStore: ObservableObject {
     }
 
     private func apply(_ item: InboxItem) {
+        if loadsInFlight > 0 { framesDuringLoad.append(.item(item)) }
         if let cur = items { items = InboxView.upsert(cur, .item(item)) }
     }
 }

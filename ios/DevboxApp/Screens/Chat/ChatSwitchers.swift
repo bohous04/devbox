@@ -7,6 +7,8 @@ import SwiftUI
 struct ChatSwitchers: View {
     let sessionId: String
     let thread: ThreadSnapshot
+    /// `ThreadView.switchKey(thread)`, precomputed by the store.
+    let targetKey: String
     let client: DevdClient
 
     private enum Which: String { case harness, model, account }
@@ -20,13 +22,6 @@ struct ChatSwitchers: View {
     @State private var note: String?
 
     private var base: String { "/api/sessions/\(pathSegment(sessionId))/thread" }
-
-    /// What re-reads the target (the dashboard's effect dependencies).
-    private var targetKey: String {
-        let n = thread.native
-        return [n?.harness, n?.nativeThreadId, n?.model, n?.account].map { $0 ?? "-" }.joined(separator: "|")
-            + "|\(thread.runs.filter { $0.endedSeq != nil }.count)|\(thread.runs.count)|\(thread.items.filter { $0.kind == .notice }.count)"
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {

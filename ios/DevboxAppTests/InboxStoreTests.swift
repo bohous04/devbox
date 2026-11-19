@@ -125,6 +125,26 @@ final class InboxStoreTests: XCTestCase {
         store.stop()
     }
 
+    /// A frame that arrives while the list is being fetched must survive the fetched (older) list.
+    func testFrameDuringReloadIsKeptOverTheFetchedList() async throws {
+        let gate = DispatchSemaphore(value: 0)
+        MockURLProtocol.handler = { _ in
+            _ = gate.wait(timeout: .now() + 3)
+            return .init(statusCode: 200, data: Data(#"{"items":[\#(self.itemJSON("a", "idle"))]}"#.utf8))
+        }
+        var feed: AsyncThrowingStream<String, Error>.Continuation?
+        let store = InboxStore(client: client(), connect: { _, _ in AsyncThrowingStream { feed = $0 } })
+        store.items = [try item("a", "idle", since: 1)]
+        store.start()
+        try await waitUntil { feed != nil && !MockURLProtocol.capturedRequests.isEmpty }
+        for l in ["event: inbox", "data: \(itemJSON("a", "needs_you"))", ""] { feed?.yield(l) }
+        try await waitUntil { store.items?.first?.attention.section == .needsYou }
+        gate.signal()
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(store.items?.first?.attention.section, .needsYou)
+        store.stop()
+    }
+
     func testStreamDropPausesAndPolls() async throws {
         MockURLProtocol.handler = { _ in .init(statusCode: 200, data: Data(#"{"items":[]}"#.utf8)) }
         let store = InboxStore(client: client(), connect: { _, _ in throw URLError(.networkConnectionLost) }, pollInterval: .milliseconds(20))

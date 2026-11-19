@@ -4,14 +4,20 @@ import UIKit
 /// One thread item (dashboard/src/components/chat/MessageList.tsx): the user's message (right, with its images,
 /// "queued" while it waits, "from the critic" for the critic's follow-up), the assistant's text, a tool call, a
 /// request (open ones as a form) or a notice.
-struct MessageRow: View {
-    let item: ThreadItem
+/// Equatable on what it shows (not the client or the answer callback), so an update re-renders only changed rows
+/// instead of re-parsing every row's markdown.
+struct MessageRow: View, Equatable {
+    let row: ChatRow
     let sessionId: String
     let client: DevdClient
-    let pending: PendingRequest?
-    let queued: Bool
-    let critic: Bool
     let onAnswer: (String, String) async throws -> Void
+
+    private var item: ThreadItem { row.item }
+    private var pending: PendingRequest? { row.pending }
+    private var queued: Bool { row.queued }
+    private var critic: Bool { row.critic }
+
+    static func == (a: MessageRow, b: MessageRow) -> Bool { a.row == b.row && a.sessionId == b.sessionId }
 
     var body: some View {
         switch item.kind {
