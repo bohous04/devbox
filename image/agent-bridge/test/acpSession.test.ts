@@ -15,6 +15,13 @@ function fixture(name: string): any[] {
 }
 const INIT = Object.fromEntries(fixture("acp-initialize.jsonl").map((l) => [l.name, l.result])) as Record<string, any>;
 
+// Live recordings of the real agents (step 4 Task 3); the first line says what was recorded, how and what was scrubbed.
+function recording(name: string): any[] {
+  const [marker, ...lines] = readFileSync(join(import.meta.dir, "fixtures", name), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  expect(marker.recorded).toStartWith("Live,");
+  return lines;
+}
+
 interface Sent {
   jsonrpc?: string;
   id?: number | string;
@@ -670,5 +677,43 @@ describe("acpMcpServers", () => {
         else process.env[k] = v;
       }
     }
+  });
+});
+
+describe("Grok (live)", () => {
+  const [init, mcpUpdate, authError] = recording("acp-grok-live.jsonl").map((l) => l.recv);
+
+  test("Grok launch args: the ACP agent over stdio with every tool call approved", async () => {
+    expect(ACP_AGENTS.grok.argv).toEqual(["grok", "agent", "--always-approve", "stdio"]);
+    const fake = fakeAgent(init.result);
+    const { session } = open(fake, { spec: ACP_AGENTS.grok });
+    await session.ready;
+    expect(fake.spawns[0]!.argv).toEqual(["grok", "agent", "--always-approve", "stdio"]);
+    expect(fake.requests("initialize")[0]!.params.clientInfo.name).toBe("devbox-agent-bridge");
+  });
+
+  test("grok 1.0.13 speaks ACP v1, resumes with session/resume and takes no images", async () => {
+    expect(negotiate(init.result)).toEqual({
+      version: 1,
+      caps: { resume: true, injectItems: false, liveModelSwitch: false, questions: false, images: false, backgroundVisibility: false },
+    });
+    const fake = fakeAgent(init.result);
+    const { session } = open(fake, { spec: ACP_AGENTS.grok, resume: "sess-old" });
+    await session.ready;
+    expect(fake.requests("session/resume")[0]!.params).toMatchObject({ sessionId: "sess-old", cwd: "/workspace" });
+    expect(fake.requests("session/load")).toHaveLength(0);
+  });
+
+  test("without a Grok login session/new is refused and the start fails with the agent's error", async () => {
+    const fake = fakeAgent(init.result);
+    fake.responders["session/new"] = () => {
+      fake.push(mcpUpdate);
+      throw Object.assign(new Error(authError.error.message), { code: authError.error.code });
+    };
+    const { session, logs } = open(fake, { spec: ACP_AGENTS.grok });
+    await expect(session.ready).rejects.toThrow("Authentication required");
+    expect(await session.ended).toMatchObject({ error: expect.stringContaining("Authentication required") });
+    // Grok's own extension notification is logged, not applied.
+    expect(logs.some((l) => l.includes("_x.ai/mcp/servers_updated"))).toBe(true);
   });
 });

@@ -20,7 +20,8 @@ export interface AcpAgentSpec {
 
 // Quirks from the T3 Code reference (commit eebb6bcc); Task 3 verifies each agent live.
 export const ACP_AGENTS: Record<AcpAgentId, AcpAgentSpec> = {
-  // Full access: Grok approves its own tool calls.
+  // Full access: Grok approves its own tool calls. grok 1.0.13 (live): ACP v1, session/resume, no image prompts, models
+  // in initialize `_meta.modelState`. Not offered in chat yet: no login in grok-home to record a turn with.
   grok: { id: "grok", argv: ["grok", "agent", "--always-approve", "stdio"] },
   // -31001 is Mistral Vibe's rate-limit code, outside ACP.
   vibe: { id: "vibe", argv: ["vibe-acp"], rateLimitCodes: [-31001] },
