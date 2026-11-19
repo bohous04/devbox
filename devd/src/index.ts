@@ -39,7 +39,7 @@ import { createConfigRepo } from "./configrepo";
 import { createGiteaApi } from "./gitea";
 import { giteaAuthEnv } from "./git";
 import {
-  activeLeases, diskHistoryEnds, failRunningCloneJobs, getSession, type SessionRow, insertDiskTotal, lastMetricTs, listAccounts, listSessions, logEvent,
+  activeLeases, diskHistoryEnds, failRunningCloneJobs, getSession, getSessionPr, type SessionRow, insertDiskTotal, lastMetricTs, listAccounts, listSessions, logEvent,
   getRepoAgent, applyPendingRestore, checkpointFully, savePendingFirstTurn, prunePendingFirstTurns, getPendingFirstTurn, deletePendingFirstTurn, openDb, startCheckpointer, pruneAccountLeases, pruneCriticReviews, pruneDiskStats, pruneEvents, pruneNotifyLog, prunePushAlerts,
 } from "./db";
 import { createSshAgents } from "./sshAgent";
@@ -411,7 +411,9 @@ const threadStore = (id: string): ThreadStore => {
   return store;
 };
 // `prWatch` is declared below; ChatHub asks it only when a run completes, after startup.
-const chatHub = new ChatHub({ hub: agentEvents, session: (id) => getSession(db, id), prCheck: (id) => prWatch.checkNow(id) });
+const chatHub = new ChatHub({
+  hub: agentEvents, session: (id) => getSession(db, id), prCheck: (id) => prWatch.checkNow(id), prRow: (id) => getSessionPr(db, id),
+});
 // The hub-facing snapshot needs runs, pending and background only: `limit: 0` skips loading every item per event.
 const chatSnapshot = (id: string) => threadStore(id).snapshot({ limit: 0 });
 // SSE fan-out (threadApi.ts) and the inbox over all sessions; an ending session is left out (its store is being archived).

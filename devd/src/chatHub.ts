@@ -38,6 +38,8 @@ export class ChatHub {
     /** Reads the session's PR now (PrWatch.checkNow), before the completion goes to the hub: the run often pushed
      *  just before, and the hub holds the "finished" while its CI checks are pending (HubDeps.prChecks). */
     prCheck?: (id: string) => Promise<unknown>;
+    /** The session's PR row as the PR watch last wrote it (session_prs): a devd restart re-sends a completion it held. */
+    prRow?: (id: string) => { checks: string; since: number } | null;
     now?: () => number;
     log?: (msg: string) => void;
   }) {
@@ -71,6 +73,18 @@ export class ChatHub {
       return;
     }
     for (const id of subagentIds(t)) this.subagentStart(s, st, id);
+    // A "finished" the hub held for CI died with the old devd (its quiet window is in memory). Unseen, not notified
+    // (the restored live state is not done) and its PR still pending or changed since the run ended: send the
+    // completion again, marked as held, so the sweep holds, releases or silences it as before the restart.
+    if (!active && last?.status === "completed" && holdingCount(t) === 0 && this.d.prRow
+        && last.endedSeq !== null && last.endedAt !== null && t.seenSeq < last.endedSeq
+        && this.d.hub.liveSnapshot(sessionId)?.status !== "done") {
+      const row = this.d.prRow(sessionId);
+      if (row && (row.checks === "pending" || row.since >= last.endedAt)) {
+        this.d.hub.handle(s, "stop", { promptId: last.runId, backgroundTasks: 0 });
+        this.d.hub.resumePrHold(sessionId);
+      }
+    }
   }
 
   /** The link while the session runs; null when it does not (devd dropped the link on purpose) or before the

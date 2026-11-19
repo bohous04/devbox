@@ -222,13 +222,13 @@ const completed = (runId: string): BridgeEvent => ({ type: "run.completed", runI
 /** Hub, ChatHub, inbox and PR watch over one clock, wired like index.ts. The provider answers come from `prs`
  *  (per session), remote heads from `heads` (default "h1"), errors from `errors`. `seed: true` keeps the first-deploy
  *  seed pending (a fresh DB has it); otherwise the seed counts as done. */
-function setup(opts: { dbPath?: string; seed?: boolean } = {}) {
-  let now = 1_000_000;
+function setup(opts: { dbPath?: string; seed?: boolean; dir?: string; now?: number } = {}) {
+  let now = opts.now ?? 1_000_000;
   const db = openDb(opts.dbPath ?? ":memory:");
   if (!opts.seed) db.run("DELETE FROM pr_watch_seed");
-  const dir = mkdtempSync(join(tmpdir(), "prwatch-"));
+  const dir = opts.dir ?? mkdtempSync(join(tmpdir(), "prwatch-"));
   const stores = new Map<string, ThreadStore>();
-  cleanups.push(() => { for (const s of stores.values()) s.close(); rmSync(dir, { recursive: true, force: true }); });
+  cleanups.push(() => { for (const s of stores.values()) s.close(); if (!opts.dir) rmSync(dir, { recursive: true, force: true }); });
   const threads = (id: string) => {
     let s = stores.get(id);
     if (!s) { s = ThreadStore.open(dir, id); stores.set(id, s); }
@@ -245,7 +245,7 @@ function setup(opts: { dbPath?: string; seed?: boolean } = {}) {
   });
   const chatHub = new ChatHub({
     hub, session: (id) => getSession(db, id), now: () => now, log: (m) => logs.push(m),
-    prCheck: (id) => watch.checkNow(id),
+    prCheck: (id) => watch.checkNow(id), prRow: (id) => getSessionPr(db, id),
   });
   inbox = new Inbox({
     db, sessions: () => listSessions(db), session: (id) => getSession(db, id), threads,
@@ -286,12 +286,18 @@ function setup(opts: { dbPath?: string; seed?: boolean } = {}) {
   };
   if (!getSession(db, CHAT.id)) insertSession(db, CHAT);
   if (!getSession(db, TMUX.id)) insertSession(db, TMUX);
+  hub.loadPersisted(listSessions(db)); // as index.ts at startup
+  /** The bridge link of a chat session connects (after a devd restart: ChatHub seeds from the store). */
+  const connect = (id: string) => {
+    chatHub.onStatus(id, "connecting", () => snapshot(id));
+    chatHub.onStatus(id, "connected", () => snapshot(id));
+  };
   const pr = (id: string, state: PrState["state"], checks: PrState["checks"], number = 7) =>
     prs.set(id, { sessionId: id, number, url: `https://github.com/o/n/pull/${number}`, state, checks });
   const attention = (id: string) => inbox.item(getSession(db, id)!).attention;
   const sweep = () => { now += QUIET; hub.sweep(); };
   const messages = () => notified.map((n) => n.message);
-  return { db, hub, chatHub, inbox, watch, feed, pr, prs, heads, errors, polled, notified, messages, logs, attention, sweep, tick: (ms: number) => { now += ms; } };
+  return { db, dir, now: () => now, connect, hub, chatHub, inbox, watch, feed, pr, prs, heads, errors, polled, notified, messages, logs, attention, sweep, tick: (ms: number) => { now += ms; } };
 }
 
 test("pending checks hold a chat thread in working: no done until CI finishes, then done", async () => {
@@ -565,4 +571,105 @@ test("after a devd restart: no second failure notification, a merge the user uns
   await b.watch.tick();
   const c = setup({ dbPath });
   expect(c.attention(TMUX.id)).toMatchObject({ section: "working", reason: "pr-checks" });
+});
+
+// ---------------------------------------------------------------- fix round 2: restart while held, seed window
+
+/** devd A holds CHAT's "finished" for pending checks, then restarts as devd B over the same DB and thread store. */
+async function heldThenRestarted() {
+  const dbDir = mkdtempSync(join(tmpdir(), "prwatch-restart-"));
+  cleanups.push(() => rmSync(dbDir, { recursive: true, force: true }));
+  const dbPath = join(dbDir, "devd.db");
+  const storeDir = join(dbDir, "threads");
+  const a = setup({ dbPath, dir: storeDir });
+  a.pr(CHAT.id, "open", "pending");
+  await a.feed(CHAT.id, [started("r1"), completed("r1")]);
+  a.sweep();
+  a.sweep();
+  expect(a.notified).toEqual([]);
+  const b = setup({ dbPath, dir: storeDir, now: a.now() + 60_000 });
+  b.pr(CHAT.id, "open", "pending");
+  return b;
+}
+
+test("a held finished survives a devd restart: CI success → exactly one finished", async () => {
+  const b = await heldThenRestarted();
+  b.connect(CHAT.id);
+  b.sweep();
+  b.sweep();
+  expect(b.notified).toEqual([]);
+  b.pr(CHAT.id, "open", "success");
+  await b.watch.tick();
+  b.sweep();
+  b.sweep();
+  expect(b.messages()).toEqual(["Claude finished working"]);
+});
+
+test("a held finished survives a devd restart: CI failure → only the CI notification", async () => {
+  const b = await heldThenRestarted();
+  b.connect(CHAT.id);
+  b.sweep();
+  b.pr(CHAT.id, "open", "failure");
+  await b.watch.tick();
+  b.sweep();
+  b.sweep();
+  expect(b.messages()).toEqual(["CI failed on PR #7"]);
+  // The completion was re-sent after the restart and silenced, not just lost.
+  expect(listNotifyLog(b.db, { session: CHAT.id }).some((r) => r.event === "sweep_done" && r.reason === "ci-failed")).toBe(true);
+});
+
+test("CI that failed while devd was down, before the link reconnects: only the CI notification", async () => {
+  const b = await heldThenRestarted();
+  b.pr(CHAT.id, "open", "failure");
+  await b.watch.tick();
+  b.connect(CHAT.id);
+  b.sweep();
+  b.sweep();
+  expect(b.messages()).toEqual(["CI failed on PR #7"]);
+  // The completion was re-sent after the restart and silenced, not just lost.
+  expect(listNotifyLog(b.db, { session: CHAT.id }).some((r) => r.event === "sweep_done" && r.reason === "ci-failed")).toBe(true);
+});
+
+test("a completion notified before the restart is not completed again", async () => {
+  const dbDir = mkdtempSync(join(tmpdir(), "prwatch-restart-"));
+  cleanups.push(() => rmSync(dbDir, { recursive: true, force: true }));
+  const dbPath = join(dbDir, "devd.db");
+  const storeDir = join(dbDir, "threads");
+  const a = setup({ dbPath, dir: storeDir });
+  await a.feed(CHAT.id, [started("r1"), completed("r1")]);
+  a.sweep();
+  expect(a.messages()).toEqual(["Claude finished working"]);
+  const b = setup({ dbPath, dir: storeDir, now: a.now() + 60_000 });
+  b.pr(CHAT.id, "open", "success");
+  await b.watch.tick(); // a PR row newer than the run's end
+  b.connect(CHAT.id);
+  b.sweep();
+  b.sweep();
+  expect(b.notified).toEqual([]);
+});
+
+test("seed window: checkNow is not silenced by the seed marker", async () => {
+  const t = setup({ seed: true });
+  t.pr(CHAT.id, "open", "failure");
+  await t.watch.checkNow(CHAT.id);
+  expect(t.messages()).toEqual(["CI failed on PR #7"]);
+});
+
+test("seed window: a session whose poll failed during the seed tick is seeded on its next successful poll", async () => {
+  const t = setup({ seed: true });
+  t.pr(TMUX.id, "open", "failure");
+  t.errors.set(TMUX.id, "gh: HTTP 502");
+  await t.watch.tick();
+  t.errors.delete(TMUX.id);
+  t.tick(2 * MIN);
+  await t.watch.tick();
+  expect(getSessionPr(t.db, TMUX.id)).toMatchObject({ checks: "failure" });
+  expect(t.notified).toEqual([]);
+  t.pr(TMUX.id, "open", "pending");
+  t.tick(PR_SETTLED_POLL_MS);
+  await t.watch.tick();
+  t.pr(TMUX.id, "open", "failure");
+  t.tick(2 * MIN);
+  await t.watch.tick();
+  expect(t.messages()).toEqual(["CI failed on PR #7"]);
 });

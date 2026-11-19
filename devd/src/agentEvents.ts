@@ -607,6 +607,16 @@ export class AgentEventHub {
     }
   }
 
+  /** ChatHub after a devd restart: the completion it just re-sent was held for CI before the restart, so it counts as
+   *  held (a failure finishes it silently; the deadline runs from now). */
+  resumePrHold(sessionId: string): void {
+    const st = this.state.get(sessionId);
+    if (!st || st.pendingDoneAt === null || st.prHeldSince !== null) return;
+    const now = this.now();
+    st.prHeldSince = now;
+    this.live(st, "working", "Waiting for CI checks", now);
+  }
+
   // index.ts calls this every ~5 s: fires "finished" once the quiet window has elapsed.
   // Returns the ids of sessions for which "finished" went out in this tick — the auto-end of
   // scheduled runs (autoEnd.ts) hooks onto that moment. The hub thus stays without a dependency

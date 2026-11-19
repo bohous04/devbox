@@ -82,6 +82,9 @@ export class PrWatch {
   private lastPoll = new Map<string, number>();
   /** The poll running per session: polls of one session run one after another. */
   private chains = new Map<string, Promise<void>>();
+  /** Sessions whose poll failed during the first-deploy seed tick: their next successful poll is a silent seed too
+   *  (in memory; a restart before that poll loses it). */
+  private seedLater = new Set<string>();
   private log: (msg: string) => void;
 
   constructor(private d: {
@@ -117,7 +120,7 @@ export class PrWatch {
   private watchable(s: SessionRow): boolean { return !!s.branch && s.host === "vps"; }
 
   async tick(): Promise<void> {
-    const seeding = prWatchSeedPending(this.d.db);
+    const seedTick = prWatchSeedPending(this.d.db);
     const now = this.now();
     for (const s of this.d.sessions()) {
       const row = getSessionPr(this.d.db, s.id);
@@ -127,6 +130,7 @@ export class PrWatch {
       }
       const err = this.errors.get(s.id);
       if (err && now < err.nextAt) continue;
+      const seeding = seedTick || this.seedLater.has(s.id);
       if (row?.state === "open") {
         const settled = row.checks !== "pending" && row.checks !== "unknown";
         if (settled && now - (this.lastPoll.get(s.id) ?? 0) < PR_SETTLED_POLL_MS) continue;
@@ -138,7 +142,7 @@ export class PrWatch {
         await this.serial(s, (id, head) => due || this.lastHead.get(id) !== head, seeding);
       }
     }
-    if (seeding) clearPrWatchSeed(this.d.db);
+    if (seedTick) clearPrWatchSeed(this.d.db);
     // Merges that waited for the session's next idle moment.
     for (const r of listSessionPrs(this.d.db)) {
       if (r.state === "merged" && r.merge_settled_at === null) this.guard(r.session_id, () => this.settleMerged(r.session_id));
@@ -149,7 +153,8 @@ export class PrWatch {
    *  whether its PR's checks are pending, by the newest state devd has. */
   async checkNow(sessionId: string): Promise<boolean> {
     const s = this.d.session(sessionId);
-    if (s && this.watchable(s)) await this.serial(s, undefined, prWatchSeedPending(this.d.db));
+    // Only the tick's seed pass is silent: a run completion reports what it finds.
+    if (s && this.watchable(s)) await this.serial(s, undefined, this.seedLater.has(sessionId));
     return this.pending(sessionId);
   }
 
@@ -167,7 +172,12 @@ export class PrWatch {
   private async pollOne(s: SessionRow, want: ((id: string, head: string) => boolean) | undefined, seeding: boolean): Promise<void> {
     let error: Error | null = null;
     const polls = await this.d.check([s], (_id, e) => { error = e; }, want);
-    if (error) { this.pollFailed(s.id, error); return; }
+    if (error) {
+      if (seeding) this.seedLater.add(s.id);
+      this.pollFailed(s.id, error);
+      return;
+    }
+    this.seedLater.delete(s.id);
     this.errors.delete(s.id);
     this.errorsLogged.delete(s.id);
     const p = polls.find((x) => x.sessionId === s.id);
