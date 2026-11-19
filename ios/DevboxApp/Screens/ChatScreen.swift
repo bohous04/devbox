@@ -146,7 +146,12 @@ struct ChatScreen: View {
 
     @ViewBuilder
     private var banners: some View {
-        if store.paused || store.badFrame != nil {
+        if store.ending {
+            Text("Session is ending…")
+                .font(Theme.F.meta).foregroundStyle(Theme.C.warnText)
+                .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.C.warn.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.R.md))
+        } else if store.paused || store.badFrame != nil {
             Text(store.paused ? "Live updates paused — reconnecting" : "Live update dropped: \(store.badFrame ?? "") — reopen the thread to catch up")
                 .font(Theme.F.meta).foregroundStyle(Theme.C.warnText)
                 .padding(10).frame(maxWidth: .infinity, alignment: .leading)

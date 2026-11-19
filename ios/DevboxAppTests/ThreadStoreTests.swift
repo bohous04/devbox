@@ -128,15 +128,15 @@ final class ThreadStoreLiveTests: XCTestCase {
         store.stop()
     }
 
-    /// A session that ended (or was removed) while the Mac app was closed: devd answers the stream with 404/409. That
-    /// is final: the store says ended and does not reconnect every 5 s.
+    /// A session that ended (or was removed) while the Mac app was closed: devd answers the stream with 404 (or 409
+    /// not-a-chat-session). That is final: the store says ended and does not reconnect every 5 s.
     func testStreamRefusedWith404EndsTheThreadWithoutReconnecting() async throws {
         for status in [404, 409] {
             let saved = try JSONDecoder().decode(ThreadSnapshot.self, from: snapshot(lastSeq: 10, seenSeq: 10))
             var connects = 0
             let store = ThreadStore(sessionId: "s1", client: client(), restored: saved, connect: { _, _ in
                 connects += 1
-                throw DevdHTTPError(statusCode: status, serverMessage: status == 404 ? "unknown session" : "session-ending")
+                throw DevdHTTPError(statusCode: status, serverMessage: status == 404 ? "unknown session" : "not-a-chat-session")
             })
             await store.start()
             try await waitUntil { store.ended }
@@ -145,6 +145,45 @@ final class ThreadStoreLiveTests: XCTestCase {
             XCTAssertFalse(store.paused, "HTTP \(status)")
             store.stop()
         }
+    }
+
+    /// 409 session-ending is not the end: a failed end releases the lock and the session lives on. The store says
+    /// "ending", retries on the slow interval, and streams normally once devd accepts.
+    func testSessionEndingRetriesAndResumesOn200() async throws {
+        let saved = try JSONDecoder().decode(ThreadSnapshot.self, from: snapshot(lastSeq: 10, seenSeq: 10))
+        var paths: [String] = []
+        let store = ThreadStore(sessionId: "s1", client: client(), restored: saved, endingRetry: .milliseconds(20),
+                                connect: { path, _ in
+            paths.append(path)
+            if paths.count < 3 { throw DevdHTTPError(statusCode: 409, serverMessage: "session-ending") }
+            return AsyncThrowingStream { _ in }
+        })
+        await store.start()
+        try await waitUntil { store.ending }
+        XCTAssertFalse(store.ended)
+        try await waitUntil { paths.count == 3 && !store.ending }
+        XCTAssertFalse(store.ended)
+        XCTAssertFalse(store.paused)
+        XCTAssertEqual(paths.last, "/api/stream?session=s1&afterSeq=10")
+        store.stop()
+    }
+
+    /// The end went through while the store waited: the next try gets 404 and that is final.
+    func testSessionEndingThen404Ends() async throws {
+        let saved = try JSONDecoder().decode(ThreadSnapshot.self, from: snapshot(lastSeq: 10, seenSeq: 10))
+        var connects = 0
+        let store = ThreadStore(sessionId: "s1", client: client(), restored: saved, endingRetry: .milliseconds(20),
+                                connect: { _, _ in
+            connects += 1
+            if connects == 1 { throw DevdHTTPError(statusCode: 409, serverMessage: "session-ending") }
+            throw DevdHTTPError(statusCode: 404, serverMessage: "unknown session")
+        })
+        await store.start()
+        try await waitUntil { store.ended }
+        XCTAssertFalse(store.ending)
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(connects, 2)
+        store.stop()
     }
 
     /// The Mac reopens a window's thread from its saved copy: no full reload, the stream asks from the saved seq

@@ -204,4 +204,20 @@ final class ThreadWindowsTests: XCTestCase {
         XCTAssertNotNil(ThreadWindows(defaults: defaults, directory: directory).restorePlan(current: nil).adopt)
         XCTAssertNil(ThreadWindows(defaults: defaults, directory: directory).restoreProblem, "said once")
     }
+
+    /// After an ended thread, opening it again builds a fresh store (it may live again, e.g. a reused id) instead of
+    /// handing back the ended one; until then the window that showed it keeps the ended store.
+    func testReopeningAnEndedThreadGetsAFreshStore() async throws {
+        let windows = ThreadWindows(defaults: defaults, directory: directory)
+        windows.show(window: "w1", thread: "a")
+        let old = try await loadedStore(windows, "a", seq: 10)
+        windows.ended("a")
+        XCTAssertTrue(windows.store(for: "a", client: client()) === old, "the window still showing it keeps saying ended")
+        windows.close(window: "w1")
+        windows.show(window: "w2", thread: "a")
+        let fresh = windows.store(for: "a", client: client())
+        XCTAssertFalse(fresh === old)
+        XCTAssertNil(fresh.thread, "no saved copy")
+        windows.dropStores()
+    }
 }

@@ -28,6 +28,9 @@ final class ThreadWindows {
     /// The app is quitting: its windows closing now must stay in the list.
     private var terminating = false
     private var stores: [String: ThreadStore] = [:]
+    /// Ended threads' stores, kept only for the windows still showing them ("Session ended"); opening the thread
+    /// again (`show`) builds a fresh store instead.
+    private var endedStores: [String: ThreadStore] = [:]
     /// The last run's window list could not be read: said once in the app (logged too).
     let restoreProblem: String?
 
@@ -67,6 +70,7 @@ final class ThreadWindows {
 
     /// A window appeared or changed its thread.
     func show(window: String, thread: String?) {
+        if let thread { endedStores[thread] = nil }
         if let i = windows.firstIndex(where: { $0.id == window }) {
             let old = windows[i].threadId
             windows[i].threadId = thread
@@ -88,7 +92,7 @@ final class ThreadWindows {
     /// The thread's store, shared by the windows that show it. The first one after a launch starts from the saved
     /// thread, so it streams from that seq instead of loading the whole thread again.
     func store(for threadId: String, client: DevdClient, connect: ThreadStore.Connect? = nil) -> ThreadStore {
-        if let s = stores[threadId] { return s }
+        if let s = stores[threadId] ?? endedStores[threadId] { return s }
         let s = ThreadStore(sessionId: threadId, client: client, restored: readSaved(threadId), connect: connect)
         stores[threadId] = s
         return s
@@ -98,6 +102,7 @@ final class ThreadWindows {
     func dropStores() {
         for s in stores.values { s.stop() }
         stores = [:]
+        endedStores = [:]
     }
 
     /// The app quits: keep the window list as it is and save the thread of every open window.
@@ -111,11 +116,13 @@ final class ThreadWindows {
         for id in stores.keys where windows.contains(where: { $0.threadId == id }) { save(id) }
     }
 
-    /// devd refused the thread's stream (404/409): no window restores it and its saved copy goes. The (ended) store
-    /// stays, so a window still showing the thread keeps saying it ended instead of trying to load it again.
+    /// devd says the thread's session is gone: no window restores it and its saved copy goes. Its store leaves the
+    /// shared ones (reopening starts fresh) but stays with the windows still showing it, which keep saying it ended
+    /// instead of loading it again.
     func ended(_ threadId: String) {
         for i in windows.indices where windows[i].threadId == threadId { windows[i].threadId = nil }
         persist()
+        if let s = stores.removeValue(forKey: threadId) { endedStores[threadId] = s }
         remove(file(threadId))
     }
 

@@ -258,8 +258,11 @@ final class ThreadStore: ObservableObject {
     /// The last frame that could not be read (also logged); the thread may miss that update until a reload.
     @Published private(set) var badFrame: String?
     @Published private(set) var seenError: String?
-    /// devd refused the stream with 404/409: the session is gone or ending. Final: no reconnect, no restart.
+    /// devd refused the stream with 404 (or 409 not-a-chat-session): the session is gone. Final: no reconnect.
     @Published private(set) var ended = false
+    /// devd answered 409 session-ending: an end is under way, but a failed end leaves the session alive, so the
+    /// stream keeps trying every `endingRetry` until devd accepts it (resume) or says 404 (ended).
+    @Published private(set) var ending = false
     /// Derived from `thread` once per update (set before it, so a render sees them together), not on every render.
     private(set) var rows: [ChatRow] = []
     private(set) var switchKey = ""
@@ -267,6 +270,7 @@ final class ThreadStore: ObservableObject {
     private static let logger = Logger(subsystem: "com.example.devbox", category: "Thread")
     private let client: DevdClient
     private let connect: Connect
+    private let endingRetry: Duration
     /// Owned only here: released with the store, it ends its connection (EventStream's deinit).
     private var stream: EventStream?
     /// The screen wants the stream (between start/resume and stop): an await that ends after stop() opens nothing.
@@ -275,9 +279,11 @@ final class ThreadStore: ObservableObject {
     private var postedSeen = 0
 
     /// `restored`: the thread as the Mac app saved it at quit; `start` then streams from its seq instead of loading it.
-    init(sessionId: String, client: DevdClient, restored: ThreadSnapshot? = nil, connect: Connect? = nil) {
+    init(sessionId: String, client: DevdClient, restored: ThreadSnapshot? = nil, endingRetry: Duration = .seconds(20),
+         connect: Connect? = nil) {
         self.sessionId = sessionId
         self.client = client
+        self.endingRetry = endingRetry
         self.connect = connect ?? { path, id in try await client.streamLines(path, lastEventId: id) }
         if let restored { setThread(restored) }
     }
@@ -336,18 +342,28 @@ final class ThreadStore: ObservableObject {
         guard stream == nil else { return }
         let session = pathSegment(sessionId)
         let s = EventStream(
-            connect: { [weak self, connect] id in
-                // Gone with its screen: no reconnect for nobody (the loop ends on the error, see EventStream).
-                guard let self else { throw CancellationError() }
-                // Each (re)connect asks from the seq the store holds now; devd prefers Last-Event-ID when sent.
-                let after = self.thread?.lastSeq ?? 0
-                do {
-                    return try await connect("/api/stream?session=\(session)&afterSeq=\(after)", id)
-                } catch let e as DevdHTTPError where e.statusCode == 404 || e.statusCode == 409 {
-                    Self.logger.notice("thread stream refused (HTTP \(e.statusCode) \(e.serverMessage ?? "", privacy: .public)): session ended")
-                    self.ended = true
-                    // Ends EventStream's loop: there is nothing to reconnect to.
-                    throw CancellationError()
+            connect: { [weak self, connect, endingRetry] id in
+                while true {
+                    // Gone with its screen: no reconnect for nobody (the loop ends on the error, see EventStream).
+                    guard let self else { throw CancellationError() }
+                    // Each (re)connect asks from the seq the store holds now; devd prefers Last-Event-ID when sent.
+                    let after = self.thread?.lastSeq ?? 0
+                    do {
+                        let lines = try await connect("/api/stream?session=\(session)&afterSeq=\(after)", id)
+                        self.ending = false
+                        return lines
+                    } catch let e as DevdHTTPError where e.statusCode == 409 && e.serverMessage == "session-ending" {
+                        Self.logger.info("thread stream: session is ending, retrying")
+                        self.ending = true
+                    } catch let e as DevdHTTPError
+                                where e.statusCode == 404 || (e.statusCode == 409 && e.serverMessage == "not-a-chat-session") {
+                        Self.logger.notice("thread stream refused (HTTP \(e.statusCode) \(e.serverMessage ?? "", privacy: .public)): session ended")
+                        self.ending = false
+                        self.ended = true
+                        // Ends EventStream's loop: there is nothing to reconnect to.
+                        throw CancellationError()
+                    }
+                    try await Task.sleep(for: endingRetry) // throws CancellationError when the stream is stopped
                 }
             },
             onOpen: { [weak self] in self?.paused = false },
