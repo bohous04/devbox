@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { insertSession, listSessions, openDb } from "../src/db";
 import { DEFAULT_CONFIG } from "../src/config";
-import { AGENTS } from "../src/agents";
+import { AGENTS, RUNTIME_BIN } from "../src/agents";
 import { PROBE_CMD, probeActive, sweepIdleSessions } from "../src/watchdog";
 
 const HOUR = 3600_000;
@@ -15,6 +15,12 @@ const row = (id: string, last: number) => ({
 // with the `grok` runtime the watchdog would not count a session running Grok as active.
 test("probe counts processes of ALL runtimes from the profile table", () => {
   for (const spec of Object.values(AGENTS)) expect(PROBE_CMD).toContain(spec.runtime);
+});
+
+// A chat-only runtime is started by its binary directly (no tmux wrapper): its process is named after RUNTIME_BIN.
+test("probe counts the process of a chat-only agent under its binary name (vibe-acp)", () => {
+  for (const spec of Object.values(AGENTS).filter((a) => a.chatOnly)) expect(PROBE_CMD).toContain(RUNTIME_BIN[spec.runtime]);
+  expect(PROBE_CMD).toContain("vibe-acp");
 });
 
 // Regression: the probe used to treat as "alive" only an attached tmux client or claude

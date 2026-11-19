@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { AGENT_RUNTIMES } from "./agents";
+import { AGENT_RUNTIMES, AGENTS, RUNTIME_BIN } from "./agents";
 import type { Settings } from "./config";
 import { listSessions, type SessionRow } from "./db";
 import { execInContainer } from "./docker";
@@ -10,7 +10,11 @@ export type ActivityProbe = (s: SessionRow) => Promise<boolean>;
 // Process names that mean "work is happening in the session" — derived from the profile table,
 // so adding another runtime cannot be forgotten by the watchdog. If a runtime were missing here,
 // the watchdog would consider a session with a working agent idle and put it to sleep.
-const AGENT_PROCS = AGENT_RUNTIMES;
+// A chat-only runtime has no tmux wrapper: the bridge starts its binary directly, so `ps` names it after RUNTIME_BIN.
+const AGENT_PROCS = [...new Set([
+  ...AGENT_RUNTIMES,
+  ...Object.values(AGENTS).filter((a) => a.chatOnly).map((a) => RUNTIME_BIN[a.runtime]),
+])];
 
 // Two lines: the number of attached tmux clients and the number of live agent processes.
 // `|| true` keeps the exit code at zero — grep without a match returns 1.
