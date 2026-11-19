@@ -297,6 +297,15 @@ function hookMeta(b: Record<string, unknown>): HookMeta {
   };
 }
 
+/** Validation shared by schedule create/update: the runtime, the agent, and that a chat schedule's agent can run in chat. */
+function scheduleRuntimeError(db: Database, folder: string, project: string, repo: string, runtime: unknown, agent: unknown): string | null {
+  if (runtime !== undefined && runtime !== "tmux" && runtime !== "chat") return "invalid runtime (tmux|chat)";
+  if (agent !== undefined && agent !== null && !isAgentName(agent)) return `invalid agent (${AGENT_IDS.join("|")})`;
+  if (runtime !== "chat") return null;
+  const effective = resolveAgent((agent ?? undefined) as AgentName | undefined, getRepoAgent(db, folder, project, repo));
+  return chatRuntimeBlock(effective, "vps");
+}
+
 export function createApp(d: ApiDeps): Hono {
   // Live Activity: an unapproved SSH key = the session is waiting. State is read from the DB (newest
   // open request), so deciding one request does not clear the wait for another.
@@ -2132,7 +2141,9 @@ export function createApp(d: ApiDeps): Hono {
     // `important` is OPT-IN, not opt-out: it means Pushover emergency (priority 2 =
     // a persistent alarm until acknowledged) for that session's notifications. Until the UI had a
     // toggle for it, all schedules were created with a one and the morning cron then rang.
-    const row: ScheduleRow = { id: crypto.randomUUID(), name: b.name, cron: b.cron, folder: b.folder, project: b.project, repo: b.repo, clone_url: b.cloneUrl, prompt: b.prompt, important: b.important === 1 ? 1 : 0, enabled: 1, last_run_at: null };
+    const bad = scheduleRuntimeError(d.db, b.folder, b.project, b.repo, b.runtime, b.agent);
+    if (bad) return c.json({ error: bad }, 400);
+    const row: ScheduleRow = { id: crypto.randomUUID(), name: b.name, cron: b.cron, folder: b.folder, project: b.project, repo: b.repo, clone_url: b.cloneUrl, prompt: b.prompt, important: b.important === 1 ? 1 : 0, enabled: 1, last_run_at: null, runtime: b.runtime ?? "tmux", agent: b.agent ?? null };
     insertSchedule(d.db, row);
     return c.json(row, 201);
   });
@@ -2141,8 +2152,11 @@ export function createApp(d: ApiDeps): Hono {
     if (!getSchedule(d.db, id)) return c.json({ error: "unknown schedule" }, 404);
     const b = (await c.req.json().catch(() => ({}))) as Partial<ScheduleRow>;
     if (b.cron !== undefined && !validCron(b.cron)) return c.json({ error: "invalid cron expression" }, 400);
+    const cur = getSchedule(d.db, id)!;
+    const bad = scheduleRuntimeError(d.db, cur.folder, cur.project, cur.repo, b.runtime ?? cur.runtime, b.agent === undefined ? cur.agent : b.agent);
+    if (bad) return c.json({ error: bad }, 400);
     const patch: Partial<ScheduleRow> = {};
-    for (const k of ["name", "cron", "prompt", "enabled", "important"] as const) if (b[k] !== undefined) (patch as Record<string, unknown>)[k] = b[k];
+    for (const k of ["name", "cron", "prompt", "enabled", "important", "runtime", "agent"] as const) if (b[k] !== undefined) (patch as Record<string, unknown>)[k] = b[k];
     updateSchedule(d.db, id, patch);
     return c.json(getSchedule(d.db, id));
   });

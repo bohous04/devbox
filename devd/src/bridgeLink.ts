@@ -86,6 +86,8 @@ export class BridgeLinks {
     onBehind: (sessionId: string) => void;
     /** Every handshake, after the replayed events were applied. */
     onHandshake?: (sessionId: string, h: BridgeHandshake) => void;
+    /** Where devd's first message survives a devd restart (main DB); without it the message is memory only. */
+    pendingTurns?: { save: (id: string, text: string) => void; load: (id: string) => string | null; remove: (id: string) => void };
     retryMs?: number;
     log?: (msg: string) => void;
   }) {
@@ -96,6 +98,11 @@ export class BridgeLinks {
   /** Keeps a link to the session's bridge, reconnecting every `retryMs` until `drop`. Idempotent. */
   ensure(sessionId: string): void {
     if (this.links.has(sessionId)) return;
+    // A first message persisted before a restart is delivered on this link's first connection.
+    if (!this.firstTurns.has(sessionId)) {
+      const saved = this.d.pendingTurns?.load(sessionId);
+      if (saved != null) this.firstTurns.set(sessionId, saved);
+    }
     const link: Link = {
       status: "connecting", socket: null, buffer: "", decoder: new TextDecoder(), outbound: [],
       pending: new Map(), retry: null, dropped: false, outageLogged: false, behindSince: null,
@@ -108,7 +115,7 @@ export class BridgeLinks {
   /** Stops retrying and closes the socket. Commands in flight fail with AgentDisconnected. No status callback:
    *  dropping is the owner's decision (stop/end), not something the link observed. */
   drop(sessionId: string): void {
-    if (this.firstTurns.delete(sessionId)) this.log(`bridge link ${sessionId}: dropped before devd's first message was sent; it is discarded`);
+    if (this.discardFirstTurn(sessionId)) this.log(`bridge link ${sessionId}: dropped before devd's first message was sent; it is discarded`);
     const link = this.links.get(sessionId);
     if (!link) return;
     this.links.delete(sessionId);
@@ -147,22 +154,31 @@ export class BridgeLinks {
 
   /** Sends `text` as a startTurn once the link is connected (at once if it is). For devd's own first message
    *  of a session (a pull conflict on open). Not sent because the bridge was unreachable: tried again on the next
-   *  connection. Timed out (outcome unknown) or refused: logged, never resent. */
+   *  connection, also after a devd restart (persisted until the bridge answered). Timed out (outcome unknown) or
+   *  refused: logged, never resent. */
   startTurnWhenConnected(sessionId: string, text: string): void {
+    this.d.pendingTurns?.save(sessionId, text);
     this.firstTurns.set(sessionId, text);
     if (this.status(sessionId) === "connected") this.sendFirstTurn(sessionId);
+  }
+
+  /** Forgets a first message that was not sent yet (memory and DB). True when there was one. */
+  discardFirstTurn(sessionId: string): boolean {
+    this.d.pendingTurns?.remove(sessionId);
+    return this.firstTurns.delete(sessionId);
   }
 
   private sendFirstTurn(sessionId: string) {
     const text = this.firstTurns.get(sessionId);
     if (text === undefined) return;
     this.firstTurns.delete(sessionId);
-    this.send(sessionId, { kind: "startTurn", text }).catch((err: Error) => {
+    this.send(sessionId, { kind: "startTurn", text }).then(() => this.d.pendingTurns?.remove(sessionId), (err: Error) => {
       if (err instanceof AgentDisconnected && !(err instanceof CommandTimeout) && this.links.has(sessionId)) {
         this.firstTurns.set(sessionId, text);
         this.log(`bridge link ${sessionId}: devd's first message not sent (${err.message}); retrying on the next connection`);
         return;
       }
+      this.d.pendingTurns?.remove(sessionId);
       this.log(`bridge link ${sessionId}: devd's first message failed, not resent: ${err.message}`);
     });
   }

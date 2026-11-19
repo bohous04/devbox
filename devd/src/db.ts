@@ -220,6 +220,13 @@ export function openDb(path: string): Database {
     important INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
     last_run_at INTEGER)`);
   migrateScheduleImportance(db);
+  const scheduleCols = () => (db.query("PRAGMA table_info(schedules)").all() as { name: string }[]).map((c) => c.name);
+  if (!scheduleCols().includes("runtime")) db.run(`ALTER TABLE schedules ADD COLUMN runtime TEXT NOT NULL DEFAULT 'tmux'`); // 'tmux' | 'chat'
+  if (!scheduleCols().includes("agent")) db.run(`ALTER TABLE schedules ADD COLUMN agent TEXT`); // NULL = the repo's remembered agent, as for a manual open
+  // devd's own first message of a chat session until the bridge confirmed it (BridgeLinks.startTurnWhenConnected):
+  // a devd restart between open and connect must not lose a scheduled run's prompt.
+  db.run(`CREATE TABLE IF NOT EXISTS pending_first_turns (
+    session_id TEXT PRIMARY KEY, text TEXT NOT NULL, created_at INTEGER NOT NULL)`);
   // Dummy git tokens. In the database, not only in memory — a devd restart must not break git
   // in running sessions (the container has the dummy in a file and devd must be able to translate it).
   db.run(`CREATE TABLE IF NOT EXISTS git_placeholders (
@@ -1078,12 +1085,24 @@ export function failRunningCloneJobs(db: Database): void {
 export interface ScheduleRow {
   id: string; name: string; cron: string; folder: string; project: string; repo: string;
   clone_url: string; prompt: string; important: 0 | 1; enabled: 0 | 1; last_run_at: number | null;
+  runtime: SessionRuntime; agent: AgentName | null;
+}
+
+export function savePendingFirstTurn(db: Database, sessionId: string, text: string): void {
+  db.query(`INSERT OR REPLACE INTO pending_first_turns (session_id,text,created_at) VALUES (?,?,?)`).run(sessionId, text, Date.now());
+}
+export function getPendingFirstTurn(db: Database, sessionId: string): string | null {
+  const r = db.query(`SELECT text FROM pending_first_turns WHERE session_id=?`).get(sessionId) as { text: string } | null;
+  return r?.text ?? null;
+}
+export function deletePendingFirstTurn(db: Database, sessionId: string): void {
+  db.query(`DELETE FROM pending_first_turns WHERE session_id=?`).run(sessionId);
 }
 
 export function insertSchedule(db: Database, r: ScheduleRow): void {
-  db.query(`INSERT INTO schedules (id,name,cron,folder,project,repo,clone_url,prompt,important,enabled,last_run_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(r.id, r.name, r.cron, r.folder, r.project, r.repo, r.clone_url, r.prompt, r.important, r.enabled, r.last_run_at);
+  db.query(`INSERT INTO schedules (id,name,cron,folder,project,repo,clone_url,prompt,important,enabled,last_run_at,runtime,agent)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(r.id, r.name, r.cron, r.folder, r.project, r.repo, r.clone_url, r.prompt, r.important, r.enabled, r.last_run_at, r.runtime, r.agent);
 }
 export function listSchedules(db: Database): ScheduleRow[] {
   return db.query(`SELECT * FROM schedules ORDER BY name`).all() as ScheduleRow[];

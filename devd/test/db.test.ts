@@ -110,7 +110,7 @@ test("migrateDiskStats drops old path-keyed schema", () => {
 
 test("schedules CRUD", () => {
   const db = openDb(":memory:");
-  const row: ScheduleRow = { id: "s1", name: "nightly bump", cron: "0 3 * * *", folder: "acme", project: "shop", repo: "cms", clone_url: "https://github.com/acme/cms.git", prompt: "bump deps", important: 1, enabled: 1, last_run_at: null };
+  const row: ScheduleRow = { id: "s1", name: "nightly bump", cron: "0 3 * * *", folder: "acme", project: "shop", repo: "cms", clone_url: "https://github.com/acme/cms.git", prompt: "bump deps", important: 1, enabled: 1, last_run_at: null, runtime: "tmux", agent: null };
   insertSchedule(db, row);
   expect(listSchedules(db)).toEqual([row]);
   expect(getSchedule(db, "s1")).toEqual(row);
@@ -278,7 +278,7 @@ test("migrateScheduleImportance: silences old schedules, but only once", () => {
   db.run("UPDATE schedules SET important=1");   // state before the migration
   insertSchedule(db, {
     id: "s-old", name: "morning status", cron: "7 8 * * *", folder: "acme", project: "shop", repo: "cms",
-    clone_url: "https://x/cms.git", prompt: "p", important: 1, enabled: 1, last_run_at: null,
+    clone_url: "https://x/cms.git", prompt: "p", important: 1, enabled: 1, last_run_at: null, runtime: "tmux", agent: null,
   });
 
   migrateScheduleImportance(db);

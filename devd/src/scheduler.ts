@@ -2,10 +2,23 @@ import type { Database } from "bun:sqlite";
 import { cronMatch } from "./cron";
 import { getSchedule, listSchedules, listSessions, logEvent, setAutoEnd, setImportant, setScheduleLastRun, type ScheduleRow } from "./db";
 import type { NotifyFn } from "./agentEvents";
+import type { AgentName, SessionRuntime } from "./db";
+
+/** How long a chat schedule waits for the new session's bridge before it fails visibly. */
+export const BRIDGE_WAIT_MS = 120_000;
 
 export interface SchedulerDeps {
   db: Database;
-  open: (t: { folder: string; project: string; repo: string; cloneUrl: string; prompt: string }) => Promise<{ session: { id: string } }>;
+  open: (t: { folder: string; project: string; repo: string; cloneUrl: string; prompt?: string; runtime?: SessionRuntime; agent?: AgentName }) => Promise<{ session: { id: string }; claudePrompt?: string }>;
+  /** The bridge links of chat sessions; required for a chat schedule. */
+  links?: {
+    ensure: (id: string) => void;
+    status: (id: string) => string;
+    startTurnWhenConnected: (id: string, text: string) => void;
+    discardFirstTurn: (id: string) => boolean;
+  };
+  bridgeWaitMs?: number;
+  pollMs?: number;
   containerRunning: (id: string) => Promise<boolean>;
   notify: NotifyFn;
   now?: () => number;
@@ -37,6 +50,15 @@ export function dueSchedules(db: Database, now: Date): ScheduleRow[] {
 export function createScheduler(d: SchedulerDeps) {
   const now = () => d.now?.() ?? Date.now();
 
+  async function waitConnected(id: string): Promise<boolean> {
+    const deadline = Date.now() + (d.bridgeWaitMs ?? BRIDGE_WAIT_MS);
+    while (d.links!.status(id) !== "connected") {
+      if (Date.now() >= deadline) return false;
+      await Bun.sleep(d.pollMs ?? 250);
+    }
+    return true;
+  }
+
   async function fireSchedule(sch: ScheduleRow): Promise<void> {
     const id = `dev-${sch.project}-${sch.repo}`;
     const at = now();
@@ -61,12 +83,31 @@ export function createScheduler(d: SchedulerDeps) {
     }
     const branch = `auto/${slug(sch.name)}-${stamp(new Date(at))}`;
     try {
-      const r = await d.open({ folder: sch.folder, project: sch.project, repo: sch.repo, cloneUrl: sch.clone_url, prompt: scheduledPrompt(sch, branch) });
+      const chat = sch.runtime === "chat";
+      if (chat && !d.links) throw new Error("chat schedules need the bridge links, which are not available");
+      // A chat session has no prompt file: the prompt is the first turn, sent through the bridge below.
+      const r = await d.open({
+        folder: sch.folder, project: sch.project, repo: sch.repo, cloneUrl: sch.clone_url,
+        ...(chat ? { runtime: "chat" as const } : { prompt: scheduledPrompt(sch, branch) }),
+        ...(sch.agent ? { agent: sch.agent } : {}),
+      });
       setImportant(d.db, r.session.id, sch.important);
       // A scheduled run is one-off work: once the agent finishes its turn, autoEnd.ts ends the
       // session. Set only AFTER open() — for a restarted session open() actually
       // resets the flag, so a manually reopened session does not vanish after its first own turn.
       setAutoEnd(d.db, r.session.id, 1);
+      if (chat) {
+        const text = scheduledPrompt(sch, branch);
+        // devd's own message about a pull conflict goes first, in the same turn: one first message per session.
+        const links = d.links!;
+        links.ensure(r.session.id);
+        // Persisted until the bridge confirms, so a devd restart while waiting still delivers it.
+        links.startTurnWhenConnected(r.session.id, r.claudePrompt ? `${r.claudePrompt}\n\n${text}` : text);
+        if (!(await waitConnected(r.session.id))) {
+          links.discardFirstTurn(r.session.id);
+          throw new Error(`the agent bridge of ${r.session.id} did not connect within ${Math.round((d.bridgeWaitMs ?? BRIDGE_WAIT_MS) / 1000)} s`);
+        }
+      }
       logEvent(d.db, r.session.id, "schedule_run", { schedule: sch.name, branch, at });
       // DELIBERATELY without `important`: emergency (Pushover priority 2) is an alarm that rings
       // every minute for a whole hour until you acknowledge it — and "run started" wants nothing from you.

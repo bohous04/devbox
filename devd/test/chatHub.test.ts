@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentEventHub, type NotifyExtra } from "../src/agentEvents";
 import { ChatHub } from "../src/chatHub";
-import { insertSession, listNotifyLog, openDb, type SessionRow } from "../src/db";
+import { insertSession, listNotifyLog, openDb, setAutoEnd, type SessionRow } from "../src/db";
+import { endFinishedRuns } from "../src/autoEnd";
 import { ThreadStore } from "../src/threadStore";
 import type { BackgroundWork, BridgeEvent, LoggedEvent, ThreadSnapshot } from "../../shared/thread";
 
@@ -245,4 +246,16 @@ test("ignored event types never read the snapshot; drop forgets the session", ()
   f.chat.onStatus(f.row.id, "connected", () => empty);
   f.chat.drop(f.row.id);
   expect(f.chat.link(f.row.id)).toBeNull();
+});
+
+test("a completed chat run is returned by sweep and ends an auto_end session", async () => {
+  const f = fixture();
+  setAutoEnd(f.db, f.row.id, 1);
+  f.feed(started("r1"), completed("r1"));
+  f.tick(QUIET);
+  const done = f.hub.sweep();
+  expect(done).toEqual([f.row.id]);
+  const ended: string[] = [];
+  expect(await endFinishedRuns({ db: f.db, end: async (id) => { ended.push(id); } }, done)).toEqual([f.row.id]);
+  expect(ended).toEqual([f.row.id]);
 });

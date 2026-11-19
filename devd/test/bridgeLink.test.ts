@@ -329,3 +329,27 @@ test("devd's first message on a connected link goes out at once; a refused one i
   await waitFor(() => logs.some((l) => l.includes("first message") && l.includes("attachments are not supported yet")), "refusal logged");
   expect(b.cmds).toHaveLength(1);
 });
+
+test("devd's first message is persisted, survives a restart and is deleted once the bridge answered", async () => {
+  const saved = new Map<string, string>();
+  const pendingTurns = { save: (id: string, t: string) => { saved.set(id, t); }, load: (id: string) => saved.get(id) ?? null, remove: (id: string) => { saved.delete(id); } };
+  const mk = () => {
+    const root = mkdtempSync(join(tmpdir(), "bl-"));
+    mkdirSync(join(root, ID));
+    const store = ThreadStore.open(root, ID);
+    const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: () => {}, pendingTurns });
+    cleanups.push(() => { links.drop(ID); store.close(); rmSync(root, { recursive: true, force: true }); });
+    return { links, sock: join(root, ID, "agent.sock") };
+  };
+  // First devd: the message is stored while no bridge is reachable, then devd "restarts" (a new BridgeLinks).
+  const first = mk();
+  first.links.startTurnWhenConnected(ID, "scheduled prompt");
+  expect(saved.get(ID)).toBe("scheduled prompt");
+  const second = mk();
+  const b = fakeBridge(second.sock);
+  cleanups.push(() => b.close());
+  second.links.ensure(ID);
+  await waitFor(() => b.cmds.length === 1, "persisted first turn sent after the restart");
+  expect(b.cmds).toEqual([{ kind: "startTurn", text: "scheduled prompt" }]);
+  await waitFor(() => !saved.has(ID), "persisted row deleted after the bridge answered");
+});

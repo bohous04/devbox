@@ -40,7 +40,7 @@ import { createGiteaApi } from "./gitea";
 import { giteaAuthEnv } from "./git";
 import {
   activeLeases, diskHistoryEnds, failRunningCloneJobs, getSession, type SessionRow, insertDiskTotal, lastMetricTs, listAccounts, listSessions, logEvent,
-  applyPendingRestore, checkpointFully, openDb, startCheckpointer, pruneAccountLeases, pruneCriticReviews, pruneDiskStats, pruneEvents, pruneNotifyLog, prunePushAlerts,
+  applyPendingRestore, checkpointFully, savePendingFirstTurn, getPendingFirstTurn, deletePendingFirstTurn, openDb, startCheckpointer, pruneAccountLeases, pruneCriticReviews, pruneDiskStats, pruneEvents, pruneNotifyLog, prunePushAlerts,
 } from "./db";
 import { createSshAgents } from "./sshAgent";
 import { pendingSshLabel, reapExpiredGrants } from "./sshApprovals";
@@ -426,6 +426,11 @@ const bridgeLinks = new BridgeLinks({
   },
   onBehind: (id) => inbox.changed(id),
   onHandshake: (id, h) => chatSwitch.onHandshake(id, h),
+  pendingTurns: {
+    save: (id, text) => savePendingFirstTurn(db, id, text),
+    load: (id) => getPendingFirstTurn(db, id),
+    remove: (id) => deletePendingFirstTurn(db, id),
+  },
 });
 const releaseThread = (id: string) => {
   bridgeLinks.drop(id);
@@ -683,6 +688,7 @@ const backupDeps = { volume: "claude-home", codexVolume: "codex-home", extraVolu
 const scheduler = createScheduler({
   db, notify,
   open: (t) => mgr.open(t),
+  links: bridgeLinks,
   containerRunning: async (id) => (await containerState(id)) === "running",
 });
 

@@ -3,7 +3,7 @@ import { openDb, insertSchedule, getSession, insertSession, type ScheduleRow, ty
 import { createScheduler, dueSchedules, scheduledPrompt, slug, stamp } from "../src/scheduler";
 
 function sched(over: Partial<ScheduleRow> = {}): ScheduleRow {
-  return { id: "s1", name: "Nightly bump", cron: "0 3 * * *", folder: "acme", project: "shop", repo: "cms", clone_url: "https://x/cms.git", prompt: "bump deps", important: 1, enabled: 1, last_run_at: null, ...over };
+  return { id: "s1", name: "Nightly bump", cron: "0 3 * * *", folder: "acme", project: "shop", repo: "cms", clone_url: "https://x/cms.git", prompt: "bump deps", important: 1, enabled: 1, last_run_at: null, runtime: "tmux", agent: null, ...over };
 }
 const at3 = new Date(2026, 6, 9, 3, 0, 0);
 
@@ -146,4 +146,91 @@ test("fireSchedule: a skipped run does not set auto_end", async () => {
   insertSession(db, { id: "dev-shop-cms", folder: "acme", project: "shop", repo: "cms", container: "dev-shop-cms", port_base: 1, status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0 } as SessionRow);
   await s.fireSchedule(sched());
   expect(getSession(db, "dev-shop-cms")!.auto_end).toBe(0);
+});
+
+// Chat schedules: no prompt file; the prompt is the session's first turn, sent through the bridge once it connects.
+function fakeLinks(statuses: string[]) {
+  const calls: string[] = []; const turns: Record<string, string> = {};
+  return {
+    calls, turns,
+    links: {
+      ensure: (id: string) => { calls.push(`ensure ${id}`); },
+      status: () => statuses.length > 1 ? statuses.shift()! : statuses[0],
+      startTurnWhenConnected: (id: string, text: string) => { calls.push(`start ${id}`); turns[id] = text; },
+      discardFirstTurn: (id: string) => { calls.push(`discard ${id}`); return delete turns[id]; },
+    },
+  };
+}
+
+test("fireSchedule (chat): opens a chat session without a prompt and sends the scheduled prompt as the first turn", async () => {
+  const db = openDb(":memory:");
+  const opened: Record<string, unknown>[] = []; const notes: string[] = [];
+  const f = fakeLinks(["connecting", "connected"]);
+  const s = createScheduler({
+    db, open: async (t) => { opened.push(t); return { session: { id: "dev-shop-cms" } }; },
+    containerRunning: async () => false, notify: (_t, m) => { notes.push(m); }, now: () => at3.getTime(), links: f.links, pollMs: 1,
+  });
+  insertSession(db, { id: "dev-shop-cms", folder: "acme", project: "shop", repo: "cms", container: "dev-shop-cms", port_base: 1, status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0, runtime: "chat" } as SessionRow);
+  await s.fireSchedule(sched({ runtime: "chat", agent: "codex" }));
+  expect(opened[0]).toMatchObject({ runtime: "chat", agent: "codex" });
+  expect(opened[0].prompt).toBeUndefined();
+  expect(f.calls).toEqual(["ensure dev-shop-cms", "start dev-shop-cms"]);
+  expect(f.turns["dev-shop-cms"]).toBe(scheduledPrompt(sched(), "auto/nightly-bump-20260709-0300"));
+  expect(getSession(db, "dev-shop-cms")!.auto_end).toBe(1);
+  expect(notes).toEqual(['Scheduled run "Nightly bump" started']);
+});
+
+test("fireSchedule (chat): a devd conflict prompt goes in front of the scheduled prompt", async () => {
+  const db = openDb(":memory:");
+  const f = fakeLinks(["connected"]);
+  const s = createScheduler({
+    db, open: async () => ({ session: { id: "dev-shop-cms" }, claudePrompt: "resolve the conflict" }),
+    containerRunning: async () => false, notify: () => {}, links: f.links, pollMs: 1,
+  });
+  await s.fireSchedule(sched({ runtime: "chat" }));
+  expect(f.turns["dev-shop-cms"]).toStartWith("resolve the conflict\n\nAutomated scheduled run");
+});
+
+test("fireSchedule (chat): a bridge that never connects fails visibly and drops the pending first turn", async () => {
+  const db = openDb(":memory:");
+  const notes: string[] = []; const extras: unknown[] = [];
+  const f = fakeLinks(["connecting"]);
+  const s = createScheduler({
+    db, open: async () => ({ session: { id: "dev-shop-cms" } }),
+    containerRunning: async () => false, notify: (_t, m, e) => { notes.push(m); extras.push(e); },
+    links: f.links, bridgeWaitMs: 30, pollMs: 5,
+  });
+  await s.fireSchedule(sched({ runtime: "chat" }));
+  expect(f.calls).toContain("discard dev-shop-cms");
+  expect(f.turns["dev-shop-cms"]).toBeUndefined();
+  const types = (db.query("SELECT type, data FROM events").all() as { type: string; data: string }[]);
+  expect(types.map((e) => e.type)).toEqual(["schedule_error"]);
+  expect(types[0].data).toContain("did not connect");
+  expect(notes).toHaveLength(1);
+  expect(notes[0]).toContain("failed");
+  expect(extras).toEqual([{ target: { kind: "schedules" } }]);
+});
+
+test("fireSchedule (chat): skip-if-running is unchanged", async () => {
+  const db = openDb(":memory:");
+  const opened: unknown[] = []; const notes: string[] = [];
+  const f = fakeLinks(["connected"]);
+  const s = createScheduler({
+    db, open: async (t) => { opened.push(t); return { session: { id: "x" } }; },
+    containerRunning: async () => true, notify: (_t, m) => { notes.push(m); }, links: f.links,
+  });
+  await s.fireSchedule(sched({ runtime: "chat" }));
+  expect(opened).toEqual([]);
+  expect(f.calls).toEqual([]);
+  expect(notes[0]).toContain("skipped");
+});
+
+test("fireSchedule (tmux): still opens with the prompt file channel and no runtime", async () => {
+  const db = openDb(":memory:");
+  const opened: Record<string, unknown>[] = [];
+  const s = createScheduler({ db, open: async (t) => { opened.push(t); return { session: { id: "x" } }; }, containerRunning: async () => false, notify: () => {} });
+  await s.fireSchedule(sched());
+  expect(opened[0].runtime).toBeUndefined();
+  expect(opened[0].agent).toBeUndefined();
+  expect(String(opened[0].prompt)).toContain("bump deps");
 });
