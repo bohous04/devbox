@@ -540,6 +540,16 @@ describe("serve", () => {
     expect(f.turns.map((t) => t.text)).toEqual(["still here"]);
   });
 
+  test("S6-R20: a switch whose open throws at once answers with the error and exits serve; the old target stays persisted", async () => {
+    const f = fakeHarness({ openThrows: [undefined, new Error("CODEX_HOME is not set for the Codex harness")] });
+    const bridge = await start(f);
+    f.emit({ type: "thread.native", harness: "claude", nativeThreadId: "thread-a", account: null, model: "m" });
+    codexAccount(ACCT);
+    await expect(cmd({ kind: "switchTarget", target: { harness: "codex", account: ACCT, model: null, env: {} }, resume: null, handoff: null })).rejects.toThrow("CODEX_HOME is not set");
+    expect(await bridge.closed).toBe(EXIT_HARNESS_ENDED);
+    expect(state()).toMatchObject({ harness: "claude", nativeThreadId: "thread-a", target: null });
+  });
+
   test("restartAgent whose reopen throws answers with the error and exits serve for a restart", async () => {
     const f = fakeHarness({ openThrows: [undefined, new Error("claude binary not found on PATH")] });
     const bridge = await start(f);

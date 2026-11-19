@@ -431,6 +431,11 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       }
     })());
   const close = () => shutdown(EXIT_STOPPED);
+  /** No usable harness is left: exit for a restart once the command's reply is written (as for `stop`). */
+  const exitAfterReply = () => {
+    harness = null;
+    setTimeout(() => void shutdown(EXIT_HARNESS_ENDED).catch((err) => logError(`agent-bridge: shutdown failed: ${errorText(err)}`)), 0);
+  };
 
   // `retired` marks a harness serve closes on purpose (restartAgent, shutdown) or, opened by a switch or at start, one
   // that failed to open in a way the caller handles (`handlesFailure`: a failed resume, devd re-plans; a switched
@@ -606,18 +611,9 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     state.nativeThreadId = cmd.resume;
     if (cmd.handoff !== null || !sameThread) state.pendingHandoff = cmd.handoff;
     persist();
-    const h = openHarness(() => true);
-    harness = h;
-    try {
-      await h.session.ready;
-    } catch (e) {
-      if (e instanceof ResumeFailedError) {
-        resumeFailed(e);
-        return;
-      }
-      // Persisting a target that cannot open would restart the bridge into it forever, while devd's DB still names
-      // the previous one: go back to that and fail the switch with the agent's error.
-      logError(`agent-bridge: opening ${target.harness} failed: ${errorText(e)}; back to ${previous.harness}`);
+    // Persisting a target that cannot open would restart the bridge into it forever, while devd's DB still names
+    // the previous one: go back to that.
+    const restorePrevious = () => {
       current = previous.current;
       state.target = previous.target;
       state.harness = previous.harness;
@@ -628,6 +624,29 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       state.usageBaseline = previous.usageBaseline;
       state.instructionsPending = previous.instructionsPending;
       persist();
+    };
+    let h: { session: HarnessSession; retired: boolean };
+    try {
+      h = openHarness(() => true);
+    } catch (e) {
+      // No harness at all now (the old one is retired): back to the previous target on disk, answer with the error,
+      // then exit so the launcher starts a fresh bridge on it (as restartAgent).
+      logError(`agent-bridge: opening ${target.harness} failed: ${errorText(e)}; back to ${previous.harness}, exiting for a restart`);
+      restorePrevious();
+      exitAfterReply();
+      throw e;
+    }
+    harness = h;
+    try {
+      await h.session.ready;
+    } catch (e) {
+      if (e instanceof ResumeFailedError) {
+        resumeFailed(e);
+        return;
+      }
+      // Fail the switch with the agent's error and reopen the previous target.
+      logError(`agent-bridge: opening ${target.harness} failed: ${errorText(e)}; back to ${previous.harness}`);
+      restorePrevious();
       if (current !== null) await openCurrent();
       throw e;
     }
@@ -676,8 +695,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
           // The old harness is closed and no new one opened: exit so the launcher starts a fresh bridge, after the
           // reply is written (as for `stop`).
           logError(`agent-bridge: reopening the harness failed: ${errorText(e)}; exiting for a restart`);
-          harness = null;
-          setTimeout(() => void shutdown(EXIT_HARNESS_ENDED).catch((err) => logError(`agent-bridge: shutdown failed: ${errorText(err)}`)), 0);
+          exitAfterReply();
           throw e;
         }
         return;
