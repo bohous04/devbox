@@ -22,7 +22,8 @@ const state: BridgeState = {
   target: { harness: "codex", account: "a1", model: "m", env: { CODEX_HOME: "/h" }, droppedEnvKeys: [] },
   pendingHandoff: { preamble: "earlier" },
   instructionsPending: true,
-  ackedSeq: 7,
+  trimSeq: 7,
+  ackCandidate: { seq: 9, at: 1234 },
   awaitingTarget: false,
 };
 
@@ -53,15 +54,15 @@ test("corrupt JSON, an empty file and a wrong shape are StateCorruptError with t
   expect(() => loadState(p)).toThrow("queue[0].attachments");
   writeFileSync(p, JSON.stringify({ ...state, target: { ...state.target, droppedEnvKeys: undefined } }));
   expect(() => loadState(p)).toThrow("target.droppedEnvKeys");
-  writeFileSync(p, JSON.stringify({ ...state, ackedSeq: -1 }));
-  expect(() => loadState(p)).toThrow("ackedSeq");
+  writeFileSync(p, JSON.stringify({ ...state, trimSeq: -1 }));
+  expect(() => loadState(p)).toThrow("trimSeq");
 });
 
 test("a state file from before switching loads with no target and no pending handoff", () => {
   const p = join(dir, "state.json");
-  const { target: _t, pendingHandoff: _h, instructionsPending: _i, ackedSeq: _a, awaitingTarget: _w, ...old } = state;
+  const { target: _t, pendingHandoff: _h, instructionsPending: _i, trimSeq: _a, ackCandidate: _c, awaitingTarget: _w, ...old } = state;
   writeFileSync(p, JSON.stringify(old));
-  expect(loadState(p)).toEqual({ ...old, target: null, pendingHandoff: null, instructionsPending: false, ackedSeq: 0, awaitingTarget: false });
+  expect(loadState(p)).toEqual({ ...old, target: null, pendingHandoff: null, instructionsPending: false, trimSeq: 0, ackCandidate: null, awaitingTarget: false });
 });
 
 test("state files written by bridge 1.2 and 1.4 load unchanged, with nothing acknowledged and no awaited target", () => {
@@ -69,6 +70,6 @@ test("state files written by bridge 1.2 and 1.4 load unchanged, with nothing ack
     const raw = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "state", `state-${v}.json`), "utf8"));
     const p = join(dir, `state-${v}.json`);
     writeFileSync(p, JSON.stringify(raw));
-    expect(loadState(p)).toEqual({ instructionsPending: false, ...raw, ackedSeq: 0, awaitingTarget: false });
+    expect(loadState(p)).toEqual({ instructionsPending: false, ...raw, trimSeq: 0, ackCandidate: null, awaitingTarget: false });
   }
 });

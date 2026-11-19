@@ -27,9 +27,11 @@ export interface BridgeState {
   /** The thread was opened new and no prompt has got through yet: an ACP agent still gets the devbox instructions
    *  (ruling S4-P3), also after a restart. */
   instructionsPending: boolean;
-  /** (bridge 1.5.0+) The seq devd last said it has stored (its hello's afterSeq): the event log may drop what is at
-   *  or below it. 0 = nothing known, nothing is dropped. */
-  ackedSeq: number;
+  /** (bridge 1.5.0+) The event log may drop what is at or below this seq: an ack (a hello's afterSeq) that was at
+   *  least ACK_TRIM_DELAY_MS old when a later hello came that was not below it. 0 = nothing is dropped. */
+  trimSeq: number;
+  /** (bridge 1.5.0+) The latest ack not yet old enough to trim to, with when it came (epoch ms). */
+  ackCandidate: { seq: number; at: number } | null;
   /** (bridge 1.5.0+) No harness opens until devd sends switchTarget: set when a lost state.json was rebuilt from a
    *  thread of another harness than the launch one (its target is devd's to say). */
   awaitingTarget: boolean;
@@ -81,7 +83,8 @@ const checkState = obj(
     target: nullable(obj({ harness: str, account: nullable(str), model: nullable(str), env: strRecord, droppedEnvKeys: arr(str) })),
     pendingHandoff: nullable(obj({ preamble: nullable(str) }, { injectItems: arr(() => {}) })),
     instructionsPending: bool,
-    ackedSeq: seq,
+    trimSeq: seq,
+    ackCandidate: nullable(obj({ seq, at: num })),
     awaitingTarget: bool,
   },
 );
@@ -101,9 +104,9 @@ export function loadState(path: string): BridgeState | null {
   checkState(raw, "state");
   // Files written before switching existed have neither target nor pendingHandoff: such a session never switched.
   // Files from before ACP agents have no instructionsPending: their threads were never ACP threads. Files from
-  // before 1.5.0 have no ackedSeq (nothing was trimmed) and never awaited a target across a restart.
+  // before 1.5.0 have no trimSeq or ackCandidate (nothing was trimmed) and never awaited a target across a restart.
   return {
-    target: null, pendingHandoff: null, instructionsPending: false, ackedSeq: 0, awaitingTarget: false,
+    target: null, pendingHandoff: null, instructionsPending: false, trimSeq: 0, ackCandidate: null, awaitingTarget: false,
     ...(raw as Partial<BridgeState>),
   } as BridgeState;
 }

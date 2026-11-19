@@ -46,6 +46,8 @@ const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export class ConfigError extends Error {}
 const WORKSPACE = "/workspace";
 const SWEEP_MS = 30_000;
+/** How old devd's ack must be before the event log is trimmed to it (ruling S6-R19). */
+export const ACK_TRIM_DELAY_MS = 10 * 60_000;
 // Adapter work with an `until` (a ScheduleWakeup) is dropped this long after its time: the agent was meant to
 // wake by then. A wakeup that fires during a user run is folded into it and never cleared by the adapter.
 export const OVERDUE_MARGIN_MS = 60_000;
@@ -295,7 +297,7 @@ function recoverState(scan: LogScan, launch: { harness: Harness; account: string
     harness: launch.harness, nativeThreadId: null, account: launch.account, model: launch.model,
     activeRunId: started.length ? started[started.length - 1]![0] : null,
     queue: open.flatMap(([runId, r]) => (r.started || r.queued === null ? [] : [{ runId, text: r.queued.text, attachments: r.queued.attachments, ...(r.queued.origin ? { origin: r.queued.origin } : {}) }])),
-    continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, ackedSeq: 0, awaitingTarget: false,
+    continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, trimSeq: 0, ackCandidate: null, awaitingTarget: false,
   };
   if (native === null) return { state, outcome: "there is no thread to resume, a new one opens" };
   if (native.harness === launch.harness) {
@@ -346,7 +348,8 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     target: null,
     pendingHandoff: null,
     instructionsPending: false,
-    ackedSeq: 0,
+    trimSeq: 0,
+    ackCandidate: null,
     awaitingTarget: false,
   };
   // A Claude/Codex target without its own home (a setModel on the launch target) keeps only the model choice: the
@@ -368,7 +371,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   const persist = () => saveState(statePath, state);
   persist();
   // What devd acknowledged before this start is dropped from the log (once it is big), then what is still open read.
-  const dropped = log.compact(state.ackedSeq);
+  const dropped = log.compact(state.trimSeq);
   if (dropped !== null) logError(`agent-bridge: trimmed ${dropped} acknowledged events from events.jsonl at start`);
   const scan = log.scan();
 
@@ -722,16 +725,26 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   // Runs whose `run.queued` is in the log: their user message is stored already.
   const announced = new Set([...scan.openRuns].filter(([, r]) => r.queued !== null).map(([id]) => id));
 
-  /** A hello: devd has stored everything up to `afterSeq`. Persisted, so the next start trims with it too; a failure
-   *  here is logged and never drops the link (the log just stays longer). */
+  /** A hello: devd has stored everything up to `afterSeq`, but its store may still lose the newest of them in a power
+   *  loss (WAL, synchronous=NORMAL). So the trim lags one ack (ruling S6-R19): an ack becomes the trim point only when
+   *  a later hello comes at least ACK_TRIM_DELAY_MS after it and is not below it (a devd that came back lower
+   *  replaces the candidate and keeps everything it misses). Persisted, so the next start trims with it too; a failure here
+   *  is logged and never drops the link (the log just stays longer). */
   function onHello(afterSeq: number): void {
     try {
       const ack = Math.min(afterSeq, log.lastSeq());
-      if (ack !== state.ackedSeq) {
-        state.ackedSeq = ack;
-        persist();
+      const t = now();
+      const c = state.ackCandidate;
+      if (c === null || ack < c.seq) {
+        // A first ack, or devd came back below the candidate (it lost events it had acknowledged): the candidate is
+        // not trimmed to; this ack starts ageing instead.
+        state.ackCandidate = { seq: ack, at: t };
+      } else if (t - c.at >= ACK_TRIM_DELAY_MS) {
+        state.trimSeq = c.seq;
+        state.ackCandidate = { seq: ack, at: t };
       }
-      const n = log.compact(ack);
+      persist();
+      const n = log.compact(state.trimSeq);
       if (n !== null) logError(`agent-bridge: trimmed ${n} events devd acknowledged from events.jsonl`);
     } catch (e) {
       logError(`agent-bridge: trimming events.jsonl failed: ${errorText(e)}`);

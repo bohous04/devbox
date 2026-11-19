@@ -122,7 +122,7 @@ function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities | (() => 
 }
 
 function baseState(over: Partial<BridgeState> = {}): BridgeState {
-  return { harness: "claude", nativeThreadId: null, account: null, model: null, activeRunId: null, queue: [], continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, ackedSeq: 0, awaitingTarget: false, ...over };
+  return { harness: "claude", nativeThreadId: null, account: null, model: null, activeRunId: null, queue: [], continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, trimSeq: 0, ackCandidate: null, awaitingTarget: false, ...over };
 }
 
 // Account homes for switch targets, under the test dir.
@@ -145,7 +145,7 @@ function codexAccount(id: string, auth = '{"tokens":{}}'): void {
   writeFileSync(join(homes().sharedHome, "config.toml"), 'model = "x"\n');
 }
 
-async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string | null; claudeExecutable?: string | null; acpBins?: string[]; logError?: (msg: string) => void; logCompactMinBytes?: number } = {}) {
+async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string | null; claudeExecutable?: string | null; acpBins?: string[]; logError?: (msg: string) => void; logCompactMinBytes?: number; now?: () => number } = {}) {
   const bridge = await serve({
     bridgeDir: dir,
     socketPath,
@@ -159,7 +159,7 @@ async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string
       claudeExecutable: over.claudeExecutable === undefined ? "/usr/local/bin/claude" : over.claudeExecutable,
       which: (bin) => ((over.acpBins ?? ["vibe-acp"]).includes(bin) ? `/usr/local/bin/${bin}` : null),
     }),
-    now: () => NOW,
+    now: over.now ?? (() => NOW),
     logError: over.logError ?? (() => {}),
     ...(over.logCompactMinBytes === undefined ? {} : { logCompactMinBytes: over.logCompactMinBytes }),
   });
@@ -1246,23 +1246,64 @@ describe("step 6 hardening", () => {
     expect(started.notice).toContain("no thread to resume");
   });
 
-  test("I8: a hello's afterSeq is persisted as devd's ack and the log is trimmed to what is open", async () => {
+  /** A finished run, then (after start) an open one; returns the last seq. */
+  async function finishedThenOpen(over: Parameters<typeof start>[1] = {}): Promise<number> {
     priorLog(
       { type: "thread.native", harness: "claude", nativeThreadId: "thread-1", account: null, model: "m" },
       { type: "run.started", runId: "r-done", origin: "user", nativeThreadId: null, model: null },
       { type: "run.completed", runId: "r-done", nativeThreadId: "thread-1", usage: null, costUsd: null },
     );
     saveState(join(dir, "state.json"), baseState({ nativeThreadId: "thread-1" }));
-    const f = fakeHarness();
-    await start(f, { logCompactMinBytes: 0 });
+    await start(fakeHarness(), { logCompactMinBytes: 0, ...over });
     await cmd({ kind: "startTurn", text: "open run" });
-    const last = new EventLog(logPath()).lastSeq();
+    return new EventLog(logPath()).lastSeq();
+  }
+  const keptSeqs = () => new EventLog(logPath()).readFrom(0).map((e) => e.seq);
+
+  test("S6-R19: the current hello's ack is never trimmed to; it becomes a candidate, persisted with its time", async () => {
+    const last = await finishedThenOpen();
     await handshake(last - 1);
-    expect(state().ackedSeq).toBe(last - 1);
-    const kept = new EventLog(logPath()).readFrom(0).map((e) => e.event);
-    // The thread, the open run (its start and the user's message); the finished run and the start's events are gone.
-    expect(kept.map((e) => e.type)).toEqual(["thread.native", "run.started", "message.final"]);
-    expect(new EventLog(logPath()).lastSeq()).toBe(last);
+    expect(state()).toMatchObject({ trimSeq: 0, ackCandidate: { seq: last - 1, at: NOW } });
+    expect(keptSeqs()).toEqual(Array.from({ length: last }, (_, i) => i + 1));
+  });
+
+  test("S6-R19: an ack at least 10 minutes old is trimmed to on a later hello, the newer one waits", async () => {
+    let clock = NOW;
+    const last = await finishedThenOpen({ now: () => clock });
+    await handshake(3);
+    clock += 10 * MIN;
+    await handshake(last);
+    expect(state()).toMatchObject({ trimSeq: 3, ackCandidate: { seq: last, at: clock } });
+    // seq 1 (latest thread.native) is kept, 2-3 (the finished run) dropped, everything after the old ack kept.
+    expect(keptSeqs()).toEqual([1, ...Array.from({ length: last - 3 }, (_, i) => i + 4)]);
+  });
+
+  test("S6-R19: power loss - devd comes back with a lower afterSeq than its latest ack: nothing it needs was trimmed", async () => {
+    let clock = NOW;
+    const last = await finishedThenOpen({ now: () => clock });
+    // devd acknowledged everything, then lost its unsynced tail and reconnects 11 minutes later from seq 2.
+    await handshake(last);
+    clock += 11 * MIN;
+    await handshake(2);
+    expect(state()).toMatchObject({ trimSeq: 0, ackCandidate: { seq: 2, at: clock } });
+    expect(keptSeqs().filter((s) => s > 2)).toEqual(Array.from({ length: last - 2 }, (_, i) => i + 3));
+    // Even once the lower ack is old enough, the trim stops at it.
+    clock += 10 * MIN;
+    await handshake(last);
+    expect(state().trimSeq).toBe(2);
+    expect(keptSeqs().filter((s) => s > 2)).toEqual(Array.from({ length: last - 2 }, (_, i) => i + 3));
+  });
+
+  test("S6-R19: hellos in quick succession do not reset the candidate's age", async () => {
+    let clock = NOW;
+    const last = await finishedThenOpen({ now: () => clock });
+    await handshake(3);
+    clock += 5 * MIN;
+    await handshake(last);
+    expect(state().ackCandidate).toEqual({ seq: 3, at: NOW });
+    clock += 5 * MIN;
+    await handshake(last);
+    expect(state()).toMatchObject({ trimSeq: 3, ackCandidate: { seq: last, at: clock } });
   });
 
   test("I8: the next start trims with the ack persisted earlier and never past it", async () => {
@@ -1272,7 +1313,7 @@ describe("step 6 hardening", () => {
       { type: "run.started", runId: "r-2", origin: "user", nativeThreadId: null, model: null },
       { type: "run.completed", runId: "r-2", nativeThreadId: "thread-1", usage: null, costUsd: null },
     );
-    saveState(join(dir, "state.json"), baseState({ nativeThreadId: "thread-1", ackedSeq: 2 }));
+    saveState(join(dir, "state.json"), baseState({ nativeThreadId: "thread-1", trimSeq: 2 }));
     await start(fakeHarness(), { logCompactMinBytes: 0 });
     expect(events().slice(0, 2)).toEqual([
       { type: "run.started", runId: "r-2", origin: "user", nativeThreadId: null, model: null },
@@ -1293,6 +1334,6 @@ describe("step 6 hardening", () => {
     await start(f);
     expect(f.opens).toEqual([]);
     expect(events().slice(2)).toEqual([{ type: "bridge.started", version: BRIDGE_VERSION, resumed: true, awaitingTarget: true }, { type: "background.changed", work: [] }]);
-    expect(state()).toMatchObject({ harness: "codex", nativeThreadId: raw.nativeThreadId, ackedSeq: 0, awaitingTarget: false, pendingHandoff: raw.pendingHandoff });
+    expect(state()).toMatchObject({ harness: "codex", nativeThreadId: raw.nativeThreadId, trimSeq: 0, ackCandidate: null, awaitingTarget: false, pendingHandoff: raw.pendingHandoff });
   });
 });
