@@ -11,6 +11,8 @@ import { baseBranch, currentBranch, findPr, giteaUrlFor, remoteHead, remoteInfo,
 
 /** How often index.ts runs the PR watch; a PR with pending checks is polled on every tick. */
 export const PR_WATCH_TICK_MS = 2 * 60_000;
+/** A new head of a PR that had checks, with no check runs registered yet, counts as pending for this long. */
+export const PR_CHECKS_GRACE_MS = 5 * 60_000;
 /** An open PR whose checks are over is polled this often, to see it merged. */
 export const PR_SETTLED_POLL_MS = 10 * 60_000;
 /** Polling a session that keeps failing backs off from PR_WATCH_TICK_MS, doubling up to this. */
@@ -18,7 +20,8 @@ export const PR_ERROR_BACKOFF_MAX_MS = 30 * 60_000;
 /** This many failed polls in a row release the hold of pending checks (the row becomes "unknown"). */
 export const PR_ERRORS_RELEASE = 3;
 
-export interface PrState { sessionId: string; number: number; url: string; state: PrStatus; checks: PrChecks }
+/** `headSha`: the PR's head commit its checks belong to (null: unknown, tests). */
+export interface PrState { sessionId: string; number: number; url: string; state: PrStatus; checks: PrChecks; headSha: string | null }
 /** One session's poll: the branch its worktree is on now (S5-R29; a shared checkout: its registered branch; null = none), that branch's
  *  head on the remote (null = not pushed, or no branch) and its PR (null = none, or nothing to watch: other host, the
  *  default branch). */
@@ -148,9 +151,10 @@ export class PrWatch {
       if (err && now < err.nextAt) continue;
       const seeding = seedTick || this.seedLater.has(s.id);
       if (row?.state === "open") {
-        const settled = row.checks !== "pending";
-        if (settled && now - (this.lastPoll.get(s.id) ?? 0) < PR_SETTLED_POLL_MS) continue;
-        await this.serial(s, undefined, seeding);
+        // Pending: every tick. Settled: every PR_SETTLED_POLL_MS, and at once when the branch's pushed head is not the
+        // commit the PR's checks belong to (a push: new checks are coming; a tmux agent has no checkNow).
+        const due = row.checks === "pending" || now - (this.lastPoll.get(s.id) ?? 0) >= PR_SETTLED_POLL_MS;
+        await this.serial(s, due ? undefined : (_id, head) => row.head_sha !== head, seeding);
       } else {
         // Without a row also every PR_SETTLED_POLL_MS: the PR may be opened after the push (a merged or closed PR
         // is not polled again until the branch moves; checkNow covers a chat run's completion).
@@ -204,7 +208,7 @@ export class PrWatch {
     const row0 = getSessionPr(this.d.db, s.id);
     if (p.pr && row0?.checks === "unknown" && this.unknownAt.has(s.id) && this.unknownAt.get(s.id) === p.head
         && p.pr.number === row0.number && p.pr.state === "open" && p.pr.checks === "pending") return; // still released
-    if (p.pr) { this.apply(cur, p.pr, p.branch, seeding); return; }
+    if (p.pr) { this.apply(cur, this.awaitingChecks(s.id, p.pr, row0), p.branch, seeding); return; }
     const row = getSessionPr(this.d.db, s.id);
     if (row && row.branch !== p.branch) {
       // The worktree left the branch of that PR (or the row predates S5-R29): it no longer speaks for the session.
@@ -251,15 +255,37 @@ export class PrWatch {
     catch (e) { this.log(`pr watch: ${id}: ${(e as Error).message}`); }
   }
 
+  /** A push to a PR that had checks starts new ones, but the provider registers them only some seconds later: a head
+   *  that has no checks yet while the PR's previous head had some counts as "pending" (holding work), from the first
+   *  poll that sees it for up to PR_CHECKS_GRACE_MS. After that, still without checks, it is "none" (logged). */
+  private awaitingChecks(id: string, pr: PrState, prev: SessionPrRow | null): PrState {
+    if (pr.state !== "open" || pr.checks !== "none" || !prev || prev.number !== pr.number || prev.state !== "open") return pr;
+    const newHead = prev.head_sha !== null && pr.headSha !== null && prev.head_sha !== pr.headSha && prev.checks !== "none";
+    const sameHeadWaiting = prev.head_sha === pr.headSha && prev.checks === "pending";
+    if (newHead || (sameHeadWaiting && this.now() - prev.since < PR_CHECKS_GRACE_MS)) return { ...pr, checks: "pending" };
+    if (sameHeadWaiting) {
+      this.log(`pr watch: PR #${pr.number} of ${id} has no checks on ${pr.headSha} after ${Math.round(PR_CHECKS_GRACE_MS / 60_000)} min; not holding`);
+    }
+    return pr;
+  }
+
   /** `seeding`: the first-deploy pass records what is there, without notifying or settling. */
   private apply(s: SessionRow, pr: PrState, branch: string | null, seeding: boolean): void {
     const prev = getSessionPr(this.d.db, s.id);
-    if (prev && prev.number === pr.number && prev.state === pr.state && prev.checks === pr.checks && prev.branch === branch) return;
     const now = this.now();
+    if (prev && prev.number === pr.number && prev.state === pr.state && prev.checks === pr.checks && prev.branch === branch) {
+      // The same verdict on a new head of an open PR is a new verdict (a new failure is notified again). A row from
+      // before the head was recorded, or a merged/closed PR, only takes the head over.
+      const newHead = pr.state === "open" && prev.head_sha !== null && pr.headSha !== null && prev.head_sha !== pr.headSha;
+      if (!newHead) {
+        if (prev.head_sha !== pr.headSha) putSessionPr(this.d.db, { ...prev, head_sha: pr.headSha, updated_at: now });
+        return;
+      }
+    }
     const sameMerge = prev?.number === pr.number ? prev.merge_settled_at : null;
     putSessionPr(this.d.db, {
       session_id: s.id, number: pr.number, url: pr.url, state: pr.state, checks: pr.checks, since: now,
-      merge_settled_at: seeding && pr.state === "merged" ? now : sameMerge, updated_at: now, branch,
+      merge_settled_at: seeding && pr.state === "merged" ? now : sameMerge, updated_at: now, branch, head_sha: pr.headSha,
     });
     if (!seeding) {
       if (pr.state === "open" && pr.checks === "failure") this.ciFailed(s, pr);

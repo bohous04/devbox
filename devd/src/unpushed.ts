@@ -316,7 +316,8 @@ export function giteaUrlFor(giteaUrls: string[], remote: RemoteInfo): string | u
   return giteaUrls.find((u) => { try { return hostnameOf(new URL(u).host) === hostnameOf(remote.host); } catch { return false; } });
 }
 
-export interface FoundPr { number: number; url: string; state: "open" | "merged" | "closed"; checks: "pending" | "success" | "failure" | "none" }
+/** `headSha`: the PR's head commit, the one its checks belong to. */
+export interface FoundPr { number: number; url: string; state: "open" | "merged" | "closed"; checks: "pending" | "success" | "failure" | "none"; headSha: string }
 
 // GitHub check runs: any status but COMPLETED is still running; StatusContext (commit statuses) carry `state`.
 // STALE (a check GitHub gave up on after 14 days) blocks nothing: neutral, as SKIPPED.
@@ -364,15 +365,16 @@ export async function findPr(o: FindPrOpts): Promise<FoundPr | null> {
   if (o.remote.provider === "github") {
     const runner = o.ghRun ?? defaultGhRun;
     const r = await runner(o.dir, "gh", "pr", "list", "--repo", `${o.remote.owner}/${o.remote.name}`, "--head", o.branch,
-      "--state", "all", "--limit", "1", "--json", "number,url,state,mergedAt,statusCheckRollup");
+      "--state", "all", "--limit", "1", "--json", "number,url,state,mergedAt,statusCheckRollup,headRefOid");
     if (r.timedOut) throw new Error(`gh pr list timed out after ${Math.round(timeoutFor("NET_CLI") / 1000)} s`);
     if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || "gh pr list failed");
-    const list = JSON.parse(r.stdout) as { number: number; url: string; state: string; mergedAt: string | null; statusCheckRollup: GhCheck[] | null }[];
+    const list = JSON.parse(r.stdout) as { number: number; url: string; state: string; mergedAt: string | null; statusCheckRollup: GhCheck[] | null; headRefOid?: string }[];
     const pr = list[0];
     if (!pr) return null;
+    if (typeof pr.headRefOid !== "string" || !pr.headRefOid) throw new Error(`gh pr list gave PR #${pr.number} without its head commit`);
     const state = pr.state === "MERGED" || pr.mergedAt ? "merged" : pr.state === "CLOSED" ? "closed" : pr.state === "OPEN" ? "open" : null;
     if (state === null) throw new Error(`unknown GitHub PR state: ${pr.state}`);
-    return { number: pr.number, url: pr.url, state, checks: state === "open" ? rollupChecks(pr.statusCheckRollup ?? []) : "none" };
+    return { number: pr.number, url: pr.url, state, checks: state === "open" ? rollupChecks(pr.statusCheckRollup ?? []) : "none", headSha: pr.headRefOid };
   }
   if (o.remote.provider === "gitea") {
     if (!o.giteaToken) throw new Error(`Gitea ${o.remote.host}: missing token (unlock the vault / set the token in Settings)`);
@@ -397,12 +399,12 @@ export async function findPr(o: FindPrOpts): Promise<FoundPr | null> {
     if (!pr) return null;
     const state = pr.merged ? "merged" : pr.state === "closed" ? "closed" : pr.state === "open" ? "open" : null;
     if (state === null) throw new Error(`unknown Gitea PR state: ${pr.state}`);
-    if (state !== "open") return { number: pr.number, url: pr.html_url, state, checks: "none" };
+    if (state !== "open") return { number: pr.number, url: pr.html_url, state, checks: "none", headSha: pr.head.sha };
     const st = (await get(`${api}/commits/${pr.head.sha}/status`)) as { state: string; total_count: number };
-    if (st.total_count === 0) return { number: pr.number, url: pr.html_url, state, checks: "none" };
+    if (st.total_count === 0) return { number: pr.number, url: pr.html_url, state, checks: "none", headSha: pr.head.sha };
     const checks = GITEA_STATUS.get(st.state);
     if (!checks) throw new Error(`unknown Gitea commit status state: ${st.state}`);
-    return { number: pr.number, url: pr.html_url, state, checks };
+    return { number: pr.number, url: pr.html_url, state, checks, headSha: pr.head.sha };
   }
   throw new Error("A PR can only be read for a repo on GitHub or a configured Gitea instance");
 }
