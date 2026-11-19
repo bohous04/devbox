@@ -109,12 +109,14 @@ export type ExitAction = "back" | "end" | "detach" | "rename" | "agent" | "accou
 //
 // "Back" is the FIRST item: F9 can be pressed by mistake and with the previous order a reflexive
 // Enter was straight "End session" — for a worktree session including deleting the files.
-export function exitMenuOptions(worktree: boolean, name?: string | null, agentNow?: string | null, agent?: SessionInfo["agent"]): { value: ExitAction; label: string }[] {
+export function exitMenuOptions(worktree: boolean, name?: string | null, agentNow?: string | null, agent?: SessionInfo["agent"], runtime?: SessionInfo["runtime"]): { value: ExitAction; label: string }[] {
   const account: { value: ExitAction; label: string }[] = agent === "codex"
     ? [{ value: "account", label: "⇄ Change account (Codex)" }]
     : agent !== undefined && specFor(agent).anthropicAccount
       ? [{ value: "account", label: "⇄ Change account (Claude Code)" }]
       : [];
+  // devd refuses an account/agent switch on a chat session with 409, so the menu does not offer them.
+  const switches = runtime === "chat";
   return [
     { value: "back", label: "← Back to session (reattach)" },
     { value: "end", label: `⏻ End session (permanent — ${endEffect(worktree)}) — closes tab` },
@@ -122,8 +124,8 @@ export function exitMenuOptions(worktree: boolean, name?: string | null, agentNo
     // The fastest path for the real flow "agent got stuck → switch to another harness":
     // the user is attached in a tab and has neither the manager nor the dashboard at hand. After the swap
     // it reattaches back (handled by handleExit in main.ts).
-    { value: "agent", label: `⇄ Change agent${agentNow ? ` (now: ${agentNow})` : ""}` },
-    ...account,
+    ...(switches ? [] : [{ value: "agent" as const, label: `⇄ Change agent${agentNow ? ` (now: ${agentNow})` : ""}` }]),
+    ...(switches ? [] : account),
     { value: "detach", label: "↩︎ Just detach (Claude keeps running)" },
   ];
 }

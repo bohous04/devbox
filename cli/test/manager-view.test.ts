@@ -239,3 +239,11 @@ test("ending sessions are grouped below active sessions under a visible divider"
   expect(opts[1].label).toContain("────────");
   expect(opts[1].label).toContain("Ukončují se (1)");
 });
+
+// devd answers 409 to an account or agent switch on a chat session, so the menu must not offer them.
+test("exitMenuOptions: a chat session hides Change agent and Change account", () => {
+  const values = exitMenuOptions(false, null, "Claude Code", "claude", "chat").map((o) => o.value);
+  expect(values).toEqual(["back", "end", "rename", "detach"]);
+  const tmux = exitMenuOptions(false, null, "Claude Code", "claude", "tmux").map((o) => o.value);
+  expect(tmux).toEqual(["back", "end", "rename", "agent", "account", "detach"]);
+});

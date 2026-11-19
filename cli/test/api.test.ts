@@ -157,3 +157,21 @@ test("placement(): timeouts around 2s, so a hung devd never blocks the open flow
     hangServer.stop(true);
   }
 });
+
+// The CLI never picks a runtime on its own: without a user request the request body carries no
+// `runtime` key, so devd's default applies (and a notice comes back when it had to deviate).
+test("ApiClient.open / openInstabox send no runtime key", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const srv = Bun.serve({ port: 0, fetch: async (req) => {
+    bodies.push(await req.json() as Record<string, unknown>);
+    return Response.json({ session: { id: "x" }, created: true, runtimeNotice: "n", jobId: "j", sessionId: "x" });
+  } });
+  try {
+    const api = new ApiClient(`http://127.0.0.1:${srv.port}`);
+    const r = await api.open({ folder: "acme", project: "shop", repo: "cms", cloneUrl: "u" });
+    expect(r.runtimeNotice).toBe("n");
+    await api.openInstabox({ folder: "acme", project: "shop", repo: "cms", cloneUrl: "u" });
+    expect(bodies.length).toBe(2);
+    for (const b of bodies) expect("runtime" in b).toBe(false);
+  } finally { srv.stop(true); }
+});
