@@ -16,7 +16,7 @@ import { startServer } from "./server";
 import { loadState, saveState, type BridgeState, type PersistedTarget } from "./state";
 import { DeclaredWaits } from "./waits";
 
-export const BRIDGE_VERSION = "1.1.0";
+export const BRIDGE_VERSION = "1.2.0";
 export const DEFAULT_BRIDGE_DIR = "/run/devd/bridge";
 export const CLAUDE_ACCOUNTS_ROOT = "/home/dev/.claude-accounts";
 export const CODEX_ACCOUNTS_ROOT = "/home/dev/.codex-accounts";

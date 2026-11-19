@@ -489,12 +489,12 @@ test("GET thread/target is the target devd plans the next switch from", async ()
     const r = await t.app.fetch(new Request(`http://x/api/sessions/${CHAT.id}/thread/target`));
     return { status: r.status, body: await r.json() };
   };
-  expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "primary", model: null, awaitingTarget: false } });
+  expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "primary", model: null, awaitingTarget: false, bridgeVersion: null } });
   claudeThread(t);
   await t.post("account", { accountId: "backup" });
-  expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "backup", model: "claude-opus-5-5", awaitingTarget: false } });
+  expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "backup", model: "claude-opus-5-5", awaitingTarget: false, bridgeVersion: null } });
   await t.post("harness", { agent: "codex" });
-  expect(await get()).toEqual({ status: 200, body: { agent: "codex", harness: "codex", account: "default", model: null, awaitingTarget: false } });
+  expect(await get()).toEqual({ status: 200, body: { agent: "codex", harness: "codex", account: "default", model: null, awaitingTarget: false, bridgeVersion: null } });
 });
 
 test("after a failed resume the switch notice says so", async () => {
@@ -791,6 +791,28 @@ test("M1: a bridge older than switching is refused with 409 bridge-too-old befor
   expect(t.sent).toEqual([]);
   t.handshake(false, "1.1.0");
   expect((await t.post("model", { model: "claude-sonnet-5-5" })).status).toBe(202);
+});
+
+test("a bridge older than 1.2.0 cannot take an ACP harness: 409 bridge-too-old before anything is sent", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.handshake(false, "1.1.0");
+  expect(await t.post("harness", { agent: "vibe" })).toEqual({
+    status: 409, body: { error: "bridge-too-old", message: "recreate the container to use Mistral Vibe" },
+  });
+  expect(t.sent).toEqual([]);
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("claude");
+  // Claude/Codex switches still work on it.
+  expect((await t.post("harness", { agent: "codex" })).status).toBe(202);
+  expect(t.sw.target(CHAT.id).bridgeVersion).toBe("1.1.0");
+});
+
+test("a 1.2.0 bridge takes an ACP harness", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.handshake(false, "1.2.0");
+  expect(await t.post("harness", { agent: "vibe" })).toMatchObject({ status: 202 });
+  expect(t.sw.target(CHAT.id).bridgeVersion).toBe("1.2.0");
 });
 
 test("M5: a Codex account not mounted in the container is refused with 409 account-not-mounted before anything is sent", async () => {

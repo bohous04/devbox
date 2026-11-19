@@ -24,6 +24,7 @@ import {
   type HarnessOpenOptions,
 } from "../src/serve";
 import type { ServerFrame, SwitchTarget } from "../src/protocol";
+import { ACP_MIN_BRIDGE_VERSION } from "../../../shared/bridgeVersion";
 import { loadState, saveState, type BridgeState } from "../src/state";
 
 const MIN = 60_000;
@@ -883,6 +884,10 @@ describe("final review fixes", () => {
     await start(fakeHarness());
     expect(BRIDGE_VERSION).not.toBe("1.0.0");
     expect(await handshake()).toMatchObject({ version: BRIDGE_VERSION, awaitingTarget: false });
+  });
+
+  test("this bridge knows ACP harnesses: its version is the one devd and the dashboard require for them", () => {
+    expect(BRIDGE_VERSION).toBe(ACP_MIN_BRIDGE_VERSION);
   });
 });
 

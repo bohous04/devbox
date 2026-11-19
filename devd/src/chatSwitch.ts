@@ -14,6 +14,7 @@
 import type { Database } from "bun:sqlite";
 import type { BridgeCommand, HandoffDelivery, SwitchTarget } from "../../image/agent-bridge/src/protocol";
 import { isProxyProfile, proxyProfileEnv, type ProxyProfile } from "../../image/agent-bridge/src/proxyProfile";
+import { ACP_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
 import { MODEL_ALIASES, CHAT_MODELS as SHARED_CHAT_MODELS } from "../../shared/chatModels";
 import type { Capabilities, LoggedEvent } from "../../shared/thread";
 import { currentAccount, lastSwitchAt } from "./accountLease";
@@ -76,7 +77,8 @@ export interface SwitchResult { kind: Transition["kind"]; unchanged?: true; exha
 const UNCHANGED: SwitchResult = { kind: "set-model", unchanged: true };
 /** GET .../thread/target: the profile and the target devd plans the next switch from. `awaitingTarget`: the bridge
  *  holds no harness until it gets a target (devd keeps sending it; a switch is allowed despite queued messages). */
-export interface CurrentTarget extends Target { agent: AgentName; awaitingTarget: boolean }
+/** `bridgeVersion`: from the bridge's latest handshake; null before one, or for a 1.0.0 bridge (it sends none). */
+export interface CurrentTarget extends Target { agent: AgentName; awaitingTarget: boolean; bridgeVersion: string | null }
 
 export interface ChatSwitchDeps {
   db: Database;
@@ -167,7 +169,7 @@ export class ChatSwitch {
     const s = getSession(this.d.db, sessionId);
     if (!s) throw new Error(`unknown session ${sessionId}`);
     const { harness, account, model } = this.current(s, this.d.threads(sessionId));
-    return { agent: agentNameFor(s.agent), harness, account, model, awaitingTarget: this.awaiting.has(sessionId) };
+    return { agent: agentNameFor(s.agent), harness, account, model, awaitingTarget: this.awaiting.has(sessionId), bridgeVersion: this.bridgeVersions.get(sessionId) ?? null };
   }
 
   async switch(sessionId: string, req: SwitchRequest): Promise<SwitchResult> {
@@ -189,6 +191,11 @@ export class ChatSwitch {
     // A 1.0.0 bridge (no version in its handshake) does not know setModel/switchTarget and would drop the link.
     if (this.bridgeVersions.get(s.id) === null) {
       throw new SwitchRefused(409, "bridge-too-old", "the agent bridge in this container predates switching; recreate the session's container first");
+    }
+    // An older bridge's parseTarget throws on an ACP harness and drops the whole link: refuse before sending.
+    const version = this.bridgeVersions.get(s.id);
+    if (req.kind === "harness" && specFor(profile).acp !== undefined && typeof version === "string" && !versionAtLeast(version, ACP_MIN_BRIDGE_VERSION)) {
+      throw new SwitchRefused(409, "bridge-too-old", `recreate the container to use ${specFor(profile).label}`);
     }
     // A run or a queued message would be overtaken by the switch: the user stops first. Not while the bridge awaits
     // its target: its queued messages wait for exactly that, and picking a target is how the user gets them going.

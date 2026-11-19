@@ -10,8 +10,8 @@ import { CHAT_MODELS as DEVD_CHAT_MODELS } from "../../devd/src/chatSwitch";
 
 const NOW = 1_800_000_000_000;
 const HOUR = 3_600_000;
-const CLAUDE: ChatTarget = { agent: "claude", harness: "claude", account: "primary", model: "claude-opus-5-5", awaitingTarget: false };
-const CODEX: ChatTarget = { agent: "codex", harness: "codex", account: "default", model: null, awaitingTarget: false };
+const CLAUDE: ChatTarget = { agent: "claude", harness: "claude", account: "primary", model: "claude-opus-5-5", awaitingTarget: false, bridgeVersion: "1.2.0" };
+const CODEX: ChatTarget = { agent: "codex", harness: "codex", account: "default", model: null, awaitingTarget: false, bridgeVersion: "1.2.0" };
 
 const run = (over: Partial<RunRow>): RunRow => ({
   runId: "r", origin: "user", status: "completed", nativeThreadId: null, model: null, harness: "claude",
@@ -50,7 +50,7 @@ test("P24a: while the agent waits for a target, switching is allowed despite que
 test("model menu: the models devd accepts for the current harness, the current one marked", () => {
   expect(modelOptions(CLAUDE).map((o) => o.value)).toEqual([...DEVD_CHAT_MODELS.claude]);
   expect(modelOptions(CODEX).map((o) => o.value)).toEqual([...DEVD_CHAT_MODELS.codex]);
-  const vibe: ChatTarget = { agent: "vibe", harness: "vibe", account: null, model: "mistral-large-4-0", awaitingTarget: false };
+  const vibe: ChatTarget = { agent: "vibe", harness: "vibe", account: null, model: "mistral-large-4-0", awaitingTarget: false, bridgeVersion: "1.2.0" };
   expect(modelOptions(vibe).map((o) => [o.value, o.current])).toEqual(DEVD_CHAT_MODELS.vibe.map((m) => [m, m === "mistral-large-4-0"]));
   // After session/load Vibe reports Medium 3.5 as mistral-medium-latest: the alias table marks it, nothing fuzzier.
   expect(modelOptions({ ...vibe, model: "mistral-medium-latest" }).filter((o) => o.current).map((o) => o.value)).toEqual(["mistral-medium-3.5"]);
@@ -70,7 +70,7 @@ test("account menu: a proxy profile runs on no account pool", () => {
   expect(accountMenuBlocked(CODEX)).toBeNull();
   expect(accountMenuBlocked({ ...CLAUDE, agent: "claude-gemini", account: null })).toMatch(/no account pool/);
   // An ACP agent runs on its own CLI login (devd: 400 no-account-pool).
-  expect(accountMenuBlocked({ agent: "vibe", harness: "vibe", account: null, model: null, awaitingTarget: false })).toMatch(/no account pool/);
+  expect(accountMenuBlocked({ agent: "vibe", harness: "vibe", account: null, model: null, awaitingTarget: false, bridgeVersion: "1.2.0" })).toMatch(/no account pool/);
 });
 
 test("Claude accounts: quarantined, disabled and expired are disabled with the reason; over the threshold stays enabled with a warning (P15)", () => {
@@ -122,6 +122,14 @@ test("harness menu: every profile chat can run is enabled, the others carry devd
   expect(by.grok.disabled).toMatch(/not available in chat/);
   expect(by.antigravity.disabled).toMatch(/not available in chat/);
   expect(by.vibe).toMatchObject({ disabled: null, label: "Mistral Vibe" });
+});
+
+test("harness menu: a bridge older than 1.2.0 cannot take an ACP agent, as devd says (409 bridge-too-old)", () => {
+  const old = Object.fromEntries(harnessOptions({ ...CLAUDE, bridgeVersion: "1.1.0" }).map((o) => [o.value, o]));
+  expect(old.vibe.disabled).toBe("recreate the container to use Mistral Vibe");
+  expect(old.codex.disabled).toBeNull();
+  // No handshake yet: devd decides when the bridge is connected.
+  expect(Object.fromEntries(harnessOptions({ ...CLAUDE, bridgeVersion: null }).map((o) => [o.value, o])).vibe.disabled).toBeNull();
 });
 
 test("switch errors are spelled out, never swallowed", () => {
