@@ -212,7 +212,8 @@ export function onboardingRoleSql(p: OnboardingPlan, passwords: Record<string, s
   const e = p.entry; const db = ident(e.db);
   const roles: [string, "read" | "write" | "migration"][] = [[e.roUser, "read"]];
   if (e.rwUser) roles.push([e.rwUser, "write"]);
-  if (e.migrationUser) roles.push([e.migrationUser, "migration"]);
+  // A catalogued migration role from an earlier request stays as it is unless this request asks for migrations.
+  if (e.migrationUser && p.migrations) roles.push([e.migrationUser, "migration"]);
   const statements = ["SET log_statement = 'none';", "SET log_min_error_statement = 'panic';", "SET pgaudit.log = 'none';", "SET standard_conforming_strings = on;", "BEGIN;", `SELECT pg_advisory_xact_lock(hashtextextended(${lit(marker(p))}, 0));`];
   for (const [user, mode] of roles) {
     const role = ident(user); const mark = lit(roleMarker(p, user));
