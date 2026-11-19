@@ -6,6 +6,11 @@ import XCTest
 final class KeychainStoreTests: XCTestCase {
     private let store = KeychainStore()
 
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        try KeychainAvailability.skipIfUnavailable()
+    }
+
     override func tearDown() {
         for key in [
             KeychainStore.cfClientId,
@@ -121,24 +126,30 @@ final class KeychainStoreTests: XCTestCase {
     private var service: String { Bundle.main.bundleIdentifier ?? "com.example.devbox" }
 
     private func addLegacyItem(_ key: String, _ value: String) {
-        let attributes: [String: Any] = [
+        var attributes: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: key,
             kSecValueData as String: Data(value.utf8),
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
         ]
+        #if os(macOS)
+        attributes[kSecUseDataProtectionKeychain as String] = true
+        #endif
         XCTAssertEqual(SecItemAdd(attributes as CFDictionary, nil), errSecSuccess)
     }
 
     private func accessibility(of key: String) -> String? {
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: key,
             kSecReturnAttributes as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
+        #if os(macOS)
+        query[kSecUseDataProtectionKeychain as String] = true
+        #endif
         var result: AnyObject?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
               let attributes = result as? [String: Any] else { return nil }

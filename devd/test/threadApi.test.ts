@@ -8,7 +8,10 @@ import { AgentDisconnected, CommandFailed, CommandTimeout } from "../src/bridgeL
 import { getSession, insertSession, listSessions, openDb, type SessionRow } from "../src/db";
 import { EventBus } from "../src/eventBus";
 import { Inbox } from "../src/sessionInbox";
+import type { ResetTarget } from "../src/sessionAttention";
 import { ThreadStore } from "../src/threadStore";
+import { stageThreadImage } from "../src/threadImages";
+import { png } from "./helpers/images";
 import type { BridgeCommand } from "../../image/agent-bridge/src/protocol";
 import type { BridgeEvent, LoggedEvent, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
@@ -27,7 +30,7 @@ const completed = (runId: string): BridgeEvent => ({ type: "run.completed", runI
 const said = (runId: string, itemId: string, text: string): BridgeEvent => ({ type: "message.final", runId, itemId, role: "assistant", text });
 const asked = (runId: string, requestId: string): BridgeEvent => ({ type: "request.opened", runId, requestId, kind: "question", prompt: "Which one?" });
 
-function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown> } = {}) {
+function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown>; untilReset?: (s: SessionRow) => ResetTarget; noUntilReset?: boolean; bridgeVersion?: string | null } = {}) {
   const db = openDb(":memory:");
   for (const r of [CHAT, CHAT2, TMUX]) insertSession(db, r);
   const dir = mkdtempSync(join(tmpdir(), "thread-api-"));
@@ -53,7 +56,7 @@ function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown
   };
   const hub = new AgentEventHub({ db, notify: () => {} });
   const inbox = new Inbox({
-    sessions: () => listSessions(db), session: (id) => getSession(db, id), threads,
+    db, sessions: () => listSessions(db), session: (id) => getSession(db, id), threads,
     chatLink: () => ({ status: "connected", since: 1 }), tmuxLive: (id) => hub.liveSnapshot(id), bus,
     now: () => 1_000_000, coalesceMs: 0,
   });
@@ -63,7 +66,7 @@ function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown
     cfg: { version: 1, settings: { autoStopHours: 4, portRangeStart: 40100, portsPerSession: 10, diskWarnPercent: 80 }, folders: {} },
     root: dir, tree: async () => [], listener: {} as never, notify: () => {}, stats: () => ({ sessions: [], disk: {} }),
     cloneQueue: {} as never, configRepo: {} as never, dashboardDir: dir, agentEvents: hub,
-    links, threads, bus, inbox,
+    links, threads, bus, inbox, bridgeVersion: () => (opts.bridgeVersion === undefined ? "1.4.0" : opts.bridgeVersion), untilReset: opts.noUntilReset ? undefined : opts.untilReset ?? (() => ({ reason: "No usage limit is active on this account" })),
   } as never);
   /** Applies events to a session's store and publishes them like index.ts does (store first, then the bus). */
   const feed = (id: string, events: BridgeEvent[]) => {
@@ -77,7 +80,7 @@ function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown
     }
     return out;
   };
-  return { a, db, threads, sent, ensured, firstTurns, bus, inbox, feed, ending };
+  return { a, db, dir, threads, sent, ensured, firstTurns, bus, inbox, feed, ending };
 }
 
 const req = (method: string, path: string, body?: unknown, headers: Record<string, string> = {}) =>
@@ -147,6 +150,71 @@ test("POST messages: empty text, missing text and extra fields are 400; nothing 
     expect(r.status).toBe(400);
   }
   expect(t.sent).toEqual([]);
+});
+
+// --- images ---
+
+const PNG = png(10, 10);
+
+test("POST messages with attachments staged for this session sends them with startTurn", async () => {
+  const t = setup();
+  const a = stageThreadImage(t.dir, CHAT.id, PNG);
+  const b = stageThreadImage(t.dir, CHAT.id, PNG);
+  const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/messages`, { text: "what is this?", attachments: [{ path: a }, { path: b }] }));
+  expect(r.status).toBe(202);
+  expect(t.sent).toEqual([[CHAT.id, { kind: "startTurn", text: "what is this?", attachments: [a, b] }]]);
+});
+
+test("POST messages: attachments that are not this session's staged images are 400; nothing is sent", async () => {
+  const t = setup();
+  const own = stageThreadImage(t.dir, CHAT.id, PNG);
+  const other = stageThreadImage(t.dir, CHAT2.id, PNG);
+  const name = own.split("/").pop()!;
+  for (const attachments of [
+    "x", [own], [{ path: other }], [{ path: `/inbox/${name}` }], [{ path: `/inbox/${CHAT.id}/../${CHAT.id}/${name}` }],
+    [{ path: `/inbox/${CHAT.id}/00000000-0000-4000-8000-000000000000.png` }], [{ path: own, extra: 1 }], [{}],
+  ]) {
+    const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/messages`, { text: "hi", attachments }));
+    expect(r.status).toBe(400);
+  }
+  expect(t.sent).toEqual([]);
+});
+
+test("POST messages: at most 10 images per message (11 is 400, nothing is sent)", async () => {
+  const t = setup();
+  const paths = Array.from({ length: 11 }, () => ({ path: stageThreadImage(t.dir, CHAT.id, PNG) }));
+  const over = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/messages`, { text: "many", attachments: paths }));
+  expect(over.status).toBe(400);
+  expect(((await over.json()) as { error: string }).error).toBe("at most 10 images per message");
+  expect(t.sent).toEqual([]);
+  expect((await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/messages`, { text: "ten", attachments: paths.slice(0, 10) }))).status).toBe(202);
+});
+
+test("POST messages with attachments to a bridge older than 1.4.0 is 409 bridge-too-old; text alone still goes", async () => {
+  for (const version of ["1.3.0", null]) {
+    const t = setup({ bridgeVersion: version });
+    const path = stageThreadImage(t.dir, CHAT.id, PNG);
+    const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/messages`, { text: "see", attachments: [{ path }] }));
+    expect(r.status).toBe(409);
+    expect(((await r.json()) as { error: string }).error).toBe("bridge-too-old");
+    expect(t.sent).toEqual([]);
+    expect((await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/messages`, { text: "see", attachments: [] }))).status).toBe(202);
+    expect(t.sent).toEqual([[CHAT.id, { kind: "startTurn", text: "see" }]]);
+  }
+});
+
+test("GET thread attachment serves this session's staged image with its type; anything else 404", async () => {
+  const t = setup();
+  const path = stageThreadImage(t.dir, CHAT.id, PNG);
+  const name = path.split("/").pop()!;
+  const r = await t.a.fetch(req("GET", `/api/sessions/${CHAT.id}/thread/attachments/${name}`));
+  expect(r.status).toBe(200);
+  expect(r.headers.get("content-type")).toBe("image/png");
+  expect(r.headers.get("x-content-type-options")).toBe("nosniff");
+  expect(new Uint8Array(await r.arrayBuffer())).toEqual(PNG);
+  expect((await t.a.fetch(req("GET", `/api/sessions/${CHAT2.id}/thread/attachments/${name}`))).status).toBe(404);
+  expect((await t.a.fetch(req("GET", `/api/sessions/${CHAT.id}/thread/attachments/notes.txt`))).status).toBe(404);
+  expect((await t.a.fetch(req("GET", `/api/sessions/${TMUX.id}/thread/attachments/${name}`))).status).toBe(409);
 });
 
 test("POST messages to unknown 404 and tmux 409", async () => {
@@ -476,4 +544,66 @@ test("a chat session whose link cannot start still opens", async () => {
   const r = await t.a.fetch(req("POST", "/api/sessions", { folder: CHAT.folder, project: CHAT.project, repo: CHAT.repo }));
   expect(r.status).toBe(201);
   expect(String(err.mock.calls[0]?.[0])).toContain("bridge link of opened session");
+});
+
+// --- settle and snooze (tmux sessions too) ---
+
+test("POST settle and unsettle work for chat and tmux sessions and answer the new inbox item", async () => {
+  const t = setup();
+  for (const id of [CHAT.id, TMUX.id]) {
+    const r = await t.a.fetch(req("POST", `/api/sessions/${id}/settle`));
+    expect(r.status).toBe(200);
+    expect(((await r.json()) as { attention: { section: string } }).attention.section).toBe("settled");
+    const u = await t.a.fetch(req("POST", `/api/sessions/${id}/unsettle`));
+    expect(u.status).toBe(200);
+    expect(((await u.json()) as { attention: { section: string } }).attention.section).not.toBe("settled");
+  }
+});
+
+test("POST snooze {until} and {untilReset} for a tmux session", async () => {
+  const t = setup({ untilReset: () => ({ resetsAt: 1_000_000 + 7_200_000 }) });
+  const r = await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/snooze`, { until: 1_000_000 + 3_600_000 }));
+  expect(r.status).toBe(200);
+  expect(((await r.json()) as { attention: unknown }).attention).toMatchObject({ section: "snoozed", until: 1_000_000 + 3_600_000 });
+  const u = await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/snooze`, { untilReset: true }));
+  expect(u.status).toBe(200);
+  expect(((await u.json()) as { attention: unknown }).attention).toMatchObject({ section: "snoozed", until: 1_000_000 + 7_200_000 });
+});
+
+test("POST snooze: no active limit is 409 with the reason; a bad body is 400; unknown session 404, ending 409", async () => {
+  const t = setup();
+  const r = await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/snooze`, { untilReset: true }));
+  expect(r.status).toBe(409);
+  expect(await r.json()).toEqual({ error: "no-active-limit", message: "No usage limit is active on this account" });
+  for (const body of [{}, { until: 999_999 }, { until: "soon" }, { until: 2_000_000, untilReset: true }, { untilReset: false }, { until: 2_000_000, x: 1 }]) {
+    expect((await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/snooze`, body))).status).toBe(400);
+  }
+  expect((await t.a.fetch(req("POST", "/api/sessions/nope/settle"))).status).toBe(404);
+  t.ending.add(TMUX.id);
+  expect((await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/settle`))).status).toBe(409);
+});
+
+test("GET snooze-reset tells when the active limit resets, or why snoozing until it is not possible", async () => {
+  const t = setup({ untilReset: (s) => (s.runtime === "tmux" ? { resetsAt: 5_000_000 } : { reason: "Mistral Vibe has no usage limit devbox can read" }) });
+  expect(await (await t.a.fetch(req("GET", `/api/sessions/${TMUX.id}/snooze-reset`))).json()).toEqual({ resetsAt: 5_000_000 });
+  expect(await (await t.a.fetch(req("GET", `/api/sessions/${CHAT.id}/snooze-reset`))).json()).toEqual({ reason: "Mistral Vibe has no usage limit devbox can read" });
+});
+
+test("settle and snooze refuse a session with an open request: 409 request-open; nothing is written", async () => {
+  const t = setup();
+  t.feed(CHAT.id, [started("r1"), asked("r1", "q1")]);
+  for (const [path, body] of [["settle", undefined], ["snooze", { until: 2_000_000 }]] as const) {
+    const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/${path}`, body));
+    expect(r.status).toBe(409);
+    expect(await r.json()).toEqual({ error: "request-open", message: "Answer the open request first: a session waiting for you cannot be settled or snoozed" });
+  }
+  expect(t.inbox.item(getSession(t.db, CHAT.id)!).attention.section).toBe("needs_you");
+});
+
+test("snooze until reset without the usage dependency is 503; settle and the thread routes still work", async () => {
+  const t = setup({ noUntilReset: true });
+  expect((await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/snooze`, { untilReset: true }))).status).toBe(503);
+  expect((await t.a.fetch(req("GET", `/api/sessions/${TMUX.id}/snooze-reset`))).status).toBe(503);
+  expect((await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/settle`))).status).toBe(200);
+  expect((await t.a.fetch(req("GET", `/api/sessions/${CHAT.id}/thread`))).status).toBe(200);
 });

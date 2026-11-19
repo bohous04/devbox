@@ -113,6 +113,13 @@ final class PushManagerTests: XCTestCase {
         XCTAssertEqual(PushManager.deepLink(from: ["sessionId": "dev-x", "terminal": true, "target": "schedules"]), .session(id: "dev-x", terminal: true))
     }
 
+    /// devd marks a chat session's notification `thread: true` (apns.ts): it opens the thread, not the terminal.
+    func testDeepLinkChatSessionOpensTheThread() {
+        XCTAssertEqual(PushManager.deepLink(from: ["sessionId": "dev-x", "thread": true]), .thread(id: "dev-x"))
+        XCTAssertEqual(PushManager.deepLink(from: ["sessionId": "dev-x", "thread": false]), .session(id: "dev-x", terminal: false))
+        XCTAssertEqual(PushManager.deepLink(from: ["sessionId": "dev-x", "thread": true])?.sessionId, "dev-x")
+    }
+
     func testHandleTargetCallsOnDeepLink() {
         var receivedLink: PushManager.PushDeepLink?
         let manager = makeManager(client: nil, onDeepLink: { receivedLink = $0 })

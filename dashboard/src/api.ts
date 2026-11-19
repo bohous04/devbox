@@ -123,6 +123,7 @@ export interface OpenResult {
 export interface Schedule {
   id: string; name: string; cron: string; folder: string; project: string; repo: string;
   clone_url: string; prompt: string; important: 0 | 1; enabled: 0 | 1; last_run_at: number | null;
+  runtime: "tmux" | "chat"; agent: AgentName | null;
 }
 export interface ActivityEvent { id: number; ts: number; session_id: string | null; type: string; data: string | null }
 export type NotifyDecision = "armed" | "sent" | "deferred" | "suppressed" | "none";
@@ -570,7 +571,11 @@ export const api = {
     const qs = q.toString();
     return j<ThreadSnapshot>(`/api/sessions/${encodeURIComponent(id)}/thread${qs ? `?${qs}` : ""}`);
   },
-  sendMessage: (id: string, text: string) => j<{ queued: true }>(`/api/sessions/${encodeURIComponent(id)}/thread/messages`, post({ text })),
+  sendMessage: (id: string, text: string, attachments: string[] = []) => j<{ queued: true }>(`/api/sessions/${encodeURIComponent(id)}/thread/messages`,
+    post(attachments.length > 0 ? { text, attachments: attachments.map((path) => ({ path })) } : { text })),
+  /** A chat image into the session's own inbox dir; its container path goes with the message (sendMessage). */
+  uploadThreadImage: (id: string, image: Blob) => j<{ path: string; size: number }>(`/api/sessions/${encodeURIComponent(id)}/inbox?for=thread`,
+    { method: "POST", headers: { "content-type": "application/octet-stream" }, body: image }),
   interrupt: (id: string) => j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/interrupt`, { method: "POST" }),
   answerRequest: (id: string, requestId: string, answer: string) =>
     j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/requests/${encodeURIComponent(requestId)}`, post({ answer })),
@@ -583,8 +588,13 @@ export const api = {
     j<ChatSwitchResult>(`/api/sessions/${encodeURIComponent(id)}/thread/harness`, post({ agent })),
   markSeen: (id: string, seq: number) => j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/seen`, post({ seq })),
   inbox: () => j<{ items: InboxItem[] }>("/api/inbox"),
+  // Inbox shelves (any session, tmux too); each answers the session's new inbox item.
+  settle: (id: string) => j<InboxItem>(`/api/sessions/${encodeURIComponent(id)}/settle`, { method: "POST" }),
+  unsettle: (id: string) => j<InboxItem>(`/api/sessions/${encodeURIComponent(id)}/unsettle`, { method: "POST" }),
+  snooze: (id: string, to: { until: number } | { untilReset: true }) => j<InboxItem>(`/api/sessions/${encodeURIComponent(id)}/snooze`, post(to)),
+  snoozeReset: (id: string) => j<{ resetsAt: number } | { reason: string }>(`/api/sessions/${encodeURIComponent(id)}/snooze-reset`),
   schedules: () => j<Schedule[]>("/api/schedules"),
-  createSchedule: (s: { name: string; cron: string; folder: string; project: string; repo: string; cloneUrl: string; prompt: string; important?: 0 | 1 }) => j<Schedule>("/api/schedules", post(s)),
+  createSchedule: (s: { name: string; cron: string; folder: string; project: string; repo: string; cloneUrl: string; prompt: string; important?: 0 | 1; runtime?: "tmux" | "chat"; agent?: AgentName }) => j<Schedule>("/api/schedules", post(s)),
   updateSchedule: (id: string, patch: Partial<Pick<Schedule, "name" | "cron" | "prompt" | "enabled" | "important">>) => j<Schedule>(`/api/schedules/${id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(patch) }),
   deleteSchedule: (id: string) => j<void>(`/api/schedules/${id}`, { method: "DELETE" }),
   runSchedule: (id: string) => j<void>(`/api/schedules/${id}/run`, { method: "POST" }),

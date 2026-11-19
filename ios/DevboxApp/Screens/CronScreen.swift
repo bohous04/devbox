@@ -2,8 +2,8 @@ import SwiftUI
 
 /// CRON screen — mirrors `dashboard/src/pages/Schedule.tsx` (see `CronStore` for fetch/actions).
 /// NARROWED (deliberate narrowing, see task report): the app cannot create or edit a schedule (cron expression +
-/// prompt + folder/project/repo pickers) — only view, enable/disable, toggle important/normal,
-/// run now and delete. "Run now" additionally gets a confirmation the web does not have — it starts a real
+/// prompt + folder/project/repo pickers) — only view, enable/disable, toggle important/normal, pick the
+/// runtime (tmux or chat) and the agent, run now and delete. "Run now" additionally gets a confirmation the web does not have — it starts a real
 /// agent run on a production repo, and on mobile it is easier to tap by accident than with a mouse on a desktop.
 struct CronScreen: View {
     @StateObject private var store: CronStore
@@ -33,7 +33,7 @@ struct CronScreen: View {
                         Section { Text(actionError).font(.caption).foregroundStyle(Theme.C.dangerText) }
                     }
                 }
-                .listStyle(.insetGrouped)
+                .insetGroupedList()
             } else if let error = store.error {
                 ContentUnavailableView(
                     "Couldn't load schedules",
@@ -74,7 +74,8 @@ struct CronScreen: View {
     private func row(_ s: Schedule) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(s.name).font(.subheadline.weight(.semibold))
-            Text("\(s.project)/\(s.repo)").font(.caption2).foregroundStyle(Theme.C.mutedForeground)
+            Text("\(s.project)/\(s.repo) · \(s.runtime == "chat" ? "chat" : "tmux")\(s.agent.map { " · \(AgentProfiles.profile(for: AgentName(rawValue: $0)).short)" } ?? "")")
+                .font(.caption2).foregroundStyle(Theme.C.mutedForeground)
             Text(promptExcerpt(s.prompt)).font(.caption2).foregroundStyle(Theme.C.mutedForeground).lineLimit(2)
             HStack {
                 Text(s.cron).font(.system(.caption, design: .monospaced))
@@ -98,6 +99,32 @@ struct CronScreen: View {
             }
             .font(.caption2.weight(.semibold))
             .buttonStyle(.plain)
+            .disabled(busyId == s.id)
+
+            HStack(spacing: 12) {
+                Menu {
+                    Picker("Runtime", selection: Binding(get: { s.runtime ?? "tmux" }, set: { r in performAction(s) { try await store.setRuntime(s, r) } })) {
+                        Text("Terminal (tmux)").tag("tmux")
+                        Text("Chat").tag("chat")
+                    }
+                } label: {
+                    Label(s.runtime == "chat" ? "Chat" : "Terminal (tmux)", systemImage: s.runtime == "chat" ? "bubble.left" : "terminal")
+                }
+                .accessibilityLabel("Runtime")
+                Menu {
+                    Picker("Agent", selection: Binding(get: { s.agent ?? "" }, set: { a in performAction(s) { try await store.setAgent(s, a.isEmpty ? nil : a) } })) {
+                        Text("Repository default").tag("")
+                        ForEach(CronStore.agentChoices(runtime: s.runtime ?? "tmux"), id: \.self) { id in
+                            Text(ChatSwitch.profile(id).label).tag(id)
+                        }
+                    }
+                } label: {
+                    Label(s.agent.map { ChatSwitch.profile($0).label } ?? "Repository default", systemImage: "person.crop.circle")
+                }
+                .accessibilityLabel("Agent")
+                Spacer()
+            }
+            .font(.caption)
             .disabled(busyId == s.id)
 
             HStack {

@@ -52,8 +52,9 @@ import { GiteaAuthError, GiteaError, GiteaUnknownInstanceError, type GiteaApi } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readUpload, UploadError } from "./uploads";
-import { stageFile, stageShared } from "./inbox";
+import { InboxNameError, stageFile, stageShared } from "./inbox";
 import { registerThreadRoutes, type ThreadApiDeps } from "./threadApi";
+import { stageThreadImage, ThreadImageError } from "./threadImages";
 import type { SshKeyRef } from "./op";
 import { resolveSshTarget, type SshServer } from "./sshServers";
 import { createScopeGrant, keyCovered, listScopeGrants, liveScopeGrant, revokeScopeGrant, scopeIssue, scopeLabel } from "./sshScopeGrants";
@@ -181,6 +182,8 @@ export interface ApiDeps { mgr: SessionManager; db: Database; cfg: DevConfig; ro
   threads?: ThreadApiDeps["threads"];
   bus?: ThreadApiDeps["bus"];
   inbox?: ThreadApiDeps["inbox"];
+  untilReset?: ThreadApiDeps["untilReset"];
+  bridgeVersion?: ThreadApiDeps["bridgeVersion"];
   switcher?: ThreadApiDeps["switcher"];
   // "Update now": status of the server checkout vs origin/main and a manual start of devbox-update.service
   // (the nightly unit). `run` returns null when an update is already running.
@@ -297,6 +300,15 @@ function hookMeta(b: Record<string, unknown>): HookMeta {
   };
 }
 
+/** Validation shared by schedule create/update: the runtime, the agent, and that a chat schedule's agent can run in chat. */
+function scheduleRuntimeError(db: Database, folder: string, project: string, repo: string, runtime: unknown, agent: unknown): string | null {
+  if (runtime !== undefined && runtime !== "tmux" && runtime !== "chat") return "invalid runtime (tmux|chat)";
+  if (agent !== undefined && agent !== null && !isAgentName(agent)) return `invalid agent (${AGENT_IDS.join("|")})`;
+  if (runtime !== "chat") return null;
+  const effective = resolveAgent((agent ?? undefined) as AgentName | undefined, getRepoAgent(db, folder, project, repo));
+  return chatRuntimeBlock(effective, "vps");
+}
+
 export function createApp(d: ApiDeps): Hono {
   // Live Activity: an unapproved SSH key = the session is waiting. State is read from the DB (newest
   // open request), so deciding one request does not clear the wait for another.
@@ -329,6 +341,8 @@ export function createApp(d: ApiDeps): Hono {
   // Hono applies middleware only to routes registered after it.
   const identity = d.containerIdentity ?? defaultContainerIdentity;
   const sharedSessions = new SharedSessions(d.db, Date.now, identity);
+  // A shared-inbox file may not take a session's id: `_inbox/<id>` is that session's chat images.
+  const isSessionId = (name: string) => getSession(d.db, name) !== null;
   app.use("*", sharedContainerGuard({ db: d.db, remoteAddr: d.remoteAddr, identity, shared: sharedSessions, approvalAllowExtra: d.sshApprovalAllowExtra }));
   /** Shared or tainted (shareTaint.ts) session — same restrictions. */
   const restricted = (sessionId: string) => sharedSessions.current().has(sessionId);
@@ -351,8 +365,8 @@ export function createApp(d: ApiDeps): Hono {
     return c.json(buildWeeklyUsage(d.db,range.from,range.to,now));
   });
   app.route("/api/live-activities", liveActivitiesRoutes(d.db, d.liveActivities));
-  registerThreadRoutes(app, d.links && d.threads && d.bus && d.inbox
-    ? { db: d.db, mgr: d.mgr, links: d.links, threads: d.threads, bus: d.bus, inbox: d.inbox, switcher: d.switcher } : null);
+  registerThreadRoutes(app, d.links && d.threads && d.bus && d.inbox && d.bridgeVersion
+    ? { db: d.db, root: d.root, mgr: d.mgr, links: d.links, threads: d.threads, bus: d.bus, inbox: d.inbox, bridgeVersion: d.bridgeVersion, switcher: d.switcher, untilReset: d.untilReset } : null);
 
   // The git proxy MUST be registered first: further down the file is a catch-all that
   // serves the dashboard SPA, and Hono matches in registration order — otherwise requests
@@ -1472,15 +1486,29 @@ export function createApp(d: ApiDeps): Hono {
     if (session.status !== "running") return c.json({ error: "session is not running" }, 409);
     if (c.req.header("content-type") !== "application/octet-stream")
       return c.json({ error: "Content-Type must be application/octet-stream" }, 415);
+    // A chat image (`?for=thread`): stored in the session's own dir under a uuid name, so a message can only carry
+    // images uploaded for its session (threadApi checks it).
+    if (c.req.query("for") === "thread") {
+      try {
+        const bytes = await readUpload(c.req.raw);
+        const path = stageThreadImage(d.root, session.id, bytes);
+        logEvent(d.db, session.id, "file_inbox", { name: path.split("/").pop(), size: bytes.length, source: "browser", thread: true });
+        return c.json({ path, size: bytes.length }, 201);
+      } catch (e) {
+        if (e instanceof UploadError || e instanceof ThreadImageError) return c.json({ error: e.message }, e.status);
+        return c.json({ error: "Could not save the image" }, 400);
+      }
+    }
     const name = c.req.query("name");
     if (!name || name.length > 240) return c.json({ error: "A file name of at most 240 characters is required" }, 400);
     try {
       const bytes = await readUpload(c.req.raw);
-      const path = stageShared(join(d.root, "_inbox"), name, bytes);
+      const path = stageShared(join(d.root, "_inbox"), name, bytes, isSessionId);
       logEvent(d.db, session.id, "file_inbox", { name: path.split("/").pop(), size: bytes.length, source: "browser", shared: true });
       return c.json({ path, size: bytes.length }, 201);
     } catch (e) {
       if (e instanceof UploadError) return c.json({ error: e.message }, e.status);
+      if (e instanceof InboxNameError) return c.json({ error: e.message }, 400);
       return c.json({ error: "Could not save the file in the inbox" }, 400);
     }
   });
@@ -2132,7 +2160,9 @@ export function createApp(d: ApiDeps): Hono {
     // `important` is OPT-IN, not opt-out: it means Pushover emergency (priority 2 =
     // a persistent alarm until acknowledged) for that session's notifications. Until the UI had a
     // toggle for it, all schedules were created with a one and the morning cron then rang.
-    const row: ScheduleRow = { id: crypto.randomUUID(), name: b.name, cron: b.cron, folder: b.folder, project: b.project, repo: b.repo, clone_url: b.cloneUrl, prompt: b.prompt, important: b.important === 1 ? 1 : 0, enabled: 1, last_run_at: null };
+    const bad = scheduleRuntimeError(d.db, b.folder, b.project, b.repo, b.runtime, b.agent);
+    if (bad) return c.json({ error: bad }, 400);
+    const row: ScheduleRow = { id: crypto.randomUUID(), name: b.name, cron: b.cron, folder: b.folder, project: b.project, repo: b.repo, clone_url: b.cloneUrl, prompt: b.prompt, important: b.important === 1 ? 1 : 0, enabled: 1, last_run_at: null, runtime: b.runtime ?? "tmux", agent: b.agent ?? null };
     insertSchedule(d.db, row);
     return c.json(row, 201);
   });
@@ -2141,8 +2171,11 @@ export function createApp(d: ApiDeps): Hono {
     if (!getSchedule(d.db, id)) return c.json({ error: "unknown schedule" }, 404);
     const b = (await c.req.json().catch(() => ({}))) as Partial<ScheduleRow>;
     if (b.cron !== undefined && !validCron(b.cron)) return c.json({ error: "invalid cron expression" }, 400);
+    const cur = getSchedule(d.db, id)!;
+    const bad = scheduleRuntimeError(d.db, cur.folder, cur.project, cur.repo, b.runtime === undefined ? cur.runtime : b.runtime, b.agent === undefined ? cur.agent : b.agent);
+    if (bad) return c.json({ error: bad }, 400);
     const patch: Partial<ScheduleRow> = {};
-    for (const k of ["name", "cron", "prompt", "enabled", "important"] as const) if (b[k] !== undefined) (patch as Record<string, unknown>)[k] = b[k];
+    for (const k of ["name", "cron", "prompt", "enabled", "important", "runtime", "agent"] as const) if (b[k] !== undefined) (patch as Record<string, unknown>)[k] = b[k];
     updateSchedule(d.db, id, patch);
     return c.json(getSchedule(d.db, id));
   });
@@ -2340,7 +2373,7 @@ export function createApp(d: ApiDeps): Hono {
       // guess the target session on the mac. Returns /inbox/<name>.
       if (c.req.query("target") === "shared") {
         let sp: string;
-        try { sp = stageShared(join(d.root, "_inbox"), r.filename ?? "file", r.body); }
+        try { sp = stageShared(join(d.root, "_inbox"), r.filename ?? "file", r.body, isSessionId); }
         catch (e) { return c.json({ error: (e as Error).message }, 400); }
         logEvent(d.db, null, "file_inbox", { name: sp.split("/").pop(), size: r.body.length, shared: true });
         return c.text(sp, 200);
@@ -2371,7 +2404,7 @@ export function createApp(d: ApiDeps): Hono {
       const p = (n: number) => String(n).padStart(2, "0");
       const stamp = `${t.getFullYear()}${p(t.getMonth() + 1)}${p(t.getDate())}-${p(t.getHours())}${p(t.getMinutes())}${p(t.getSeconds())}`;
       let sp: string;
-      try { sp = stageShared(join(d.root, "_inbox"), `img-${stamp}.png`, r.body); }
+      try { sp = stageShared(join(d.root, "_inbox"), `img-${stamp}.png`, r.body, isSessionId); }
       catch (e) { return c.json({ error: (e as Error).message }, 400); }
       logEvent(d.db, validSeg(session) ? session : null, "clipboard_access", { kind: "image", target: "shared", name: sp.split("/").pop(), size: r.body.length });
       return c.text(sp, 200);

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { endFinishedRuns } from "../src/autoEnd";
+import { endFinishedRuns, endSessionKeepingWork } from "../src/autoEnd";
 import { getSession, insertSession, listEvents, openDb, setAutoEnd, type SessionRow } from "../src/db";
 import type { Database } from "bun:sqlite";
 
@@ -143,4 +143,15 @@ test("a session without a worktree does not ask about the state at all", async (
   expect(asked).toBe(false);
   expect(calls).toEqual([{ keep: false }]);
   expect(listEvents(d).some((e) => e.type === "auto_end_kept")).toBe(false);
+});
+
+test("endSessionKeepingWork keeps a dirty or unknown worktree and deletes a clean one", async () => {
+  for (const [dirt, keep] of [[["M a.ts"], true], [null, true], [[], false]] as const) {
+    const d = db("dev-a-cms");
+    d.run("UPDATE sessions SET worktree='/w' WHERE id='dev-a-cms'");
+    const calls: unknown[] = [];
+    await endSessionKeepingWork({ db: d, end: async (id, _a, opts) => { calls.push([id, opts]); }, changes: async () => dirt as string[] | null }, getSession(d, "dev-a-cms")!, "schedule-failed");
+    expect(calls).toEqual([["dev-a-cms", { keepWorktree: keep }]]);
+    expect(listEvents(d).some((e) => e.type === "auto_end_kept")).toBe(keep);
+  }
 });

@@ -11,6 +11,13 @@ describe("parseClientFrame", () => {
     expect(parseClientFrame(line)).toEqual({ t: "cmd", id: "c1", cmd: { kind: "startTurn", text: "hi" } });
   });
 
+  test("startTurn may name its origin: user, or critic for devd's critic follow-up", () => {
+    for (const origin of ["user", "critic"] as const) {
+      const line = JSON.stringify({ t: "cmd", id: "c1", cmd: { kind: "startTurn", text: "fix it", origin } });
+      expect(parseClientFrame(line)).toEqual({ t: "cmd", id: "c1", cmd: { kind: "startTurn", text: "fix it", origin } });
+    }
+  });
+
   test("accepts the other command kinds", () => {
     const cmds: BridgeCommand[] = [
       { kind: "interrupt" },
@@ -45,6 +52,8 @@ describe("parseClientFrame", () => {
       '{"t":"hello"}',
       '{"t":"cmd","id":"c1","cmd":{"kind":"startTurn","text":""}}',
       '{"t":"cmd","id":"c1","cmd":{"kind":"startTurn","text":"x","attachments":[1]}}',
+      '{"t":"cmd","id":"c1","cmd":{"kind":"startTurn","text":"x","origin":"agent"}}',
+      '{"t":"cmd","id":"c1","cmd":{"kind":"startTurn","text":"x","origin":null}}',
       '{"t":"cmd","id":"","cmd":{"kind":"stop"}}',
       '{"t":"cmd","id":"c1","cmd":{"kind":"answer","requestId":"q1"}}',
       '{"t":"cmd","id":"c1","cmd":{"kind":"declareWait","reason":"x","waitKind":"nope"}}',

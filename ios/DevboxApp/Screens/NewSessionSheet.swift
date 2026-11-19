@@ -121,7 +121,7 @@ struct NewSessionSheet: View {
                 }
             }
             .navigationTitle("New session")
-            .navigationBarTitleDisplayMode(.inline)
+            .inlineNavigationTitle()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }

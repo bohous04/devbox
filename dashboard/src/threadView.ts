@@ -14,6 +14,9 @@ export function applyThreadEvent(t: ThreadSnapshot, e: LoggedEvent): ThreadSnaps
   return n;
 }
 
+/** A user item's images; no field when the message has none (same rule in devd/src/threadStore.ts). */
+const withAttachments = (a: string[] | undefined): { attachments?: string[] } => (a !== undefined && a.length > 0 ? { attachments: a } : {});
+
 const TERMINAL: ReadonlySet<string> = new Set(["completed", "interrupted", "failed"]);
 
 const findItem = (n: ThreadSnapshot, runId: string, itemId: string) =>
@@ -26,6 +29,7 @@ function insertItem(n: ThreadSnapshot, seq: number, ts: number, i: Omit<ThreadIt
   if (i.output !== undefined) it.output = i.output;
   if (i.isError !== undefined) it.isError = i.isError;
   if (i.status !== undefined) it.status = i.status;
+  if (i.attachments !== undefined) it.attachments = i.attachments;
   n.items.push(it);
 }
 
@@ -58,8 +62,8 @@ function dispatch(n: ThreadSnapshot, { seq, ts, event: ev }: LoggedEvent) {
       n.native = { harness: ev.harness, nativeThreadId: ev.nativeThreadId, account: ev.account, model: ev.model ?? (n.native?.harness === ev.harness ? n.native.model : null) };
       return;
     case "run.queued":
-      insertRun(n, ev.runId, { origin: "user", status: "queued", nativeThreadId: null, model: null, queuedAt: ts, startedAt: null });
-      insertItem(n, seq, ts, { runId: ev.runId, itemId: `user:${ev.runId}`, kind: "user", text: ev.text, status: "done" });
+      insertRun(n, ev.runId, { origin: ev.origin ?? "user", status: "queued", nativeThreadId: null, model: null, queuedAt: ts, startedAt: null });
+      insertItem(n, seq, ts, { runId: ev.runId, itemId: `user:${ev.runId}`, kind: "user", text: ev.text, status: "done", ...withAttachments(ev.attachments) });
       return;
     case "run.started": {
       const idx = n.runs.findIndex((r) => r.runId === ev.runId);
@@ -82,7 +86,7 @@ function dispatch(n: ThreadSnapshot, { seq, ts, event: ev }: LoggedEvent) {
       if (ev.role === "user") {
         // The user's text already came with run.queued; a harness echo must not duplicate it.
         if (!n.items.some((i) => i.runId === ev.runId && i.kind === "user")) {
-          insertItem(n, seq, ts, { runId: ev.runId, itemId: ev.itemId, kind: "user", text: ev.text, status: "done" });
+          insertItem(n, seq, ts, { runId: ev.runId, itemId: ev.itemId, kind: "user", text: ev.text, status: "done", ...withAttachments(ev.attachments) });
         }
         return;
       }
@@ -196,12 +200,16 @@ export const activeRun = (t: ThreadSnapshot): RunRow | undefined => t.runs.find(
 export const queuedRunIds = (t: ThreadSnapshot): Set<string> =>
   new Set(t.runs.filter((r) => r.status === "queued").map((r) => r.runId));
 
+/** Runs devd's critic started (its follow-up after a block): their user message is the critic's, not the user's. */
+export const criticRunIds = (t: ThreadSnapshot): Set<string> =>
+  new Set(t.runs.filter((r) => r.origin === "critic").map((r) => r.runId));
+
 /** What the composer shows when sending failed. The text stays in the composer; nothing is retried: after a timeout
  *  the message may have been queued anyway. */
 export function composerErrorText(status: number, body: unknown): string {
   const b = (typeof body === "object" && body !== null ? body : {}) as { error?: unknown; message?: unknown };
   if (b.error === "agent-disconnected") return "agent not connected — message not sent";
   if (b.error === "agent-timeout") return "no reply from the agent — check the thread before resending";
-  if (b.error === "command-failed" && typeof b.message === "string") return b.message;
+  if ((b.error === "command-failed" || b.error === "bridge-too-old") && typeof b.message === "string") return b.message;
   return typeof b.error === "string" ? b.error : `HTTP ${status}`;
 }

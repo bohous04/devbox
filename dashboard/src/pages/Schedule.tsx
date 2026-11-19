@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Plus } from "lucide-react";
 import { FormDialog } from "../components/FormDialog";
-import { api, type Schedule, type TreeProject } from "../api";
+import { api, type AgentName, type Schedule, type TreeProject } from "../api";
 import { ActionButton, AppPage, ConfirmButton, EmptyState, RowsSkeleton, Section } from "../components/primitives";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { agoLabel } from "../format";
-import { folderChoices, projectChoices, repoChoices, soleProject } from "../newSession";
+import { AGENT_IDS, AGENT_PROFILES, chatRuntimeBlock, folderChoices, projectChoices, repoChoices, soleProject } from "../newSession";
 
 const selectCls = "h-11 w-full rounded-md border bg-background px-2 text-sm text-foreground disabled:cursor-not-allowed disabled:opacity-50";
 const textareaCls = "w-full min-w-0 rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50";
@@ -18,6 +18,7 @@ function NewSchedule({ open, onClose, onCreated }: { open: boolean; onClose: () 
   const [tree, setTree] = useState<TreeProject[] | null>(null);
   const [folder, setFolder] = useState(""); const [project, setProject] = useState(""); const [repo, setRepo] = useState("");
   const [name, setName] = useState(""); const [cron, setCron] = useState("0 3 * * *"); const [prompt, setPrompt] = useState("");
+  const [runtime, setRuntime] = useState<"tmux" | "chat">("tmux"); const [agent, setAgent] = useState<AgentName | "">("");
   const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => { if (open && tree === null) api.tree().then(setTree).catch((e) => setErr((e as Error).message)); }, [open, tree]);
@@ -26,12 +27,15 @@ function NewSchedule({ open, onClose, onCreated }: { open: boolean; onClose: () 
   const projects = tree && folder ? projectChoices(tree, folder) : [];
   const repos = tree && folder && project ? repoChoices(tree, folder, project).filter((r) => r.cloneUrl) : [];
 
+  // A chat schedule can only use agents the chat runtime runs; "" = the repository's remembered agent.
+  const agents = AGENT_IDS.filter((a) => runtime === "tmux" || chatRuntimeBlock(a, "vps") === null);
+
   async function create() {
     const choice = repos.find((r) => r.value === repo);
     if (busy || !name.trim() || !cron.trim() || !folder || !project || !repo || !choice?.cloneUrl || !prompt.trim()) return;
     setBusy(true); setErr(null);
     try {
-      await api.createSchedule({ name: name.trim(), cron: cron.trim(), folder, project, repo, cloneUrl: choice.cloneUrl, prompt: prompt.trim() });
+      await api.createSchedule({ name: name.trim(), cron: cron.trim(), folder, project, repo, cloneUrl: choice.cloneUrl, prompt: prompt.trim(), runtime, ...(agent ? { agent } : {}) });
       setName(""); setPrompt(""); setRepo(""); await onCreated(); onClose();
     } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
   }
@@ -46,6 +50,10 @@ function NewSchedule({ open, onClose, onCreated }: { open: boolean; onClose: () 
           <label className="grid gap-1.5 text-sm font-medium">Project<select className={selectCls} value={project} required disabled={!folder || busy} onChange={(e) => { setProject(e.target.value); setRepo(""); }}><option value="">Choose project</option>{projects.map((p) => <option key={p} value={p}>{p}</option>)}</select></label>
         </div>
         <label className="grid gap-1.5 text-sm font-medium">Repository<select className={selectCls} value={repo} required disabled={!project || busy} onChange={(e) => setRepo(e.target.value)}><option value="">Choose repository</option>{repos.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}</select></label>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="grid gap-1.5 text-sm font-medium">Runtime<select className={selectCls} value={runtime} disabled={busy} onChange={(e) => { const r = e.target.value as "tmux" | "chat"; setRuntime(r); if (agent && r === "chat" && chatRuntimeBlock(agent, "vps")) setAgent(""); }}><option value="tmux">Terminal (tmux)</option><option value="chat">Chat</option></select></label>
+          <label className="grid gap-1.5 text-sm font-medium">Agent<select className={selectCls} value={agent} disabled={busy} onChange={(e) => setAgent(e.target.value as AgentName | "")}><option value="">Repository default</option>{agents.map((a) => <option key={a} value={a}>{AGENT_PROFILES[a].label}</option>)}</select></label>
+        </div>
         <label className="grid gap-1.5 text-sm font-medium">Cron expression<Input required className="font-mono" value={cron} onChange={(e) => setCron(e.target.value)} aria-describedby="cron-help" /></label>
         <p id="cron-help" className="text-xs text-muted-foreground">Minute · hour · day · month · weekday. Example: 0 3 * * * runs daily at 03:00 (server time).</p>
         <label className="grid gap-1.5 text-sm font-medium">Prompt<textarea className={textareaCls} required rows={4} placeholder="Describe the work to complete…" value={prompt} onChange={(e) => setPrompt(e.target.value)} /></label>
@@ -98,7 +106,7 @@ export function Schedule() {
                     <TableRow key={s.id} className={cn(!s.enabled && "opacity-60")}>
                       <TableCell className="min-w-48 max-w-xs">
                         <div className="font-medium">{s.name}</div>
-                        <div className="text-xs text-muted-foreground">{s.project}/{s.repo}</div>
+                        <div className="text-xs text-muted-foreground">{s.project}/{s.repo} · {s.runtime === "chat" ? "chat" : "tmux"}{s.agent ? ` · ${AGENT_PROFILES[s.agent].short}` : ""}</div>
                         <div className="mt-0.5 truncate text-xs text-muted-foreground" title={s.prompt}>
                           {s.prompt.slice(0, 160)}{s.prompt.length > 160 ? "…" : ""}
                         </div>

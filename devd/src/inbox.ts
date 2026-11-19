@@ -49,12 +49,20 @@ export function stageFile(workspace: string, rawName: string, bytes: Uint8Array)
 // Shared inbox: the file goes into the host's `sharedDir` (= <root>/_inbox), which is
 // bind-mounted into EVERY container as /inbox. The path is uniform across
 // sessions → we do not have to guess the target session on the mac (see push model / hotkey).
-export function stageShared(sharedDir: string, rawName: string, bytes: Uint8Array): string {
+/** A shared-inbox name the user must change (the API answers 400 with the message). */
+export class InboxNameError extends Error {}
+
+/** `isSessionId`: `<sharedDir>/<session id>` is that session's chat-image directory (threadImages.ts), so a shared
+ *  file may not take a session's id as its name. */
+export function stageShared(sharedDir: string, rawName: string, bytes: Uint8Array, isSessionId: (name: string) => boolean): string {
   const name = sanitizeName(rawName);
   if (!name) throw new Error("invalid file name");
   mkdirSync(sharedDir, { recursive: true });
   if (!lstatSync(sharedDir).isDirectory()) throw new Error("inbox must be a directory, not a symlink");
   const target = uniquePath(sharedDir, name);
+  if (isSessionId(name) || isSessionId(basename(target))) {
+    throw new InboxNameError(`"${basename(target)}" is the id of a session; rename the file (e.g. add an extension)`);
+  }
   writeFileSync(target, bytes, { flag: "wx" });
   return "/inbox/" + basename(target);
 }

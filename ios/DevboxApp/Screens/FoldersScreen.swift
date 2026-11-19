@@ -27,7 +27,7 @@ struct FoldersScreen: View {
                         }
                     }
                 }
-                .listStyle(.insetGrouped)
+                .insetGroupedList()
             } else if let error = store.error {
                 ContentUnavailableView(
                     "Couldn't load folders",

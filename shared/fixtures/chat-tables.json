@@ -1,0 +1,100 @@
+{
+  "agentIds": [
+    "claude",
+    "claude-gemini",
+    "claude-openrouter",
+    "codex",
+    "grok",
+    "antigravity",
+    "vibe"
+  ],
+  "profiles": {
+    "claude": {
+      "label": "Claude Code",
+      "proxy": false,
+      "runtime": "claude",
+      "acp": null,
+      "acpLive": false,
+      "chatOnly": false
+    },
+    "claude-gemini": {
+      "label": "Claude Code + Gemini",
+      "proxy": true,
+      "runtime": "claude",
+      "acp": null,
+      "acpLive": false,
+      "chatOnly": false
+    },
+    "claude-openrouter": {
+      "label": "Claude Code + OpenRouter",
+      "proxy": true,
+      "runtime": "claude",
+      "acp": null,
+      "acpLive": false,
+      "chatOnly": false
+    },
+    "codex": {
+      "label": "Codex",
+      "proxy": false,
+      "runtime": "codex",
+      "acp": null,
+      "acpLive": false,
+      "chatOnly": false
+    },
+    "grok": {
+      "label": "Grok Build",
+      "proxy": false,
+      "runtime": "grok",
+      "acp": "grok",
+      "acpLive": false,
+      "chatOnly": false
+    },
+    "antigravity": {
+      "label": "Antigravity",
+      "proxy": false,
+      "runtime": "agy",
+      "acp": "antigravity",
+      "acpLive": false,
+      "chatOnly": false
+    },
+    "vibe": {
+      "label": "Mistral Vibe",
+      "proxy": false,
+      "runtime": "vibe",
+      "acp": "vibe",
+      "acpLive": true,
+      "chatOnly": true
+    }
+  },
+  "chatModels": {
+    "claude": [
+      "claude-opus-5-5",
+      "claude-sonnet-5-5"
+    ],
+    "codex": [
+      "gpt-6.1-sol",
+      "gpt-6-sol",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+      "gpt-5.4-mini",
+      "gpt-5.3-codex"
+    ],
+    "grok": [
+      "grok-4.6",
+      "grok-4.5"
+    ],
+    "vibe": [
+      "mistral-large-4-0",
+      "mistral-medium-3.5"
+    ],
+    "antigravity": [
+      "gemini-4-neon"
+    ]
+  },
+  "sameModelAliases": {
+    "mistral-medium-latest": "mistral-medium-3.5"
+  },
+  "acpMinBridgeVersion": "1.2.0"
+}

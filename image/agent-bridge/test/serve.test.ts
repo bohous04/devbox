@@ -25,7 +25,8 @@ import {
   type HarnessOpenOptions,
 } from "../src/serve";
 import type { ServerFrame, SwitchTarget } from "../src/protocol";
-import { ACP_MIN_BRIDGE_VERSION } from "../../../shared/bridgeVersion";
+import { ACP_MIN_BRIDGE_VERSION, CRITIC_MIN_BRIDGE_VERSION, IMAGES_MIN_BRIDGE_VERSION, versionAtLeast } from "../../../shared/bridgeVersion";
+import { withImagePaths } from "../src/images";
 import { loadState, saveState, type BridgeState } from "../src/state";
 
 const MIN = 60_000;
@@ -47,7 +48,7 @@ afterEach(async () => {
 // `deferStart` holds every turn, as Codex does before its thread is ready.
 // `readyErrors[i]` makes the i-th open fail to become ready (the session then ends, as the adapters do);
 // `readyGates[i]` holds the i-th open's readiness until it resolves.
-function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities; readyErrors?: (Error | undefined)[]; readyGates?: (Promise<void> | undefined)[] } = {}) {
+function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities | (() => Capabilities); readyErrors?: (Error | undefined)[]; readyGates?: (Promise<void> | undefined)[] } = {}) {
   const ends: ((r: { error?: string }) => void)[] = [];
   const f = {
     opens: [] as HarnessOpenOptions[],
@@ -55,7 +56,7 @@ function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities; readyErr
     /** Fails the next startTurn with this error. */
     failNextStart: null as Error | null,
     injected: [] as unknown[][],
-    turns: [] as { runId: string; text: string; origin: RunOrigin }[],
+    turns: [] as { runId: string; text: string; origin: RunOrigin; images?: string[] }[],
     closes: 0,
     active: null as string | null,
     waiting: [] as { runId: string; origin: RunOrigin }[],
@@ -88,18 +89,18 @@ function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities; readyErr
       if (readyError) end({ error: readyError.message });
       return {
         ready,
-        capabilities: () => opts.caps ?? CLAUDE_CAPABILITIES,
+        capabilities: () => (typeof opts.caps === "function" ? opts.caps() : opts.caps ?? CLAUDE_CAPABILITIES),
         async setModel(m) {
           f.models.push(m);
         },
         async injectItems(items) {
           f.injected.push(items);
         },
-        async startTurn(runId, text, origin) {
+        async startTurn(runId, text, origin, images) {
           const fail = f.failNextStart;
           f.failNextStart = null;
           if (fail) throw fail;
-          f.turns.push({ runId, text, origin });
+          f.turns.push({ runId, text, origin, ...(images?.length ? { images } : {}) });
           if (f.active === null && !opts.deferStart) f.start(runId, origin);
           else f.waiting.push({ runId, origin });
         },
@@ -246,11 +247,103 @@ describe("serve", () => {
     expect(state()).toMatchObject({ activeRunId: null, queue: [] });
   });
 
-  test("startTurn with attachments is refused explicitly", async () => {
+  test("a critic startTurn runs with origin critic; without an origin it is the user's", async () => {
     const f = fakeHarness();
     await start(f);
-    await expect(cmd({ kind: "startTurn", text: "look", attachments: ["a.png"] })).rejects.toThrow("attachments");
-    expect(f.turns).toEqual([]);
+    const r = (await cmd({ kind: "startTurn", text: "fix the failing test", origin: "critic" })) as { runId: string };
+    expect(f.turns).toEqual([{ runId: r.runId, text: "fix the failing test", origin: "critic" }]);
+    expect(events()).toContainEqual({ type: "run.started", runId: r.runId, origin: "critic", nativeThreadId: null, model: null });
+    f.complete();
+    const u = (await cmd({ kind: "startTurn", text: "thanks" })) as { runId: string };
+    expect(f.turns[1]).toEqual({ runId: u.runId, text: "thanks", origin: "user" });
+  });
+
+  test("a queued critic turn keeps its origin across a bridge restart", async () => {
+    const f = fakeHarness({ deferStart: true });
+    const bridge = await start(f);
+    const r = (await cmd({ kind: "startTurn", text: "fix it", origin: "critic" })) as { runId: string };
+    expect(state().queue).toEqual([{ runId: r.runId, text: "fix it", attachments: [], origin: "critic" }]);
+    await bridge.close();
+    const g = fakeHarness();
+    await start(g);
+    expect(g.turns).toEqual([{ runId: r.runId, text: "fix it", origin: "critic" }]);
+  });
+
+  test("a critic startTurn is refused while a run is active or queued", async () => {
+    const f = fakeHarness();
+    await start(f);
+    await cmd({ kind: "startTurn", text: "one" });
+    await expect(cmd({ kind: "startTurn", text: "fix it", origin: "critic" })).rejects.toThrow("run-active");
+    await cmd({ kind: "startTurn", text: "two" });
+    f.complete();
+    await expect(cmd({ kind: "startTurn", text: "fix it", origin: "critic" })).rejects.toThrow("run-active");
+    expect(f.turns.map((t) => t.origin)).toEqual(["user", "user"]);
+    expect(state().queue).toEqual([]);
+  });
+
+  test("a critic turn the harness holds is announced as queued with its origin", async () => {
+    const f = fakeHarness({ deferStart: true });
+    await start(f);
+    const r = (await cmd({ kind: "startTurn", text: "fix it", origin: "critic" })) as { runId: string };
+    expect(events()).toContainEqual({ type: "run.queued", runId: r.runId, text: "fix it", attachments: [], origin: "critic" });
+  });
+
+  test("attachments go to a harness that takes images; the user's message records them", async () => {
+    const f = fakeHarness();
+    await start(f);
+    const r = (await cmd({ kind: "startTurn", text: "look", attachments: ["/inbox/s/a.png"] })) as { runId: string };
+    expect(f.turns).toEqual([{ runId: r.runId, text: "look", origin: "user", images: ["/inbox/s/a.png"] }]);
+    expect(events()).toContainEqual({ type: "message.final", runId: r.runId, itemId: `user:${r.runId}`, role: "user", text: "look", attachments: ["/inbox/s/a.png"] });
+  });
+
+  test("fallback: a harness without images gets the paths appended to its text; the thread keeps the user's text", async () => {
+    const f = fakeHarness({ caps: { ...CLAUDE_CAPABILITIES, images: false } });
+    await start(f);
+    const r = (await cmd({ kind: "startTurn", text: "look", attachments: ["/inbox/s/a.png", "/inbox/s/b.gif"] })) as { runId: string };
+    expect(f.turns).toEqual([{ runId: r.runId, text: withImagePaths("look", ["/inbox/s/a.png", "/inbox/s/b.gif"]), origin: "user" }]);
+    expect(events()).toContainEqual({ type: "message.final", runId: r.runId, itemId: `user:${r.runId}`, role: "user", text: "look", attachments: ["/inbox/s/a.png", "/inbox/s/b.gif"] });
+  });
+
+  test("a queued message keeps its attachments in run.queued, in state and across a bridge restart", async () => {
+    const img = join(dir, "a.png");
+    writeFileSync(img, "x");
+    const f = fakeHarness({ deferStart: true });
+    const bridge = await start(f);
+    const r = (await cmd({ kind: "startTurn", text: "look", attachments: [img] })) as { runId: string };
+    expect(events()).toContainEqual({ type: "run.queued", runId: r.runId, text: "look", attachments: [img] });
+    expect(state().queue).toEqual([{ runId: r.runId, text: "look", attachments: [img] }]);
+    await bridge.close();
+    const g = fakeHarness();
+    await start(g);
+    expect(g.turns).toEqual([{ runId: r.runId, text: "look", origin: "user", images: [img] }]);
+  });
+
+  test("recovery: a queued message whose image is gone fails visibly and the rest of the queue still runs", async () => {
+    const gone = join(dir, "gone.png");
+    saveState(join(dir, "state.json"), baseState({ nativeThreadId: "thread-1", queue: [
+      { runId: "r-img", text: "look", attachments: [gone] },
+      { runId: "r-next", text: "next", attachments: [] },
+    ] }));
+    const f = fakeHarness({ deferStart: true });
+    await start(f);
+    expect(f.turns).toEqual([{ runId: "r-next", text: "next", origin: "user" }]);
+    expect(events()).toContainEqual({ type: "run.queued", runId: "r-img", text: "look", attachments: [gone] });
+    expect(events()).toContainEqual({ type: "run.failed", runId: "r-img", error: `attachment missing: ${gone}` });
+    expect(state().queue).toEqual([{ runId: "r-next", text: "next", attachments: [] }]);
+  });
+
+  test("an early turn on a harness still negotiating (an ACP agent before initialize) gets the image paths in its text", async () => {
+    let negotiated = true;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const f = fakeHarness({ caps: () => ({ ...CLAUDE_CAPABILITIES, images: negotiated }), readyGates: [undefined, gate] });
+    await start(f);
+    negotiated = false; // the restarted harness reports no images until it has negotiated
+    await cmd({ kind: "restartAgent" });
+    const r = (await cmd({ kind: "startTurn", text: "look", attachments: ["/inbox/s/a.png"] })) as { runId: string };
+    expect(f.turns.at(-1)).toEqual({ runId: r.runId, text: withImagePaths("look", ["/inbox/s/a.png"]), origin: "user" });
+    negotiated = true;
+    release();
   });
 
   test("restartAgent while a run is active is refused", async () => {
@@ -546,6 +639,15 @@ describe("switching", () => {
     expect(f.turns.map((t) => t.text)).toEqual(["[user] earlier\n\nUser message:\nhi", "again"]);
     // The thread shows what the user wrote, not the handoff.
     expect(events()).toContainEqual({ type: "message.final", runId: first.runId, itemId: `user:${first.runId}`, role: "user", text: "hi" });
+    expect(state().pendingHandoff).toBeNull();
+  });
+
+  test("a critic follow-up takes the handoff, labelled as the critic's review", async () => {
+    const f = fakeHarness();
+    await start(f);
+    await switchCmd({ harness: "claude", account: "b", model: null, env: { CLAUDE_CONFIG_DIR: claudeProfile("b") } }, null, { preamble: "[user] earlier" });
+    await cmd({ kind: "startTurn", text: "fix the migration", origin: "critic" });
+    expect(f.turns.map((t) => t.text)).toEqual(["[user] earlier\n\nCritic review:\nfix the migration"]);
     expect(state().pendingHandoff).toBeNull();
   });
 
@@ -942,8 +1044,16 @@ describe("final review fixes", () => {
     expect(await handshake()).toMatchObject({ version: BRIDGE_VERSION, awaitingTarget: false });
   });
 
-  test("this bridge knows ACP harnesses: its version is the one devd and the dashboard require for them", () => {
-    expect(BRIDGE_VERSION).toBe(ACP_MIN_BRIDGE_VERSION);
+  test("this bridge knows ACP harnesses: its version is at least the one devd and the dashboard require for them", () => {
+    expect(versionAtLeast(BRIDGE_VERSION, ACP_MIN_BRIDGE_VERSION)).toBe(true);
+  });
+
+  test("this bridge takes a startTurn origin: its version is at least the one devd requires for critic follow-ups", () => {
+    expect(versionAtLeast(BRIDGE_VERSION, CRITIC_MIN_BRIDGE_VERSION)).toBe(true);
+  });
+
+  test("this bridge takes startTurn attachments: its version is the one devd requires to send them", () => {
+    expect(BRIDGE_VERSION).toBe(IMAGES_MIN_BRIDGE_VERSION);
   });
 });
 

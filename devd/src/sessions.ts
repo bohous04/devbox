@@ -1,5 +1,6 @@
 import { loadRemoteRoute, inspectRemoteContainer, prepareRemoteWorkspace, restoreExactSession, retainRemoteWorkspace, type RemoteRoute } from "../../infra/codex-remote/restoreSession";
 import { archiveChats } from "./chatArchive";
+import { removeThreadImages } from "./threadImages";
 import { codexRemoteLaunchScope } from "./codexRemoteLaunch";
 import type { Database } from "bun:sqlite";
 import { chmodSync, chownSync, existsSync, mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -1396,6 +1397,10 @@ export class SessionManager {
       // the store takes them (isEnding keeps readers out). Closed here, it is archived with no handle open.
       this.d.releaseThread?.(id);
       this.keepChats(id);
+      // Its chat images go only now (S5-R23): the bridge that read them is gone with the container. A failure leaves
+      // them on disk (logged) and must not leave the session row behind, like the lease release below.
+      try { removeThreadImages(this.d.root, id); }
+      catch (e) { console.error(`removing the chat images of ${id} failed, they stay in _inbox/${id}:`, e); }
       deleteGitStat(this.d.db, id);
       // The lease belongs to the session — without releasing it the account would look occupied until the
       // period expires and the poller would needlessly keep it at the fast cadence. An error here must not, however,

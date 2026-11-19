@@ -130,14 +130,23 @@ final class LiveStoreTests: XCTestCase {
 
         store.start()
         try await Task.sleep(for: .milliseconds(70))
+        let polling = store.pollTask
         store.stop()
+        // Wait (bounded, so a stop() that does not stop fails instead of hanging) until the loop is over: no tick
+        // starts after this.
+        var loopEnded = false
+        Task { await polling?.value; loopEnded = true }
+        try await waitUntil { loopEnded }
         let countAfterStop = MockURLProtocol.capturedRequests.filter { $0.url?.path == "/api/stats/live" }.count
         XCTAssertGreaterThan(countAfterStop, 0)
 
-        try await Task.sleep(for: .milliseconds(120)) // longer than a few more ticks would take
+        try await Task.sleep(for: .milliseconds(120)) // six polling intervals
         let countLater = MockURLProtocol.capturedRequests.filter { $0.url?.path == "/api/stats/live" }.count
 
-        XCTAssertEqual(countAfterStop, countLater, "no more requests may arrive after stop()")
+        // The tick running at stop() had already handed its request to URLSession; cancelled, it can still reach
+        // the mock a moment later (URLSession starts protocols on its own queue). That is at most one request;
+        // polling that went on would add one every 20 ms.
+        XCTAssertLessThanOrEqual(countLater - countAfterStop, 1, "no new tick may start after stop()")
     }
 
     func testStartCalledTwiceDoesNotDoublePolling() async throws {

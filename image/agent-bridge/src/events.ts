@@ -21,7 +21,8 @@ export interface Capabilities {
   backgroundVisibility: boolean;
 }
 
-export type RunOrigin = "user" | "agent" | "continuation";
+/** `critic`: devd's automatic follow-up when its critic blocked the previous run (a `startTurn` with that origin). */
+export type RunOrigin = "user" | "agent" | "continuation" | "critic";
 export type RequestKind = "question" | "plan" | "approval";
 
 export interface BackgroundWork {
@@ -35,10 +36,12 @@ export interface BackgroundWork {
 export type BridgeEvent =
   // harness: "claude", "codex" or an ACP agent's id (ACP_AGENTS).
   | { type: "thread.native"; harness: "claude" | "codex" | (string & {}); nativeThreadId: string; account: string | null; model: string | null; caps?: Capabilities }
-  | { type: "run.queued"; runId: string; text: string; attachments: string[] }
+  // `origin` (bridge 1.3.0+) only for a critic follow-up; absent = the user's message.
+  | { type: "run.queued"; runId: string; text: string; attachments: string[]; origin?: "critic" }
   | { type: "run.started"; runId: string; origin: RunOrigin; nativeThreadId: string | null; model: string | null }
   | { type: "message.delta"; runId: string; itemId: string; text: string }
-  | { type: "message.final"; runId: string; itemId: string; role: "assistant" | "user"; text: string }
+  // attachments (bridge 1.4.0+): the user's images (paths under /inbox), only on a user message that has them.
+  | { type: "message.final"; runId: string; itemId: string; role: "assistant" | "user"; text: string; attachments?: string[] }
   | { type: "tool.started"; runId: string; itemId: string; tool: string; input: unknown }
   | { type: "tool.finished"; runId: string; itemId: string; isError: boolean; output: string }
   | { type: "request.opened"; runId: string; requestId: string; kind: RequestKind; prompt: string; options?: { label: string; description?: string }[]; multiSelect?: boolean }

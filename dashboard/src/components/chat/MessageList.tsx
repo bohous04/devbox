@@ -2,6 +2,7 @@ import { Info } from "lucide-react";
 import type { PendingRequest, ThreadItem } from "../../../../shared/thread";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { attachmentUrl } from "../../imageView";
 import { Markdown } from "./Markdown";
 import { RequestForm } from "./RequestForm";
 import { ToolCall } from "./ToolCall";
@@ -21,11 +22,15 @@ function RequestItem({ item, pending, onAnswer }: { item: ThreadItem; pending: P
 }
 
 /** The thread: user and assistant messages, tool calls, requests (open ones as a form) and notices. */
-export function MessageList({ items, pending, queued, onAnswer }: {
+export function MessageList({ sessionId, items, pending, queued, critic, onAnswer }: {
+  /** For the user's images (attachmentUrl). */
+  sessionId: string;
   items: ThreadItem[];
   pending: PendingRequest[];
   /** Runs still waiting behind the active one: their user message shows as queued. */
   queued: Set<string>;
+  /** Runs the critic started: their "user" message is the critic's review, labelled as such. */
+  critic: Set<string>;
   onAnswer: (requestId: string, answer: string) => Promise<void>;
 }) {
   return (
@@ -34,6 +39,16 @@ export function MessageList({ items, pending, queued, onAnswer }: {
         <li key={`${it.seq}:${it.runId}:${it.itemId}:${i}`} className={cn("min-w-0", it.kind === "user" && "flex justify-end")}>
           {it.kind === "user" ? (
             <div className={cn("max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-primary px-3.5 py-2 text-sm text-primary-foreground", it.runId && queued.has(it.runId) && "opacity-70")}>
+              {it.runId && critic.has(it.runId) && <Badge variant="secondary" className="mb-1.5 block w-fit">from the critic</Badge>}
+              {it.attachments && (
+                <div className="mb-1.5 flex flex-wrap gap-1.5">
+                  {it.attachments.map((p) => (
+                    <a key={p} href={attachmentUrl(sessionId, p)} target="_blank" rel="noreferrer">
+                      <img src={attachmentUrl(sessionId, p)} alt="Attached image" loading="lazy" className="max-h-40 max-w-full rounded-lg object-cover" />
+                    </a>
+                  ))}
+                </div>
+              )}
               {it.text}
               {it.runId && queued.has(it.runId) && <Badge variant="secondary" className="ml-2 align-middle">queued</Badge>}
             </div>

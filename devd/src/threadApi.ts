@@ -1,18 +1,25 @@
 import type { Context, Hono } from "hono";
 import type { Database } from "bun:sqlite";
+import { IMAGES_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
 import type { LoggedEvent } from "../../shared/thread";
 import { AgentDisconnected, CommandFailed, CommandTimeout, type BridgeLinks } from "./bridgeLink";
 import { SwitchRefused, type ChatSwitch, type SwitchRequest } from "./chatSwitch";
 import { getSession, type SessionRow } from "./db";
 import type { BusTopic, EventBus } from "./eventBus";
+import { REQUEST_OPEN, type ResetTarget } from "./sessionAttention";
 import type { Inbox } from "./sessionInbox";
 import { storedRuntime } from "./sessions";
+import { threadImageByName, threadImageFile } from "./threadImages";
 import type { ThreadStore } from "./threadStore";
 
 export const SSE_PING_MS = 25_000;
+/** S5-R23; the dashboard's Composer stops at the same number. */
+export const MAX_IMAGES_PER_MESSAGE = 10;
 
 export interface ThreadApiDeps {
   db: Database;
+  /** devd's data root: chat images live in `<root>/_inbox/<sessionId>` (threadImages.ts). */
+  root: string;
   mgr: { isEnding: (id: string) => boolean };
   links: Pick<BridgeLinks, "send" | "ensure" | "startTurnWhenConnected">;
   /** The session's thread store (index.ts: opened lazily, shared with its bridge link). */
@@ -21,6 +28,11 @@ export interface ThreadApiDeps {
   inbox: Inbox;
   /** Model, account and harness switching (chatSwitch.ts); without it those routes answer 503. */
   switcher?: Pick<ChatSwitch, "switch" | "target">;
+  /** When the session's active usage limit resets, or why that is not known (sessionAttention.untilReset); without
+   *  it only "snooze until reset" and snooze-reset answer 503. */
+  untilReset?: (s: SessionRow) => ResetTarget;
+  /** The session's bridge version from its latest handshake (chatSwitch.ts); null before one or for a 1.0.0 bridge. */
+  bridgeVersion: (sessionId: string) => string | null;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -48,7 +60,8 @@ const sseFrame = (event: string, data: unknown, id?: number) =>
 export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
   if (!d) {
     const off = (c: Context) => c.json({ error: "chat runtime is not configured" }, 503);
-    for (const path of ["/api/sessions/:id/thread", "/api/sessions/:id/thread/*", "/api/inbox", "/api/stream"]) app.all(path, off);
+    for (const path of ["/api/sessions/:id/thread", "/api/sessions/:id/thread/*", "/api/inbox", "/api/stream",
+      "/api/sessions/:id/settle", "/api/sessions/:id/unsettle", "/api/sessions/:id/snooze", "/api/sessions/:id/snooze-reset"]) app.all(path, off);
     return;
   }
   /** The chat session's row and store, or the error response: 404 unknown, 409 tmux or ending. */
@@ -80,12 +93,42 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
     const r = chat(c, id);
     if ("res" in r) return r.res;
     const body = await c.req.json().catch(() => null);
-    // Attachments are not supported yet: only {text}.
-    if (!isRecord(body) || Object.keys(body).some((k) => k !== "text")) return c.json({ error: "body must be {text}" }, 400);
+    if (!isRecord(body) || Object.keys(body).some((k) => k !== "text" && k !== "attachments")) {
+      return c.json({ error: "body must be {text, attachments?}" }, 400);
+    }
     if (typeof body.text !== "string" || body.text.trim() === "") return c.json({ error: "text must be a non-empty string" }, 400);
-    try { await d.links.send(id, { kind: "startTurn", text: body.text }); }
+    const attachments = body.attachments === undefined ? [] : body.attachments;
+    if (!Array.isArray(attachments)) return c.json({ error: "attachments must be an array of {path}" }, 400);
+    if (attachments.length > MAX_IMAGES_PER_MESSAGE) return c.json({ error: `at most ${MAX_IMAGES_PER_MESSAGE} images per message` }, 400);
+    const paths: string[] = [];
+    for (const a of attachments) {
+      if (!isRecord(a) || Object.keys(a).some((k) => k !== "path") || typeof a.path !== "string" || threadImageFile(d.root, id, a.path) === null) {
+        return c.json({ error: "attachments must be images uploaded to this session (POST /api/sessions/:id/inbox?for=thread)" }, 400);
+      }
+      paths.push(a.path);
+    }
+    if (paths.length > 0) {
+      // A 1.2.0/1.3.0 bridge parses attachments but refuses the turn; say why before sending.
+      const version = d.bridgeVersion(id);
+      if (version === null || !versionAtLeast(version, IMAGES_MIN_BRIDGE_VERSION)) {
+        return c.json({ error: "bridge-too-old", message: `this session's agent bridge (${version ?? "unknown version"}) cannot take images; it needs ${IMAGES_MIN_BRIDGE_VERSION} — recreate the session's container` }, 409);
+      }
+    }
+    try { await d.links.send(id, paths.length > 0 ? { kind: "startTurn", text: body.text, attachments: paths } : { kind: "startTurn", text: body.text }); }
     catch (e) { return commandError(c, e); }
     return c.json({ queued: true }, 202);
+  });
+
+  // The thread's images for the dashboard; uuid names, so a cached copy never goes stale.
+  app.get("/api/sessions/:id/thread/attachments/:name", (c) => {
+    const id = c.req.param("id");
+    const r = chat(c, id);
+    if ("res" in r) return r.res;
+    const img = threadImageByName(d.root, id, c.req.param("name"));
+    if (!img) return c.json({ error: "unknown attachment" }, 404);
+    return new Response(Bun.file(img.file), {
+      headers: { "content-type": img.type, "x-content-type-options": "nosniff", "cache-control": "private, max-age=31536000, immutable" },
+    });
   });
 
   app.post("/api/sessions/:id/thread/interrupt", async (c) => {
@@ -157,6 +200,68 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
   });
 
   app.get("/api/inbox", (c) => c.json({ items: d.inbox.list() }));
+
+  /** Settle and snooze apply to every session, tmux too: 404 unknown, 409 ending. */
+  const anySession = (c: Context, id: string): { s: SessionRow } | { res: Response } => {
+    const s = getSession(d.db, id);
+    if (!s) return { res: c.json({ error: "unknown session" }, 404) };
+    if (d.mgr.isEnding(id)) return { res: c.json({ error: "session-ending" }, 409) };
+    return { s };
+  };
+  /** Settle and snooze would hide a question or approval the session waits on: 409 request-open. */
+  const requestOpen = (c: Context, s: SessionRow): Response | null =>
+    d.inbox.item(s).attention.reason === "request" ? c.json({ error: "request-open", message: REQUEST_OPEN }, 409) : null;
+  const noUsage = (c: Context) => c.json({ error: "usage limits are not configured" }, 503);
+  /** Each answers the session's new inbox item. */
+  app.post("/api/sessions/:id/settle", (c) => {
+    const r = anySession(c, c.req.param("id"));
+    if ("res" in r) return r.res;
+    const open = requestOpen(c, r.s);
+    if (open) return open;
+    d.inbox.settle(r.s.id, "manual");
+    return c.json(d.inbox.item(r.s));
+  });
+  /** Back into the inbox: ends a settle and a snooze. */
+  app.post("/api/sessions/:id/unsettle", (c) => {
+    const r = anySession(c, c.req.param("id"));
+    if ("res" in r) return r.res;
+    d.inbox.unsettle(r.s.id);
+    return c.json(d.inbox.item(r.s));
+  });
+  /** `{until}` (epoch ms, in the future) or `{untilReset: true}`; 409 no-active-limit with the reason when the
+   *  session has no active usage limit to wait for. */
+  app.post("/api/sessions/:id/snooze", async (c) => {
+    const r = anySession(c, c.req.param("id"));
+    if ("res" in r) return r.res;
+    const body = await c.req.json().catch(() => null);
+    const keys = isRecord(body) ? Object.keys(body) : [];
+    if (!isRecord(body) || keys.length !== 1 || !(keys[0] === "until" || keys[0] === "untilReset")) {
+      return c.json({ error: "body must be {until} or {untilReset: true}" }, 400);
+    }
+    const open = requestOpen(c, r.s);
+    if (open) return open;
+    if ("until" in body) {
+      const until = body.until;
+      if (typeof until !== "number" || !Number.isSafeInteger(until) || until <= d.inbox.now()) {
+        return c.json({ error: "until must be a time in the future (epoch ms)" }, 400);
+      }
+      d.inbox.snooze(r.s.id, until, "time");
+      return c.json(d.inbox.item(r.s));
+    }
+    if (body.untilReset !== true) return c.json({ error: "body must be {until} or {untilReset: true}" }, 400);
+    if (!d.untilReset) return noUsage(c);
+    const target = d.untilReset(r.s);
+    if ("reason" in target) return c.json({ error: "no-active-limit", message: target.reason }, 409);
+    d.inbox.snooze(r.s.id, target.resetsAt, "reset");
+    return c.json(d.inbox.item(r.s));
+  });
+  /** For the snooze menu: `{resetsAt}` or `{reason}` why "until the limit resets" is not possible. */
+  app.get("/api/sessions/:id/snooze-reset", (c) => {
+    const r = anySession(c, c.req.param("id"));
+    if ("res" in r) return r.res;
+    if (!d.untilReset) return noUsage(c);
+    return c.json(d.untilReset(r.s));
+  });
 
   /** Server-sent events: `inbox` (InboxItem, coalesced per session by Inbox), `ping` every 25 s and, with
    *  `?session=<id>`, `thread` (LoggedEvent, `id: <seq>`) and `thread-notice` (a devd notice, ThreadItem with item id

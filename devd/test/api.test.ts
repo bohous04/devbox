@@ -20,6 +20,7 @@ import type { ApiDeps } from "../src/api";
 import { terminalGuard } from "../src/terminal";
 import { hasDocker } from "./helpers/docker";
 import { recordWeeklyUsage } from "../src/weeklyUsage";
+import { gif, jpeg, png, webp } from "./helpers/images";
 
 const PROD_CATALOG = join(import.meta.dir, "..", "..", "image", "prod-db", "catalog.json");
 
@@ -152,6 +153,22 @@ test("GET /api/events returns DESC + honours the session filter", async () => {
   expect(all[0].session_id).toBe("dev-blog-web"); // newest first
   const filtered = await (await a.request("/api/events?session=dev-shop-cms")).json() as unknown[];
   expect(filtered).toHaveLength(2);
+});
+
+test("schedules: runtime and agent are validated; a chat schedule needs a chat-capable agent", async () => {
+  const { a } = app();
+  const post = (extra: object) => a.request("/api/schedules", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "n", cron: "0 3 * * *", folder: "acme", project: "shop", repo: "cms", cloneUrl: "https://x/cms.git", prompt: "p", ...extra }) });
+  expect((await post({ runtime: "docker" })).status).toBe(400);
+  expect((await post({ agent: "nope" })).status).toBe(400);
+  expect((await post({ runtime: "chat", agent: "grok" })).status).toBe(400);
+  const ok = await post({ runtime: "chat", agent: "codex" });
+  expect(ok.status).toBe(201);
+  expect(await ok.json()).toMatchObject({ runtime: "chat", agent: "codex" });
+  const made = await (await post({})).json() as { id: string };
+  expect(made).toMatchObject({ runtime: "tmux", agent: null });
+  const put = (body: object) => a.request(`/api/schedules/${made.id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  expect((await put({ runtime: null })).status).toBe(400);
+  expect((await put({ runtime: "chat", agent: "claude" })).status).toBe(200);
 });
 
 test("schedules CRUD via the API + cron validation", async () => {
@@ -1308,6 +1325,10 @@ test("browser inbox upload: owner can upload while the vault/listener is unavail
   expect(await first.json()).toEqual({ path: "/inbox/photo_one.png", size: 11 });
   expect(readFileSync(join(root, "_inbox", "photo_one.png"), "utf8")).toBe("photo bytes");
   expect(((await (await upload("photo one.png")).json()) as { path: string }).path).toBe("/inbox/photo_one-1.png");
+  // `_inbox/<session id>` is that session's chat-image directory: a shared file may not take the name.
+  const clash = await upload("dev-acme-web");
+  expect(clash.status).toBe(400);
+  expect(((await clash.json()) as { error: string }).error).toContain("is the id of a session");
 });
 
 test("browser inbox upload rejects foreign origins, container callers, bad media types, absent sessions, and oversized files", async () => {
@@ -1326,4 +1347,34 @@ test("browser inbox upload rejects foreign origins, container callers, bad media
     expect((await send({}, "missing")).status).toBe(404);
     expect((await send({ "content-length": String(26 * 1024 * 1024) })).status).toBe(413);
   }
+});
+
+test("chat image upload (?for=thread): png, jpeg, webp, gif land in the session's own /inbox dir under a uuid name", async () => {
+  const { a, db, root } = app(undefined, undefined, undefined, {
+    remoteAddr: () => "127.0.0.1", dashboardOrigins: ["https://dev.example.com"],
+  });
+  insertSession(db, { id: "dev-acme-web", folder: "apps", project: "acme", repo: "web", container: "dev-acme-web", port_base: 40000,
+    status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0 });
+  const upload = (body: Uint8Array, headers: Record<string, string> = {}) => a.request("/api/sessions/dev-acme-web/inbox?for=thread", {
+    method: "POST", headers: { "content-type": "application/octet-stream", origin: "https://dev.example.com", ...headers }, body,
+  });
+  const enc = (s: string) => new TextEncoder().encode(s);
+  const images: [Uint8Array, string][] = [[png(64, 48), "png"], [jpeg(64, 48), "jpg"], [webp(64, 48), "webp"], [gif(64, 48), "gif"]];
+  for (const [bytes, ext] of images) {
+    const r = await upload(bytes);
+    expect(r.status).toBe(201);
+    const { path, size } = (await r.json()) as { path: string; size: number };
+    expect(path).toMatch(new RegExp(`^/inbox/dev-acme-web/[0-9a-f-]{36}\\.${ext}$`));
+    expect(size).toBe(bytes.length);
+    expect(readFileSync(join(root, "_inbox", "dev-acme-web", path.split("/").pop()!))).toEqual(Buffer.from(bytes));
+  }
+  const svg = await upload(enc("<svg/>"));
+  expect(svg.status).toBe(415);
+  expect(((await svg.json()) as { error: string }).error).toContain("png, jpeg, webp or gif");
+  expect((await upload(images[0]![0], { "content-length": String(26 * 1024 * 1024) })).status).toBe(413);
+  // Per-image cap: over 5 MB or over 8000 px on a side.
+  const heavy = await upload(jpeg(64, 48, 5 * 1024 * 1024 + 1));
+  expect(heavy.status).toBe(413);
+  expect(((await heavy.json()) as { error: string }).error).toBe("The image is 5.0 MB; chat images may be at most 5 MB");
+  expect((await upload(png(8001, 10))).status).toBe(413);
 });

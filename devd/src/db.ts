@@ -220,6 +220,34 @@ export function openDb(path: string): Database {
     important INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
     last_run_at INTEGER)`);
   migrateScheduleImportance(db);
+  const scheduleCols = () => (db.query("PRAGMA table_info(schedules)").all() as { name: string }[]).map((c) => c.name);
+  if (!scheduleCols().includes("runtime")) db.run(`ALTER TABLE schedules ADD COLUMN runtime TEXT NOT NULL DEFAULT 'tmux'`); // 'tmux' | 'chat'
+  if (!scheduleCols().includes("agent")) db.run(`ALTER TABLE schedules ADD COLUMN agent TEXT`); // NULL = the repo's remembered agent, as for a manual open
+  // devd's own first message of a chat session until the bridge confirmed it (BridgeLinks.startTurnWhenConnected):
+  // a devd restart between open and connect must not lose a scheduled run's prompt.
+  db.run(`CREATE TABLE IF NOT EXISTS pending_first_turns (
+    session_id TEXT PRIMARY KEY, text TEXT NOT NULL, created_at INTEGER NOT NULL,
+    after_seq INTEGER NOT NULL DEFAULT 0, tag TEXT)`);
+  // after_seq: the thread's lastSeq when the message was queued (a run started after it means it was delivered);
+  // tag: the schedule that queued it, so the outcome can be logged after a devd restart.
+  const pendingCols = (db.query("PRAGMA table_info(pending_first_turns)").all() as { name: string }[]).map((c) => c.name);
+  if (!pendingCols.includes("after_seq")) db.run(`ALTER TABLE pending_first_turns ADD COLUMN after_seq INTEGER NOT NULL DEFAULT 0`);
+  if (!pendingCols.includes("tag")) db.run(`ALTER TABLE pending_first_turns ADD COLUMN tag TEXT`);
+  // The inbox shelves of a session (sessionAttention.ts): settled (by hand or after 7 days idle) and snoozed. One row
+  // per session, deleted with it (deleteSession).
+  db.run(`CREATE TABLE IF NOT EXISTS session_attention (
+    session_id TEXT PRIMARY KEY, settled_at INTEGER, settled_reason TEXT,
+    snooze_until INTEGER, snooze_kind TEXT, updated_at INTEGER NOT NULL)`);
+  // The PR of a session's pushed branch as the PR watch last saw it (prWatch.ts). Kept across devd restarts so a
+  // CI failure is notified once and a merge settles once. One row per session, deleted with it (deleteSession).
+  // First deploy of the PR watch: the table is new, so PRs that are already failing or merged are not news. The
+  // marker makes the PR watch's first tick a seed pass (record, no notification, no settle); the PR watch deletes it.
+  const prsExisted = db.query(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_prs'`).get() !== null;
+  db.run(`CREATE TABLE IF NOT EXISTS pr_watch_seed (pending INTEGER NOT NULL)`);
+  if (!prsExisted) db.run(`INSERT INTO pr_watch_seed (pending) VALUES (1)`);
+  db.run(`CREATE TABLE IF NOT EXISTS session_prs (
+    session_id TEXT PRIMARY KEY, number INTEGER NOT NULL, url TEXT NOT NULL, state TEXT NOT NULL, checks TEXT NOT NULL,
+    since INTEGER NOT NULL, merge_settled_at INTEGER, updated_at INTEGER NOT NULL)`);
   // Dummy git tokens. In the database, not only in memory — a devd restart must not break git
   // in running sessions (the container has the dummy in a file and devd must be able to translate it).
   db.run(`CREATE TABLE IF NOT EXISTS git_placeholders (
@@ -673,6 +701,9 @@ export function setSessionName(db: Database, id: string, name: string | null): v
 
 export function deleteSession(db: Database, id: string): void {
   db.query(`DELETE FROM sessions WHERE id=?`).run(id);
+  // A later session may get the same id: it must not start settled or snoozed.
+  db.query(`DELETE FROM session_attention WHERE session_id=?`).run(id);
+  db.query(`DELETE FROM session_prs WHERE session_id=?`).run(id);
 }
 
 export function getSession(db: Database, id: string): SessionRow | null {
@@ -796,6 +827,15 @@ export function insertNotifyLog(db: Database, r: NotifyLogInput): void {
   db.query(`INSERT INTO notify_log (ts, session_id, event, decision, reason, inflight, teammates, agent_session_id, detail)
     VALUES (?,?,?,?,?,?,?,?,?)`)
     .run(r.ts, r.session_id, r.event, r.decision, r.reason, r.inflight, r.teammates, r.agent_session_id, r.detail);
+}
+
+/** The newest `sweep_done` decision of a session at or after `since`, or a critic block (`stop` suppressed
+ *  critic-block: the run was not finished, its follow-up carries on): a "finished" the hub held (deferred, pr-checks
+ *  or critic-review) and never sent, silenced or blocked ends on that row. */
+export function lastSweepDone(db: Database, sessionId: string, since: number): { decision: NotifyDecision; reason: string | null } | null {
+  return (db.query(`SELECT decision, reason FROM notify_log WHERE session_id=? AND ts>=?
+      AND (event='sweep_done' OR (event='stop' AND reason='critic-block')) ORDER BY id DESC LIMIT 1`)
+    .get(sessionId, since) as { decision: NotifyDecision; reason: string | null } | null) ?? null;
 }
 
 export function listNotifyLog(
@@ -1078,12 +1118,74 @@ export function failRunningCloneJobs(db: Database): void {
 export interface ScheduleRow {
   id: string; name: string; cron: string; folder: string; project: string; repo: string;
   clone_url: string; prompt: string; important: 0 | 1; enabled: 0 | 1; last_run_at: number | null;
+  runtime: SessionRuntime; agent: AgentName | null;
+}
+
+export type SettleReason = "manual" | "idle" | "merged";
+/** `reset`: until the session's active usage limit resets (the time is fixed when the snooze is set). */
+export type SnoozeKind = "time" | "reset";
+export interface SessionAttentionRow {
+  session_id: string; settled_at: number | null; settled_reason: SettleReason | null;
+  snooze_until: number | null; snooze_kind: SnoozeKind | null; updated_at: number;
+}
+export function getSessionAttention(db: Database, sessionId: string): SessionAttentionRow | null {
+  return (db.query(`SELECT * FROM session_attention WHERE session_id=?`).get(sessionId) as SessionAttentionRow | null) ?? null;
+}
+/** Sessions whose snooze ends after `now`. */
+export function snoozedSessionIds(db: Database, now: number): string[] {
+  return (db.query(`SELECT session_id FROM session_attention WHERE snooze_until > ?`).all(now) as { session_id: string }[]).map((r) => r.session_id);
+}
+export function putSessionAttention(db: Database, r: SessionAttentionRow): void {
+  db.query(`INSERT OR REPLACE INTO session_attention (session_id,settled_at,settled_reason,snooze_until,snooze_kind,updated_at)
+    VALUES (?,?,?,?,?,?)`).run(r.session_id, r.settled_at, r.settled_reason, r.snooze_until, r.snooze_kind, r.updated_at);
+}
+
+export type PrStatus = "open" | "merged" | "closed";
+export type PrChecks = "pending" | "success" | "failure" | "none";
+/** `since`: when the PR's state or checks last changed; `merge_settled_at`: when the merge settled the session (or the
+ *  first-deploy seed took the merge as already seen). `checks` "unknown": pending checks the PR watch could not read
+ *  several times in a row (the hold is released). */
+export interface SessionPrRow {
+  session_id: string; number: number; url: string; state: PrStatus; checks: PrChecks | "unknown";
+  since: number; merge_settled_at: number | null; updated_at: number;
+}
+export function getSessionPr(db: Database, sessionId: string): SessionPrRow | null {
+  return (db.query(`SELECT * FROM session_prs WHERE session_id=?`).get(sessionId) as SessionPrRow | null) ?? null;
+}
+export function listSessionPrs(db: Database): SessionPrRow[] {
+  return db.query(`SELECT * FROM session_prs`).all() as SessionPrRow[];
+}
+export function prWatchSeedPending(db: Database): boolean {
+  return db.query(`SELECT 1 FROM pr_watch_seed LIMIT 1`).get() !== null;
+}
+export function clearPrWatchSeed(db: Database): void {
+  db.run(`DELETE FROM pr_watch_seed`);
+}
+export function putSessionPr(db: Database, r: SessionPrRow): void {
+  db.query(`INSERT OR REPLACE INTO session_prs (session_id,number,url,state,checks,since,merge_settled_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?)`).run(r.session_id, r.number, r.url, r.state, r.checks, r.since, r.merge_settled_at, r.updated_at);
+}
+
+export interface PendingFirstTurn { text: string; seq: number; tag: string | null }
+export function savePendingFirstTurn(db: Database, sessionId: string, text: string, seq: number, tag: string | null): void {
+  db.query(`INSERT OR REPLACE INTO pending_first_turns (session_id,text,created_at,after_seq,tag) VALUES (?,?,?,?,?)`).run(sessionId, text, Date.now(), seq, tag);
+}
+export function getPendingFirstTurn(db: Database, sessionId: string): PendingFirstTurn | null {
+  const r = db.query(`SELECT text, after_seq, tag FROM pending_first_turns WHERE session_id=?`).get(sessionId) as { text: string; after_seq: number; tag: string | null } | null;
+  return r ? { text: r.text, seq: r.after_seq, tag: r.tag } : null;
+}
+/** On devd start: a pending first message of a session that is gone or not running will never be delivered. */
+export function prunePendingFirstTurns(db: Database): number {
+  return db.query(`DELETE FROM pending_first_turns WHERE session_id NOT IN (SELECT id FROM sessions WHERE status='running')`).run().changes;
+}
+export function deletePendingFirstTurn(db: Database, sessionId: string): void {
+  db.query(`DELETE FROM pending_first_turns WHERE session_id=?`).run(sessionId);
 }
 
 export function insertSchedule(db: Database, r: ScheduleRow): void {
-  db.query(`INSERT INTO schedules (id,name,cron,folder,project,repo,clone_url,prompt,important,enabled,last_run_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(r.id, r.name, r.cron, r.folder, r.project, r.repo, r.clone_url, r.prompt, r.important, r.enabled, r.last_run_at);
+  db.query(`INSERT INTO schedules (id,name,cron,folder,project,repo,clone_url,prompt,important,enabled,last_run_at,runtime,agent)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(r.id, r.name, r.cron, r.folder, r.project, r.repo, r.clone_url, r.prompt, r.important, r.enabled, r.last_run_at, r.runtime, r.agent);
 }
 export function listSchedules(db: Database): ScheduleRow[] {
   return db.query(`SELECT * FROM schedules ORDER BY name`).all() as ScheduleRow[];

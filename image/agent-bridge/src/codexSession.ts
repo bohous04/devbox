@@ -124,6 +124,7 @@ interface Turn {
   runId: string;
   text: string;
   origin: RunOrigin;
+  images: string[];
 }
 
 interface OpenRequest {
@@ -263,7 +264,8 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
     emit({ type: "run.started", runId: t.runId, origin: t.origin, nativeThreadId: threadId, model });
     const params: TurnStartParams = {
       threadId: threadId!,
-      input: [{ type: "text", text: t.text, text_elements: [] }],
+      // /inbox is mounted in the container: Codex reads the files itself (no base64 in the request).
+      input: [{ type: "text", text: t.text, text_elements: [] }, ...t.images.map((path) => ({ type: "localImage" as const, path }))],
       ...(model !== null ? { model } : {}),
     };
     peer.request<TurnStartResponse>("turn/start", params).then(
@@ -505,9 +507,9 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
   })();
 
   return {
-    async startTurn(runId, text, origin) {
+    async startTurn(runId, text, origin, images = []) {
       if (endReason !== null) throw new Error(endReason);
-      const turn = { runId, text, origin };
+      const turn = { runId, text, origin, images };
       // turn/start during an active turn would steer it; the message starts the next turn instead.
       if (active === null && threadId !== null) writeTurn(turn);
       else waiting.push(turn);

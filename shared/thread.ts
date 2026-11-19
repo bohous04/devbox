@@ -13,6 +13,8 @@ export interface ThreadItem {
   output?: string;
   isError?: boolean;
   status?: "streaming" | "done" | "open" | "answered" | "expired";
+  /** A user message's images: container paths under `/inbox/<sessionId>/` (devd/src/threadImages.ts). */
+  attachments?: string[];
   ts: number;
 }
 
@@ -60,12 +62,18 @@ export interface ThreadSnapshot {
 /** devd's connection to a chat session's agent bridge socket. */
 export type LinkStatus = "connecting" | "connected" | "disconnected";
 
-export type InboxSection = "needs_you" | "working" | "idle";
+/** `settled` and `snoozed` are shelves the user (or the 7-day idle rule) put a session on; `reason` and `since` stay
+ *  those of the state underneath (devd/src/sessionAttention.ts). */
+export type InboxSection = "needs_you" | "working" | "idle" | "settled" | "snoozed";
 /** Where a session belongs in the inbox and why; `since` is when that state began (0 = nothing happened yet). */
 export interface Attention {
   section: InboxSection;
-  reason: "request" | "failed" | "rate-limited" | "completed" | "disconnected" | "bridge-behind" | "running" | "background" | "queued" | null;
+  /** `pr-checks`: the session's open PR waits for its CI checks; `ci-failed`: they failed (devd/src/prWatch.ts). */
+  reason: "request" | "failed" | "rate-limited" | "completed" | "disconnected" | "bridge-behind" | "running" | "background" | "queued"
+    | "pr-checks" | "ci-failed" | null;
   since: number;
+  /** Snoozed only: when the snooze ends (epoch ms). */
+  until?: number;
 }
 
 /** SSE `inbox` event for a session that left the inbox (ended, or ending). */

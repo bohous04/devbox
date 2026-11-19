@@ -130,4 +130,47 @@ final class CronStoreTests: XCTestCase {
         XCTAssertEqual(paths, ["/api/schedules/s1", "/api/schedules"])
         XCTAssertEqual(MockURLProtocol.capturedRequests[0].httpMethod, "DELETE")
     }
+    // MARK: - runtime and agent (step 5: schedules on the chat runtime)
+
+    func testDecodesRuntimeAndAgentAndOlderDevdWithout() throws {
+        let rows = try JSONDecoder().decode([Schedule].self, from: Data(#"""
+        [{"id":"a","name":"n","cron":"* * * * *","folder":"f","project":"p","repo":"r","clone_url":"u","prompt":"x","important":0,"enabled":1,"last_run_at":null,"runtime":"chat","agent":"codex"},
+         {"id":"b","name":"n","cron":"* * * * *","folder":"f","project":"p","repo":"r","clone_url":"u","prompt":"x","important":0,"enabled":1,"last_run_at":null}]
+        """#.utf8))
+        XCTAssertEqual(rows.map(\.runtime), ["chat", nil])
+        XCTAssertEqual(rows.map(\.agent), ["codex", nil])
+    }
+
+    func testSetRuntimePutsOnlyRuntime() async throws {
+        let store = makeStore { _ in .init(statusCode: 200, data: self.scheduleJSON(self.schedule())) }
+        var s = schedule()
+        s.agent = "codex"
+        try await store.setRuntime(s, "chat")
+        let body = bodyJSON(MockURLProtocol.capturedRequests[0])
+        XCTAssertEqual(MockURLProtocol.capturedRequests[0].httpMethod, "PUT")
+        XCTAssertEqual(body as NSDictionary, ["runtime": "chat"] as NSDictionary)
+    }
+
+    /// devd refuses a chat schedule with an agent chat cannot run: the agent goes back to the repository default
+    /// in the same request, as the dashboard's form does.
+    func testSetRuntimeToChatResetsAnAgentChatCannotRun() async throws {
+        let store = makeStore { _ in .init(statusCode: 200, data: self.scheduleJSON(self.schedule())) }
+        var s = schedule()
+        s.agent = "grok"
+        try await store.setRuntime(s, "chat")
+        XCTAssertEqual(bodyJSON(MockURLProtocol.capturedRequests[0]) as NSDictionary, ["runtime": "chat", "agent": NSNull()] as NSDictionary)
+    }
+
+    func testSetAgentSendsNullForTheRepositoryDefault() async throws {
+        let store = makeStore { _ in .init(statusCode: 200, data: self.scheduleJSON(self.schedule())) }
+        try await store.setAgent(schedule(), nil)
+        try await store.setAgent(schedule(), "codex")
+        XCTAssertEqual(bodyJSON(MockURLProtocol.capturedRequests[0]) as NSDictionary, ["agent": NSNull()] as NSDictionary)
+        XCTAssertEqual(bodyJSON(MockURLProtocol.capturedRequests[2]) as NSDictionary, ["agent": "codex"] as NSDictionary)
+    }
+
+    func testAgentChoicesPerRuntime() {
+        XCTAssertEqual(CronStore.agentChoices(runtime: "chat"), ["claude", "claude-gemini", "claude-openrouter", "codex", "vibe"])
+        XCTAssertEqual(CronStore.agentChoices(runtime: "tmux"), ["claude", "claude-gemini", "claude-openrouter", "codex", "grok", "antigravity"])
+    }
 }

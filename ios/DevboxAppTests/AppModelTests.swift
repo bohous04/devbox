@@ -58,11 +58,23 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.pendingDeepLink?.sessionId, "dev-x")
     }
 
+    /// Links come from outside the app (the listener, any web page): a session id must be one devd could have made.
+    func testThreadAndSessionLinksRejectIdsOutsideDevdsCharset() {
+        XCTAssertEqual(AppModel.deepLink(from: URL(string: "devbox://thread/dev-shop_cms.2")!), .thread(id: "dev-shop_cms.2"))
+        for bad in ["devbox://thread/..", "devbox://thread/.hidden", "devbox://thread/a%2Fb", "devbox://session/a%20b",
+                    "devbox://thread/%2E%2E", "devbox://session/x%3Fy"] {
+            XCTAssertNil(AppModel.deepLink(from: URL(string: bad)!), bad)
+        }
+    }
+
     func testMoreAndVaultURLs() {
         XCTAssertEqual(AppModel.deepLink(from: URL(string: "devbox://more/prodWrites")!), .more(.prodWrites))
         XCTAssertEqual(AppModel.deepLink(from: URL(string: "devbox://more/sshKeys")!), .more(.sshKeys))
         XCTAssertEqual(AppModel.deepLink(from: URL(string: "devbox://more/sshApprovals")!), .more(.sshKeys))
         XCTAssertEqual(AppModel.deepLink(from: URL(string: "devbox://vault")!), .vault)
+        XCTAssertEqual(AppModel.deepLink(from: URL(string: "devbox://thread/dev-shop-cms")!), .thread(id: "dev-shop-cms"))
+        XCTAssertNil(AppModel.deepLink(from: URL(string: "devbox://thread")!))
+        XCTAssertEqual(AppModel.deepLink(from: URL(string: "devbox://more/hardware")!), .more(.hardware))
         XCTAssertNil(AppModel.deepLink(from: URL(string: "devbox://more/nesmysl")!))
         XCTAssertNil(AppModel.deepLink(from: URL(string: "devbox://more")!))
     }
@@ -133,7 +145,8 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.client)
     }
 
-    func testInitWithExistingTailnetValueIsConfigured() {
+    func testInitWithExistingTailnetValueIsConfigured() throws {
+        try KeychainAvailability.skipIfUnavailable()
         let keychain = KeychainStore(requireBiometryForVault: false)
         keychain.set(KeychainStore.tailnetBase, "100.100.100.100:4300")
 
@@ -145,7 +158,8 @@ final class AppModelTests: XCTestCase {
 
     // MARK: - saveConfig roundtrip
 
-    func testSaveConfigPersistsToKeychainAndRebuildsClient() {
+    func testSaveConfigPersistsToKeychainAndRebuildsClient() throws {
+        try KeychainAvailability.skipIfUnavailable()
         let keychain = KeychainStore(requireBiometryForVault: false)
         let model = AppModel(keychain: keychain)
         XCTAssertFalse(model.configured)
@@ -165,7 +179,8 @@ final class AppModelTests: XCTestCase {
     // Review fix round 1: a CF hostname on its own (no id/secret) must not flip `configured` to
     // true — `DevdClient` would reject such a request anyway (missing service token), and in `SettingsScreen`
     // it would also mean the onboarding sheet closes before the "Test connection" result arrives.
-    func testCfHostnameWithoutIdAndSecretIsNotConfigured() {
+    func testCfHostnameWithoutIdAndSecretIsNotConfigured() throws {
+        try KeychainAvailability.skipIfUnavailable()
         let keychain = KeychainStore(requireBiometryForVault: false)
         let model = AppModel(keychain: keychain)
 
@@ -179,7 +194,8 @@ final class AppModelTests: XCTestCase {
     /// An empty form (typically the onboarding cover shown because of an unreadable Keychain
     /// on a locked phone) MUST NOT delete the saved credentials — saveConfig returns an error
     /// and leaves the Keychain alone.
-    func testSaveConfigWithAllFieldsEmptyKeepsExistingKeychainEntries() {
+    func testSaveConfigWithAllFieldsEmptyKeepsExistingKeychainEntries() throws {
+        try KeychainAvailability.skipIfUnavailable()
         let keychain = KeychainStore(requireBiometryForVault: false)
         keychain.set(KeychainStore.cfHostname, "old.example.ts.net")
         keychain.set(KeychainStore.cfClientId, "old-id")
@@ -202,7 +218,8 @@ final class AppModelTests: XCTestCase {
     }
 
     /// A partially empty form may still turn off one path (CF fields empty, tailnet stays).
-    func testSaveConfigWithEmptyCfFieldsDeletesOnlyCfEntries() {
+    func testSaveConfigWithEmptyCfFieldsDeletesOnlyCfEntries() throws {
+        try KeychainAvailability.skipIfUnavailable()
         let keychain = KeychainStore(requireBiometryForVault: false)
         keychain.set(KeychainStore.cfHostname, "old.example.ts.net")
         keychain.set(KeychainStore.cfClientId, "old-id")
@@ -278,6 +295,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertNotNil(model.client)
     }
 
+    #if os(iOS)
     // MARK: - Live Activity — tokens only for a configured server
 
     func testLiveActivityHasNoServerUntilConfigured() {
@@ -308,6 +326,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertNotNil(model.liveActivityManager.serverID)
         XCTAssertNotEqual(model.liveActivityManager.serverID, first)
     }
+    #endif
 
     // MARK: - ConfigLoadingKind — spinner vs. explanation while there is no client
 
@@ -344,7 +363,8 @@ final class AppModelTests: XCTestCase {
     }
 
     /// Test connection from the form must not write or delete anything before the test succeeds.
-    func testFormTestConnectionDoesNotTouchKeychain() async {
+    func testFormTestConnectionDoesNotTouchKeychain() async throws {
+        try KeychainAvailability.skipIfUnavailable()
         let keychain = KeychainStore(requireBiometryForVault: false)
         keychain.set(KeychainStore.tailnetBase, "100.100.100.100:4300")
         let model = AppModel(keychain: keychain)
@@ -376,7 +396,8 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(config.tailnet, "")
     }
 
-    func testCurrentConfigReflectsSavedValues() {
+    func testCurrentConfigReflectsSavedValues() throws {
+        try KeychainAvailability.skipIfUnavailable()
         let keychain = KeychainStore(requireBiometryForVault: false)
         let model = AppModel(keychain: keychain)
         model.saveConfig(hostname: "devbox.example.ts.net", cfId: "id-1", cfSecret: "secret-1", tailnet: "")
@@ -410,7 +431,8 @@ final class AppModelTests: XCTestCase {
 
     // MARK: - clientIdentity — changes after saveConfig (review pass #2, stage B/C — split-brain)
 
-    func testClientIdentityChangesAfterSaveConfig() {
+    func testClientIdentityChangesAfterSaveConfig() throws {
+        try KeychainAvailability.skipIfUnavailable()
         let keychain = KeychainStore(requireBiometryForVault: false)
         let model = AppModel(keychain: keychain)
         let before = model.clientIdentity
@@ -423,7 +445,8 @@ final class AppModelTests: XCTestCase {
     /// The SECOND save too (a different value, the client is rebuilt again) must give a NEW identity AGAIN —
     /// otherwise `SessionsContainer`'s `.onChange(of: appModel.clientIdentity)` (DevboxAppApp.swift)
     /// would miss the second client change.
-    func testClientIdentityChangesAgainOnSecondSaveConfig() {
+    func testClientIdentityChangesAgainOnSecondSaveConfig() throws {
+        try KeychainAvailability.skipIfUnavailable()
         let keychain = KeychainStore(requireBiometryForVault: false)
         let model = AppModel(keychain: keychain)
         model.saveConfig(hostname: "devbox.example.ts.net", cfId: "id-1", cfSecret: "secret-1", tailnet: "")
@@ -557,6 +580,7 @@ final class AppModelTests: XCTestCase {
     /// The saved passphrase is read from the Keychain (in production that triggers Face ID itself via the
     /// item's access control) and sent to `/api/vault/unlock` — one tap from the banner and from Settings.
     func testUnlockVaultWithSavedPassphraseReadsKeychainAndPosts() async throws {
+        try KeychainAvailability.skipIfUnavailable()
         let keychain = KeychainStore(requireBiometryForVault: false)
         keychain.set(KeychainStore.vaultPassphrase, "s3cr3t")
         let model = AppModel(keychain: keychain)
@@ -600,7 +624,8 @@ final class AppModelTests: XCTestCase {
     }
 
     /// A network error (devd not running) is NOT a reason to forget the passphrase — it may still be correct.
-    func testUnlockVaultWithSavedPassphraseKeepsValueOnNetworkFailure() async {
+    func testUnlockVaultWithSavedPassphraseKeepsValueOnNetworkFailure() async throws {
+        try KeychainAvailability.skipIfUnavailable()
         let keychain = KeychainStore(requireBiometryForVault: false)
         keychain.set(KeychainStore.vaultPassphrase, "s3cr3t")
         let model = AppModel(keychain: keychain)
@@ -668,7 +693,8 @@ final class AppModelTests: XCTestCase {
 
     // MARK: - Vault passphrase in Keychain (remember/forget)
 
-    func testVaultPassphraseSavedRoundtrip() {
+    func testVaultPassphraseSavedRoundtrip() throws {
+        try KeychainAvailability.skipIfUnavailable()
         let keychain = KeychainStore(requireBiometryForVault: false)
         let model = AppModel(keychain: keychain)
         XCTAssertFalse(model.vaultPassphraseSaved())

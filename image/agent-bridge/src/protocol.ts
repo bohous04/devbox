@@ -19,8 +19,13 @@ export interface HandoffDelivery {
   injectItems?: unknown[];
 }
 
+/** The origins a `startTurn` may name; the others belong to runs the bridge starts itself. */
+export type TurnOrigin = "user" | "critic";
+
 export type BridgeCommand =
-  | { kind: "startTurn"; text: string; attachments?: string[] }
+  // `attachments` (bridge 1.4.0+; older ones refuse a turn that has them): image paths under /inbox.
+  // `origin` (bridge 1.3.0+): who sends the turn; absent = the user. devd's critic sends "critic".
+  | { kind: "startTurn"; text: string; attachments?: string[]; origin?: TurnOrigin }
   | { kind: "interrupt" }
   | { kind: "answer"; requestId: string; answer: string }
   // Nightly binary update: close and reopen the harness with resume; refused while a run is active.
@@ -86,11 +91,18 @@ function parseCommand(v: unknown): BridgeCommand {
   switch (v.kind) {
     case "startTurn": {
       const text = nonEmptyString(v.text, "startTurn.text");
-      if (v.attachments === undefined) return { kind: "startTurn", text };
-      if (!Array.isArray(v.attachments) || !v.attachments.every((a) => typeof a === "string")) {
-        throw new ProtocolError("startTurn.attachments must be an array of strings");
+      const cmd: BridgeCommand = { kind: "startTurn", text };
+      if (v.attachments !== undefined) {
+        if (!Array.isArray(v.attachments) || !v.attachments.every((a) => typeof a === "string")) {
+          throw new ProtocolError("startTurn.attachments must be an array of strings");
+        }
+        cmd.attachments = v.attachments;
       }
-      return { kind: "startTurn", text, attachments: v.attachments };
+      if (v.origin !== undefined) {
+        if (v.origin !== "user" && v.origin !== "critic") throw new ProtocolError('startTurn.origin must be "user" or "critic"');
+        cmd.origin = v.origin;
+      }
+      return cmd;
     }
     case "interrupt":
     case "restartAgent":

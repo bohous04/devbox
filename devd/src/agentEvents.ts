@@ -1,7 +1,8 @@
 import type { Database } from "bun:sqlite";
 import { specFor } from "./agents";
+import type { Activity } from "./sessionAttention";
 import {
-  deleteAgentLiveState, getAgentLiveState, insertNotifyLog, insertWorkInterval, lastMetricTs, logEvent, updateSession,
+  deleteAgentLiveState, getAgentLiveState, insertNotifyLog, insertWorkInterval, lastMetricTs, lastSweepDone, logEvent, updateSession,
   upsertAgentLiveState, type AgentName, type NotifyDecision, type SessionRow, type SessionRuntime,
 } from "./db";
 
@@ -135,6 +136,8 @@ export interface AgentLiveSnapshot {
 // hooks or metrics (see DEVBOX-3 in index.ts). Then only STUCK_MS applies.
 export const STALLED_MS = 180_000;
 export const STUCK_MS = 20 * 60_000;
+/** The longest a chat session's "finished" waits for its PR's pending CI checks (HubDeps.prChecks); then it goes out. */
+export const PR_HOLD_MAX_MS = 60 * 60_000;
 // The `inflight` counter without a single Subagent event for this long = a lost SubagentStop. Previously
 // such a turn silenced "finished" until the next prompt; now it is reset after 10 min.
 const INFLIGHT_STALE_MS = 10 * 60_000;
@@ -177,6 +180,7 @@ interface SessionState {
   teammates: number;             // open TEAM tasks; only context for the log
   mainAgentSessionId: string | null; // session_id of the main loop from the last prompt
   lastBackgroundTasks: number | undefined; // last value from `stop`; undefined = unknown
+  prHeldSince: number | null;    // the armed "finished" waits for the PR's pending CI checks since then
 }
 
 export interface HubDeps {
@@ -185,6 +189,16 @@ export interface HubDeps {
   now?: () => number;
   quietMs?: number;     // silence after Stop before "finished" goes out
   coalesceMs?: number;  // min. spacing of two blocking notifications of the same session
+  /** The inbox shelves (Inbox.activity): a new prompt, a blocking request or a failure of the session's agent. */
+  onActivity?: (sessionId: string, kind: Activity) => void;
+  /** The session is snoozed: its "finished" is logged but not sent. */
+  snoozed?: (sessionId: string) => boolean;
+  /** The CI checks of the session's open PR (PrWatch, chat sessions only, S5-R3/S5-R19). Pending holds the armed
+   *  "finished" (at most PR_HOLD_MAX_MS); a hold that ends in a failure finishes silently: the PR watch has already
+   *  sent "CI failed". Not background work: the turn is over, so the stuck detection does not watch it. */
+  prChecks?: (sessionId: string) => "pending" | "failure" | null;
+  /** A hold reached PR_HOLD_MAX_MS (PrWatch.holdExpired: the checks become "unknown", so they hold nothing again). */
+  onPrHoldExpired?: (sessionId: string) => void;
 }
 
 // Translates Claude hook events (POST /api/agent-event) into notifications. The state
@@ -239,6 +253,7 @@ export class AgentEventHub {
       live, waits: new Map(), openCalls: new Set(), promptId: null, completionAllowed: true,
       session, important, pendingDoneAt: null, lastBlockedAt: 0, lastHookAt: 0, lastStopAt: 0, lastPromptAt: 0,
       inflight: 0, lastSubagentAt: 0, stalled: false, deferredStopAt: null, teammates: 0, mainAgentSessionId: null, lastBackgroundTasks: undefined,
+      prHeldSince: null,
     };
   }
 
@@ -294,7 +309,8 @@ export class AgentEventHub {
   private stallCheck(sessionId: string, st: SessionState): number | null {
     const now = this.now();
     let since: number | null = null;
-    if (st.live.status === "working") {
+    // A "finished" held for CI waits on purpose: the agent's turn is over.
+    if (st.live.status === "working" && !(st.prHeldSince !== null && st.pendingDoneAt !== null)) {
       const busy = st.openCalls.size > 0 || (st.lastBackgroundTasks ?? 0) > 0;
       const limit = busy ? STUCK_MS : STALLED_MS;
       if (now - st.lastHookAt > limit) {
@@ -462,6 +478,7 @@ export class AgentEventHub {
         // A leaked call (tool_complete missing) must not hold the STUCK_MS threshold until the end of the turn.
         if (!foreign) st.openCalls.clear();
         if (!foreign && !(event === "interrupted" && ["done", "failed"].includes(st.live.status))) {
+          if (event === "stop_failure") this.d.onActivity?.(s.id, "failure");
           st.pendingDoneAt = null;
           st.deferredStopAt = null;
           st.waits.clear();
@@ -486,6 +503,7 @@ export class AgentEventHub {
         st.lastBackgroundTasks = undefined;
         if (meta.agentSessionId) st.mainAgentSessionId = meta.agentSessionId;
         updateSession(this.d.db, s.id, { last_active_at: now });
+        this.d.onActivity?.(s.id, "run");
         log("none", coalesced ? "coalesced" : undefined);
         return;
       }
@@ -591,6 +609,44 @@ export class AgentEventHub {
     }
   }
 
+  /** The session's "finished" for a run that ended at `endedAt` was held (for CI: `pr-checks`; for the critic's
+   *  verdict: `critic-review`) and never sent, silenced or blocked (the newest `sweep_done` row since then is the
+   *  hold's deferral). Survives a devd restart and a session stop/start. */
+  heldFor(sessionId: string, endedAt: number, reason: "pr-checks" | "critic-review"): boolean {
+    const last = lastSweepDone(this.d.db, sessionId, endedAt);
+    return last?.decision === "deferred" && last.reason === reason;
+  }
+
+  /** ChatHub: the critic reviews run `runId`, so its `stop` comes only after the verdict. Recorded so a devd restart
+   *  in the meantime re-sends the completion (heldFor `critic-review`). */
+  holdForCritic(s: SessionRow, runId: string): void {
+    const c = this.counters(s.id);
+    insertNotifyLog(this.d.db, {
+      ts: this.now(), session_id: s.id, event: "sweep_done", decision: "deferred", reason: "critic-review",
+      inflight: c.inflight, teammates: c.teammates, agent_session_id: null, detail: JSON.stringify({ promptId: runId }),
+    });
+  }
+
+  /** ChatHub: the critic blocked run `runId`; its `stop` never comes, the follow-up run carries the turn on. The same
+   *  row the tmux Stop hook writes on a block. */
+  criticBlocked(s: SessionRow, runId: string): void {
+    const c = this.counters(s.id);
+    insertNotifyLog(this.d.db, {
+      ts: this.now(), session_id: s.id, event: "stop", decision: "suppressed", reason: "critic-block",
+      inflight: c.inflight, teammates: c.teammates, agent_session_id: null, detail: JSON.stringify({ promptId: runId }),
+    });
+  }
+
+  /** ChatHub after a devd restart: the completion it just re-sent was held for CI before the restart, so it counts as
+   *  held (a failure finishes it silently; the deadline runs from now). */
+  resumePrHold(sessionId: string): void {
+    const st = this.state.get(sessionId);
+    if (!st || st.pendingDoneAt === null || st.prHeldSince !== null) return;
+    const now = this.now();
+    st.prHeldSince = now;
+    this.live(st, "working", "Waiting for CI checks", now);
+  }
+
   // index.ts calls this every ~5 s: fires "finished" once the quiet window has elapsed.
   // Returns the ids of sessions for which "finished" went out in this tick — the auto-end of
   // scheduled runs (autoEnd.ts) hooks onto that moment. The hub thus stays without a dependency
@@ -611,14 +667,38 @@ export class AgentEventHub {
         });
       }
       if (st.pendingDoneAt === null || now < st.pendingDoneAt) continue;
+      const checks = this.d.prChecks?.(id) ?? null;
+      if (checks === "pending") {
+        if (st.prHeldSince === null) {
+          st.prHeldSince = now;
+          this.live(st, "working", "Waiting for CI checks", now);
+          insertNotifyLog(this.d.db, {
+            ts: now, session_id: id, event: "sweep_done", decision: "deferred", reason: "pr-checks",
+            inflight: st.inflight, teammates: st.teammates, agent_session_id: null, detail: null,
+          });
+        }
+        if (now - st.prHeldSince < PR_HOLD_MAX_MS) continue;
+        insertNotifyLog(this.d.db, {
+          ts: now, session_id: id, event: "sweep_done", decision: "armed", reason: "pr-hold-deadline",
+          inflight: st.inflight, teammates: st.teammates, agent_session_id: null, detail: JSON.stringify({ heldSince: st.prHeldSince }),
+        });
+        this.d.onPrHoldExpired?.(id);
+      }
+      const ciFailed = st.prHeldSince !== null && checks === "failure";
       st.pendingDoneAt = null;
+      st.prHeldSince = null;
       this.live(st, "done", "Work finished", now);
       done.push(id);
-      const t = doneText(st.session);
-      this.d.notify(t.title, t.message, { session: st.session, important: st.important });
+      // A snoozed session's completion is silent, and so is one CI failed after holding it ("CI failed" went out);
+      // it still counts as done (autoEnd, the log).
+      const snoozed = this.d.snoozed?.(id) ?? false;
+      if (!snoozed && !ciFailed) {
+        const t = doneText(st.session);
+        this.d.notify(t.title, t.message, { session: st.session, important: st.important });
+      }
       logEvent(this.d.db, id, "agent_done", { project: st.session.project, repo: st.session.repo, at: now, via: "hook" });
       insertNotifyLog(this.d.db, {
-        ts: now, session_id: id, event: "sweep_done", decision: "sent", reason: null,
+        ts: now, session_id: id, event: "sweep_done", decision: snoozed || ciFailed ? "suppressed" : "sent", reason: snoozed ? "snoozed" : ciFailed ? "ci-failed" : null,
         inflight: st.inflight, teammates: st.teammates, agent_session_id: null, detail: null,
       });
     }
@@ -642,6 +722,7 @@ export class AgentEventHub {
   // is not written in sweep() after the quiet window — it would be inflated by that delay.
   private finishTurn(st: SessionState, endedAt: number, now: number): void {
     st.deferredStopAt = null;
+    st.prHeldSince = null;
     if (st.lastPromptAt > 0) {
       const raw = endedAt - st.lastPromptAt;
       insertWorkInterval(this.d.db, {
@@ -655,6 +736,7 @@ export class AgentEventHub {
   }
 
   private blocked(st: SessionState, kind: BlockedKind, now: number, log: (d: NotifyDecision, r?: string) => void): void {
+    this.d.onActivity?.(st.session.id, "request");
     st.pendingDoneAt = null;
     this.live(st, "waiting", kind === "permission" ? "Waiting for permission" : "Waiting for a reply", now, waitReason(st));
     if (now - st.lastBlockedAt < (this.d.coalesceMs ?? 30_000)) { log("suppressed", "coalesced"); return; }

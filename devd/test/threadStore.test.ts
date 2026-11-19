@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 let n = 0;
+import { Database } from "bun:sqlite";
 import { ThreadStore } from "../src/threadStore";
 import type { BridgeEvent } from "../../shared/thread";
 
@@ -222,6 +223,34 @@ test("a run that starts at once has its user item", () => {
   expect(s.lastMessageText()).toBe("hi");
 });
 
+test("the user item keeps its attachments, from run.queued or from the start echo; none means no field", () => {
+  const s = store(); n = 0;
+  s.apply(ev({ type: "run.queued", runId: "r1", text: "look", attachments: ["/inbox/s/a.png"] }));
+  s.apply(ev({ type: "run.started", runId: "r2", origin: "user", nativeThreadId: null, model: null }));
+  s.apply(ev({ type: "message.final", runId: "r2", itemId: "user:r2", role: "user", text: "and this", attachments: ["/inbox/s/b.gif"] }));
+  s.apply(ev({ type: "run.queued", runId: "r3", text: "plain", attachments: [] }));
+  const items = s.snapshot().items;
+  expect(items.map((i) => [i.text, i.attachments])).toEqual([["look", ["/inbox/s/a.png"]], ["and this", ["/inbox/s/b.gif"]], ["plain", undefined]]);
+  expect("attachments" in items[2]!).toBe(false);
+});
+
+test("a store from before attachments gains the column on open", () => {
+  const dir = mkdtempSync(join(tmpdir(), "threads-"));
+  mkdirSync(join(dir, "_threads"));
+  const db = new Database(ThreadStore.path(dir, "dev-a-b-1"));
+  db.run(`CREATE TABLE items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, seq INTEGER NOT NULL, run_id TEXT, item_id TEXT, kind TEXT NOT NULL, text TEXT NOT NULL,
+    tool TEXT, input TEXT, output TEXT, is_error INTEGER, status TEXT, ts INTEGER NOT NULL, updated_seq INTEGER NOT NULL)`);
+  db.run(`INSERT INTO items (seq, run_id, item_id, kind, text, ts, updated_seq) VALUES (1, 'r0', 'user:r0', 'user', 'old', 1, 1)`);
+  db.close();
+  const s = ThreadStore.open(dir, "dev-a-b-1");
+  n = 1;
+  s.apply(ev({ type: "run.queued", runId: "r1", text: "new", attachments: ["/inbox/s/a.png"] }));
+  expect(s.snapshot().items.map((i) => [i.text, i.attachments])).toEqual([["old", undefined], ["new", ["/inbox/s/a.png"]]]);
+  s.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("deltas after a run's terminal event are ignored: the item stays done", () => {
   const s = store(); n = 0;
   s.apply(ev({ type: "run.started", runId: "r1", origin: "user", nativeThreadId: null, model: null }));
@@ -277,4 +306,14 @@ test("resume-failed for a run id never announced adds no item: devd's own notice
   expect(s.apply(ev({ type: "run.failed", runId: "never-started", error: "resume-failed" }))).toBe(true);
   expect(s.snapshot().items).toEqual([]);
   expect(s.lastSeq()).toBe(1);
+});
+
+test("a queued critic run keeps its origin", () => {
+  const dir = mkdtempSync(join(tmpdir(), "threadstore-critic-"));
+  const store = ThreadStore.open(dir, "dev-a-b-1");
+  try {
+    store.apply({ seq: 1, ts: 1, event: { type: "run.queued", runId: "r1", text: "fix it", attachments: [], origin: "critic" } });
+    expect(store.snapshot().runs[0]).toMatchObject({ runId: "r1", origin: "critic", status: "queued" });
+    expect(store.userText("r1")).toBe("fix it");
+  } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });

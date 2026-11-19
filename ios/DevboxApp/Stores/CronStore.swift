@@ -44,6 +44,46 @@ final class CronStore: ObservableObject {
         await load()
     }
 
+    /// `{runtime}`, plus `agent: null` (the repository default) when the schedule's agent cannot run in chat —
+    /// devd would refuse the change otherwise (scheduleRuntimeError), and the dashboard's form does the same.
+    private struct RuntimePatch: Encodable {
+        let runtime: String
+        let resetAgent: Bool
+        private enum CodingKeys: String, CodingKey { case runtime, agent }
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(runtime, forKey: .runtime)
+            if resetAgent { try c.encodeNil(forKey: .agent) }
+        }
+    }
+
+    /// `{agent}` with an explicit null for "Repository default".
+    private struct AgentPatch: Encodable {
+        let agent: String?
+        private enum CodingKeys: String, CodingKey { case agent }
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(agent, forKey: .agent)
+        }
+    }
+
+    func setRuntime(_ s: Schedule, _ runtime: String) async throws {
+        let reset = runtime == "chat" && s.agent.map { ChatSwitch.chatRuntimeBlock($0) != nil } == true
+        let _: Schedule = try await client.put("/api/schedules/\(s.id)", body: RuntimePatch(runtime: runtime, resetAgent: reset))
+        await load()
+    }
+
+    func setAgent(_ s: Schedule, _ agent: String?) async throws {
+        let _: Schedule = try await client.put("/api/schedules/\(s.id)", body: AgentPatch(agent: agent))
+        await load()
+    }
+
+    /// The agents a schedule of that runtime can name: chat only those the chat runtime runs, tmux all but the
+    /// chat-only ones (devd refuses both otherwise).
+    static func agentChoices(runtime: String) -> [String] {
+        ChatSwitch.agentIds.filter { runtime == "chat" ? ChatSwitch.chatRuntimeBlock($0) == nil : !ChatSwitch.profile($0).chatOnly }
+    }
+
     func run(_ s: Schedule) async throws {
         try await client.postVoid("/api/schedules/\(s.id)/run", body: nil)
     }

@@ -52,7 +52,7 @@ struct HardwareScreen: View {
                         workspaceSection
                         servicesSection(snapshot.monitors)
                     }
-                    .listStyle(.insetGrouped)
+                    .insetGroupedList()
                 }
             } else if let error = store.error {
                 ContentUnavailableView(
@@ -345,7 +345,7 @@ struct HardwareScreen: View {
                                 Text(p.command).font(.system(.caption2, design: .monospaced)).lineLimit(1)
                                 Spacer()
                                 Button {
-                                    UIPasteboard.general.string = p.command
+                                    Clipboard.copy(p.command)
                                 } label: {
                                     Image(systemName: "doc.on.doc")
                                 }

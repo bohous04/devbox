@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { getSession, logEvent } from "./db";
+import { getSession, logEvent, type SessionRow } from "./db";
 import { worktreeChanges } from "./git";
 
 export interface AutoEndDeps {
@@ -26,31 +26,37 @@ export interface AutoEndDeps {
 //  * Repo in the old shape (`worktree === null`): the workspace is shared and `end` does not
 //    delete it at all — it survives as before, nothing to handle.
 // The branch is not deleted in any case (see end()), so commits always survive.
-export async function endFinishedRuns(d: AutoEndDeps, doneIds: string[]): Promise<string[]> {
+/** Ends one session the way cron cleanup does: a worktree with changes (or one whose state is unknown) is kept.
+ *  Throws when `end` fails. Also used by the scheduler for a run that could not start. */
+export async function endSessionKeepingWork(d: AutoEndDeps, s: SessionRow, reason: string): Promise<void> {
   const changes = d.changes ?? worktreeChanges;
+  // `null` = the state could not be determined. Treated as "something may be left": a needlessly
+  // kept directory is a nuisance, silently deleted work is a loss.
+  const dirt = s.worktree ? await changes(s.worktree) : [];
+  const keepWorktree = s.worktree != null && (dirt === null || dirt.length > 0);
+  // Log BEFORE ending: `end` deletes the session row, but events survive, so the Log
+  // then shows that cron, not a human, was behind the session's disappearance.
+  logEvent(d.db, s.id, "auto_end", { project: s.project, repo: s.repo, reason });
+  if (keepWorktree) {
+    // Without this row a scheduled run would leave behind a directory nobody knows about.
+    logEvent(d.db, s.id, "auto_end_kept", {
+      worktree: s.worktree,
+      reason: dirt === null ? "status-unknown" : "dirty",
+      // A sample of the changes, so the Log shows what it is about; the full listing can be long.
+      changes: dirt?.length ?? null, sample: dirt?.slice(0, 10) ?? null,
+    });
+  }
+  await d.end(s.id, "keep", { keepWorktree });
+}
+
+export async function endFinishedRuns(d: AutoEndDeps, doneIds: string[]): Promise<string[]> {
   const ended: string[] = [];
   for (const id of doneIds) {
     const s = getSession(d.db, id);
     // The row may have vanished in the meantime (manual End a second earlier) — nothing to clean up.
     if (!s || s.auto_end !== 1) continue;
-    // `null` = the state could not be determined. Treated as "something may be left": a needlessly
-    // kept directory is a nuisance, silently deleted work is a loss.
-    const dirt = s.worktree ? await changes(s.worktree) : [];
-    const keepWorktree = s.worktree != null && (dirt === null || dirt.length > 0);
-    // Log BEFORE ending: `end` deletes the session row, but events survive, so the Log
-    // then shows that cron, not a human, was behind the session's disappearance.
-    logEvent(d.db, id, "auto_end", { project: s.project, repo: s.repo, reason: "agent-done" });
-    if (keepWorktree) {
-      // Without this row a scheduled run would leave behind a directory nobody knows about.
-      logEvent(d.db, id, "auto_end_kept", {
-        worktree: s.worktree,
-        reason: dirt === null ? "status-unknown" : "dirty",
-        // A sample of the changes, so the Log shows what it is about; the full listing can be long.
-        changes: dirt?.length ?? null, sample: dirt?.slice(0, 10) ?? null,
-      });
-    }
     try {
-      await d.end(id, "keep", { keepWorktree });
+      await endSessionKeepingWork(d, s, "agent-done");
       ended.push(id);
     } catch (e) {
       // We deliberately DO NOT CLEAR the flag: the session still belongs to cron and on the next finished

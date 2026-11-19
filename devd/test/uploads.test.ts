@@ -27,9 +27,9 @@ test("shared uploads refuse a symlink inbox and do not follow a pre-existing des
   const outside = join(root, "outside");
   mkdirSync(outside);
   symlinkSync(outside, dir, "dir");
-  expect(() => stageShared(dir, "x.png", new Uint8Array([1]))).toThrow("symlink");
+  expect(() => stageShared(dir, "x.png", new Uint8Array([1]), () => false)).toThrow("symlink");
   const safe = join(root, "safe"); mkdirSync(safe);
   symlinkSync(join(outside, "target"), join(safe, "x.png"));
   // A dangling symlink is not overwritten (existsSync follows it, but wx refuses it).
-  expect(() => stageShared(safe, "x.png", new Uint8Array([1]))).toThrow();
+  expect(() => stageShared(safe, "x.png", new Uint8Array([1]), () => false)).toThrow();
 });

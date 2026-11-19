@@ -4,6 +4,8 @@ import { join } from "node:path";
 import type { BackgroundWork, Capabilities, LoggedEvent, PendingRequest, RunRow, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
 const TERMINAL: ReadonlySet<string> = new Set(["completed", "interrupted", "failed"]);
+/** A user item's images; no field when the message has none (same rule in dashboard/src/threadView.ts). */
+const withAttachments = (a: string[] | undefined): { attachments?: string[] } => (a !== undefined && a.length > 0 ? { attachments: a } : {});
 
 /** A native thread this session has used, kept so a later switch back to its harness can resume it. */
 export interface ProviderThread {
@@ -63,6 +65,10 @@ export class ThreadStore {
     if (!(db.query("PRAGMA table_info(runs)").all() as { name: string }[]).some((c) => c.name === "failure_reason")) {
       db.run("ALTER TABLE runs ADD COLUMN failure_reason TEXT");
     }
+    // Stores created before user messages carried images lack the column.
+    if (!(db.query("PRAGMA table_info(items)").all() as { name: string }[]).some((c) => c.name === "attachments")) {
+      db.run("ALTER TABLE items ADD COLUMN attachments TEXT");
+    }
     return new ThreadStore(db, opts.onNotice ?? (() => {}));
   }
 
@@ -114,8 +120,8 @@ export class ThreadStore {
         }
         return;
       case "run.queued":
-        this.insertRun(seq, ev.runId, "user", "queued", null, null, ts, null);
-        this.insertItem(seq, ts, { runId: ev.runId, itemId: `user:${ev.runId}`, kind: "user", text: ev.text, status: "done" });
+        this.insertRun(seq, ev.runId, ev.origin ?? "user", "queued", null, null, ts, null);
+        this.insertItem(seq, ts, { runId: ev.runId, itemId: `user:${ev.runId}`, kind: "user", text: ev.text, status: "done", ...withAttachments(ev.attachments) });
         return;
       case "run.started": {
         const row = db.query("SELECT status FROM runs WHERE run_id=?").get(ev.runId) as { status: string } | null;
@@ -140,7 +146,7 @@ export class ThreadStore {
         if (ev.role === "user") {
           // The user's text already came with run.queued; a harness echo must not duplicate it.
           const has = db.query("SELECT 1 FROM items WHERE run_id=? AND kind='user'").get(ev.runId);
-          if (!has) this.insertItem(seq, ts, { runId: ev.runId, itemId: ev.itemId, kind: "user", text: ev.text, status: "done" });
+          if (!has) this.insertItem(seq, ts, { runId: ev.runId, itemId: ev.itemId, kind: "user", text: ev.text, status: "done", ...withAttachments(ev.attachments) });
           return;
         }
         const it = this.findItem(ev.runId, ev.itemId);
@@ -250,10 +256,11 @@ export class ThreadStore {
   }
 
   private insertItem(seq: number, ts: number, i: Omit<ThreadItem, "seq" | "ts">) {
-    this.db.query(`INSERT INTO items (seq, run_id, item_id, kind, text, tool, input, output, is_error, status, ts, updated_seq)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    this.db.query(`INSERT INTO items (seq, run_id, item_id, kind, text, tool, input, output, is_error, status, ts, updated_seq, attachments)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       seq, i.runId, i.itemId, i.kind, i.text, i.tool ?? null, i.input === undefined ? null : JSON.stringify(i.input),
-      i.output ?? null, i.isError === undefined ? null : i.isError ? 1 : 0, i.status ?? null, ts, seq);
+      i.output ?? null, i.isError === undefined ? null : i.isError ? 1 : 0, i.status ?? null, ts, seq,
+      i.attachments === undefined ? null : JSON.stringify(i.attachments));
   }
 
   /** A notice devd itself adds (not a bridge event). Seqs belong to the bridge's log (the link's hello asks for
@@ -289,6 +296,7 @@ export class ThreadStore {
       if (r.output !== null) it.output = r.output;
       if (r.is_error !== null) it.isError = r.is_error === 1;
       if (r.status !== null) it.status = r.status;
+      if (r.attachments !== null) it.attachments = JSON.parse(r.attachments);
       return it;
     });
     const runs = (this.db.query(`SELECT * FROM runs WHERE updated_seq > ? ORDER BY rowid`).all(after) as Record<string, any>[])
@@ -325,6 +333,12 @@ export class ThreadStore {
       harness: r.harness, account: r.account, nativeThreadId: r.native_thread_id, coveredThroughRun: r.covered_through_run,
       lastUsedAt: r.last_used_at, caps: r.caps === null ? null : (JSON.parse(r.caps) as Capabilities), resumeFailed: r.resume_failed === 1,
     };
+  }
+
+  /** The user message of run `runId` (the user's text, or the critic's follow-up); null while the store has none. */
+  userText(runId: string): string | null {
+    const r = this.db.query(`SELECT text FROM items WHERE run_id=? AND kind='user' LIMIT 1`).get(runId) as { text: string } | null;
+    return r ? r.text : null;
   }
 
   /** Text of the newest user or assistant item (also one still streaming); null for a thread without messages. */

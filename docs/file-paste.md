@@ -70,6 +70,12 @@ A physical `Ctrl+V` in a codex/grok session also inserts text or a file from the
 - **Name collisions** in the inbox are resolved automatically (`-1`, `-2`, …).
 - **Cleanup:** files stay in `/srv/dev/_inbox` (shared across sessions). Delete what you do not
   need from time to time.
+- **Chat images** (images pasted, dropped or attached in a chat session's composer) go to
+  `/srv/dev/_inbox/<session id>/<uuid>.<ext>`, i.e. `/inbox/<session id>/…` in the containers. The mount is the same
+  shared `/inbox`, so **every session container can read every session's chat images**, not only its own. devd
+  accepts png, jpeg, webp and gif up to 5 MB and 8000 px on a side, at most 10 per message; the dashboard scales
+  images down to 2048 px / 4 MB first and re-encodes jpegs (drops EXIF, GPS included). A session's chat images are
+  deleted when the session ends.
 
 ## Where it lives
 

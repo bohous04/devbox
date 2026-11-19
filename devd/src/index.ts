@@ -39,8 +39,8 @@ import { createConfigRepo } from "./configrepo";
 import { createGiteaApi } from "./gitea";
 import { giteaAuthEnv } from "./git";
 import {
-  activeLeases, diskHistoryEnds, failRunningCloneJobs, getSession, type SessionRow, insertDiskTotal, lastMetricTs, listAccounts, listSessions, logEvent,
-  applyPendingRestore, checkpointFully, openDb, startCheckpointer, pruneAccountLeases, pruneCriticReviews, pruneDiskStats, pruneEvents, pruneNotifyLog, prunePushAlerts,
+  activeLeases, diskHistoryEnds, failRunningCloneJobs, getSession, getSessionPr, type SessionRow, insertDiskTotal, lastMetricTs, listAccounts, listSessions, logEvent,
+  getRepoAgent, applyPendingRestore, checkpointFully, savePendingFirstTurn, prunePendingFirstTurns, getPendingFirstTurn, deletePendingFirstTurn, openDb, startCheckpointer, pruneAccountLeases, pruneCriticReviews, pruneDiskStats, pruneEvents, pruneNotifyLog, prunePushAlerts,
 } from "./db";
 import { createSshAgents } from "./sshAgent";
 import { pendingSshLabel, reapExpiredGrants } from "./sshApprovals";
@@ -77,6 +77,8 @@ import { ChatHub } from "./chatHub";
 import { ChatSwitch } from "./chatSwitch";
 import { EventBus } from "./eventBus";
 import { Inbox } from "./sessionInbox";
+import { AUTO_SETTLE_TICK_MS, hubShelfDeps, resetDeps, untilReset } from "./sessionAttention";
+import { checkPrs, PR_WATCH_TICK_MS, PrWatch } from "./prWatch";
 import { chatAttention, chatBusy } from "./attention";
 import { contextLengthCached } from "./openrouterModels";
 import { parseMeminfo, resourceBreakdown } from "./resources";
@@ -109,7 +111,7 @@ import { IBX_PATHS } from "./instabox/runOpts";
 import { readHostLoad } from "./placement";
 import { run, timeoutFor } from "./proc";
 import { COMMIT } from "./version";
-import { createScheduler } from "./scheduler";
+import { createScheduler, scheduledNotifySession } from "./scheduler";
 import { ccStatus, dueForCheck, inWindow, resolveCcUpkeep, runCcUpkeep, type UpkeepDeps, type UpkeepResult } from "./ccUpkeep";
 import { beszelFrom, createHardware, loadMachines, sshArgv } from "./hardware";
 
@@ -139,6 +141,7 @@ const useVault = !!vaultPath && existsSync(vaultPath);
 const secrets: Secrets = useVault ? {} : loadSecrets(secretsPath);
 if (applyPendingRestore(env("DEVD_DB", "/var/lib/devd/devd.sqlite"))) console.log("devd: restored database swapped in");
 const db = openDb(env("DEVD_DB", "/var/lib/devd/devd.sqlite"));
+prunePendingFirstTurns(db);
 startCheckpointer(env("DEVD_DB", "/var/lib/devd/devd.sqlite"));
 initCodexAccounts(db);
 
@@ -249,7 +252,24 @@ function hydrate(s: Secrets): void {
   apiDeps.opToken = secrets.opServiceAccountToken;
   console.log(`vault unlocked — available: ${Object.keys(s).sort().join(", ") || "nothing"}`);
 }
-const agentEvents = new AgentEventHub({ db, notify });
+// The inbox shelves (sessionAttention.ts): `inbox` is declared below; the hub calls these only once hooks and bridge
+// events arrive, after startup. Failures are logged, never fail the hook; an unreadable snooze notifies (S5-R14).
+const agentEvents = new AgentEventHub({
+  db, notify,
+  ...hubShelfDeps({ activity: (id, kind) => inbox.activity(id, kind), snoozed: (id) => inbox.snoozed(id) }, (m) => console.error(m)),
+  // Chat sessions only: a tmux "finished" is not held for CI (S5-R19). `prWatch` is declared below; the sweep runs
+  // after startup. An unreadable PR state does not hold: the "finished" goes out and the error is logged (S5-R14).
+  prChecks: (id) => {
+    try {
+      const s = getSession(db, id);
+      return s && storedRuntime(s) === "chat" ? prWatch.hold(id)?.checks ?? null : null;
+    } catch (e) { console.error(`PR state of ${id} unreadable, not holding its finished:`, e); return null; }
+  },
+  onPrHoldExpired: (id) => {
+    try { prWatch.holdExpired(id); }
+    catch (e) { console.error(`PR hold of ${id} not marked expired:`, e); }
+  },
+});
 // State of running sessions surviving a devd restart (see agentEvents.ts loadPersisted):
 // working/waiting come back as unknown (that state cannot be restored reliably without
 // hook memory), done/failed unchanged. Must run before the first hook/sweep tick manages
@@ -394,12 +414,24 @@ const threadStore = (id: string): ThreadStore => {
   threadStores.set(id, store);
   return store;
 };
-const chatHub = new ChatHub({ hub: agentEvents, session: (id) => getSession(db, id) });
+// `prWatch`, `critic`, `chatSwitch`, `bridgeLinks` and `inbox` are declared below; ChatHub uses them only on bridge
+// events, after startup.
+const chatHub = new ChatHub({
+  hub: agentEvents, session: (id) => getSession(db, id), prCheck: (id) => prWatch.checkNow(id), prRow: (id) => getSessionPr(db, id),
+  critic: {
+    gate: { onPrompt: (s, task) => critic.onPrompt(s, task), onStop: (s) => critic.onStop(s) },
+    bridgeVersion: (id) => chatSwitch.bridgeVersion(id),
+    userText: (id, runId) => threadStore(id).userText(runId),
+    followUp: (id, text) => bridgeLinks.send(id, { kind: "startTurn", text, origin: "critic" }),
+  },
+  changed: (id) => inbox.changed(id),
+});
 // The hub-facing snapshot needs runs, pending and background only: `limit: 0` skips loading every item per event.
 const chatSnapshot = (id: string) => threadStore(id).snapshot({ limit: 0 });
 // SSE fan-out (threadApi.ts) and the inbox over all sessions; an ending session is left out (its store is being archived).
 const bus = new EventBus();
-const inbox = new Inbox({
+const inbox: Inbox = new Inbox({
+  db,
   sessions: () => listSessions(db).filter((s) => !mgr.isEnding(s.id)),
   session: (id) => (mgr.isEnding(id) ? null : getSession(db, id)),
   threads: threadStore,
@@ -409,7 +441,21 @@ const inbox = new Inbox({
     return link && behindSince !== null ? { ...link, behindSince } : link;
   },
   tmuxLive: (id) => agentEvents.liveSnapshot(id),
+  prHold: (id) => prWatch.hold(id),
   bus,
+});
+// PR watch (prWatch.ts): the PR of each session's pushed branch, GitHub through the host's `gh`, Gitea through its API.
+const prWatch: PrWatch = new PrWatch({
+  db,
+  sessions: () => listSessions(db).filter((s) => !mgr.isEnding(s.id)),
+  session: (id) => (mgr.isEnding(id) ? null : getSession(db, id)),
+  check: (sessions, onError, want) => checkPrs({
+    sessions, root, onError, want,
+    giteaUrls: getGiteaInstances().map((i) => i.url),
+    giteaToken: (host) => giteaTokensByHost(getGiteaInstances(), giteaTokens)[host],
+  }),
+  inbox,
+  notify,
 });
 const bridgeLinks = new BridgeLinks({
   controlDir: (id) => join(controlRoot, id),
@@ -426,6 +472,24 @@ const bridgeLinks = new BridgeLinks({
   },
   onBehind: (id) => inbox.changed(id),
   onHandshake: (id, h) => chatSwitch.onHandshake(id, h),
+  pendingTurns: {
+    save: (id, text, seq, tag) => savePendingFirstTurn(db, id, text, seq, tag),
+    load: (id) => getPendingFirstTurn(db, id),
+    remove: (id) => deletePendingFirstTurn(db, id),
+  },
+  // A scheduled run's first message delivered after a devd restart: the scheduler that queued it is gone, so the
+  // outcome is logged and notified here. (No session end on failure: that needs the schedule run's own state.)
+  onRestoredTurnDone: (id, schedule, err) => {
+    const s = getSession(db, id);
+    const target = s ? { session: scheduledNotifySession(s) } : undefined;
+    if (err === null) {
+      logEvent(db, id, "schedule_run", { schedule, restored: true });
+      notify(s ? `${s.project}/${s.repo}` : id, `Scheduled run "${schedule}" started`, target);
+    } else {
+      logEvent(db, id, "schedule_error", { schedule, restored: true, error: err.message });
+      notify(s ? `${s.project}/${s.repo}` : id, `Scheduled run "${schedule}" failed after a devd restart: ${err.message}`, { target: { kind: "schedules" } });
+    }
+  },
 });
 const releaseThread = (id: string) => {
   bridgeLinks.drop(id);
@@ -683,10 +747,14 @@ const backupDeps = { volume: "claude-home", codexVolume: "codex-home", extraVolu
 const scheduler = createScheduler({
   db, notify,
   open: (t) => mgr.open(t),
+  links: bridgeLinks,
+  end: (id, soloAction, opts) => mgr.end(id, soloAction, opts),
+  repoAgent: (t) => getRepoAgent(db, t.folder, t.project, t.repo),
   containerRunning: async (id) => (await containerState(id)) === "running",
 });
 
-// Standing critic: Stop hook → criticGate → review in the SAME container via docker exec.
+// Standing critic: Stop hook (tmux) or ChatHub's run completion (chat) → criticGate → review in the SAME container
+// via docker exec.
 // Config is read fresh (freshCfg), so a provider/model change from the dashboard
 // applies without restarting devd.
 const critic = createCriticGate({
@@ -1006,7 +1074,8 @@ const apiDeps: ApiDeps = {
     },
   },
   agentEvents, liveActivities, gitea, spawnPty: realSpawnPty, scheduler, critic, codexAuth,
-  links: bridgeLinks, threads: threadStore, bus, inbox, switcher: chatSwitch,
+  links: bridgeLinks, threads: threadStore, bus, inbox, switcher: chatSwitch, bridgeVersion: (id) => chatSwitch.bridgeVersion(id),
+  untilReset: (s) => untilReset(s, resetDeps({ db, threads: threadStore, codexAccounts }), Date.now()),
   codexUsage: { view: () => buildCodexView(db) },
   codexAccounts,
   codexSessionAccounts: new CodexSessionAccounts({
@@ -1228,6 +1297,10 @@ setInterval(() => {
       .catch((e) => console.error("auto-end failed:", e));
   }
 }, 5_000);
+// Snoozes a previous devd set still end with an inbox update; then settle sessions idle for 7 days (sessionAttention.ts).
+try { inbox.armSnoozes(); } catch (e) { console.error("inbox: snooze timers not armed:", e); }
+setInterval(guardedTick("auto-settle", async () => { inbox.autoSettle(); }), AUTO_SETTLE_TICK_MS);
+setInterval(guardedTick("pr watch", () => prWatch.tick()), PR_WATCH_TICK_MS);
 // Hardware: the tick itself decides what is currently due (see INTERVALS in hardware.ts),
 // so this interval is only a fine sieve, not the refresh cadence.
 // `hardware` may only come into existence after the vault is unlocked, so it is read on every tick,

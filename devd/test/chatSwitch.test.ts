@@ -101,8 +101,8 @@ function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; pro
   cleanups.push(() => sw.drop(CHAT.id));
   const app = new Hono();
   registerThreadRoutes(app, {
-    db, mgr: { isEnding: () => false }, threads: () => store, bus: new EventBus(), inbox: { changedSafe: () => {} } as never,
-    links: { send: deps.links.send, ensure: () => {}, startTurnWhenConnected: () => {} }, switcher: sw,
+    db, root: dir, mgr: { isEnding: () => false }, threads: () => store, bus: new EventBus(), inbox: { changedSafe: () => {} } as never, bridgeVersion: (id) => sw.bridgeVersion(id),
+    links: { send: deps.links.send, ensure: () => {}, startTurnWhenConnected: () => {} }, switcher: sw, untilReset: () => { throw new Error("not used"); },
   });
   const post = async (what: string, body: unknown) => {
     const r = await app.fetch(new Request(`http://x/api/sessions/${CHAT.id}/thread/${what}`, {
@@ -825,6 +825,7 @@ test("a 1.2.0 bridge takes an ACP harness", async () => {
   t.handshake(false, "1.2.0");
   expect(await t.post("harness", { agent: "vibe" })).toMatchObject({ status: 202 });
   expect(t.sw.target(CHAT.id).bridgeVersion).toBe("1.2.0");
+  expect(t.sw.bridgeVersion(CHAT.id)).toBe("1.2.0");
 });
 
 test("M5: a Codex account not mounted in the container is refused with 409 account-not-mounted before anything is sent", async () => {

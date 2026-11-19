@@ -5,9 +5,11 @@ import { query, type CanUseTool, type PermissionResult, type Query, type SDKMess
 import { BackgroundTracker, WAKEUP_ID } from "./background.ts";
 import { claudeQueryOptions, mapSdkMessage, resultError, sumModelUsage, type ClaudeSdkOptions, type QueryFn } from "./claude.ts";
 import type { BridgeEvent, Capabilities, RunOrigin, TokenUsage, UsageBaseline } from "./events.ts";
+import { readImageBase64 } from "./images.ts";
 
 export interface HarnessSession {
-  startTurn(runId: string, text: string, origin: RunOrigin): Promise<void>; // resolves when the turn is accepted
+  /** Resolves when the turn is accepted. `images`: files under /inbox, only when `capabilities().images`. */
+  startTurn(runId: string, text: string, origin: RunOrigin, images?: string[]): Promise<void>;
   interrupt(): Promise<void>;
   answer(requestId: string, answer: string): Promise<void>;
   /** Model for the next turns; the current turn keeps its model. */
@@ -92,7 +94,7 @@ interface ActiveRun {
 
 interface Turn {
   runId: string;
-  text: string;
+  content: SDKUserMessage["message"]["content"];
   origin: RunOrigin;
 }
 
@@ -176,7 +178,7 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
 
   function writeTurn(t: Turn): void {
     active = { runId: t.runId, interrupted: false, interruptReported: false };
-    input.push({ type: "user", message: { role: "user", content: t.text }, parent_tool_use_id: null });
+    input.push({ type: "user", message: { role: "user", content: t.content }, parent_tool_use_id: null });
     emit({ type: "run.started", runId: t.runId, origin: t.origin, nativeThreadId, model });
   }
 
@@ -337,9 +339,18 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
   })();
 
   return {
-    async startTurn(runId, text, origin) {
+    async startTurn(runId, text, origin, images = []) {
       if (ended) throw new Error(SESSION_ENDED);
-      const turn = { runId, text, origin };
+      // Read now: a file that cannot be read refuses the turn instead of failing it later. Images first, as the
+      // Messages API recommends.
+      const content: Turn["content"] = images.length === 0 ? text : [
+        ...images.map((p) => {
+          const { mediaType, data } = readImageBase64(p);
+          return { type: "image" as const, source: { type: "base64" as const, media_type: mediaType, data } };
+        }),
+        { type: "text" as const, text },
+      ];
+      const turn = { runId, content, origin };
       // Writing during an active run would merge the message into that run; it starts the next one instead.
       if (active === null) writeTurn(turn);
       else waiting.push(turn);

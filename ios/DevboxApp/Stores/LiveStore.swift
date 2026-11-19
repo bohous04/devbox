@@ -22,7 +22,8 @@ final class LiveStore: ObservableObject {
 
     private var client: DevdClient
     private let pollInterval: Duration
-    private var pollTask: Task<Void, Never>?
+    /// Readable for tests: awaiting it after `stop()` means the last tick (and its requests) is over.
+    private(set) var pollTask: Task<Void, Never>?
 
     /// `pollInterval` has a production default of 5 s (like the web); tests can inject a shorter
     /// interval to verify polling without waiting a real 5 s.

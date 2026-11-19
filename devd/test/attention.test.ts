@@ -168,3 +168,9 @@ test("the last run is the one that ended last, not the last one inserted", () =>
   s.markSeen(5); // C's end was seen, B's was not
   expect(chatAttention(s.snapshot(), connected, LATER)).toEqual({ section: "needs_you", reason: "completed", since: 7000 });
 });
+
+test("a completed run the critic still reviews is working, not needs-you", () => {
+  const s = thread([started("r1"), completed("r1")]);
+  expect(chatAttention(s.snapshot(), { ...connected, reviewingSince: 2500 }, LATER)).toEqual({ section: "working", reason: "running", since: 2500 });
+  expect(chatAttention(s.snapshot(), connected, LATER)).toEqual({ section: "needs_you", reason: "completed", since: 2000 });
+});

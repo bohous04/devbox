@@ -1,14 +1,31 @@
 import type { Attention, InboxItem, InboxRemoved } from "../../shared/thread";
 
-/** The inbox's three sections. Ordering mirrors `sortInbox` in devd/src/sessionInbox.ts: needs-you oldest first
- *  (the longest wait on top), working and idle newest first. */
-export function groupInbox(items: InboxItem[]): { needsYou: InboxItem[]; working: InboxItem[]; idle: InboxItem[] } {
+/** The inbox's sections and its two shelves. Ordering mirrors `sortInbox` in devd/src/sessionInbox.ts: needs-you
+ *  oldest first (the longest wait on top), the rest newest first. */
+export function groupInbox(items: InboxItem[]): {
+  needsYou: InboxItem[]; working: InboxItem[]; idle: InboxItem[]; snoozed: InboxItem[]; settled: InboxItem[];
+} {
   const newestFirst = (a: InboxItem, b: InboxItem) => b.attention.since - a.attention.since;
+  const of = (section: InboxItem["attention"]["section"]) => items.filter((i) => i.attention.section === section);
   return {
-    needsYou: items.filter((i) => i.attention.section === "needs_you").sort((a, b) => a.attention.since - b.attention.since),
-    working: items.filter((i) => i.attention.section === "working").sort(newestFirst),
-    idle: items.filter((i) => i.attention.section === "idle").sort(newestFirst),
+    needsYou: of("needs_you").sort((a, b) => a.attention.since - b.attention.since),
+    working: of("working").sort(newestFirst),
+    idle: of("idle").sort(newestFirst),
+    snoozed: of("snoozed").sort(newestFirst),
+    settled: of("settled").sort(newestFirst),
   };
+}
+
+/** The snooze menu's fixed times: one hour from now, and the next 9:00 local time (today before 9:00, else tomorrow). */
+export function snoozeTimes(now: Date): { hour: number; morning: { at: number; label: string } } {
+  const today = now.getHours() < 9;
+  const at = new Date(now.getFullYear(), now.getMonth(), now.getDate() + (today ? 0 : 1), 9, 0).getTime();
+  return { hour: now.getTime() + 3_600_000, morning: { at, label: today ? "9:00" : "Tomorrow 9:00" } };
+}
+
+/** Why a row cannot be settled or snoozed (devd refuses it with 409 request-open), or null. */
+export function shelfBlock(i: InboxItem): string | null {
+  return i.attention.reason === "request" ? "Answer the open request first" : null;
 }
 
 /** An SSE `inbox` event carries one session's current item: it replaces that session's row. A removal drops it. */
@@ -37,6 +54,8 @@ const REASON: Record<NonNullable<Attention["reason"]>, string> = {
   running: "running",
   background: "background work",
   queued: "queued",
+  "pr-checks": "waiting for CI checks",
+  "ci-failed": "CI failed",
 };
 
 export const reasonLabel = (r: Attention["reason"]): string => (r === null ? "" : REASON[r]);

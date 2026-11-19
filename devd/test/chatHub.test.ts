@@ -4,21 +4,37 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentEventHub, type NotifyExtra } from "../src/agentEvents";
 import { ChatHub } from "../src/chatHub";
-import { insertSession, listNotifyLog, openDb, type SessionRow } from "../src/db";
+import { CommandFailed } from "../src/bridgeLink";
+import { insertSession, listCriticReviews, listEvents, listNotifyLog, openDb, setAutoEnd, type SessionRow } from "../src/db";
+import { createCriticGate } from "../src/criticGate";
+import { DEFAULT_CRITIC_CFG } from "../src/criticProvider";
+import { chatAttention } from "../src/attention";
+import { endFinishedRuns } from "../src/autoEnd";
 import { ThreadStore } from "../src/threadStore";
-import type { BackgroundWork, BridgeEvent, LoggedEvent, ThreadSnapshot } from "../../shared/thread";
+import type { BackgroundWork, BridgeEvent, LoggedEvent, RunOrigin, ThreadSnapshot } from "../../shared/thread";
 
 const QUIET = 20_000;
 const cleanups: (() => void)[] = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
 
-function fixture() {
+/** `critic`: the session has the critic on; `review` answers each critic run (raw critic stdout), in order. */
+interface CriticOpts {
+  review: (prompt: string) => Promise<string>;
+  bridgeVersion?: string | null;
+  followUpError?: Error;
+}
+
+function fixture(opts: { critic?: CriticOpts; prCheck?: (id: string) => Promise<unknown> } = {}) {
   const db = openDb(":memory:");
   const row: SessionRow = {
     id: "dev-shop-cms", folder: "acme", project: "shop", repo: "cms", container: "dev-shop-cms",
     port_base: 40100, status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0, runtime: "chat",
+    critic: opts.critic ? 1 : 0,
   };
   insertSession(db, row);
+  const criticPrompts: string[] = [];
+  const followUps: { sessionId: string; text: string }[] = [];
+  const changed: string[] = [];
   const notified: { title: string; message: string; extra?: NotifyExtra }[] = [];
   let t = 100_000;
   const logs: string[] = [];
@@ -27,11 +43,34 @@ function fixture() {
   cleanups.push(() => { store.close(); rmSync(dir, { recursive: true, force: true }); db.close(); });
   const make = () => {
     const hub = new AgentEventHub({ db, notify: (title, message, extra) => notified.push({ title, message, extra }), now: () => t, quietMs: QUIET });
-    return { hub, chat: new ChatHub({ hub, session: (id) => (id === row.id ? row : null), now: () => t, log: (m) => logs.push(m) }) };
+    const c = opts.critic;
+    const critic = c && {
+      gate: createCriticGate({
+        db,
+        head: async () => "abc123",
+        diff: async () => ({ diff: "--- a\n+++ b\n+change", newFiles: [], truncated: [] }),
+        run: async (_s, prompt) => { criticPrompts.push(prompt); return c.review(prompt); },
+        cfg: () => DEFAULT_CRITIC_CFG,
+        now: () => t,
+      }),
+      bridgeVersion: () => (c.bridgeVersion === undefined ? "1.3.0" : c.bridgeVersion),
+      userText: (_id: string, runId: string) => store.userText(runId),
+      followUp: async (sessionId: string, text: string) => {
+        if (c.followUpError) throw c.followUpError;
+        followUps.push({ sessionId, text });
+      },
+    };
+    return {
+      hub,
+      chat: new ChatHub({
+        hub, session: (id) => (id === row.id ? row : null), now: () => t, log: (m) => logs.push(m),
+        prCheck: opts.prCheck, critic, changed: (id) => changed.push(id),
+      }),
+    };
   };
   let seq = 0;
   const f = {
-    db, row, store, notified, logs, ...make(),
+    db, row, store, notified, logs, criticPrompts, followUps, changed, ...make(),
     feed: (...events: BridgeEvent[]) => {
       for (const event of events) {
         const e: LoggedEvent = { seq: ++seq, ts: t, event };
@@ -49,13 +88,17 @@ function fixture() {
     // Decision rows only: the hub adds counter-mismatch diagnostics when holding work is not a subagent.
     log: (event: string) => listNotifyLog(db, { session: row.id }).filter((r) => r.event === event && r.reason !== "counter-mismatch"),
     tick: (ms: number) => { t += ms; },
+    /** Lets the critic's and the PR read's promises run. */
+    drain: async () => { for (let i = 0; i < 10; i++) await Bun.sleep(0); },
+    attention: () => chatAttention(store.snapshot({ limit: 0 }), f.chat.link(row.id), t),
   };
   return f;
 }
 const empty: ThreadSnapshot = { lastSeq: 0, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: null };
 const noSnapshot = (): ThreadSnapshot => { throw new Error("snapshot read for an event the hub ignores"); };
 
-const started = (runId: string): BridgeEvent => ({ type: "run.started", runId, origin: "user", nativeThreadId: null, model: null });
+const started = (runId: string, origin: RunOrigin = "user"): BridgeEvent => ({ type: "run.started", runId, origin, nativeThreadId: null, model: null });
+const userMessage = (runId: string, text: string): BridgeEvent => ({ type: "message.final", runId, itemId: `user:${runId}`, role: "user", text });
 const completed = (runId: string): BridgeEvent => ({ type: "run.completed", runId, nativeThreadId: "n", usage: null, costUsd: null });
 const background = (...work: BackgroundWork[]): BridgeEvent => ({ type: "background.changed", work });
 const wakeup: BackgroundWork = { id: "w1", kind: "wakeup", label: "check CI", holding: true };
@@ -245,4 +288,190 @@ test("ignored event types never read the snapshot; drop forgets the session", ()
   f.chat.onStatus(f.row.id, "connected", () => empty);
   f.chat.drop(f.row.id);
   expect(f.chat.link(f.row.id)).toBeNull();
+});
+
+test("a completed chat run is returned by sweep and ends an auto_end session", async () => {
+  const f = fixture();
+  setAutoEnd(f.db, f.row.id, 1);
+  f.feed(started("r1"), completed("r1"));
+  f.tick(QUIET);
+  const done = f.hub.sweep();
+  expect(done).toEqual([f.row.id]);
+  const ended: string[] = [];
+  expect(await endFinishedRuns({ db: f.db, end: async (id) => { ended.push(id); } }, done)).toEqual([f.row.id]);
+  expect(ended).toEqual([f.row.id]);
+});
+
+const OK = JSON.stringify({ result: '{"verdict":"ok","findings":[]}' });
+const ISSUES = JSON.stringify({
+  result: '{"verdict":"issues","findings":[{"severity":"critical","file":"a.ts","line":2,"what":"broken migration"}]}',
+});
+
+test("critic block: the reason goes back as a critic follow-up, no done until the critic lets the work pass", async () => {
+  const verdicts = [ISSUES, OK];
+  const f = fixture({ critic: { review: async () => verdicts.shift()! } });
+  f.feed({ type: "run.queued", runId: "r1", text: "add the orders table", attachments: [] }, started("r1"), completed("r1"));
+  await f.drain();
+  expect(f.followUps).toHaveLength(1);
+  expect(f.followUps[0].text).toContain("broken migration");
+  f.settle();
+  expect(f.notified).toHaveLength(0);
+  expect(f.log("stop")).toEqual([expect.objectContaining({ decision: "suppressed", reason: "critic-block" })]);
+  // The follow-up is not a new task: the critic keeps the user's task and counts on.
+  f.feed(started("r2", "critic"), userMessage("r2", f.followUps[0].text), completed("r2"));
+  await f.drain();
+  expect(f.followUps).toHaveLength(1);
+  expect(f.criticPrompts).toHaveLength(2);
+  expect(f.criticPrompts[1]).toContain("add the orders table");
+  expect(listCriticReviews(f.db, f.row.id).map((r) => r.round).sort()).toEqual([1, 2]);
+  f.settle();
+  expect(f.notified.map((n) => n.message)).toEqual(["Claude finished working"]);
+  expect(JSON.parse(f.log("stop").find((r) => r.reason !== "critic-block")!.detail!)).toMatchObject({ promptId: "r2" });
+});
+
+test("critic pass: done goes out; the task of a run that was not queued comes with its user message", async () => {
+  const f = fixture({ critic: { review: async () => OK } });
+  f.feed(started("r1"), userMessage("r1", "rename the helper"), completed("r1"));
+  await f.drain();
+  expect(f.criticPrompts[0]).toContain("rename the helper");
+  expect(f.followUps).toHaveLength(0);
+  f.settle();
+  expect(f.notified.map((n) => n.message)).toEqual(["Claude finished working"]);
+  expect(listEvents(f.db, { type: "critic_pass" })).toHaveLength(1);
+});
+
+test("critic rounds cap: after the last round the work passes with reservations and done goes out", async () => {
+  const f = fixture({ critic: { review: async () => ISSUES } });
+  f.feed(started("r1"), userMessage("r1", "add the orders table"), completed("r1"));
+  await f.drain();
+  f.feed(started("r2", "critic"), userMessage("r2", "fix it"), completed("r2"));
+  await f.drain();
+  expect(f.followUps).toHaveLength(DEFAULT_CRITIC_CFG.rounds - 1);
+  expect(listEvents(f.db, { type: "critic_giveup" })).toHaveLength(1);
+  f.settle();
+  expect(f.notified.map((n) => n.message)).toEqual(["Claude finished working"]);
+});
+
+test("critic error fails open: critic_error is logged and done goes out", async () => {
+  const f = fixture({ critic: { review: async () => { throw new Error("critic exited with code 1"); } } });
+  f.feed(started("r1"), userMessage("r1", "do X"), completed("r1"));
+  await f.drain();
+  expect(listEvents(f.db, { type: "critic_error" })).toHaveLength(1);
+  expect(f.followUps).toHaveLength(0);
+  f.settle();
+  expect(f.notified.map((n) => n.message)).toEqual(["Claude finished working"]);
+});
+
+test("a follow-up that cannot be sent fails open: logged, done goes out", async () => {
+  const f = fixture({ critic: { review: async () => ISSUES, followUpError: new Error("agent not connected") } });
+  f.feed(started("r1"), userMessage("r1", "do X"), completed("r1"));
+  await f.drain();
+  f.settle();
+  expect(f.notified.map((n) => n.message)).toEqual(["Claude finished working"]);
+  expect(f.logs.some((l) => l.includes("agent not connected"))).toBe(true);
+});
+
+test("a bridge older than 1.3.0 gets no critic: logged once, done goes out without a review", async () => {
+  const f = fixture({ critic: { review: async () => ISSUES, bridgeVersion: "1.2.0" } });
+  f.feed(started("r1"), userMessage("r1", "do X"), completed("r1"), started("r2"), userMessage("r2", "do Y"), completed("r2"));
+  await f.drain();
+  expect(f.criticPrompts).toHaveLength(0);
+  expect(f.followUps).toHaveLength(0);
+  expect(f.logs.filter((l) => l.includes("critic disabled"))).toHaveLength(1);
+  f.settle();
+  expect(f.notified.map((n) => n.message)).toEqual(["Claude finished working"]);
+});
+
+test("while the critic reviews, the run counts as working and the hub holds its stop (no done, no autoEnd)", async () => {
+  let verdict: (raw: string) => void = () => {};
+  const f = fixture({ critic: { review: () => new Promise<string>((r) => { verdict = r; }) } });
+  setAutoEnd(f.db, f.row.id, 1);
+  f.chat.onStatus(f.row.id, "connected", () => f.store.snapshot({ limit: 0 }));
+  f.feed(started("r1"), userMessage("r1", "do X"), completed("r1"));
+  await f.drain();
+  f.tick(QUIET);
+  expect(f.hub.sweep()).toEqual([]);
+  expect(f.attention()).toMatchObject({ section: "working", reason: "running" });
+  verdict(OK);
+  await f.drain();
+  expect(f.changed).toContain(f.row.id);
+  expect(f.attention().section).not.toBe("working");
+  f.tick(QUIET);
+  expect(f.hub.sweep()).toEqual([f.row.id]);
+});
+
+test("the critic decides before the PR read: a blocked run never asks for the PR", async () => {
+  const order: string[] = [];
+  const verdicts = [ISSUES, OK];
+  const f = fixture({
+    critic: { review: async () => { order.push("critic"); return verdicts.shift()!; } },
+    prCheck: async () => { order.push("pr"); },
+  });
+  f.feed(started("r1"), userMessage("r1", "do X"), completed("r1"));
+  await f.drain();
+  expect(order).toEqual(["critic"]);
+  f.feed(started("r2", "critic"), userMessage("r2", "fix"), completed("r2"));
+  await f.drain();
+  expect(order).toEqual(["critic", "critic", "pr"]);
+  f.settle();
+  expect(f.notified.map((n) => n.message)).toEqual(["Claude finished working"]);
+});
+
+test("no critic while holding work keeps the run going; a new user run makes a pending verdict stale", async () => {
+  let verdict: (raw: string) => void = () => {};
+  const f = fixture({ critic: { review: () => new Promise<string>((r) => { verdict = r; }) } });
+  f.feed(started("r1"), userMessage("r1", "do X"), background(wakeup), completed("r1"));
+  await f.drain();
+  expect(f.criticPrompts).toHaveLength(0);
+  f.feed(background(), started("r2"), userMessage("r2", "do Y"), completed("r2"));
+  await f.drain();
+  expect(f.criticPrompts).toHaveLength(1);
+  f.feed(started("r3"), userMessage("r3", "do Z"));
+  verdict(ISSUES);
+  await f.drain();
+  expect(f.followUps).toHaveLength(0);
+});
+
+test("a critic off session completes at once, as before", () => {
+  const f = fixture();
+  f.feed(started("r1"), completed("r1"));
+  f.settle();
+  expect(f.notified.map((n) => n.message)).toEqual(["Claude finished working"]);
+});
+
+test("a devd restart while the critic reviews: the completion is re-sent at connect and done goes out once", async () => {
+  const f = fixture({ critic: { review: () => new Promise<string>(() => {}) } });
+  f.feed(started("r1"), userMessage("r1", "do X"), completed("r1"));
+  await f.drain();
+  expect(f.log("sweep_done")).toEqual([expect.objectContaining({ decision: "deferred", reason: "critic-review" })]);
+  f.restart();
+  f.settle();
+  expect(f.notified.map((n) => n.message)).toEqual(["Claude finished working"]);
+  f.restart();
+  f.settle();
+  expect(f.notified).toHaveLength(1);
+});
+
+test("a blocked run restarted before its follow-up: no done until the follow-up finishes", async () => {
+  const f = fixture({ critic: { review: async () => ISSUES } });
+  f.feed(started("r1"), userMessage("r1", "do X"), completed("r1"));
+  await f.drain();
+  expect(f.followUps).toHaveLength(1);
+  expect(f.log("stop")).toEqual([expect.objectContaining({ decision: "suppressed", reason: "critic-block" })]);
+  f.restart();
+  f.settle();
+  expect(f.notified).toHaveLength(0);
+  f.feed(started("r2", "critic"), userMessage("r2", f.followUps[0].text), completed("r2"));
+  await f.drain();
+  f.settle();
+  expect(f.notified.map((n) => n.message)).toEqual(["Claude finished working"]);
+});
+
+test("a critic follow-up the bridge refuses (run-active) is logged and the run finishes with one done", async () => {
+  const f = fixture({ critic: { review: async () => ISSUES, followUpError: new CommandFailed("run-active") } });
+  f.feed(started("r1"), userMessage("r1", "do X"), completed("r1"));
+  await f.drain();
+  f.settle(); f.settle();
+  expect(f.notified.map((n) => n.message)).toEqual(["Claude finished working"]);
+  expect(f.logs.some((l) => l.includes("run-active"))).toBe(true);
 });

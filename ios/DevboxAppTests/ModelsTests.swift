@@ -251,4 +251,56 @@ final class ModelsTests: XCTestCase {
         let live = try decodeRaw(json, as: LiveStats.self)
         XCTAssertEqual(live.sessions.first?.agent, .unknown)
     }
+
+    // MARK: - Tolerant enums of the step 5 inbox and thread (a later devd may add values)
+
+    func testInboxSectionUnknownDecodesToUnknown() throws {
+        XCTAssertEqual(try decodeRaw("\"needs_you\"", as: InboxSection.self), .needsYou)
+        XCTAssertEqual(try decodeRaw("\"parked\"", as: InboxSection.self), .unknown)
+    }
+
+    func testAttentionReasonUnknownDecodesToUnknown() throws {
+        XCTAssertEqual(try decodeRaw("\"ci-failed\"", as: AttentionReason.self), .ciFailed)
+        XCTAssertEqual(try decodeRaw("\"review-requested\"", as: AttentionReason.self), .unknown)
+    }
+
+    func testRunOriginUnknownDecodesToUnknown() throws {
+        XCTAssertEqual(try decodeRaw("\"critic\"", as: RunOrigin.self), .critic)
+        XCTAssertEqual(try decodeRaw("\"schedule\"", as: RunOrigin.self), .unknown)
+    }
+
+    func testRequestKindUnknownDecodesToUnknown() throws {
+        XCTAssertEqual(try decodeRaw("\"plan\"", as: RequestKind.self), .plan)
+        XCTAssertEqual(try decodeRaw("\"form\"", as: RequestKind.self), .unknown)
+    }
+
+    func testThreadItemKindAndStatusUnknownDecodeToUnknown() throws {
+        XCTAssertEqual(try decodeRaw("\"tool\"", as: ThreadItem.Kind.self), .tool)
+        XCTAssertEqual(try decodeRaw("\"reasoning\"", as: ThreadItem.Kind.self), .unknown)
+        XCTAssertEqual(try decodeRaw("\"done\"", as: ThreadItem.Status.self), .done)
+        XCTAssertEqual(try decodeRaw("\"cancelled\"", as: ThreadItem.Status.self), .unknown)
+    }
+
+    func testRunRowStatusUnknownDecodesToUnknown() throws {
+        XCTAssertEqual(try decodeRaw("\"failed\"", as: RunRow.Status.self), .failed)
+        XCTAssertEqual(try decodeRaw("\"paused\"", as: RunRow.Status.self), .unknown)
+    }
+
+    func testInboxRuntimeUnknownDecodesToUnknown() throws {
+        XCTAssertEqual(try decodeRaw("\"chat\"", as: InboxItem.Runtime.self), .chat)
+        XCTAssertEqual(try decodeRaw("\"web\"", as: InboxItem.Runtime.self), .unknown)
+    }
+
+    /// One item with values this app does not know must not fail the whole `/api/inbox`.
+    func testInboxListWithUnknownValuesStillDecodes() throws {
+        let json = """
+        {"items":[{"sessionId":"a","runtime":"web","title":"A","project":"p","repo":"r","agent":"claude",
+          "attention":{"section":"parked","reason":"review-requested","since":1}},
+          {"sessionId":"b","runtime":"chat","title":"B","project":"p","repo":"r","agent":"claude",
+          "attention":{"section":"idle","since":2}}]}
+        """
+        let list = try decodeRaw(json, as: InboxList.self)
+        XCTAssertEqual(list.items.map(\.attention.section), [.unknown, .idle])
+        XCTAssertEqual(list.items.first?.attention.reason, .unknown)
+    }
 }

@@ -11,7 +11,7 @@ import {
   listEvents, pruneEvents, migrateMetricsIndex, migrateMetricsSessionIndex, migrateMetricsAttrColumns,
   insertCriticReview, latestCriticReview, listCriticReviews, pruneCriticReviews, setCritic, type CriticReviewRow,
   getRepoAgent, isAgentName, listRepoAgents, setRepoAgent, setSessionAgent,
-  setAutoEnd,
+  setAutoEnd, savePendingFirstTurn, getPendingFirstTurn, prunePendingFirstTurns, type SessionRow,
   setSessionInstabox, getInstaboxBase, setInstaboxBase,
   deleteAgentLiveState, getAgentLiveState, upsertAgentLiveState,
 } from "../src/db";
@@ -110,7 +110,7 @@ test("migrateDiskStats drops old path-keyed schema", () => {
 
 test("schedules CRUD", () => {
   const db = openDb(":memory:");
-  const row: ScheduleRow = { id: "s1", name: "nightly bump", cron: "0 3 * * *", folder: "acme", project: "shop", repo: "cms", clone_url: "https://github.com/acme/cms.git", prompt: "bump deps", important: 1, enabled: 1, last_run_at: null };
+  const row: ScheduleRow = { id: "s1", name: "nightly bump", cron: "0 3 * * *", folder: "acme", project: "shop", repo: "cms", clone_url: "https://github.com/acme/cms.git", prompt: "bump deps", important: 1, enabled: 1, last_run_at: null, runtime: "tmux", agent: null };
   insertSchedule(db, row);
   expect(listSchedules(db)).toEqual([row]);
   expect(getSchedule(db, "s1")).toEqual(row);
@@ -278,7 +278,7 @@ test("migrateScheduleImportance: silences old schedules, but only once", () => {
   db.run("UPDATE schedules SET important=1");   // state before the migration
   insertSchedule(db, {
     id: "s-old", name: "morning status", cron: "7 8 * * *", folder: "acme", project: "shop", repo: "cms",
-    clone_url: "https://x/cms.git", prompt: "p", important: 1, enabled: 1, last_run_at: null,
+    clone_url: "https://x/cms.git", prompt: "p", important: 1, enabled: 1, last_run_at: null, runtime: "tmux", agent: null,
   });
 
   migrateScheduleImportance(db);
@@ -485,4 +485,14 @@ test("agent_live_state: upsert overwrites the row of one session_id, delete remo
   });
   deleteAgentLiveState(db, "dev-shop-cms");
   expect(getAgentLiveState(db, "dev-shop-cms")).toBeNull();
+});
+
+test("prunePendingFirstTurns keeps rows of running sessions only", () => {
+  const db = openDb(":memory:");
+  const mk = (id: string, status: string, port: number) => insertSession(db, { id, folder: "f", project: id, repo: "r", container: id, port_base: port, status, solo: 0, created_at: 0, last_active_at: 0, important: 0 } as SessionRow);
+  mk("run", "running", 1); mk("stop", "stopped", 2);
+  for (const id of ["run", "stop", "ghost"]) savePendingFirstTurn(db, id, "t", 7, "tag");
+  expect(prunePendingFirstTurns(db)).toBe(2);
+  expect(getPendingFirstTurn(db, "run")).toEqual({ text: "t", seq: 7, tag: "tag" });
+  expect(getPendingFirstTurn(db, "stop")).toBeNull();
 });

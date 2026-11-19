@@ -164,6 +164,11 @@ export class ChatSwitch {
     this.resend(sessionId);
   }
 
+  /** The bridge version of the session's latest handshake; null before one, or for a 1.0.0 bridge. */
+  bridgeVersion(sessionId: string): string | null {
+    return this.bridgeVersions.get(sessionId) ?? null;
+  }
+
   /** The target the next switch is planned from (see `current`), for the dashboard's switchers. */
   target(sessionId: string): CurrentTarget {
     const s = getSession(this.d.db, sessionId);

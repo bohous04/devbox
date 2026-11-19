@@ -74,6 +74,7 @@ export class BridgeLinks {
   private links = new Map<string, Link>();
   /** devd's own first message per session (startTurnWhenConnected), until the bridge took it. */
   private firstTurns = new Map<string, string>();
+  private firstTurnDone = new Map<string, (err: Error | null) => void>();
   private retryMs: number;
   private log: (msg: string) => void;
 
@@ -86,6 +87,15 @@ export class BridgeLinks {
     onBehind: (sessionId: string) => void;
     /** Every handshake, after the replayed events were applied. */
     onHandshake?: (sessionId: string, h: BridgeHandshake) => void;
+    /** Where devd's first message survives a devd restart (main DB); without it the message is memory only. */
+    pendingTurns?: {
+      save: (id: string, text: string, seq: number, tag: string | null) => void;
+      load: (id: string) => { text: string; seq: number; tag: string | null } | null;
+      remove: (id: string) => void;
+    };
+    /** Outcome of a first message that was loaded from `pendingTurns` after a restart and carries a tag
+     *  (the schedule name): there is no caller left to hear it. */
+    onRestoredTurnDone?: (sessionId: string, tag: string, err: Error | null) => void;
     retryMs?: number;
     log?: (msg: string) => void;
   }) {
@@ -96,6 +106,22 @@ export class BridgeLinks {
   /** Keeps a link to the session's bridge, reconnecting every `retryMs` until `drop`. Idempotent. */
   ensure(sessionId: string): void {
     if (this.links.has(sessionId)) return;
+    // A first message persisted before a restart is delivered on this link's first connection.
+    if (!this.firstTurns.has(sessionId)) {
+      const saved = this.d.pendingTurns?.load(sessionId);
+      if (saved) {
+        // The bridge may have accepted the turn just before devd died, leaving the row behind: a run started after
+        // the row was saved means it was delivered. Runs from before (a reused session) say nothing.
+        if (this.d.store(sessionId).snapshot({ afterSeq: saved.seq, limit: 0 }).runs.length > 0) {
+          this.d.pendingTurns?.remove(sessionId);
+          this.log(`bridge link ${sessionId}: dropped a persisted first message, the thread already has a run since it was queued`);
+        } else {
+          this.firstTurns.set(sessionId, saved.text);
+          const { tag } = saved;
+          if (tag !== null && this.d.onRestoredTurnDone) this.firstTurnDone.set(sessionId, (err) => this.d.onRestoredTurnDone!(sessionId, tag, err));
+        }
+      }
+    }
     const link: Link = {
       status: "connecting", socket: null, buffer: "", decoder: new TextDecoder(), outbound: [],
       pending: new Map(), retry: null, dropped: false, outageLogged: false, behindSince: null,
@@ -108,7 +134,7 @@ export class BridgeLinks {
   /** Stops retrying and closes the socket. Commands in flight fail with AgentDisconnected. No status callback:
    *  dropping is the owner's decision (stop/end), not something the link observed. */
   drop(sessionId: string): void {
-    if (this.firstTurns.delete(sessionId)) this.log(`bridge link ${sessionId}: dropped before devd's first message was sent; it is discarded`);
+    if (this.discardFirstTurn(sessionId)) this.log(`bridge link ${sessionId}: dropped before devd's first message was sent; it is discarded`);
     const link = this.links.get(sessionId);
     if (!link) return;
     this.links.delete(sessionId);
@@ -146,24 +172,50 @@ export class BridgeLinks {
   }
 
   /** Sends `text` as a startTurn once the link is connected (at once if it is). For devd's own first message
-   *  of a session (a pull conflict on open). Not sent because the bridge was unreachable: tried again on the next
-   *  connection. Timed out (outcome unknown) or refused: logged, never resent. */
-  startTurnWhenConnected(sessionId: string, text: string): void {
+   *  of a session (a pull conflict on open, a scheduled run's prompt). Not sent because the bridge was unreachable:
+   *  tried again on the next connection, also after a devd restart (persisted until the bridge answered). Timed out
+   *  (outcome unknown) or refused: logged, never resent. `onDone` hears the outcome once: null = the bridge accepted
+   *  the turn, an Error = it was refused, timed out, discarded or dropped. It is memory only; `tag` is persisted
+   *  and reaches `onRestoredTurnDone` instead after a restart. */
+  startTurnWhenConnected(sessionId: string, text: string, onDone?: (err: Error | null) => void, tag: string | null = null): void {
+    this.d.pendingTurns?.save(sessionId, text, this.d.store(sessionId).lastSeq(), tag);
     this.firstTurns.set(sessionId, text);
+    if (onDone) this.firstTurnDone.set(sessionId, onDone);
     if (this.status(sessionId) === "connected") this.sendFirstTurn(sessionId);
+  }
+
+  /** Forgets a first message that was not sent yet (memory and DB). True when there was one; false when it was
+   *  already sent (or never queued), so the caller can tell a late discard from an effective one. */
+  discardFirstTurn(sessionId: string): boolean {
+    this.d.pendingTurns?.remove(sessionId);
+    const had = this.firstTurns.delete(sessionId);
+    if (had) this.settleFirstTurn(sessionId, new Error("first message discarded before it was sent"));
+    return had;
+  }
+
+  private settleFirstTurn(sessionId: string, err: Error | null) {
+    const done = this.firstTurnDone.get(sessionId);
+    if (!done) return;
+    this.firstTurnDone.delete(sessionId);
+    done(err);
   }
 
   private sendFirstTurn(sessionId: string) {
     const text = this.firstTurns.get(sessionId);
     if (text === undefined) return;
     this.firstTurns.delete(sessionId);
-    this.send(sessionId, { kind: "startTurn", text }).catch((err: Error) => {
+    this.send(sessionId, { kind: "startTurn", text }).then(() => {
+      this.d.pendingTurns?.remove(sessionId);
+      this.settleFirstTurn(sessionId, null);
+    }, (err: Error) => {
       if (err instanceof AgentDisconnected && !(err instanceof CommandTimeout) && this.links.has(sessionId)) {
         this.firstTurns.set(sessionId, text);
         this.log(`bridge link ${sessionId}: devd's first message not sent (${err.message}); retrying on the next connection`);
         return;
       }
+      this.d.pendingTurns?.remove(sessionId);
       this.log(`bridge link ${sessionId}: devd's first message failed, not resent: ${err.message}`);
+      this.settleFirstTurn(sessionId, err);
     });
   }
 

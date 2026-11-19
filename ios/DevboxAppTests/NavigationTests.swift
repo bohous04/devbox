@@ -5,16 +5,24 @@ import XCTest
 /// a deep link from a push notification / Live Activity leads. `SessionsContainer` reads `AppTab.allCases`
 /// and `AppTab.route(for:)` directly, so the test guards the real behavior, not a copy.
 final class NavigationTests: XCTestCase {
-    func testTabOrderMatchesWeb() {
-        XCTAssertEqual(AppTab.allCases, [.overview, .sessions, .stats, .hardware, .more])
-        XCTAssertEqual(AppTab.allCases.map(\.title), ["Overview", "Sessions", "Statistics", "Hardware", "More"])
+    /// Inbox first (step 5); Hardware left the bar for it, as on the web (it lives in More → System).
+    func testTabOrderInboxFirst() {
+        XCTAssertEqual(AppTab.allCases, [.inbox, .overview, .sessions, .stats, .more])
+        XCTAssertEqual(AppTab.allCases.map(\.title), ["Inbox", "Overview", "Sessions", "Statistics", "More"])
+        XCTAssertEqual(AppTab.inbox.systemImage, "tray")
         XCTAssertEqual(AppTab.overview.systemImage, "gauge")
         XCTAssertEqual(AppTab.stats.systemImage, "chart.bar")
-        XCTAssertEqual(AppTab.hardware.systemImage, "cpu")
     }
 
-    func testAppStartsOnFirstTab() {
-        XCTAssertEqual(AppTab.initial, .overview)
+    func testAppStartsOnTheInbox() {
+        XCTAssertEqual(AppTab.initial, .inbox)
+    }
+
+    /// A chat session's notification or `devbox://thread/<id>` opens its thread on the Inbox tab's stack.
+    func testThreadDeepLinkOpensTheChatInTheInboxTab() {
+        let route = AppTab.route(for: .thread(id: "dev-shop-cms"))
+        XCTAssertEqual(route, .inbox(path: ["dev-shop-cms"]))
+        XCTAssertEqual(route.tab, .inbox)
     }
 
     func testDeepLinkSwitchesToSessionsTabAndOpensSession() {
@@ -41,7 +49,7 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(MoreMenu.sections.map { $0.items.map(\.title) }, [
             ["Folders", "AI limits & accounts"],
             ["Schedules", "Production writes", "SSH keys"],
-            ["Activity", "Notifications", "Settings"],
+            ["Hardware", "Activity", "Notifications", "Settings"],
         ])
     }
 }
