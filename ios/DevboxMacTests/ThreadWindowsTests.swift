@@ -134,4 +134,74 @@ final class ThreadWindowsTests: XCTestCase {
         XCTAssertFalse(windows.store(for: "a", client: client()) === first, "nobody shows a: its store went")
         windows.dropStores()
     }
+
+    private func loadedStore(_ windows: ThreadWindows, _ id: String, seq: Int) async throws -> ThreadStore {
+        MockURLProtocol.handler = { _ in .init(statusCode: 200, data: self.snapshot(seq)) }
+        let store = windows.store(for: id, client: client(), connect: Streams().connect)
+        await store.start()
+        XCTAssertEqual(store.thread?.lastSeq, seq)
+        return store
+    }
+
+    /// Losing focus saves the threads too: after a crash (no quit) the next launch still streams from that seq.
+    func testThreadsSavedOnResignActiveSurviveACrash() async throws {
+        let windows = ThreadWindows(defaults: defaults, directory: directory)
+        windows.show(window: "w1", thread: "a")
+        _ = try await loadedStore(windows, "a", seq: 10)
+        windows.saveOpenThreads()
+        windows.dropStores() // the process dies here: no willTerminate
+
+        let relaunched = ThreadWindows(defaults: defaults, directory: directory)
+        XCTAssertEqual(relaunched.restorePlan(current: nil).adopt, "a")
+        relaunched.show(window: "n1", thread: "a")
+        XCTAssertEqual(relaunched.store(for: "a", client: client()).thread?.lastSeq, 10)
+        relaunched.dropStores()
+    }
+
+    /// Switching a window away from a thread or closing it keeps its content: opening it again streams from its seq.
+    func testSwitchingAwayAndClosingSaveTheThread() async throws {
+        let windows = ThreadWindows(defaults: defaults, directory: directory)
+        windows.show(window: "w1", thread: "a")
+        _ = try await loadedStore(windows, "a", seq: 10)
+        windows.show(window: "w1", thread: "b")
+        windows.show(window: "w1", thread: "a")
+        XCTAssertEqual(windows.store(for: "a", client: client()).thread?.lastSeq, 10, "reopened from its saved copy")
+        windows.show(window: "w2", thread: "c")
+        _ = try await loadedStore(windows, "c", seq: 30)
+        windows.close(window: "w2")
+        windows.show(window: "w3", thread: "c")
+        XCTAssertEqual(windows.store(for: "c", client: client()).thread?.lastSeq, 30)
+        windows.dropStores()
+    }
+
+    /// An ended session is not restored and its saved thread goes.
+    func testAnEndedThreadIsForgotten() async throws {
+        let windows = ThreadWindows(defaults: defaults, directory: directory)
+        windows.show(window: "w1", thread: "a")
+        windows.show(window: "w2", thread: "b")
+        _ = try await loadedStore(windows, "a", seq: 10)
+        windows.saveOpenThreads()
+        windows.ended("a")
+        windows.willTerminate()
+        windows.dropStores()
+
+        let relaunched = ThreadWindows(defaults: defaults, directory: directory)
+        let plan = relaunched.restorePlan(current: nil)
+        XCTAssertEqual(plan.adopt, "b")
+        XCTAssertEqual(plan.open, [])
+        relaunched.show(window: "n1", thread: "a")
+        XCTAssertNil(relaunched.store(for: "a", client: client()).thread, "no saved copy left")
+        relaunched.dropStores()
+    }
+
+    /// An unreadable window list is said once and kept aside, not silently replaced.
+    func testACorruptWindowListIsReportedAndKept() {
+        defaults.set(Data("not json".utf8), forKey: "openWindows")
+        let windows = ThreadWindows(defaults: defaults, directory: directory)
+        XCTAssertNotNil(windows.restoreProblem)
+        XCTAssertEqual(defaults.data(forKey: "openWindows.unreadable"), Data("not json".utf8))
+        windows.show(window: "w1", thread: "a")
+        XCTAssertNotNil(ThreadWindows(defaults: defaults, directory: directory).restorePlan(current: nil).adopt)
+        XCTAssertNil(ThreadWindows(defaults: defaults, directory: directory).restoreProblem, "said once")
+    }
 }

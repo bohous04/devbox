@@ -55,6 +55,11 @@ final class LoginItem: ObservableObject {
         if apply(true) { defaults.set(true, forKey: Self.doneKey) }
     }
 
+    /// The user can change it in System Settings too: Settings re-reads it when it appears.
+    func refresh() {
+        enabled = service.status == .enabled
+    }
+
     func set(enabled on: Bool) {
         defaults.set(true, forKey: Self.doneKey)
         apply(on)

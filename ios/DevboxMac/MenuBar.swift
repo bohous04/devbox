@@ -18,16 +18,30 @@ struct MenuBarLabel: View {
     }
 }
 
+/// The count next to the icon; "?" marks it stale while the inbox stream is down or the list failed to load.
+enum NeedsYouBadge {
+    static func text(count: Int, stale: Bool) -> String? {
+        switch (count, stale) {
+        case (0, false): return nil
+        case (0, true): return "?"
+        case (_, false): return "\(count)"
+        case (_, true): return "\(count)?"
+        }
+    }
+}
+
 private struct NeedsYouLabel: View {
     @ObservedObject var inbox: InboxStore
 
     var body: some View {
         let count = inbox.items.map { InboxView.group($0).needsYou.count } ?? 0
-        if count > 0 {
-            Label("\(count)", systemImage: "tray.full.fill").labelStyle(.titleAndIcon)
-                .accessibilityLabel("\(count) sessions need you")
+        let stale = inbox.paused || inbox.loadError != nil
+        let icon = count > 0 ? "tray.full.fill" : "tray"
+        if let text = NeedsYouBadge.text(count: count, stale: stale) {
+            Label(text, systemImage: icon).labelStyle(.titleAndIcon)
+                .accessibilityLabel("\(count) sessions need you\(stale ? ", updates paused" : "")")
         } else {
-            Image(systemName: "tray").accessibilityLabel(inbox.items == nil ? "Devbox, inbox not loaded" : "Nothing needs you")
+            Image(systemName: icon).accessibilityLabel("Nothing needs you")
         }
     }
 }

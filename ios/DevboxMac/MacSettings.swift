@@ -32,5 +32,6 @@ private struct LoginItemSettings: View {
             }
         }
         .padding()
+        .onAppear { item.refresh() }
     }
 }

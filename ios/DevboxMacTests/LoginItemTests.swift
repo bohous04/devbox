@@ -69,4 +69,14 @@ final class LoginItemTests: XCTestCase {
         let item = LoginItem(service: service, defaults: defaults)
         XCTAssertEqual(item.statusText, "Allow Devbox in System Settings › General › Login Items.")
     }
+
+    /// Settings re-reads macOS's state when it appears (the user may have changed it in System Settings).
+    func testRefreshRereadsTheStatus() {
+        let service = FakeService()
+        let item = LoginItem(service: service, defaults: defaults)
+        XCTAssertFalse(item.enabled)
+        service.status = .enabled
+        item.refresh()
+        XCTAssertTrue(item.enabled)
+    }
 }

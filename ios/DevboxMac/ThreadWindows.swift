@@ -6,9 +6,9 @@ import os
 /// action. macOS's own window restoration is not relied on: it is off when "Close windows when quitting an
 /// application" is set and after a restart without "Reopen windows".
 ///
-/// The window list is written on every change (a crash keeps it); a thread itself is written when the app quits,
-/// so a window's thread after a crash comes from the last quit (an older seq only means a longer catch-up: devd's
-/// replay sends everything changed after it).
+/// The window list is written on every change (a crash keeps it). A thread is written when the app quits or loses
+/// focus and when a window closes or leaves it, so after a crash it comes from the last of those (an older seq only
+/// means a longer catch-up: devd's replay sends everything changed after it). An ended session is forgotten.
 @MainActor
 final class ThreadWindows {
     private struct Window: Codable, Equatable {
@@ -18,6 +18,8 @@ final class ThreadWindows {
 
     private static let logger = Logger(subsystem: "com.example.devbox", category: "Windows")
     private static let key = "openWindows"
+    /// Where an unreadable window list is kept for a look instead of being overwritten.
+    private static let unreadableKey = "openWindows.unreadable"
     private let defaults: UserDefaults
     private let directory: URL
     private var windows: [Window] = []
@@ -26,18 +28,24 @@ final class ThreadWindows {
     /// The app is quitting: its windows closing now must stay in the list.
     private var terminating = false
     private var stores: [String: ThreadStore] = [:]
+    /// The last run's window list could not be read: said once in the app (logged too).
+    let restoreProblem: String?
 
     init(defaults: UserDefaults, directory: URL) {
         self.defaults = defaults
         self.directory = directory
         var saved: [Window] = []
+        var problem: String?
         if let data = defaults.data(forKey: Self.key) {
             do {
                 saved = try JSONDecoder().decode([Window].self, from: data)
             } catch {
                 Self.logger.error("saved window list unreadable, no windows restored: \(String(describing: error), privacy: .public)")
+                defaults.set(data, forKey: Self.unreadableKey)
+                problem = "The windows open at the last quit could not be read, so none were reopened (\(error.localizedDescription))."
             }
         }
+        restoreProblem = problem
         var seen = Set<String>()
         toRestore = saved.compactMap(\.threadId).filter { seen.insert($0).inserted }
         persist()
@@ -95,23 +103,38 @@ final class ThreadWindows {
     /// The app quits: keep the window list as it is and save the thread of every open window.
     func willTerminate() {
         terminating = true
-        for (id, store) in stores where windows.contains(where: { $0.threadId == id }) {
-            guard let thread = store.thread else { continue }
-            do {
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                try JSONEncoder().encode(thread).write(to: file(id), options: .atomic)
-            } catch {
-                Self.logger.error("could not save thread \(id, privacy: .public): \(String(describing: error), privacy: .public)")
-            }
-        }
+        saveOpenThreads()
+    }
+
+    /// Saves the thread of every open window (quit, and when the app loses focus: a crash then loses little).
+    func saveOpenThreads() {
+        for id in stores.keys where windows.contains(where: { $0.threadId == id }) { save(id) }
+    }
+
+    /// devd refused the thread's stream (404/409): no window restores it and its saved copy goes. The (ended) store
+    /// stays, so a window still showing the thread keeps saying it ended instead of trying to load it again.
+    func ended(_ threadId: String) {
+        for i in windows.indices where windows[i].threadId == threadId { windows[i].threadId = nil }
+        persist()
+        remove(file(threadId))
     }
 
     // MARK: - Private
 
     private func dropIfUnshown(_ threadId: String) {
         guard !windows.contains(where: { $0.threadId == threadId }) else { return }
+        save(threadId)
         stores.removeValue(forKey: threadId)?.stop()
-        remove(file(threadId)) // usually absent: only quitting writes one
+    }
+
+    private func save(_ threadId: String) {
+        guard let thread = stores[threadId]?.thread else { return }
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try JSONEncoder().encode(thread).write(to: file(threadId), options: .atomic)
+        } catch {
+            Self.logger.error("could not save thread \(threadId, privacy: .public): \(String(describing: error), privacy: .public)")
+        }
     }
 
     private func persist() {

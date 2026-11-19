@@ -15,6 +15,19 @@ struct MacWindow: View {
 
     var body: some View {
         content
+            .safeAreaInset(edge: .top) {
+                if let problem = state.restoreNotice {
+                    HStack {
+                        Label(problem, systemImage: "exclamationmark.triangle").font(Theme.F.meta)
+                        Spacer()
+                        Button("Dismiss") { state.restoreNotice = nil }
+                    }
+                    .padding(8)
+                    .background(Theme.C.warn.opacity(0.18))
+                }
+            }
+            // The app restores its windows itself (ThreadWindows); macOS restoring them too would double them.
+            .background(WindowConfigurator { $0.isRestorable = false })
             .onAppear {
                 state.setOpenWindow(openWindow)
                 state.windows.show(window: windowId, thread: thread)
@@ -120,6 +133,28 @@ struct MacInboxSidebar: View {
     }
 }
 
+/// Turns off AppKit window restoration for the window hosting this view. One path for macOS 14 and 15+
+/// (`restorationBehavior(.disabled)` is a macOS 15 scene modifier).
+private struct WindowConfigurator: NSViewRepresentable {
+    let configure: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> NSView { Probe(configure: configure) }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class Probe: NSView {
+        let configure: (NSWindow) -> Void
+        init(configure: @escaping (NSWindow) -> Void) {
+            self.configure = configure
+            super.init(frame: .zero)
+        }
+        required init?(coder: NSCoder) { nil }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let window { configure(window) }
+        }
+    }
+}
+
 /// The thread as chat or terminal. A tmux session has no chat, so it starts on its terminal.
 struct MacThreadDetail: View {
     private enum Tab { case chat, terminal }
@@ -128,6 +163,7 @@ struct MacThreadDetail: View {
     let client: DevdClient
     @ObservedObject var inbox: InboxStore
     @EnvironmentObject private var state: MacAppState
+    @Environment(\.dismissWindow) private var dismissWindow
     @State private var tab: Tab?
 
     private var item: InboxItem? { inbox.items?.first { $0.sessionId == threadId } }
@@ -138,8 +174,10 @@ struct MacThreadDetail: View {
             switch shown {
             case .chat:
                 let store = state.windows.store(for: threadId, client: client)
-                ChatScreen(store: store, client: client, openTerminal: { tab = .terminal })
+                ChatScreen(store: store, client: client, openTerminal: { tab = .terminal },
+                           closeWindow: { dismissWindow(id: MacWindow.sceneId, value: threadId) })
                     .id(ObjectIdentifier(store))
+                    .onReceive(store.$ended) { if $0 { state.windows.ended(threadId) } }
             case .terminal:
                 TerminalScreen(sessionId: threadId, title: item?.title ?? threadId, client: client, closable: false)
             }
