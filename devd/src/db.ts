@@ -251,7 +251,12 @@ export function openDb(path: string): Database {
   // The worktree branch the PR was found for (S5-R29: the watch follows the current branch); NULL on rows written
   // before the column existed.
   const prCols = (db.query("PRAGMA table_info(session_prs)").all() as { name: string }[]).map((c) => c.name);
-  if (!prCols.includes("branch")) db.run(`ALTER TABLE session_prs ADD COLUMN branch TEXT`);
+  if (!prCols.includes("branch")) {
+    db.run(`ALTER TABLE session_prs ADD COLUMN branch TEXT`);
+    // Deploying S5-R29 watches sessions that were not watched before and rewrites every old row: the first tick
+    // after it is a silent seed again, or it would notify PRs that were already failing and settle merged ones.
+    if (prsExisted && !db.query(`SELECT 1 FROM pr_watch_seed LIMIT 1`).get()) db.run(`INSERT INTO pr_watch_seed (pending) VALUES (1)`);
+  }
   // Dummy git tokens. In the database, not only in memory — a devd restart must not break git
   // in running sessions (the container has the dummy in a file and devd must be able to translate it).
   db.run(`CREATE TABLE IF NOT EXISTS git_placeholders (

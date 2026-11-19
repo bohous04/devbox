@@ -782,6 +782,12 @@ test("S5-R29: a session registered on main whose worktree is on a feature branch
   expect(t.attention(CHAT.id)).toMatchObject({ section: "needs_you", reason: "ci-failed" });
   expect(t.messages()).toEqual(["CI failed on PR #7"]);
 
+  // A detached HEAD (a rebase in progress) skips the poll: the row stays as it was.
+  await sh(work, "git", "checkout", "-q", "--detach");
+  await w.checkNow(CHAT.id);
+  expect(getSessionPr(t.db, CHAT.id)).toMatchObject({ number: 7, checks: "failure", branch: "feat" });
+  await sh(work, "git", "checkout", "-q", "feat");
+
   // The agent switches to another branch without a PR: the old branch's PR no longer speaks for the session.
   await sh(work, "git", "checkout", "-q", "-b", "other");
   await w.checkNow(CHAT.id);
@@ -790,7 +796,7 @@ test("S5-R29: a session registered on main whose worktree is on a feature branch
   expect(w.pending(CHAT.id)).toBe(false);
 });
 
-test("S5-R29: a session with no registered branch but a worktree is watched; a detached HEAD means no PR for that poll", async () => {
+test("S5-R29: a session with no registered branch but a worktree is watched; a detached HEAD skips the poll", async () => {
   const { root, work } = await repo("https://github.com/o/n.git");
   const gh = fakeGh([{ number: 3, url: "u", state: "OPEN", mergedAt: null, statusCheckRollup: [] }]);
   const s = { ...ROW, worktree: work, branch: null };
@@ -798,6 +804,55 @@ test("S5-R29: a session with no registered branch but a worktree is watched; a d
     .toMatchObject([{ number: 3 }]);
   await sh(work, "git", "checkout", "-q", "--detach");
   const polls = await checkPrs({ sessions: [s], root, gh: gh.run, fetcher: noFetch, giteaUrls: [], giteaToken: () => undefined, onError: (_id, e) => { throw e; } });
-  expect(polls).toEqual([{ sessionId: s.id, branch: null, head: null, pr: null }]);
+  expect(polls).toEqual([]); // skipped: no answer for this poll, nothing changes
   expect(gh.calls).toHaveLength(1);
+});
+
+test("S5-R29: a worktree git cannot read is an error for the poll (onError, backoff), not \"no branch\"", async () => {
+  const { root } = await repo("https://github.com/o/n.git");
+  const errors: string[] = [];
+  const polls = await checkPrs({
+    sessions: [{ ...ROW, worktree: join(root, "missing"), branch: "feat" }], root, gh: fakeGh([]).run, fetcher: noFetch,
+    giteaUrls: [], giteaToken: () => undefined, onError: (_id, e) => errors.push(e.message),
+  });
+  expect(polls).toEqual([]);
+  expect(errors).toHaveLength(1);
+});
+
+test("S5-R29: a session without its own worktree (shared checkout) keeps watching its registered branch", async () => {
+  const { root, work } = await repo("https://github.com/o/n.git");
+  await sh(work, "git", "checkout", "-q", "main"); // the shared checkout is elsewhere now
+  const gh = fakeGh([]);
+  // workspacePath(root, "", "", "work") = <root>/work: the session works in the shared checkout.
+  const s = { ...ROW, folder: "", project: "", repo: "work", worktree: null, branch: "feat" };
+  const polls = await checkPrs({ sessions: [s], root, gh: gh.run, fetcher: noFetch, giteaUrls: [], giteaToken: () => undefined, onError: (_id, e) => { throw e; } });
+  expect(polls.map((x) => x.branch)).toEqual(["feat"]);
+  expect(gh.calls.map((c) => c[6])).toEqual(["feat"]);
+});
+
+test("S5-R29 deploy: adding the branch column re-arms the seed, so old rows and newly watched sessions notify nothing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "prwatch-migrate-"));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  const dbPath = join(dir, "devd.db");
+  // A database from before S5-R29: session_prs without `branch`, the first-deploy seed long done, a failing row.
+  const old = openDb(dbPath);
+  old.run("ALTER TABLE session_prs DROP COLUMN branch");
+  old.run("DELETE FROM pr_watch_seed");
+  old.run(`INSERT INTO session_prs (session_id,number,url,state,checks,since,merge_settled_at,updated_at) VALUES (?,7,'u','open','failure',1,NULL,1)`, [CHAT.id]);
+  old.close();
+  const t = setup({ dbPath, seed: true });
+  t.pr(CHAT.id, "open", "failure", 7);
+  t.pr(TMUX.id, "open", "failure", 9); // newly watched, already failing
+  await t.watch.tick();
+  expect(t.notified).toEqual([]);
+  expect(getSessionPr(t.db, CHAT.id)).toMatchObject({ checks: "failure", branch: CHAT.branch });
+  expect(getSessionPr(t.db, TMUX.id)).toMatchObject({ checks: "failure" });
+  // After the seed, a new failure notifies as usual.
+  t.pr(TMUX.id, "open", "pending", 9);
+  t.tick(PR_SETTLED_POLL_MS);
+  await t.watch.tick();
+  t.pr(TMUX.id, "open", "failure", 9);
+  t.tick(2 * MIN);
+  await t.watch.tick();
+  expect(t.messages()).toEqual(["CI failed on PR #9"]);
 });

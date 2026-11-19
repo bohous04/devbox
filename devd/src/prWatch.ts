@@ -6,9 +6,8 @@ import {
   type PrChecks, type PrStatus, type SessionPrRow, type SessionRow, type SettleReason,
 } from "./db";
 import type { Activity } from "./sessionAttention";
-import { worktreeBranch } from "./git";
 import { workspacePath } from "./tree";
-import { baseBranch, findPr, giteaUrlFor, remoteHead, remoteInfo, remoteNames, type Fetcher, type GhRunner } from "./unpushed";
+import { baseBranch, currentBranch, findPr, giteaUrlFor, remoteHead, remoteInfo, remoteNames, type Fetcher, type GhRunner } from "./unpushed";
 
 /** How often index.ts runs the PR watch; a PR with pending checks is polled on every tick. */
 export const PR_WATCH_TICK_MS = 2 * 60_000;
@@ -20,7 +19,7 @@ export const PR_ERROR_BACKOFF_MAX_MS = 30 * 60_000;
 export const PR_ERRORS_RELEASE = 3;
 
 export interface PrState { sessionId: string; number: number; url: string; state: PrStatus; checks: PrChecks }
-/** One session's poll: the branch its worktree is on now (S5-R29; null = detached HEAD or unreadable), that branch's
+/** One session's poll: the branch its worktree is on now (S5-R29; a shared checkout: its registered branch; null = none), that branch's
  *  head on the remote (null = not pushed, or no branch) and its PR (null = none, or nothing to watch: other host, the
  *  default branch). */
 export interface PrPoll { sessionId: string; branch: string | null; head: string | null; pr: PrState | null }
@@ -45,9 +44,17 @@ export async function checkPrs(d: {
   for (const s of d.sessions) {
     try {
       const dir = s.worktree ?? workspacePath(d.root, s.folder, s.project, s.repo);
-      // S5-R29: the branch the worktree is on now, not `sessions.branch` (fixed at creation; the agent may have
-      // switched). Detached or unreadable: no PR for this poll, never the registered branch instead.
-      const branch = await worktreeBranch(dir);
+      // S5-R29: a session's own worktree is watched by the branch it is on now, not `sessions.branch` (fixed at
+      // creation; the agent may have switched). A detached HEAD (a rebase in progress) skips this poll, the row stays;
+      // a git failure throws (onError, backoff). A session in a shared checkout (no worktree of its own) keeps its
+      // registered branch: the checkout's branch belongs to no single session.
+      let branch: string | null;
+      if (s.worktree) {
+        branch = await currentBranch(dir);
+        if (branch === null) continue;
+      } else {
+        branch = s.branch ?? null;
+      }
       if (branch === null) { out.push({ sessionId: s.id, branch, head: null, pr: null }); continue; }
       const remote = await remoteInfo(dir, d.giteaUrls);
       if (!remote) {
