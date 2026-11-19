@@ -8,12 +8,13 @@ import { BottomBar, MobileHeader, Sidebar } from "./components/Nav";
 import { PageSkeleton } from "./components/primitives";
 import { VaultGate } from "./components/VaultGate";
 import { LEGACY_ROUTES } from "./nav";
-import { Overview } from "./pages/Overview";
+import { Inbox } from "./pages/Inbox";
 import { useStore } from "./store";
 
 // Route-level code splitting: without it the bundle was a single 1.49MB chunk and recharts
-// and xterm were downloaded even when the user only looked at Overview. Overview stays
+// and xterm were downloaded even when the user only looked at Overview. Inbox stays
 // static — it is the default route, lazy loading would only add a flash there.
+const Overview = lazy(() => import("./pages/Overview").then((m) => ({ default: m.Overview })));
 const AgentUpkeep = lazy(() => import("./pages/AgentUpkeep").then((m) => ({ default: m.AgentUpkeep })));
 const Sessions = lazy(() => import("./pages/Sessions").then((m) => ({ default: m.Sessions })));
 const Stats = lazy(() => import("./pages/Stats").then((m) => ({ default: m.Stats })));
@@ -29,7 +30,6 @@ const Operations = lazy(() => import("./pages/Operations").then((m) => ({ defaul
 const SshApprovals = lazy(() => import("./pages/SshApprovals").then((m) => ({ default: m.SshApprovals })));
 const Unpushed = lazy(() => import("./pages/Unpushed").then((m) => ({ default: m.Unpushed })));
 const TerminalPage = lazy(() => import("./pages/TerminalPage").then((m) => ({ default: m.TerminalPage })));
-const Inbox = lazy(() => import("./pages/Inbox").then((m) => ({ default: m.Inbox })));
 const SessionPage = lazy(() => import("./pages/SessionPage").then((m) => ({ default: m.SessionPage })));
 
 function OfflineBar() {
@@ -78,8 +78,8 @@ export function App() {
         <ErrorBoundary key={location.pathname} where={location.pathname}>
         <Suspense fallback={<PageSkeleton delayed />}>
         <Routes location={location} key={location.pathname}>
-          <Route path="/" element={<Overview />} />
-          <Route path="/inbox" element={<Inbox />} />
+          <Route path="/" element={<Inbox />} />
+          <Route path="/overview" element={<Overview />} />
           {/* A chat session: conversation + terminal tab. */}
           <Route path="/s/:id" element={<SessionPage />} />
           <Route path="/upkeep" element={<AgentUpkeep />} />

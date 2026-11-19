@@ -22,17 +22,20 @@ test("every old path points to an existing new one", () => {
   }
 });
 
-test("NAV: Inbox comes right after Overview and is in the mobile bar", () => {
-  expect(NAV[1]).toMatchObject({ to: "/inbox", label: "Inbox", primary: true });
-  expect(activeLabel("/inbox")).toBe("Inbox");
+test("NAV: Inbox is the home page, Overview has its own path, both in the mobile bar", () => {
+  expect(NAV[0]).toMatchObject({ to: "/", label: "Inbox", primary: true, end: true });
+  expect(NAV[1]).toMatchObject({ to: "/overview", label: "Overview", primary: true });
+  expect(activeLabel("/overview")).toBe("Overview");
+  // Notifications and bookmarks still point at the old Inbox address.
+  expect(LEGACY_ROUTES["/inbox"]).toBe("/");
 });
 
 test("activeLabel recognizes the root and subpages", () => {
-  expect(activeLabel("/")).toBe("Overview");
+  expect(activeLabel("/")).toBe("Inbox");
   expect(activeLabel("/sessions")).toBe("Sessions");
   expect(activeLabel("/sessions?open=abc")).toBe("Sessions");
   expect(activeLabel("/prod-writes")).toBe("Production writes");
-  expect(activeLabel("/neznama")).toBe("Overview");
+  expect(activeLabel("/neznama")).toBe("Inbox");
 });
 
 test("the root does not catch other paths (end route)", () => {
