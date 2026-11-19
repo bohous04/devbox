@@ -208,8 +208,9 @@ enum ThreadView {
             terminal(&n, seq, ts, runId, .failed, error: error, failureReason: reason == "rate-limited" ? reason : nil)
             notice(&n, seq, ts, runId: runId, error)
 
-        case let .bridgeStarted(version, resumed):
+        case let .bridgeStarted(version, resumed, text):
             if resumed { notice(&n, seq, ts, runId: nil, "Agent bridge restarted (v\(version))") }
+            if let text, !text.isEmpty { notice(&n, seq, ts, runId: nil, text) }
 
         case let .unknown(type):
             logger.error("thread view: unknown event type \(type, privacy: .public) at seq \(seq)")

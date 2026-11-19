@@ -196,6 +196,17 @@ test("run.started for an unknown run creates it; resumed bridge.started adds a n
   expect(items[1]).toMatchObject({ kind: "tool", tool: "(unknown)", output: "out" });
 });
 
+test("a bridge.started notice (state.json rebuilt) is shown in the thread, also on a fresh start", () => {
+  const s = store();
+  s.apply(ev({ type: "bridge.started", version: "1.5.0", resumed: true, notice: "state.json was unusable" }));
+  s.apply(ev({ type: "bridge.started", version: "1.5.0", resumed: false, notice: "no thread to resume" }));
+  expect(s.snapshot().items.map((i) => [i.kind, i.text])).toEqual([
+    ["notice", "Agent bridge restarted (v1.5.0)"],
+    ["notice", "state.json was unusable"],
+    ["notice", "no thread to resume"],
+  ]);
+});
+
 test("runs carry when they were queued and the seq that ended them", () => {
   const s = store(); n = 0;
   s.apply(ev({ type: "run.queued", runId: "r1", text: "hi", attachments: [] }));

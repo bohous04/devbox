@@ -1122,12 +1122,13 @@ enum BridgeEvent: Decodable, Equatable {
     case runCompleted(runId: String, nativeThreadId: String, usage: TokenUsage?)
     case runInterrupted(runId: String)
     case runFailed(runId: String, error: String, reason: String?)
-    case bridgeStarted(version: String, resumed: Bool)
+    /// `notice` (bridge 1.5.0+): something the user must know about this start, e.g. state.json rebuilt from the log.
+    case bridgeStarted(version: String, resumed: Bool, notice: String?)
     case unknown(type: String)
 
     private enum K: String, CodingKey {
         case type, harness, nativeThreadId, account, model, runId, text, attachments, origin, itemId, role, tool, input
-        case isError, output, requestId, kind, prompt, options, multiSelect, answer, by, work, usage, error, reason, version, resumed
+        case isError, output, requestId, kind, prompt, options, multiSelect, answer, by, work, usage, error, reason, version, resumed, notice
     }
 
     init(from decoder: Decoder) throws {
@@ -1167,7 +1168,7 @@ enum BridgeEvent: Decodable, Equatable {
         case "run.failed":
             self = .runFailed(runId: try s(.runId), error: try s(.error), reason: try o(.reason))
         case "bridge.started":
-            self = .bridgeStarted(version: try s(.version), resumed: try c.decode(Bool.self, forKey: .resumed))
+            self = .bridgeStarted(version: try s(.version), resumed: try c.decode(Bool.self, forKey: .resumed), notice: try o(.notice))
         default:
             self = .unknown(type: type)
         }
