@@ -161,8 +161,6 @@ struct AgentProfile {
 enum AgentProfiles {
     static let all: [AgentName: AgentProfile] = [
         .claude: AgentProfile(label: "Claude Code", short: "Claude", yolo: true),
-        .claudeGpt: AgentProfile(label: "Claude Code + GPT", short: "Claude+GPT", yolo: true),
-        .claudeGrok: AgentProfile(label: "Claude Code + Grok", short: "Claude+Grok", yolo: true),
         .claudeGemini: AgentProfile(label: "Claude Code + Gemini", short: "Claude+Gemini", yolo: true),
         .claudeOpenrouter: AgentProfile(label: "Claude Code + OpenRouter", short: "Claude+OR", yolo: true),
         .codex: AgentProfile(label: "Codex", short: "Codex", yolo: true),
@@ -173,7 +171,7 @@ enum AgentProfiles {
     /// Order of options in the picker — same as `AGENT_IDS` on the web (default first, then proxy
     /// variants, then standalone CLIs). `.unknown` (tolerant decoding fallback) is not offered —
     /// it is not a real profile one could switch to.
-    static let ids: [AgentName] = [.claude, .claudeGpt, .claudeGrok, .claudeGemini, .claudeOpenrouter, .codex, .grok, .antigravity]
+    static let ids: [AgentName] = [.claude, .claudeGemini, .claudeOpenrouter, .codex, .grok, .antigravity]
 
     /// Profile for a value that may be nil/unknown — mirrors `agentNameFor`/`profileFor`
     /// (fallback to claude, an unknown profile must not crash the UI).

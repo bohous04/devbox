@@ -520,11 +520,11 @@ test.skipIf(!hasDocker)("open(): reopening with a vanished container (state=miss
 // REBUILT on restart (not just startContainer), which must revoke the old share.
 test.skipIf(!hasDocker)("restartSolo(): rebuilding the container (stale proxy env) revokes shares", async () => {
   const d = dockerDeps();
-  d.cfg.settings.proxyModels = { gpt: "gpt-5.6-sol" };
+  d.cfg.settings.proxyModels = { gemini: "gemini-3-pro" };
   let key: string | null = null; // vault locked at open time
   const mgr = new SessionManager({ ...d, cliproxyKey: () => key });
   try {
-    const s = await mgr.openSolo("acme", PROJECT, "claude-gpt");
+    const s = await mgr.openSolo("acme", PROJECT, "claude-gemini");
     await mgr.stop(s.session.id);
     createShare(d.db, s.session.id, 30);
     expect(isShared(d.db, s.session.id)).toBe(true);

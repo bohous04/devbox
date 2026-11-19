@@ -4,7 +4,7 @@
 // Used by the chat bridge at launch (serve.ts) and by devd for a live switch (chatSwitch.ts), so both paths
 // produce the same env.
 
-export const PROXY_PROFILES = ["claude-gpt", "claude-grok", "claude-gemini", "claude-openrouter"] as const;
+export const PROXY_PROFILES = ["claude-gemini", "claude-openrouter"] as const;
 export type ProxyProfile = (typeof PROXY_PROFILES)[number];
 
 export function isProxyProfile(v: unknown): v is ProxyProfile {
@@ -43,8 +43,7 @@ export function proxyProfileEnv(profile: ProxyProfile, inputs: Record<string, st
     ANTHROPIC_MODEL: model,
     CLAUDE_CODE_SUBAGENT_MODEL: model,
     CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: "3",
-    // xAI rejects more than 350 tools; the reasoning is at the same condition in agent-launch.sh.
-    ENABLE_TOOL_SEARCH: profile === "claude-grok" ? "true" : "false",
+    ENABLE_TOOL_SEARCH: "false",
     DEVBOX_PROXY_PROFILE: "1",
   };
   if (inputs.DEVD_AGENT_CTX) env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = inputs.DEVD_AGENT_CTX;
@@ -53,6 +52,5 @@ export function proxyProfileEnv(profile: ProxyProfile, inputs: Record<string, st
       env[k] = model;
     }
   }
-  if (profile === "claude-gpt") env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT = "1";
   return env;
 }

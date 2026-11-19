@@ -18,7 +18,7 @@ export const JOB_STEP_LABEL: Record<string, string> = {
 
 // R3: several sessions per repo are normal, so "repo already has a session" does not block InstaBox.
 // `agentBlock`: reason from instaboxAgentBlock (newSession.ts, mirrors devd/src/agents.ts) —
-// proxy profiles (claude-gpt, claude-grok, claude-gemini, claude-openrouter) and Antigravity
+// proxy profiles (claude-gemini, claude-openrouter) and Antigravity
 // run only on the VPS; the server rejects them on InstaBox with 400 (check order same as
 // POST /api/sessions: solo before agent).
 export function hostDisabledReason(s: IbxStatusDto, isSolo: boolean, agentBlock: string | null = null): string | null {

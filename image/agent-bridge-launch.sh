@@ -21,7 +21,7 @@ case "${DEVD_AGENT:-}" in
       if [ -n "$pool_dir" ]; then export CLAUDE_CONFIG_DIR="$pool_dir"; fi
     fi
     ;;
-  claude-gpt|claude-grok|claude-gemini|claude-openrouter)
+  claude-gemini|claude-openrouter)
     # Claude Code against a third-party upstream: no Anthropic account, so no lease (agent-launch takes none either);
     # the image's CLAUDE_CONFIG_DIR stays. `agent-bridge serve` turns the DEVD_* inputs into the profile env.
     ;;

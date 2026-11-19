@@ -37,8 +37,6 @@ enum ClaudeState: String, Decodable {
 
 enum AgentName: String, Decodable {
     case claude
-    case claudeGpt = "claude-gpt"
-    case claudeGrok = "claude-grok"
     case claudeGemini = "claude-gemini"
     case claudeOpenrouter = "claude-openrouter"
     case codex

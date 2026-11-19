@@ -88,7 +88,7 @@ test("a repeated setup.sh actually restarts the proxy, not just 'enable --now'",
   expect(fn).not.toContain("systemctl enable --now cliproxy");
 });
 
-// The key to three paid subscriptions must not be readable by others on the host even for a moment:
+// The key to paid subscriptions must not be readable by others on the host even for a moment:
 // neither on disk (chmod only AFTER the write = a window with umask 0644), nor in `ps` (sed had the expression
 // `s#…#$key#` in argv). Also verified functionally: `sed -f -` works in both GNU and BSD sed, and a file
 // created via `install -m 600` keeps its mode after redirection.

@@ -93,14 +93,14 @@ test("chatRuntimeBlock mirrors devd: chat only for the claude and codex harnesse
   }
   expect(chatRuntimeBlock("claude", "vps")).toBeNull();
   expect(chatRuntimeBlock("codex", "vps")).toBeNull();
-  expect(chatRuntimeBlock("claude-gpt", "vps")).toBeNull();
+  expect(chatRuntimeBlock("claude-gemini", "vps")).toBeNull();
   expect(chatRuntimeBlock("grok", "vps")).not.toBeNull();
 });
 
 test("isProxyAgent: InstaBox cannot reach profiles running through CLIProxyAPI/OpenRouter", () => {
   expect(isProxyAgent("claude")).toBe(false);
   expect(isProxyAgent("codex")).toBe(false);
-  expect(isProxyAgent("claude-gpt")).toBe(true);
+  expect(isProxyAgent("claude-gemini")).toBe(true);
   expect(isProxyAgent("claude-openrouter")).toBe(true);
 });
 

@@ -57,13 +57,13 @@ test("validation: solo 400, invalid host 400, missing cloneUrl 400, full 409", a
   expect((await app.request("/api/sessions", json({ ...T, host: "instabox" }))).status).toBe(409);
 });
 
-test("proxy agent (claude-gpt/claude-grok) on InstaBox → 400, even when only remembered for the repo; claude/codex/grok pass", async () => {
-  for (const agent of ["claude-gpt", "claude-grok"]) {
+test("proxy agent (claude-gemini/claude-openrouter) on InstaBox → 400, even when only remembered for the repo; claude/codex/grok pass", async () => {
+  for (const agent of ["claude-gemini", "claude-openrouter"]) {
     const res = await app.request("/api/sessions", json({ ...T, host: "instabox", agent }));
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("not supported on InstaBox");
   }
-  setRepoAgent(env.db, "f", "p", "r", "claude-gpt", 1);
+  setRepoAgent(env.db, "f", "p", "r", "claude-gemini", 1);
   expect((await app.request("/api/sessions", json({ ...T, host: "instabox" }))).status).toBe(400);
   expect(listSessions(env.db)).toHaveLength(0);
   for (const agent of ["claude", "codex", "grok"]) {
@@ -165,15 +165,15 @@ test("I4/M10: live agent switch of an InstaBox session to a proxy agent or antig
   }));
   insertSession(env.db, { id: "dev-p-i", folder: "f", project: "p", repo: "i", container: "dev-p-i", port_base: 40300, status: "running", solo: 0, created_at: 1, last_active_at: 1, important: 0, host: "instabox", instabox_machine_id: "m_9" });
   insertSession(env.db, { id: "dev-p-v", folder: "f", project: "p", repo: "v", container: "dev-p-v", port_base: 40310, status: "running", solo: 0, created_at: 1, last_active_at: 1, important: 0 });
-  for (const agent of ["claude-gpt", "claude-openrouter", "antigravity"]) {
+  for (const agent of ["claude-gemini", "claude-openrouter", "antigravity"]) {
     const r = await app.request("/api/sessions/dev-p-i/agent", json({ agent }));
     expect([agent, r.status]).toEqual([agent, 400]);
     expect(((await r.json()) as { error: string }).error).toContain("not supported on InstaBox");
   }
   expect(switched).toEqual([]);
   expect((await app.request("/api/sessions/dev-p-i/agent", json({ agent: "codex" }))).status).toBe(200);
-  expect((await app.request("/api/sessions/dev-p-v/agent", json({ agent: "claude-gpt" }))).status).toBe(200);
-  expect(switched).toEqual(["dev-p-i codex", "dev-p-v claude-gpt"]);
+  expect((await app.request("/api/sessions/dev-p-v/agent", json({ agent: "claude-gemini" }))).status).toBe(200);
+  expect(switched).toEqual(["dev-p-i codex", "dev-p-v claude-gemini"]);
 });
 
 test("M7: desktop-link refresh in control mode does not invalidate old links; an explicit takeover does", async () => {

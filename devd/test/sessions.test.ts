@@ -500,10 +500,10 @@ test.skipIf(!hasDocker)("restartSolo brings a stopped solo back on the same port
 // and open again" forever) even after unlocking.
 test.skipIf(!hasDocker)("restartSolo: a stopped proxy session picks up the key after the vault is unlocked", async () => {
   const d = makeDeps();
-  d.cfg.settings.proxyModels = { gpt: "gpt-5.6-sol" };
+  d.cfg.settings.proxyModels = { gemini: "gemini-3-pro" };
   let key: string | null = null;                       // locked vault
   const mgr = new SessionManager({ ...d, cliproxyKey: () => key });
-  const s = await mgr.openSolo("acme", PROJECT, "claude-gpt");
+  const s = await mgr.openSolo("acme", PROJECT, "claude-gemini");
   const born = containerId(s.session.id);
   await mgr.stop(s.session.id);
 
@@ -517,7 +517,7 @@ test.skipIf(!hasDocker)("restartSolo: a stopped proxy session picks up the key a
   await mgr.restartSolo(s.session.id);
   expect(containerId(s.session.id)).not.toBe(born);
   expect(inspectEnv(s.session.id).DEVD_CLIPROXY_KEY).toBe("k-after-unlock");
-  expect(inspectEnv(s.session.id).DEVD_AGENT_MODEL).toBe("gpt-5.6-sol");
+  expect(inspectEnv(s.session.id).DEVD_AGENT_MODEL).toBe("gemini-3-pro");
   const recreates = listEvents(d.db, { session: s.session.id }).filter((e) => e.type === "recreate");
   expect(recreates.some((e) => JSON.parse(e.data ?? "{}").reason === "proxy-env")).toBe(true);
 
@@ -800,12 +800,12 @@ const containerId = (id: string) => sh(process.cwd(), "docker", "inspect", "-f",
 
 test.skipIf(!hasDocker)("proxy profile: an unlocked vault propagates into an existing container", async () => {
   const d = makeDeps();
-  d.cfg.settings.proxyModels = { gpt: "gpt-5.6-sol" };
+  d.cfg.settings.proxyModels = { gemini: "gemini-3-pro" };
   let key: string | null = null;                       // locked vault
   const mgr = new SessionManager({ ...d, cliproxyKey: () => key });
   const t = { folder: "acme", project: PROJECT, repo: "app", cloneUrl: d.bareUrl };
 
-  await mgr.open({ ...t, agent: "claude-gpt" as const });
+  await mgr.open({ ...t, agent: "claude-gemini" as const });
   expect(inspectEnv(APP_ID).DEVD_CLIPROXY_KEY).toBe("");
   const born = containerId(APP_ID);
 
@@ -819,7 +819,7 @@ test.skipIf(!hasDocker)("proxy profile: an unlocked vault propagates into an exi
   await mgr.open(t);
   expect(containerId(APP_ID)).not.toBe(born);
   expect(inspectEnv(APP_ID).DEVD_CLIPROXY_KEY).toBe("k-after-unlock");
-  expect(inspectEnv(APP_ID).DEVD_AGENT_MODEL).toBe("gpt-5.6-sol");
+  expect(inspectEnv(APP_ID).DEVD_AGENT_MODEL).toBe("gemini-3-pro");
   const withKey = containerId(APP_ID);
 
   // 3) Without a config change the container is not rebuilt (no needless recreates).

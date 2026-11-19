@@ -4,32 +4,30 @@ import { DEFAULT_CONFIG, type Settings } from "../src/config";
 import { localEnvProfiles } from "../src/localEnv";
 
 const settings = (over: Partial<Settings> = {}): Settings => ({ ...DEFAULT_CONFIG.settings, ...over });
-const full = settings({ proxyModels: { gpt: "gpt-5.6-sol", grok: "grok-4.5", openrouter: "stealth/ox-alpha" } });
+const full = settings({ proxyModels: { gemini: "gemini-3-pro", openrouter: "stealth/ox-alpha" } });
 const keys = (u: Upstream) => (u === "openrouter" ? "or-key" : "cp-key");
 const ctx = async () => 1_000_000;
 const BASE = "http://100.100.100.100:4300/api/cliproxy";
 
 test("cliproxy profile points at the devd passthrough and carries the key, model and window", async () => {
   const rows = await localEnvProfiles(full, keys, ctx, BASE);
-  const gpt = rows.find((r) => r.profile === "claude-gpt")!;
-  expect(gpt.ready).toBe(true);
-  expect(gpt.env).toMatchObject({
+  const gemini = rows.find((r) => r.profile === "claude-gemini")!;
+  expect(gemini.ready).toBe(true);
+  expect(gemini.env).toEqual({
     ANTHROPIC_BASE_URL: BASE,
     ANTHROPIC_AUTH_TOKEN: "cp-key",
-    ANTHROPIC_MODEL: "gpt-5.6-sol",
-    CLAUDE_CODE_SUBAGENT_MODEL: "gpt-5.6-sol",
+    ANTHROPIC_MODEL: "gemini-3-pro",
+    CLAUDE_CODE_SUBAGENT_MODEL: "gemini-3-pro",
     CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: "3",
     ENABLE_TOOL_SEARCH: "false",
-    CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: "1",
     CLAUDE_CODE_MAX_CONTEXT_TOKENS: "1000000",
   });
-  // Effort is a property of GPT models — it is not forced on Grok (same as in agent-launch).
-  const grok = rows.find((r) => r.profile === "claude-grok")!;
-  expect(grok.env!.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT).toBeUndefined();
-  expect(grok.env!.ANTHROPIC_MODEL).toBe("grok-4.5");
-  // Grok forces tool search (xAI cap of 350 tools) — the full reasoning is at the same
-  // condition in image/agent-launch.sh; this is just a mirror for `dev local`.
-  expect(grok.env!.ENABLE_TOOL_SEARCH).toBe("true");
+});
+
+// An old config can still carry models for removed profiles; they are ignored, not offered.
+test("leftover proxyModels keys without a profile are ignored", async () => {
+  const rows = await localEnvProfiles(settings({ proxyModels: { gpt: "x", grok: "y", gemini: "gemini-3-pro" } }), keys, ctx, BASE);
+  expect(rows.map((r) => r.profile)).toEqual(["claude-gemini", "claude-openrouter"]);
 });
 
 test("openrouter profile goes direct, remaps all slots + drops ANTHROPIC_API_KEY", async () => {
@@ -50,9 +48,9 @@ test("openrouter profile goes direct, remaps all slots + drops ANTHROPIC_API_KEY
 
 test("missing key or model → ready:false with a reason and NO env", async () => {
   const noKey = await localEnvProfiles(full, () => null, ctx, BASE);
-  expect(noKey.find((r) => r.profile === "claude-gpt")).toMatchObject({ ready: false });
-  expect(noKey.find((r) => r.profile === "claude-gpt")!.env).toBeUndefined();
-  expect(noKey.find((r) => r.profile === "claude-gpt")!.reason).toContain("key");
+  expect(noKey.find((r) => r.profile === "claude-gemini")).toMatchObject({ ready: false });
+  expect(noKey.find((r) => r.profile === "claude-gemini")!.env).toBeUndefined();
+  expect(noKey.find((r) => r.profile === "claude-gemini")!.reason).toContain("key");
   const noModel = await localEnvProfiles(settings(), keys, ctx, BASE);
   expect(noModel.find((r) => r.profile === "claude-openrouter")).toMatchObject({ ready: false });
   expect(noModel.find((r) => r.profile === "claude-openrouter")!.reason).toContain("model");
@@ -60,5 +58,5 @@ test("missing key or model → ready:false with a reason and NO env", async () =
 
 test("an unknown window simply omits the key", async () => {
   const rows = await localEnvProfiles(full, keys, async () => null, BASE);
-  expect(rows.find((r) => r.profile === "claude-gpt")!.env!.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBeUndefined();
+  expect(rows.find((r) => r.profile === "claude-gemini")!.env!.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBeUndefined();
 });

@@ -36,7 +36,7 @@ test("chatRuntimeBlock: vps claude/codex and proxy profiles allowed, instabox an
   expect(chatRuntimeBlock("claude", "vps")).toBeNull();
   expect(chatRuntimeBlock("codex", "vps")).toBeNull();
   expect(chatRuntimeBlock("claude", "instabox")).toBe("Chat sessions run only on the VPS");
-  for (const proxy of ["claude-gpt", "claude-grok", "claude-gemini", "claude-openrouter"] as const) expect(chatRuntimeBlock(proxy, "vps")).toBeNull();
+  for (const proxy of ["claude-gemini", "claude-openrouter"] as const) expect(chatRuntimeBlock(proxy, "vps")).toBeNull();
   expect(chatRuntimeBlock("grok", "vps")).toBe("Grok Build is not available in chat sessions yet");
   expect(chatRuntimeBlock("antigravity", "vps")).toContain("is not available in chat sessions yet");
 });

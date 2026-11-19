@@ -109,7 +109,7 @@ test("agentOptions: custom hint for the agent-switch context", () => {
 });
 
 test("--agent <id> picks a profile; the old shortcuts still work", () => {
-  expect(agentFlag(["--agent", "claude-grok", "shop/app"])).toBe("claude-grok");
+  expect(agentFlag(["--agent", "claude-gemini", "shop/app"])).toBe("claude-gemini");
   expect(agentFlag(["--codex"])).toBe("codex");
   expect(agentFlag(["--claude"])).toBe("claude");
   expect(agentFlag(["shop/app"])).toBeUndefined();

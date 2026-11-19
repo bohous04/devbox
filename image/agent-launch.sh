@@ -12,7 +12,7 @@ for a in "$@"; do
     *) args+=("$a") ;;
   esac
 done
-# A profile is not the same as a binary: claude, claude-gpt and claude-grok all run `cc`,
+# A profile is not the same as a binary: claude and the claude-* proxy profiles all run `cc`,
 # they differ only in the model (see devd/src/agents.ts, RUNTIME_BIN).
 profile="${args[0]:-${DEVD_AGENT:-claude}}"
 # Arguments AFTER the profile go to the binary (a live agent switch passes `--resume <id>`,
@@ -27,7 +27,7 @@ extra=("${args[@]:1}")
 # without `set -u` yields no word, see the comment at `extra` above).
 prompt_flag=()
 case "$profile" in
-  claude|claude-gpt|claude-grok|claude-gemini|claude-openrouter) bin=cc ;;
+  claude|claude-gemini|claude-openrouter) bin=cc ;;
   codex) bin=co ;;
   grok)  bin=gr ;;
   antigravity) bin=ag; prompt_flag=(-i) ;;
@@ -52,7 +52,7 @@ if [ "${DEVD_RUNTIME:-}" = chat ]; then exec zsh; fi
 # request with a 401, which is incomprehensible from the user's point of view. We check both
 # inputs separately because they have a different cause and a different fix (see below).
 case "$profile" in
-  claude-gpt|claude-grok|claude-gemini|claude-openrouter)
+  claude-gemini|claude-openrouter)
     # The canonical names are UPSTREAM_*, because the upstream need not be a proxy (OpenRouter
     # runs directly). The old CLIPROXY_* names are a fallback: a new image may run against an
     # older devd that still sends only those.
@@ -110,18 +110,10 @@ case "$profile" in
     export ANTHROPIC_MODEL="$DEVD_AGENT_MODEL"
     export CLAUDE_CODE_SUBAGENT_MODEL="$DEVD_AGENT_MODEL"
     export CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY=3
-    # xAI rejects requests with more than 350 tools, and the shared claude-home (11 MCP
-    # servers) plus built-in tools adds up to over 500 — without tool search the session
-    # sends NOT A SINGLE request (live 2026-08-23: "571 tools … maximum is 350").
-    # Deferred loading via ToolSearch against grok worked, including loading and calling a
-    # deferred tool (tool_reference blocks passed through both cliproxy and xAI). The other
-    # proxy profiles stay at false: they work today and tool_reference passthrough of
-    # their upstreams is not verified — do not enable across the board without a live test.
+    # Tool search stays off: tool_reference passthrough of the proxy upstreams is not
+    # verified — do not enable it without a live test.
     # WARNING: devd/src/localEnv.ts is the TS mirror of this branch (dev local) — change them TOGETHER.
-    case "$profile" in
-      claude-grok) export ENABLE_TOOL_SEARCH=true ;;
-      *)           export ENABLE_TOOL_SEARCH=false ;;
-    esac
+    export ENABLE_TOOL_SEARCH=false
     # The model's context window (devd measures it via OpenRouter /v1/models): for an
     # unrecognized model cc assumes 200k and the session then keeps compacting — needlessly
     # for a model with a 1M window, and in an endless loop (measured 2026-08-22, stealth/ox-alpha).
@@ -154,9 +146,6 @@ case "$profile" in
     unset ANTHROPIC_API_KEY
     ;;
 esac
-# Reasoning effort is a property of GPT models; do not force it on Grok.
-[ "$profile" = claude-gpt ] && export CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1
-
 if [ "$printenv" = 1 ]; then
   for v in ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_MODEL \
            ANTHROPIC_SMALL_FAST_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL \
@@ -164,7 +153,7 @@ if [ "$printenv" = 1 ]; then
            CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY ENABLE_TOOL_SEARCH CLAUDE_CODE_ALWAYS_ENABLE_EFFORT \
            DEVBOX_PROXY_PROFILE XAI_API_KEY; do
     [ -z "${!v:-}" ] && continue
-    # ANTHROPIC_AUTH_TOKEN is the key to three paid subscriptions (proxy). --print-env
+    # ANTHROPIC_AUTH_TOKEN is the key to paid subscriptions (proxy). --print-env
     # exists only so tests can peek into the exported environment, but
     # this script ships in the image — the value has nowhere to leak, but whatever is printable
     # to stdout can be found in production in `docker logs`/build cache too. The other variables

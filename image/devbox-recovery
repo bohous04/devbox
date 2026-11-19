@@ -24,7 +24,7 @@ PROC = Path("/proc")
 SCRIPT = "/usr/local/bin/devbox-recovery"
 AGENT_LAUNCH = "/usr/local/bin/agent-launch"
 UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.I)
-PROFILES = {"claude", "claude-gpt", "claude-grok", "claude-gemini", "claude-openrouter", "codex", "grok", "antigravity"}
+PROFILES = {"claude", "claude-gemini", "claude-openrouter", "codex", "grok", "antigravity"}
 # Profile = runtime, except claude-* (Claude Code) and antigravity (the agy binary).
 RUNTIME = {profile: "claude" if profile.startswith("claude") else ("agy" if profile == "antigravity" else profile) for profile in PROFILES}
 AGENT_RUNTIMES = {"claude", "codex", "grok", "agy"}

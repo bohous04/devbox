@@ -252,7 +252,7 @@ test("F9 Claude no-op, missing account and partial restart remain visible in the
 });
 
 test("F9 account picker rejects proxy Claude profiles before prompting or calling APIs", async () => {
-  for (const agent of ["claude-gpt", "claude-grok", "claude-openrouter", "grok"] as const) {
+  for (const agent of ["claude-gemini", "claude-openrouter", "grok"] as const) {
     const h = setup();
     expect(await pickAndSwitchAccount(h.deps, { ...session, agent }, h.ui)).toBe(false);
     expect(h.requests).toEqual([]);

@@ -538,7 +538,7 @@ describe("Codex session account switching", () => {
   });
 
   test("native Codex and running-session guards reject before exec", async () => {
-    for (const row of [{ agent: "claude" as const }, { agent: "claude-gpt" as const }, { status: "stopped" as const }]) {
+    for (const row of [{ agent: "claude" as const }, { agent: "claude-gemini" as const }, { status: "stopped" as const }]) {
       const f = fixture(["default"], row);
       await expect(f.service.switch(ROW.id, EXTRA)).rejects.toMatchObject({ status: 409 });
       await expect(f.service.view(ROW.id)).rejects.toMatchObject({ status: 409 });

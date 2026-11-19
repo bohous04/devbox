@@ -91,13 +91,21 @@ class PolicyTests(unittest.TestCase):
                 r.restore_docker(saved)
 
     def test_existing_proxy_profile_boolean_is_not_a_model_profile(self):
-        p = dict(pane(), pane_id='%1', pane_pid='12', **{'@devd_agent': 'claude-gpt'})
-        env = {'TMUX_PANE': '%1', 'DEVBOX_PROXY_PROFILE': '1', 'DEVD_LAUNCH_PROFILE': 'claude-gpt',
-               'CLAUDE_CONFIG_DIR': '/home/dev/.claude', 'DEVD_AGENT_MODEL': 'gpt-model'}
+        p = dict(pane(), pane_id='%1', pane_pid='12', **{'@devd_agent': 'claude-gemini'})
+        env = {'TMUX_PANE': '%1', 'DEVBOX_PROXY_PROFILE': '1', 'DEVD_LAUNCH_PROFILE': 'claude-gemini',
+               'CLAUDE_CONFIG_DIR': '/home/dev/.claude', 'DEVD_AGENT_MODEL': 'gemini-model'}
         with patch.object(r, 'nearest_agent', return_value=(12, 'claude')), patch.object(r, 'process_env', return_value=env):
             context = r.infer_context(p)
-        self.assertEqual(context['profile'], 'claude-gpt')
-        self.assertEqual(context['env']['DEVD_AGENT_MODEL'], 'gpt-model')
+        self.assertEqual(context['profile'], 'claude-gemini')
+        self.assertEqual(context['env']['DEVD_AGENT_MODEL'], 'gemini-model')
+
+    def test_removed_proxy_profile_is_not_resumed_as_plain_claude(self):
+        # A pane left over from a proxy profile that no longer exists must not come back as native Claude.
+        p = dict(pane(), pane_id='%1', pane_pid='12', **{'@devd_agent': 'claude-removed'})
+        env = {'TMUX_PANE': '%1', 'DEVBOX_PROXY_PROFILE': '1', 'DEVD_LAUNCH_PROFILE': 'claude-removed',
+               'CLAUDE_CONFIG_DIR': '/home/dev/.claude', 'DEVD_AGENT_MODEL': 'old-model'}
+        with patch.object(r, 'nearest_agent', return_value=(12, 'claude')), patch.object(r, 'process_env', return_value=env):
+            self.assertEqual(r.infer_context(p), {})
 
     def test_standalone_codex_identity_requires_one_open_root_rollout(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -399,7 +407,7 @@ class AgyRecovery(unittest.TestCase):
         self.assertTrue(plan['active'])
 
     def test_foreign_profile_or_bad_id_does_not_resume(self):
-        self.assertIsNone(r.resume_plan(self.agy_pane(profile='claude-grok')))
+        self.assertIsNone(r.resume_plan(self.agy_pane(profile='claude-gemini')))
         self.assertIsNone(r.resume_plan(self.agy_pane(sid='not-a-uuid')))
 
     def test_claude_gemini_maps_to_claude_runtime(self):

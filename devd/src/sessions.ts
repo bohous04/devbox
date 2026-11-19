@@ -190,7 +190,7 @@ export function upstreamKey(d: Pick<SessionDeps, "cliproxyKey" | "openrouterKey"
   return (u) => (u === "openrouter" ? d.openrouterKey?.() : d.cliproxyKey?.()) ?? null;
 }
 
-/** Default window for cliproxy models (gpt-5.6-sol, grok-4.5): the public catalog has no windows
+/** Default window for cliproxy models (e.g. the Gemini models): the public catalog has no windows
  *  for them, and cc's assumed 200k made them compact over and over (with ~120k of MCP tools
  *  at baseline, immediately). User decision 2026-08-22: rather 1M with the risk that a model
  *  with a smaller real window hits an API error instead of compacting (handled by a manual /compact),
@@ -252,7 +252,7 @@ export function proxyEnv(agent: AgentName, settings: Settings, key: (u: Upstream
     ...(typeof ctx === "number" ? { DEVD_AGENT_CTX: String(ctx) } : {}),
     // Old names with the same value. A devd deploy does NOT recreate containers and
     // `agent-launch.sh` is baked into the image, so until the image is rebuilt and the
-    // containers are recreated, a running claude-gpt/claude-grok still reads these names.
+    // containers are recreated, a running cliproxy profile still reads these names.
     // Once both have happened, this pair can go.
     DEVD_CLIPROXY_URL: url,
     DEVD_CLIPROXY_KEY: apiKey,
@@ -673,7 +673,7 @@ export class SessionManager {
    *  reopening a running session is even just an attach.
    *
    *  Without this the common path was a dead end: every devd restart locks the vault →
-   *  the user opens claude-gpt → the container is created with an empty key → agent-launch
+   *  the user opens a cliproxy profile → the container is created with an empty key → agent-launch
    *  correctly says "unlock the vault and open the session again" → the user unlocks and
    *  opens → the container is still running (agent-launch fell into zsh, so it did not exit) → the same
    *  message, forever. The only way out was switching the profile, which recreates the container.

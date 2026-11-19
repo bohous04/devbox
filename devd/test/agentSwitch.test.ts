@@ -49,9 +49,9 @@ test("agentLaunchCmd: profile + optional --resume", () => {
 });
 
 test("tmuxEnvScript: sets DEVD_AGENT + proxy values, unsets missing DEVD_*", () => {
-  const s = tmuxEnvScript("claude-grok", { DEVD_AGENT_MODEL: "grok-4.6", DEVD_UPSTREAM_URL: "http://h:8317", DEVD_UPSTREAM_KEY: "k1", DEVD_CLIPROXY_URL: "http://h:8317", DEVD_CLIPROXY_KEY: "k1" });
-  expect(s).toContain("set-environment -g DEVD_AGENT 'claude-grok'");
-  expect(s).toContain("set-environment -g DEVD_AGENT_MODEL 'grok-4.6'");
+  const s = tmuxEnvScript("claude-gemini", { DEVD_AGENT_MODEL: "gemini-3-pro", DEVD_UPSTREAM_URL: "http://h:8317", DEVD_UPSTREAM_KEY: "k1", DEVD_CLIPROXY_URL: "http://h:8317", DEVD_CLIPROXY_KEY: "k1" });
+  expect(s).toContain("set-environment -g DEVD_AGENT 'claude-gemini'");
+  expect(s).toContain("set-environment -g DEVD_AGENT_MODEL 'gemini-3-pro'");
   // DEVD_AGENT_CTX missing → unset, so a new window does not inherit a foreign context window.
   expect(s).toContain("set-environment -gu DEVD_AGENT_CTX");
   expect(s).not.toContain("set-environment -gu DEVD_AGENT_MODEL");

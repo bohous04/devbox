@@ -123,7 +123,7 @@ is safe even if the base temporarily stays old.
 - file inbox from the clipboard
 - preview ports
 - `solo` (`claudeSolo`) — the API returns 400
-- proxy agents (`claude-gpt`, `claude-grok`, `claude-gemini`, `claude-openrouter`) —
+- proxy agents (`claude-gemini`, `claude-openrouter`) —
   proxy profiles go through CLIProxyAPI on the VPS and are not reachable from the VM in v1
 - scheduled runs (scheduler) — those always go to the VPS
 - recreate — the API returns 409

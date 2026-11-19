@@ -57,13 +57,13 @@ test("model menu: the models devd accepts for the current harness, the current o
 
 test("model menu: a proxy profile's model comes from settings, so the menu is blocked with the reason", () => {
   expect(modelMenuBlocked(CLAUDE)).toBeNull();
-  expect(modelMenuBlocked({ ...CLAUDE, agent: "claude-gpt", model: "gpt-x" })).toMatch(/Claude Code \+ GPT.*settings/);
+  expect(modelMenuBlocked({ ...CLAUDE, agent: "claude-gemini", model: "gemini-x" })).toMatch(/Claude Code \+ Gemini.*settings/);
 });
 
 test("account menu: a proxy profile runs on no account pool", () => {
   expect(accountMenuBlocked(CLAUDE)).toBeNull();
   expect(accountMenuBlocked(CODEX)).toBeNull();
-  expect(accountMenuBlocked({ ...CLAUDE, agent: "claude-grok", account: null })).toMatch(/no account pool/);
+  expect(accountMenuBlocked({ ...CLAUDE, agent: "claude-gemini", account: null })).toMatch(/no account pool/);
 });
 
 test("Claude accounts: quarantined, disabled and expired are disabled with the reason; over the threshold stays enabled with a warning (P15)", () => {
@@ -111,7 +111,7 @@ test("harness menu: every profile chat can run is enabled, the others carry devd
   const by = Object.fromEntries(opts.map((o) => [o.value, o]));
   expect(by.claude).toMatchObject({ current: true, disabled: null, label: "Claude Code" });
   expect(by.codex.disabled).toBeNull();
-  expect(by["claude-gpt"].disabled).toBeNull();
+  expect(by["claude-gemini"].disabled).toBeNull();
   expect(by.grok.disabled).toMatch(/not available in chat/);
   expect(by.antigravity.disabled).toMatch(/not available in chat/);
 });
