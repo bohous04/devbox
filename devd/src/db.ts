@@ -238,6 +238,11 @@ export function openDb(path: string): Database {
   db.run(`CREATE TABLE IF NOT EXISTS session_attention (
     session_id TEXT PRIMARY KEY, settled_at INTEGER, settled_reason TEXT,
     snooze_until INTEGER, snooze_kind TEXT, updated_at INTEGER NOT NULL)`);
+  // The PR of a session's pushed branch as the PR watch last saw it (prWatch.ts). Kept across devd restarts so a
+  // CI failure is notified once and a merge settles once. One row per session, deleted with it (deleteSession).
+  db.run(`CREATE TABLE IF NOT EXISTS session_prs (
+    session_id TEXT PRIMARY KEY, number INTEGER NOT NULL, url TEXT NOT NULL, state TEXT NOT NULL, checks TEXT NOT NULL,
+    since INTEGER NOT NULL, merge_settled_at INTEGER, updated_at INTEGER NOT NULL)`);
   // Dummy git tokens. In the database, not only in memory — a devd restart must not break git
   // in running sessions (the container has the dummy in a file and devd must be able to translate it).
   db.run(`CREATE TABLE IF NOT EXISTS git_placeholders (
@@ -693,6 +698,7 @@ export function deleteSession(db: Database, id: string): void {
   db.query(`DELETE FROM sessions WHERE id=?`).run(id);
   // A later session may get the same id: it must not start settled or snoozed.
   db.query(`DELETE FROM session_attention WHERE session_id=?`).run(id);
+  db.query(`DELETE FROM session_prs WHERE session_id=?`).run(id);
 }
 
 export function getSession(db: Database, id: string): SessionRow | null {
@@ -1101,7 +1107,7 @@ export interface ScheduleRow {
   runtime: SessionRuntime; agent: AgentName | null;
 }
 
-export type SettleReason = "manual" | "idle";
+export type SettleReason = "manual" | "idle" | "merged";
 /** `reset`: until the session's active usage limit resets (the time is fixed when the snooze is set). */
 export type SnoozeKind = "time" | "reset";
 export interface SessionAttentionRow {
@@ -1118,6 +1124,24 @@ export function snoozedSessionIds(db: Database, now: number): string[] {
 export function putSessionAttention(db: Database, r: SessionAttentionRow): void {
   db.query(`INSERT OR REPLACE INTO session_attention (session_id,settled_at,settled_reason,snooze_until,snooze_kind,updated_at)
     VALUES (?,?,?,?,?,?)`).run(r.session_id, r.settled_at, r.settled_reason, r.snooze_until, r.snooze_kind, r.updated_at);
+}
+
+export type PrStatus = "open" | "merged" | "closed";
+export type PrChecks = "pending" | "success" | "failure" | "none";
+/** `since`: when the PR's state or checks last changed; `merge_settled_at`: when the merge settled the session. */
+export interface SessionPrRow {
+  session_id: string; number: number; url: string; state: PrStatus; checks: PrChecks;
+  since: number; merge_settled_at: number | null; updated_at: number;
+}
+export function getSessionPr(db: Database, sessionId: string): SessionPrRow | null {
+  return (db.query(`SELECT * FROM session_prs WHERE session_id=?`).get(sessionId) as SessionPrRow | null) ?? null;
+}
+export function listSessionPrs(db: Database): SessionPrRow[] {
+  return db.query(`SELECT * FROM session_prs`).all() as SessionPrRow[];
+}
+export function putSessionPr(db: Database, r: SessionPrRow): void {
+  db.query(`INSERT OR REPLACE INTO session_prs (session_id,number,url,state,checks,since,merge_settled_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?)`).run(r.session_id, r.number, r.url, r.state, r.checks, r.since, r.merge_settled_at, r.updated_at);
 }
 
 export interface PendingFirstTurn { text: string; seq: number; tag: string | null }

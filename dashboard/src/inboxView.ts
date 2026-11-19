@@ -54,6 +54,8 @@ const REASON: Record<NonNullable<Attention["reason"]>, string> = {
   running: "running",
   background: "background work",
   queued: "queued",
+  "pr-checks": "waiting for CI checks",
+  "ci-failed": "CI failed",
 };
 
 export const reasonLabel = (r: Attention["reason"]): string => (r === null ? "" : REASON[r]);

@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { InboxItem, InboxRemoved, InboxSection } from "../../shared/thread";
 import type { AgentLiveSnapshot } from "./agentEvents";
-import { chatAttention, lastEndedRun, tmuxAttention, WORKING_GRACE_MS, type LinkState } from "./attention";
+import { chatAttention, lastEndedRun, tmuxAttention, WORKING_GRACE_MS, type LinkState, type PrHold } from "./attention";
 import { getSessionAttention, putSessionAttention, snoozedSessionIds, type SessionRow, type SettleReason, type SnoozeKind } from "./db";
 import type { EventBus } from "./eventBus";
 import { autoSettleDue, shelve, snoozeActive, type Activity } from "./sessionAttention";
@@ -50,6 +50,8 @@ export class Inbox {
     threads: (id: string) => ThreadStore;
     chatLink: (id: string) => LinkState | null;
     tmuxLive: (id: string) => AgentLiveSnapshot | null;
+    /** The CI checks of the session's open PR (PrWatch.hold); absent = devd watches no PRs. */
+    prHold?: (id: string) => PrHold | null;
     bus: EventBus;
     now?: () => number;
     coalesceMs?: number;
@@ -71,6 +73,17 @@ export class Inbox {
     const now = this.now();
     putSessionAttention(this.d.db, { session_id: sessionId, settled_at: now, settled_reason: reason, snooze_until: null, snooze_kind: null, updated_at: now });
     this.changedSafe(sessionId);
+  }
+
+  /** Settles unless the session is busy (an active run, holding work, a pending request): the merged-PR rule settles
+   *  at the session's next idle moment, so the caller retries. Returns whether it settled. */
+  settleWhenIdle(sessionId: string, reason: SettleReason): boolean {
+    const s = this.d.session(sessionId);
+    if (!s) return false;
+    const a = this.base(s).item.attention;
+    if (a.section === "working" || a.reason === "request") return false;
+    this.settle(sessionId, reason);
+    return true;
   }
 
   /** Back into the inbox: ends a settle and a snooze. */
@@ -139,10 +152,12 @@ export class Inbox {
     const runtime = storedRuntime(s);
     // `agent` is optional in SessionRow only for insert literals; the column is NOT NULL.
     const base = { sessionId: s.id, runtime, title: s.name || `${s.project}/${s.repo}`, project: s.project, repo: s.repo, agent: s.agent! };
+    // Read outside the store's try: a failing DB read is not an unreadable thread store.
+    const pr = this.d.prHold?.(s.id) ?? null;
     if (runtime === "tmux") {
-      return { item: { ...base, attention: tmuxAttention(this.d.tmuxLive(s.id)), lastText: null }, recheckAt: null };
+      return { item: { ...base, attention: tmuxAttention(this.d.tmuxLive(s.id), pr), lastText: null }, recheckAt: null };
     }
-    try { return this.buildChat(s, base); }
+    try { return this.buildChat(s, base, pr); }
     catch (e) {
       // One broken store must not take the whole inbox down; the session shows up as needing the user.
       const msg = (e as Error).message;
@@ -157,11 +172,11 @@ export class Inbox {
     }
   }
 
-  private buildChat(s: SessionRow, base: Omit<InboxItem, "attention" | "lastText">): { item: InboxItem; recheckAt: number | null } {
+  private buildChat(s: SessionRow, base: Omit<InboxItem, "attention" | "lastText">, pr: PrHold | null): { item: InboxItem; recheckAt: number | null } {
     const store = this.d.threads(s.id);
     const t = store.snapshot({ limit: 0 }); // attention reads runs, pending and background only
     const now = this.now();
-    const attention = chatAttention(t, this.d.chatLink(s.id), now);
+    const attention = chatAttention(t, this.d.chatLink(s.id), now, pr);
     const text = store.lastMessageText();
     const last = lastEndedRun(t);
     const graceEnd = last && last.endedAt !== null ? last.endedAt + WORKING_GRACE_MS : null;

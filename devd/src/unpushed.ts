@@ -284,6 +284,101 @@ function prNumber(url: string): number | null {
   return m ? parseInt(m[1], 10) : null;
 }
 
+// ---------------------------------------------------------------- PR read (prWatch.ts)
+
+/** The branch is on the remote: its remote-tracking ref exists (a push, devd's or the agent's, updates it). */
+export async function pushedBranch(dir: string, branch: string): Promise<boolean> {
+  const r = await git(dir, "rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`);
+  if (r.code === 0) return true;
+  if (r.code === 1) return false; // --quiet: 1 = no such ref; anything else is git failing
+  throw new Error((r.stderr || r.stdout).trim() || `git rev-parse failed (${r.code})`);
+}
+
+/** The configured Gitea instance URL serving the remote's host (git may go over ssh on another port). */
+export function giteaUrlFor(giteaUrls: string[], remote: RemoteInfo): string | undefined {
+  return giteaUrls.find((u) => { try { return hostnameOf(new URL(u).host) === hostnameOf(remote.host); } catch { return false; } });
+}
+
+export interface FoundPr { number: number; url: string; state: "open" | "merged" | "closed"; checks: "pending" | "success" | "failure" | "none" }
+
+// GitHub check runs: any status but COMPLETED is still running; StatusContext (commit statuses) carry `state`.
+const GH_SUCCESS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
+const GH_FAILURE = new Set(["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"]);
+const GH_STATUS = new Map<string, "pending" | "success" | "failure">([["SUCCESS", "success"], ["PENDING", "pending"], ["EXPECTED", "pending"], ["FAILURE", "failure"], ["ERROR", "failure"]]);
+
+type GhCheck = { __typename?: string; status?: string; conclusion?: string; state?: string };
+
+/** One verdict over all checks: a failure wins, then anything still running, else success; no checks = none.
+ *  A value GitHub adds later is an error, not a guess. */
+export function rollupChecks(rollup: GhCheck[]): FoundPr["checks"] {
+  if (rollup.length === 0) return "none";
+  const each = rollup.map((c): "pending" | "success" | "failure" => {
+    if (c.__typename === "StatusContext") {
+      const v = GH_STATUS.get(c.state ?? "");
+      if (!v) throw new Error(`unknown GitHub commit status state: ${c.state}`);
+      return v;
+    }
+    if (c.status !== "COMPLETED") return "pending";
+    if (GH_SUCCESS.has(c.conclusion ?? "")) return "success";
+    if (GH_FAILURE.has(c.conclusion ?? "")) return "failure";
+    throw new Error(`unknown GitHub check conclusion: ${c.conclusion}`);
+  });
+  return each.includes("failure") ? "failure" : each.includes("pending") ? "pending" : "success";
+}
+
+// Gitea's combined commit status. `warning` does not fail a PR in Gitea (it is not an error state), so it counts as
+// success here.
+const GITEA_STATUS = new Map<string, "pending" | "success" | "failure">([["pending", "pending"], ["success", "success"], ["warning", "success"], ["error", "failure"], ["failure", "failure"]]);
+
+export interface FindPrOpts {
+  dir: string; branch: string; remote: RemoteInfo;
+  giteaToken: string | undefined;
+  giteaUrl: string | undefined;
+  ghRun?: GhRunner;
+  fetcher?: Fetcher;
+}
+
+/** The newest PR whose head is `branch`, with the verdict of its checks (only for an open PR: merged and closed say
+ *  "none"). GitHub via `gh pr list`, Gitea via its API with the instance token. null = no PR for the branch. */
+export async function findPr(o: FindPrOpts): Promise<FoundPr | null> {
+  if (o.remote.provider === "github") {
+    const runner = o.ghRun ?? defaultGhRun;
+    const r = await runner(o.dir, "gh", "pr", "list", "--repo", `${o.remote.owner}/${o.remote.name}`, "--head", o.branch,
+      "--state", "all", "--limit", "1", "--json", "number,url,state,mergedAt,statusCheckRollup");
+    if (r.timedOut) throw new Error(`gh pr list timed out after ${Math.round(timeoutFor("NET_CLI") / 1000)} s`);
+    if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || "gh pr list failed");
+    const list = JSON.parse(r.stdout) as { number: number; url: string; state: string; mergedAt: string | null; statusCheckRollup: GhCheck[] | null }[];
+    const pr = list[0];
+    if (!pr) return null;
+    const state = pr.state === "MERGED" || pr.mergedAt ? "merged" : pr.state === "CLOSED" ? "closed" : pr.state === "OPEN" ? "open" : null;
+    if (state === null) throw new Error(`unknown GitHub PR state: ${pr.state}`);
+    return { number: pr.number, url: pr.url, state, checks: state === "open" ? rollupChecks(pr.statusCheckRollup ?? []) : "none" };
+  }
+  if (o.remote.provider === "gitea") {
+    if (!o.giteaToken) throw new Error(`Gitea ${o.remote.host}: missing token (unlock the vault / set the token in Settings)`);
+    if (!o.giteaUrl) throw new Error(`Gitea ${o.remote.host}: no configured instance`);
+    const api = `${o.giteaUrl.replace(/\/+$/, "")}/api/v1/repos/${o.remote.owner}/${o.remote.name}`;
+    const get = async (url: string) => {
+      const res = await (o.fetcher ?? fetch)(url, { headers: { Authorization: `token ${o.giteaToken}` } });
+      if (!res.ok) throw new Error(`Gitea ${url.slice(api.length) || "/"} failed (HTTP ${res.status})`);
+      return res.json() as Promise<unknown>;
+    };
+    // Gitea has no head-branch filter on the list in every version; the 50 most recently updated cover a live branch.
+    const pulls = (await get(`${api}/pulls?state=all&sort=recentupdate&limit=50`)) as { number: number; html_url: string; state: string; merged: boolean; head: { ref: string; sha: string } }[];
+    const pr = pulls.filter((p) => p.head.ref === o.branch).sort((a, b) => b.number - a.number)[0];
+    if (!pr) return null;
+    const state = pr.merged ? "merged" : pr.state === "closed" ? "closed" : pr.state === "open" ? "open" : null;
+    if (state === null) throw new Error(`unknown Gitea PR state: ${pr.state}`);
+    if (state !== "open") return { number: pr.number, url: pr.html_url, state, checks: "none" };
+    const st = (await get(`${api}/commits/${pr.head.sha}/status`)) as { state: string; total_count: number };
+    if (st.total_count === 0) return { number: pr.number, url: pr.html_url, state, checks: "none" };
+    const checks = GITEA_STATUS.get(st.state);
+    if (!checks) throw new Error(`unknown Gitea commit status state: ${st.state}`);
+    return { number: pr.number, url: pr.html_url, state, checks };
+  }
+  throw new Error("A PR can only be read for a repo on GitHub or a configured Gitea instance");
+}
+
 export interface UnpushedOpsDeps {
   /** Git auth env by origin URL (Gitea Basic auth from the token; GitHub goes through the gh helper). */
   authFor: (url: string) => Record<string, string>;
@@ -309,8 +404,6 @@ export function unpushedOps(root: string, deps: UnpushedOpsDeps) {
     if (!validBranch(branch)) throw new Error(`invalid branch: ${branch.slice(0, 60)}`);
     if ((await git(dir, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`)).code !== 0) throw new Error(`branch ${branch} does not exist in the repo`);
   };
-  const giteaBaseFor = (remote: RemoteInfo) =>
-    deps.giteaUrls().find((u) => { try { return hostnameOf(new URL(u).host) === hostnameOf(remote.host); } catch { return false; } });
   return {
     async push(path: string, branch: string): Promise<PushResult> {
       const r = repoAt(path);
@@ -327,7 +420,7 @@ export function unpushedOps(root: string, deps: UnpushedOpsDeps) {
       const base = await baseBranch(r.path);
       return createPr({
         dir: r.path, branch: p.branch, base, title: p.title, body: p.body, remote,
-        giteaToken: deps.giteaToken(remote.host), giteaUrl: giteaBaseFor(remote), ghRun: deps.ghRun, fetcher: deps.fetcher,
+        giteaToken: deps.giteaToken(remote.host), giteaUrl: giteaUrlFor(deps.giteaUrls(), remote), ghRun: deps.ghRun, fetcher: deps.fetcher,
       });
     },
   };

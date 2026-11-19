@@ -66,7 +66,9 @@ export type InboxSection = "needs_you" | "working" | "idle" | "settled" | "snooz
 /** Where a session belongs in the inbox and why; `since` is when that state began (0 = nothing happened yet). */
 export interface Attention {
   section: InboxSection;
-  reason: "request" | "failed" | "rate-limited" | "completed" | "disconnected" | "bridge-behind" | "running" | "background" | "queued" | null;
+  /** `pr-checks`: the session's open PR waits for its CI checks; `ci-failed`: they failed (devd/src/prWatch.ts). */
+  reason: "request" | "failed" | "rate-limited" | "completed" | "disconnected" | "bridge-behind" | "running" | "background" | "queued"
+    | "pr-checks" | "ci-failed" | null;
   since: number;
   /** Snoozed only: when the snooze ends (epoch ms). */
   until?: number;

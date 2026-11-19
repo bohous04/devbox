@@ -8,6 +8,18 @@ export const WORKING_GRACE_MS = 2000;
  *  bridge's log is behind the thread store (BridgeLinks.behind). */
 export interface LinkState { status: LinkStatus; since: number; behindSince?: number }
 
+/** The CI checks of the session's open PR as the PR watch (prWatch.ts) last saw them, when they matter for the
+ *  inbox: pending is holding work, a failure needs the user. `since` = when they became so. */
+export interface PrHold { checks: "pending" | "failure"; since: number }
+
+/** The PR's part of the attention once no run is active: a failure seen after `lastEndedAt` (a later run supersedes
+ *  it), then pending checks. CI runs outside the container, so this holds whether the session runs or not. */
+function prAttention(pr: PrHold | null, lastEndedAt: number): Attention | null {
+  if (pr?.checks === "failure" && pr.since >= lastEndedAt) return { section: "needs_you", reason: "ci-failed", since: pr.since };
+  if (pr?.checks === "pending") return { section: "working", reason: "pr-checks", since: pr.since };
+  return null;
+}
+
 /** The run that ended last (highest `endedSeq`). Not the last row: a continuation run is inserted after a run that
  *  was queued before the restart, but runs and ends first. */
 export function lastEndedRun(t: ThreadSnapshot): RunRow | undefined {
@@ -24,7 +36,7 @@ function required(v: number | null, what: string, run: RunRow): number {
 /** `t` must be a full snapshot (no `afterSeq`): runs filtered by seq would hide the last run. Items are not read.
  *  `link` is null when devd keeps no link to the bridge (the session is not running): then a lost connection
  *  is expected, not something the user has to look at. */
-export function chatAttention(t: ThreadSnapshot, link: LinkState | null, now: number): Attention {
+export function chatAttention(t: ThreadSnapshot, link: LinkState | null, now: number, pr: PrHold | null = null): Attention {
   if (t.pending.length > 0) {
     return { section: "needs_you", reason: "request", since: Math.min(...t.pending.map((p) => p.openedAt)) };
   }
@@ -51,12 +63,14 @@ export function chatAttention(t: ThreadSnapshot, link: LinkState | null, now: nu
   const holding = live && t.background.some((w) => w.holding);
   if (!last) {
     if (holding) throw new Error("holding background work without any run: is the snapshot partial?");
-    return { section: "idle", reason: null, since: 0 };
+    return prAttention(pr, 0) ?? { section: "idle", reason: null, since: 0 };
   }
   const endedAt = required(last.endedAt, "endedAt", last);
   const unseen = t.seenSeq < required(last.endedSeq, "endedSeq", last);
   if (last.status === "failed" && unseen) return { section: "needs_you", reason: last.failureReason ?? "failed", since: endedAt };
   if (holding) return { section: "working", reason: "background", since: endedAt };
+  const prA = prAttention(pr, endedAt);
+  if (prA) return prA;
   if (now - endedAt < WORKING_GRACE_MS) return { section: "working", reason: "running", since: endedAt };
   if (last.status === "completed" && unseen) {
     return { section: "needs_you", reason: "completed", since: endedAt };
@@ -70,15 +84,16 @@ export function chatBusy(t: ThreadSnapshot, a: Attention): boolean {
 }
 
 /** The hub's live state of a tmux session. `done` stays needs_you until the next prompt: tmux has no seen marker. */
-export function tmuxAttention(live: AgentLiveSnapshot | null): Attention {
-  if (!live) return { section: "idle", reason: null, since: 0 };
+export function tmuxAttention(live: AgentLiveSnapshot | null, pr: PrHold | null = null): Attention {
+  if (!live) return prAttention(pr, 0) ?? { section: "idle", reason: null, since: 0 };
   const since = live.statusSince;
   switch (live.status) {
     case "waiting": return { section: "needs_you", reason: "request", since };
     case "failed": return { section: "needs_you", reason: "failed", since };
-    case "done": return { section: "needs_you", reason: "completed", since };
+    case "done": return prAttention(pr, since) ?? { section: "needs_you", reason: "completed", since };
     case "working":
     case "stalled": return { section: "working", reason: "running", since };
-    case "unknown": return { section: "idle", reason: null, since };
+    // Unknown (after a devd restart) says nothing about when the last run ended: any seen failure stands.
+    case "unknown": return prAttention(pr, 0) ?? { section: "idle", reason: null, since };
   }
 }

@@ -78,6 +78,7 @@ import { ChatSwitch } from "./chatSwitch";
 import { EventBus } from "./eventBus";
 import { Inbox } from "./sessionInbox";
 import { AUTO_SETTLE_TICK_MS, hubShelfDeps, resetDeps, untilReset } from "./sessionAttention";
+import { checkPrs, PR_WATCH_TICK_MS, PrWatch } from "./prWatch";
 import { chatAttention, chatBusy } from "./attention";
 import { contextLengthCached } from "./openrouterModels";
 import { parseMeminfo, resourceBreakdown } from "./resources";
@@ -401,7 +402,11 @@ const threadStore = (id: string): ThreadStore => {
   threadStores.set(id, store);
   return store;
 };
-const chatHub = new ChatHub({ hub: agentEvents, session: (id) => getSession(db, id) });
+// `prWatch` is declared below; ChatHub asks it only when a run completes, after startup.
+const chatHub = new ChatHub({
+  hub: agentEvents, session: (id) => getSession(db, id),
+  pr: { pending: (id) => prWatch.pending(id), check: (id) => prWatch.checkNow(id) },
+});
 // The hub-facing snapshot needs runs, pending and background only: `limit: 0` skips loading every item per event.
 const chatSnapshot = (id: string) => threadStore(id).snapshot({ limit: 0 });
 // SSE fan-out (threadApi.ts) and the inbox over all sessions; an ending session is left out (its store is being archived).
@@ -417,7 +422,22 @@ const inbox: Inbox = new Inbox({
     return link && behindSince !== null ? { ...link, behindSince } : link;
   },
   tmuxLive: (id) => agentEvents.liveSnapshot(id),
+  prHold: (id) => prWatch.hold(id),
   bus,
+});
+// PR watch (prWatch.ts): the PR of each session's pushed branch, GitHub through the host's `gh`, Gitea through its API.
+const prWatch: PrWatch = new PrWatch({
+  db,
+  sessions: () => listSessions(db).filter((s) => !mgr.isEnding(s.id)),
+  session: (id) => (mgr.isEnding(id) ? null : getSession(db, id)),
+  check: (sessions, onError) => checkPrs({
+    sessions, root, onError,
+    giteaUrls: getGiteaInstances().map((i) => i.url),
+    giteaToken: (host) => giteaTokensByHost(getGiteaInstances(), giteaTokens)[host],
+  }),
+  inbox,
+  checksEnded: (id) => chatHub.prChecksEnded(id, () => chatSnapshot(id)),
+  notify,
 });
 const bridgeLinks = new BridgeLinks({
   controlDir: (id) => join(controlRoot, id),
@@ -1261,6 +1281,7 @@ setInterval(() => {
 // Snoozes a previous devd set still end with an inbox update; then settle sessions idle for 7 days (sessionAttention.ts).
 try { inbox.armSnoozes(); } catch (e) { console.error("inbox: snooze timers not armed:", e); }
 setInterval(guardedTick("auto-settle", async () => { inbox.autoSettle(); }), AUTO_SETTLE_TICK_MS);
+setInterval(guardedTick("pr watch", () => prWatch.tick()), PR_WATCH_TICK_MS);
 // Hardware: the tick itself decides what is currently due (see INTERVALS in hardware.ts),
 // so this interval is only a fine sieve, not the refresh cadence.
 // `hardware` may only come into existence after the vault is unlocked, so it is read on every tick,

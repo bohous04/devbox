@@ -80,7 +80,7 @@ function Row({ item, now, onItem }: { item: InboxItem; now: number; onItem: (i: 
   return (
     <div className="flex min-w-0 items-start">
       <Link to={inboxHref(item)} className="flex min-h-14 min-w-0 flex-1 items-start gap-3 py-3 pl-4 pr-2 transition-colors hover:bg-accent/40">
-        <span className="mt-1.5"><StatusDot kind={a.reason === "failed" || a.reason === "rate-limited" || a.reason === "disconnected" || a.reason === "bridge-behind" ? "danger" : DOT[a.section]} pulse={a.section === "working"} /></span>
+        <span className="mt-1.5"><StatusDot kind={a.reason === "failed" || a.reason === "rate-limited" || a.reason === "disconnected" || a.reason === "bridge-behind" || a.reason === "ci-failed" ? "danger" : DOT[a.section]} pulse={a.section === "working"} /></span>
         <span className="min-w-0 flex-1">
           <span className="flex min-w-0 items-center gap-2">
             <span className="min-w-0 truncate text-sm font-medium">{item.title}</span>
