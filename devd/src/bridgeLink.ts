@@ -49,6 +49,8 @@ interface Link {
   failure: { atSeq: number; key: string; count: number } | null;
   /** The periodic ack of this connection; only for a bridge that takes it. */
   ackTimer: ReturnType<typeof setInterval> | null;
+  /** A skipped ack was logged; reset (and the recovery logged) once an ack goes out again. */
+  ackFailLogged: boolean;
 }
 
 class MalformedFrame extends Error {}
@@ -160,7 +162,7 @@ export class BridgeLinks {
     }
     const link: Link = {
       status: "connecting", socket: null, buffer: "", decoder: new TextDecoder(), outbound: [],
-      pending: new Map(), retry: null, dropped: false, outageLogged: false, behindSince: null, failure: null,
+      pending: new Map(), retry: null, dropped: false, outageLogged: false, behindSince: null, failure: null, ackFailLogged: false,
       ackTimer: null,
     };
     this.links.set(sessionId, link);
@@ -451,20 +453,21 @@ export class BridgeLinks {
   }
 
   /** S6-R21: tells the bridge the store holds every event up to its durable seq. Not durable now (a checkpoint
-   *  that could not finish) or no store: logged, and the next interval tries again. */
+   *  that could not finish) or no store: logged once per episode (like checkBehind), and the next interval tries
+   *  again. */
   private sendAck(sessionId: string, link: Link) {
     if (link.status !== "connected" || !link.socket) return;
+    const skipped = (why: string) => {
+      if (!link.ackFailLogged) this.log(`bridge link ${sessionId}: no ack: ${why}`);
+      link.ackFailLogged = true;
+    };
     let seq: number | null;
     try { seq = this.d.store(sessionId).durableSeq(); }
-    catch (err) {
-      this.log(`bridge link ${sessionId}: no ack: ${err instanceof Error ? err.message : String(err)}`);
-      return;
-    }
-    if (seq === null) {
-      this.log(`bridge link ${sessionId}: no ack: the thread store's checkpoint could not finish (another reader holds the WAL)`);
-      return;
-    }
+    catch (err) { skipped(err instanceof Error ? err.message : String(err)); return; }
+    if (seq === null) { skipped("the thread store's checkpoint could not finish (another reader holds the WAL)"); return; }
     this.write(link, { t: "ack", seq });
+    if (link.ackFailLogged) this.log(`bridge link ${sessionId}: acks resumed (seq ${seq})`);
+    link.ackFailLogged = false;
   }
 
   /** M12: a bridge older than the one this devd ships keeps running until its container is recreated. Said once per

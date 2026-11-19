@@ -590,10 +590,14 @@ test("S6-R21: no ack while the store cannot say what is durable; it is logged an
   const a = serve({ events: [ev(1), ev(2)], ready: { version: ACK_MIN_BRIDGE_VERSION } });
   links.ensure(ID);
   await waitFor(() => logs.some((l) => l.includes("no ack")), "the skipped ack logged");
+  await Bun.sleep(100); // several more intervals without an ack
   expect(a.acks).toEqual([]);
   expect(links.status(ID)).toBe("connected");
+  // Once per episode, like a bridge log that is behind.
+  expect(logs.filter((l) => l.includes("no ack"))).toHaveLength(1);
   reader.run("COMMIT");
   reader.close();
   await waitFor(() => a.acks.length >= 1, "ack once the checkpoint completes");
   expect(a.acks[0]).toBe(2);
+  expect(logs.filter((l) => l.includes("acks resumed"))).toEqual([`bridge link ${ID}: acks resumed (seq 2)`]);
 });
