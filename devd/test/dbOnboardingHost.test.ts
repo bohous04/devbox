@@ -179,6 +179,12 @@ test("DDL permission is a distinct early blocker and never borrows an administra
   expect(f.creates).toBe(0);
 });
 
+test("a read request on an entry with an existing migration role is not blocked by the DDL owner check", async () => {
+  const p = plan(); p.entry.migrationUser = "fixture_migrate"; p.entry.migrationOpItem = "prod-migrate fixture";
+  const f = harness(p); f.ownerSafe = false;
+  expect((await f.host.preflight(p)).map(b => b.code)).not.toContain("ddl_owner");
+});
+
 test("host rejects changed target, unsafe identifiers, user and reused admin key before commands", async () => {
   const p = plan(); const catalog = { servers: { test: p.trustedServer }, databases: [] };
   expect(validateHostPlan({ ...p, entry: { ...p.entry, server: "apps-fixture" } }, catalog).map(b => b.code)).toContain("unknown_server");
@@ -285,6 +291,10 @@ test("SQL contains SCRAM verifier, real RO grants and scope-specific migration p
   expect(onboardingVerifySql(p)).toContain("has_table_privilege");
   expect(scramVerifier("abc", Buffer.alloc(16))).toBe(scramVerifier("abc", Buffer.alloc(16)));
   p.entry.migrationUser = "fixture_migrate"; p.entry.migrationOpItem = "prod-migrate fixture";
+  // A catalogued migration role is left untouched unless this request asks for migrations.
+  const readSql = onboardingRoleSql(p, { fixture_ro: "a" });
+  expect(readSql).not.toContain("devd ddl_owner"); expect(readSql).not.toContain('CREATE ROLE "fixture_migrate"');
+  p.migrations = true;
   const migrationSql = onboardingRoleSql(p, { fixture_ro: "a", fixture_migrate: "b" });
   expect(migrationSql).toContain("owner_row.rolsuper"); expect(migrationSql).toContain("devd ddl_owner");
   expect(migrationSql.indexOf('CREATE ROLE "fixture_migrate"')).toBeLessThan(migrationSql.lastIndexOf('ALTER DEFAULT PRIVILEGES FOR ROLE "fixture_migrate"'));

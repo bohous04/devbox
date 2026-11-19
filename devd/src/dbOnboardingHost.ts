@@ -458,7 +458,7 @@ export function createDbOnboardingHost(d: HostDeps): DbOnboardingHost {
       if (target.remotePortBusy && !target.relayManaged && !binding) blocks.push(block("remote_port_busy", "configuration", `Port ${plan.entry.hostPort} is used by another process on the target server.`, "Choose another port and prepare the plan again."));
       if (target.tunnelUserConflict) blocks.push(block("tunnel_user_conflict", "configuration", "The dedicated SSH account name is already used by an unmanaged account.", "Choose a different dedicated tunnel account."));
       if (target.database && !target.database.publicReadOnlySafe && target.database.publicReadOnlySafe !== undefined) blocks.push(block("public_write_privileges", "permission", "The PUBLIC role has write privileges or access to application SECURITY DEFINER functions; read-only access cannot be guaranteed.", "Review and adjust the PUBLIC privileges separately. Onboarding does not change other applications' privileges."));
-      if (plan.entry.migrationUser && target.database && (!target.database.ownerSafe || !target.database.ownerOwnsTables)) blocks.push(block("ddl_owner", "permission", "Migrations need a separate owner of the application tables without admin privileges.", "Set up a safe DB/schema owner; onboarding does not take over superuser privileges."));
+      if (plan.migrations && target.database && (!target.database.ownerSafe || !target.database.ownerOwnsTables)) blocks.push(block("ddl_owner", "permission", "Migrations need a separate owner of the application tables without admin privileges.", "Set up a safe DB/schema owner; onboarding does not take over superuser privileges."));
       for (const role of target.database?.roles ?? []) if (!role.managed) blocks.push(block("role_conflict", "configuration", `Existing role '${role.name}' does not belong to this database operation.`, "Choose unique role names; Devbox does not overwrite roles it does not own."));
     } catch (e) { blocks.push(safeError(e, block("ssh_failed", "connection", "The SSH check of the target failed.", "Check that the server is reachable and its admin access."))); }
     return blocks;
@@ -483,7 +483,7 @@ export function createDbOnboardingHost(d: HostDeps): DbOnboardingHost {
           if (d.verifyDatabase) await d.verifyDatabase(plan, password, port);
           else {
             const checks: [string, string, string][] = [[plan.entry.roUser, password, onboardingVerifySql(plan)]];
-            for (const [role, title, migration] of [[plan.entry.rwUser, plan.entry.rwOpItem, false], [plan.entry.migrationUser, plan.entry.migrationOpItem, true]] as const) {
+            for (const [role, title, migration] of [[plan.entry.rwUser, plan.entry.rwOpItem, false], [plan.migrations ? plan.entry.migrationUser : undefined, plan.entry.migrationOpItem, true]] as const) {
               if (!role || !title) continue;
               const item = match(ctx.items, title, "PASSWORD");
               if (!item) return fail("setup_incomplete", "configuration", "The write role has no verified credentials.", "Retry the approved operation.");
@@ -532,7 +532,7 @@ export function createDbOnboardingHost(d: HostDeps): DbOnboardingHost {
       onProgress("1password_items");
       const tunnel = await ensureItem(plan.server.key, "SSH_KEY", ctx.vault);
       const credentials: Record<string, string> = {};
-      for (const [role, title] of [[plan.entry.roUser, plan.entry.opItem], [plan.entry.rwUser, plan.entry.rwOpItem], [plan.entry.migrationUser, plan.entry.migrationOpItem]]) {
+      for (const [role, title] of [[plan.entry.roUser, plan.entry.opItem], [plan.entry.rwUser, plan.entry.rwOpItem], ...(plan.migrations ? [[plan.entry.migrationUser, plan.entry.migrationOpItem]] : [])]) {
         if (role && title) credentials[role] = await read(await ensureItem(title, "PASSWORD", ctx.vault), "password");
       }
       // Derive public keys from private material locally; never trust freeform
