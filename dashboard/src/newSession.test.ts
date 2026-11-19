@@ -83,15 +83,17 @@ test("mirror in newSession.ts (AGENT_PROFILES) matches devd/src/agents.ts", () =
     expect(AGENT_PROFILES[id].short).toBe(DEVD_AGENTS[id].short);
     expect(AGENT_PROFILES[id].yolo).toBe(DEVD_AGENTS[id].yolo);
     expect(AGENT_PROFILES[id].proxy).toBe(usesProxy(id));
+    expect(AGENT_PROFILES[id].runtime).toBe(DEVD_AGENTS[id].runtime);
   }
 });
 
-test("chatRuntimeBlock mirrors devd: chat only for claude and codex on the VPS", () => {
+test("chatRuntimeBlock mirrors devd: chat only for the claude and codex harnesses on the VPS", () => {
   for (const id of DEVD_AGENT_IDS) {
     for (const host of ["vps", "instabox"] as const) expect(chatRuntimeBlock(id, host)).toBe(devdChatRuntimeBlock(id, host));
   }
   expect(chatRuntimeBlock("claude", "vps")).toBeNull();
   expect(chatRuntimeBlock("codex", "vps")).toBeNull();
+  expect(chatRuntimeBlock("claude-gpt", "vps")).toBeNull();
   expect(chatRuntimeBlock("grok", "vps")).not.toBeNull();
 });
 

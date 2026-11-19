@@ -7,6 +7,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, ApiError } from "../api";
 import { Composer } from "../components/chat/Composer";
 import { MessageList } from "../components/chat/MessageList";
+import { Switchers } from "../components/chat/Switchers";
 import { EmptyState, RowsSkeleton } from "../components/primitives";
 import { profileFor } from "../newSession";
 import { useStore } from "../store";
@@ -42,6 +43,13 @@ function ChatPage({ id }: { id: string }) {
     );
     return () => { alive = false; };
   }, [id]);
+
+  // A confirmed switch adds devd's notice without a stream event (ThreadStore.addNotice): reload to show it. No run
+  // is active during a switch; should the stream still have got ahead of the reload, the newer copy stays.
+  const reloadThread = async () => {
+    const fresh = await api.thread(id);
+    setThread((t) => (t && t.lastSeq > fresh.lastSeq ? t : fresh));
+  };
 
   const { paused, badFrame } = useEventStream({
     sessionId: id,
@@ -135,7 +143,10 @@ function ChatPage({ id }: { id: string }) {
           </div>
           {/* Above the mobile bottom bar (h-16); from lg there is none. */}
           <div className="sticky bottom-16 z-10 -mx-4 mt-4 border-t bg-background/95 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6 lg:bottom-0 lg:-mx-10 lg:px-10">
-            <Composer running={running} onSend={async (text) => { await api.sendMessage(id, text); }} onStop={() => api.interrupt(id)} />
+            <Composer
+              running={running} onSend={async (text) => { await api.sendMessage(id, text); }} onStop={() => api.interrupt(id)}
+              toolbar={<Switchers sessionId={id} thread={thread} onSwitched={reloadThread} />}
+            />
           </div>
         </>
       )}

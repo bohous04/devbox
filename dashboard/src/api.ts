@@ -256,6 +256,15 @@ export interface SwitchAgentResponse {
   status: "unchanged" | "no-agent" | "switched" | "failed";
   panes: { target: string; outcome: "restarted" | "did-not-exit" | "did-not-return" | "stuck-on-dialog" }[];
 }
+/** GET /api/sessions/:id/thread/target — the target devd plans a chat session's next switch from
+ *  (devd/src/chatSwitch.ts CurrentTarget). `model: null` = the harness default. */
+export interface ChatTarget { agent: AgentName; harness: string; account: string | null; model: string | null }
+/** 202 of the chat switch routes. `unchanged`: nothing was switched; `exhausted`: the target account is over its usage
+ *  threshold (allowed, as for `dev switch`). Refusals come back as ApiError with the body (see switchErrorText). */
+export interface ChatSwitchResult {
+  kind: "set-model" | "restart-resume" | "resume-with-delta" | "fresh-with-handoff";
+  unchanged?: true; exhausted?: true;
+}
 export interface CcSessionStatus {
   id: string; project: string; repo: string;
   version: string | null; panes: number | null; stalePanes: number | null; busyPct: number | null;
@@ -562,6 +571,13 @@ export const api = {
   interrupt: (id: string) => j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/interrupt`, { method: "POST" }),
   answerRequest: (id: string, requestId: string, answer: string) =>
     j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/requests/${encodeURIComponent(requestId)}`, post({ answer })),
+  chatTarget: (id: string) => j<ChatTarget>(`/api/sessions/${encodeURIComponent(id)}/thread/target`),
+  switchChatModel: (id: string, model: string) =>
+    j<ChatSwitchResult>(`/api/sessions/${encodeURIComponent(id)}/thread/model`, post({ model })),
+  switchChatAccount: (id: string, accountId: string) =>
+    j<ChatSwitchResult>(`/api/sessions/${encodeURIComponent(id)}/thread/account`, post({ accountId })),
+  switchChatHarness: (id: string, agent: AgentName) =>
+    j<ChatSwitchResult>(`/api/sessions/${encodeURIComponent(id)}/thread/harness`, post({ agent })),
   markSeen: (id: string, seq: number) => j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/seen`, post({ seq })),
   inbox: () => j<{ items: InboxItem[] }>("/api/inbox"),
   schedules: () => j<Schedule[]>("/api/schedules"),
