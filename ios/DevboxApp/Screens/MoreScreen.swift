@@ -42,6 +42,7 @@ struct MoreScreen: View {
     @ViewBuilder
     private func destination(_ destination: MoreMenu.Destination) -> some View {
         switch destination {
+        case .hardware: HardwareScreen(client: client)
         case .folders: FoldersScreen(client: client)
         case .subscriptions: SubscriptionsScreen(client: client)
         case .schedules: CronScreen(client: client)

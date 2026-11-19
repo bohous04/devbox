@@ -189,11 +189,11 @@ private struct ConfigLoadFailedView: View {
 /// it switches straight to the Sessions tab and jumps to that session's detail; `SessionDetailView` then
 /// consumes `terminal` from here and opens the terminal (simplification from the plan: navigation
 /// always goes to the detail, the terminal opens from there). A notification with a target (`PushDeepLink.more`)
-/// switches to the More tab and pushes the screen onto `morePath`; `.vault` opens the unlock sheet.
+/// switches to the More tab and pushes the screen onto `morePath`; `.vault` opens the unlock sheet; a chat
+/// session's notification (`PushDeepLink.thread`) switches to the Inbox tab and pushes its thread onto `inboxPath`.
 ///
-/// Tabs and their order follow the web bottom bar (Overview, Sessions, Statistics, Hardware,
-/// More — see `AppTab`). `selectedTab` lets a deep link (`onChange` below) jump to Sessions
-/// even when the user was on another tab (`AppTab.route(for:)`).
+/// Tabs: Inbox, Overview, Sessions, Statistics, More — see `AppTab`. `selectedTab` lets a deep link (`onChange`
+/// below) jump to its tab even when the user was on another tab (`AppTab.route(for:)`).
 ///
 /// Five tabs, NOT more — with more than 5 tabs the iPhone hides the rest in the system "More → More" overflow (and
 /// the last visible icon would lose its own). AI limits, Folders, Activity etc. therefore
@@ -212,6 +212,8 @@ private struct SessionsContainer: View {
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var appModel: AppModel
     @State private var path: [String] = []
+    /// The Inbox tab stack — a chat notification / `devbox://thread/<id>` pushes the thread onto it.
+    @State private var inboxPath: [InboxRoute] = []
     /// The More tab stack — a deep link with a target (`PushDeepLink.more`) pushes the screen straight onto it.
     @State private var morePath: [MoreMenu.Destination] = []
     @State private var selectedTab = AppTab.initial
@@ -253,6 +255,18 @@ private struct SessionsContainer: View {
     /// their store) after a path change, without tearing down the tabs, navigation or `SettingsScreen`.
     var body: some View {
         TabView(selection: $selectedTab) {
+            NavigationStack(path: $inboxPath) {
+                withVaultBanner(InboxScreen(client: client).id(appModel.clientIdentity))
+                    .navigationDestination(for: InboxRoute.self) { route in
+                        switch route {
+                        case .thread(let id): ChatScreen(sessionId: id, client: client).id(appModel.clientIdentity)
+                        case .session(let id): SessionDetailView(sessionId: id, actions: actions)
+                        }
+                    }
+            }
+            .tabItem { tabLabel(.inbox) }
+            .tag(AppTab.inbox)
+
             NavigationStack {
                 withVaultBanner(OverviewScreen(client: client).id(appModel.clientIdentity))
             }
@@ -270,12 +284,6 @@ private struct SessionsContainer: View {
             }
             .tabItem { tabLabel(.stats) }
             .tag(AppTab.stats)
-
-            NavigationStack {
-                withVaultBanner(HardwareScreen(client: client).id(appModel.clientIdentity))
-            }
-            .tabItem { tabLabel(.hardware) }
-            .tag(AppTab.hardware)
 
             NavigationStack(path: $morePath) {
                 withVaultBanner(MoreScreen(client: client))
@@ -317,6 +325,10 @@ private struct SessionsContainer: View {
         .onChange(of: appModel.pendingDeepLink, initial: true) { _, link in
             guard let link else { return }
             switch AppTab.route(for: link) {
+            case .inbox(let threads):
+                selectedTab = .inbox
+                inboxPath = threads.map(InboxRoute.thread)
+                appModel.pendingDeepLink = nil
             case .sessions(let sessionsPath):
                 // `pendingDeepLink` is NOT cleared here — `SessionDetailView` (after the push) still
                 // needs to read it (terminal) before clearing it itself.

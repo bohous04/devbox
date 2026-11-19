@@ -1217,3 +1217,35 @@ struct ThreadUpload: Decodable {
     let path: String
     let size: Int
 }
+
+/// `GET /api/sessions/:id/thread/target` — what devd plans a chat session's next switch from (chatSwitch.ts).
+/// `model` nil = the harness default; `awaitingTarget`: the bridge waits for a target (a switch is then allowed even
+/// with queued messages); `bridgeVersion` nil before a handshake or for a 1.0.0 bridge.
+struct ChatTarget: Decodable, Equatable {
+    let agent: String
+    let harness: String
+    let account: String?
+    let model: String?
+    let awaitingTarget: Bool
+    let bridgeVersion: String?
+}
+
+/// 202 of `POST /thread/model|account|harness`. `unchanged`: nothing was switched; `exhausted`: the target account is
+/// over its usage threshold (allowed).
+struct ChatSwitchResult: Decodable, Equatable {
+    let kind: String
+    let unchanged: Bool?
+    let exhausted: Bool?
+}
+
+/// `GET /api/codex-accounts`.
+struct CodexAccountView: Decodable {
+    let id: String
+    let label: String
+    let disabled: Bool
+    let usage: CodexSubscriptionView?
+}
+
+struct CodexAccountsResponse: Decodable {
+    let accounts: [CodexAccountView]
+}

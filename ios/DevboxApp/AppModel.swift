@@ -162,8 +162,9 @@ final class AppModel: ObservableObject {
         pendingDeepLink = link
     }
 
-    /// `devbox://session/<id>[?terminal=1]`, `devbox://more/<target>` (same dictionary as `target`
-    /// in the push payload, see `PushManager.link(forTarget:)`) and `devbox://vault`.
+    /// `devbox://session/<id>[?terminal=1]`, `devbox://thread/<id>` (a chat session's thread, the Mac listener's
+    /// click), `devbox://more/<target>` (same dictionary as `target` in the push payload, see
+    /// `PushManager.link(forTarget:)`) and `devbox://vault`.
     static func deepLink(from url: URL) -> PushManager.PushDeepLink? {
         guard url.scheme == "devbox" else { return nil }
         let first = url.pathComponents.dropFirst().first
@@ -173,6 +174,9 @@ final class AppModel: ObservableObject {
             let terminal = URLComponents(url: url, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "terminal" })?.value == "1"
             return .session(id: sessionId, terminal: terminal)
+        case "thread":
+            guard let sessionId = first, !sessionId.isEmpty else { return nil }
+            return .thread(id: sessionId)
         case "more":
             guard let target = first, target != "vault" else { return nil }
             return PushManager.link(forTarget: target)

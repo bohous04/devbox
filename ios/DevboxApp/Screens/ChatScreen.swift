@@ -1,0 +1,129 @@
+import SwiftUI
+
+/// A chat session's conversation (dashboard/src/pages/SessionPage.tsx): the thread live over devd's stream, the
+/// composer with the model, account and agent switchers, and the session's terminal from the toolbar. iOS drops
+/// the stream in the background; coming back catches up from the thread's seq (`ThreadStore.resume`).
+struct ChatScreen: View {
+    @StateObject private var store: ThreadStore
+    @EnvironmentObject private var live: LiveStore
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var showTerminal = false
+    @State private var atEnd = true
+    @State private var wentAway = false
+    private let sessionId: String
+    private let client: DevdClient
+
+    init(sessionId: String, client: DevdClient) {
+        self.sessionId = sessionId
+        self.client = client
+        _store = StateObject(wrappedValue: ThreadStore(sessionId: sessionId, client: client))
+    }
+
+    private var title: String {
+        guard let s = live.live?.sessions.first(where: { $0.id == sessionId }) else { return sessionId }
+        if let name = s.name?.trimmingCharacters(in: .whitespaces), !name.isEmpty { return name }
+        return "\(s.project)/\(s.repo)"
+    }
+
+    var body: some View {
+        Group {
+            if store.isTmux {
+                ContentUnavailableView {
+                    Label("This is a tmux session", systemImage: "terminal")
+                } description: {
+                    Text("It has no chat thread; its agent runs in the terminal.")
+                } actions: {
+                    Button("Open the terminal") { showTerminal = true }
+                }
+            } else if let thread = store.thread {
+                conversation(thread)
+            } else if let error = store.loadError {
+                ContentUnavailableView("Could not load the thread", systemImage: "bubble.left.and.exclamationmark.bubble.right", description: Text(error))
+            } else {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .background(Theme.C.background)
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { showTerminal = true } label: { Label("Terminal", systemImage: "terminal") }
+            }
+        }
+        .fullScreenCover(isPresented: $showTerminal) {
+            TerminalScreen(sessionId: sessionId, title: title, client: client)
+        }
+        .task { await store.start() }
+        .onDisappear { store.stop() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background {
+                wentAway = true
+                store.stop()
+            } else if phase == .active, wentAway {
+                wentAway = false
+                Task { await store.resume() }
+            }
+        }
+    }
+
+    private func conversation(_ t: ThreadSnapshot) -> some View {
+        let queued = Set(ThreadView.queuedRunIds(t))
+        let critic = Set(ThreadView.criticRunIds(t))
+        return ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    banners
+                    if t.items.isEmpty {
+                        EmptyState("No messages yet — write the first message below.", systemImage: "bubble.left")
+                    }
+                    ForEach(Array(t.items.enumerated()), id: \.offset) { _, it in
+                        MessageRow(item: it, sessionId: sessionId, client: client,
+                                   pending: t.pending.first { $0.requestId == it.itemId },
+                                   queued: it.runId.map(queued.contains) ?? false,
+                                   critic: it.runId.map(critic.contains) ?? false,
+                                   onAnswer: { try await store.answer(requestId: $0, answer: $1) })
+                    }
+                    if !t.background.isEmpty {
+                        Text("background: \(t.background.map(\.label).joined(separator: ", "))")
+                            .font(Theme.F.meta).foregroundStyle(Theme.C.mutedForeground)
+                    }
+                    // Follow the conversation while the user is at its end; leave them alone when they scrolled up.
+                    Color.clear.frame(height: 1).id("end")
+                        .onAppear { atEnd = true }
+                        .onDisappear { atEnd = false }
+                }
+                .padding(Theme.S.screenPadding)
+            }
+            .defaultScrollAnchor(.bottom)
+            .scrollDismissesKeyboard(.interactively)
+            .onChange(of: t.lastSeq) { _, _ in
+                if atEnd { proxy.scrollTo("end", anchor: .bottom) }
+            }
+            .safeAreaInset(edge: .bottom) {
+                VStack(alignment: .leading, spacing: 6) {
+                    ChatSwitchers(sessionId: sessionId, thread: t, client: client)
+                    ComposerView(running: ThreadView.activeRun(t) != nil,
+                                 onSend: { try await store.send(text: $0, images: $1) },
+                                 onStop: { try await store.interrupt() })
+                }
+                .padding(.horizontal, Theme.S.screenPadding)
+                .padding(.vertical, 8)
+                .background(.bar)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var banners: some View {
+        if store.paused || store.badFrame != nil {
+            Text(store.paused ? "Live updates paused — reconnecting" : "Live update dropped: \(store.badFrame ?? "") — reopen the thread to catch up")
+                .font(Theme.F.meta).foregroundStyle(Theme.C.warnText)
+                .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.C.warn.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.R.md))
+        }
+        if let seen = store.seenError {
+            Text("Could not mark the thread as seen: \(seen)").font(Theme.F.meta).foregroundStyle(Theme.C.dangerText)
+        }
+    }
+}

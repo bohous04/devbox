@@ -16,14 +16,18 @@ final class PushManager: ObservableObject {
     enum PushDeepLink: Equatable {
         /// Session notification → detail (and terminal when the payload carried `terminal: true`).
         case session(id: String, terminal: Bool)
+        /// A chat session's notification (`thread: true` from devd) or `devbox://thread/<id>` → its thread.
+        case thread(id: String)
         /// Notification without a session but with a target (`target` from devd) → screen in the More tab.
         case more(MoreMenu.Destination)
         /// Locked vault → unlock sheet (only while the vault is still locked).
         case vault
 
         var sessionId: String? {
-            if case .session(let id, _) = self { return id }
-            return nil
+            switch self {
+            case .session(let id, _), .thread(let id): return id
+            case .more, .vault: return nil
+            }
         }
     }
 
@@ -130,6 +134,7 @@ final class PushManager: ObservableObject {
     /// `target` decides (`NotifyTarget` in `devd/src/agentEvents.ts`). Unknown target = just open the app.
     static func deepLink(from userInfo: [AnyHashable: Any]) -> PushDeepLink? {
         if let sessionId = userInfo["sessionId"] as? String {
+            if (userInfo["thread"] as? Bool) == true { return .thread(id: sessionId) }
             return .session(id: sessionId, terminal: (userInfo["terminal"] as? Bool) ?? false)
         }
         guard let target = userInfo["target"] as? String else { return nil }

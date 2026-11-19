@@ -243,6 +243,11 @@ actor DevdClient {
         }
     }
 
+    /// Raw bytes (a chat image for its thumbnail); GET fallback as `get`.
+    func getData(_ path: String) async throws -> Data {
+        try await request(path: path, method: "GET", body: nil)
+    }
+
     /// A raw upload (`POST /api/sessions/:id/inbox?for=thread`: a chat image as octet-stream). Same path fallback
     /// as `post`.
     func upload<T: Decodable>(_ path: String, data: Data) async throws -> T {

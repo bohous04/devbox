@@ -63,6 +63,9 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(AppModel.deepLink(from: URL(string: "devbox://more/sshKeys")!), .more(.sshKeys))
         XCTAssertEqual(AppModel.deepLink(from: URL(string: "devbox://more/sshApprovals")!), .more(.sshKeys))
         XCTAssertEqual(AppModel.deepLink(from: URL(string: "devbox://vault")!), .vault)
+        XCTAssertEqual(AppModel.deepLink(from: URL(string: "devbox://thread/dev-shop-cms")!), .thread(id: "dev-shop-cms"))
+        XCTAssertNil(AppModel.deepLink(from: URL(string: "devbox://thread")!))
+        XCTAssertEqual(AppModel.deepLink(from: URL(string: "devbox://more/hardware")!), .more(.hardware))
         XCTAssertNil(AppModel.deepLink(from: URL(string: "devbox://more/nesmysl")!))
         XCTAssertNil(AppModel.deepLink(from: URL(string: "devbox://more")!))
     }
