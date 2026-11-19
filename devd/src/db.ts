@@ -251,6 +251,9 @@ export function openDb(path: string): Database {
   // The worktree branch the PR was found for (S5-R29: the watch follows the current branch); NULL on rows written
   // before the column existed.
   const prCols = (db.query("PRAGMA table_info(session_prs)").all() as { name: string }[]).map((c) => c.name);
+  // The PR head commit its checks belong to: a new head with the same verdict is a new verdict. NULL on older rows
+  // (adopted silently at their next poll).
+  if (!prCols.includes("head_sha")) db.run(`ALTER TABLE session_prs ADD COLUMN head_sha TEXT`);
   if (!prCols.includes("branch")) {
     db.run(`ALTER TABLE session_prs ADD COLUMN branch TEXT`);
     // Deploying S5-R29 watches sessions that were not watched before and rewrites every old row: the first tick
@@ -1159,6 +1162,8 @@ export interface SessionPrRow {
   since: number; merge_settled_at: number | null; updated_at: number;
   /** The worktree branch the PR was found for; null on rows from before S5-R29. */
   branch: string | null;
+  /** The PR's head commit the checks belong to; null on rows from before it was recorded. */
+  head_sha: string | null;
 }
 export function getSessionPr(db: Database, sessionId: string): SessionPrRow | null {
   return (db.query(`SELECT * FROM session_prs WHERE session_id=?`).get(sessionId) as SessionPrRow | null) ?? null;
@@ -1173,8 +1178,8 @@ export function clearPrWatchSeed(db: Database): void {
   db.run(`DELETE FROM pr_watch_seed`);
 }
 export function putSessionPr(db: Database, r: SessionPrRow): void {
-  db.query(`INSERT OR REPLACE INTO session_prs (session_id,number,url,state,checks,since,merge_settled_at,updated_at,branch)
-    VALUES (?,?,?,?,?,?,?,?,?)`).run(r.session_id, r.number, r.url, r.state, r.checks, r.since, r.merge_settled_at, r.updated_at, r.branch);
+  db.query(`INSERT OR REPLACE INTO session_prs (session_id,number,url,state,checks,since,merge_settled_at,updated_at,branch,head_sha)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(r.session_id, r.number, r.url, r.state, r.checks, r.since, r.merge_settled_at, r.updated_at, r.branch, r.head_sha);
 }
 export function deleteSessionPr(db: Database, sessionId: string): void {
   db.query(`DELETE FROM session_prs WHERE session_id=?`).run(sessionId);

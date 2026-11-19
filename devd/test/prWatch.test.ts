@@ -8,7 +8,7 @@ import { ChatHub } from "../src/chatHub";
 import { getSession, getSessionAttention, getSessionPr, insertSession, listNotifyLog, listSessions, openDb, type SessionRow } from "../src/db";
 import { EventBus } from "../src/eventBus";
 import { sh } from "../src/git";
-import { checkPrs, PR_SETTLED_POLL_MS, PrWatch, type PrPoll, type PrState } from "../src/prWatch";
+import { checkPrs, PR_CHECKS_GRACE_MS, PR_SETTLED_POLL_MS, PrWatch, type PrPoll, type PrState } from "../src/prWatch";
 import { findPr } from "../src/unpushed";
 import { hubShelfDeps } from "../src/sessionAttention";
 import { Inbox } from "../src/sessionInbox";
@@ -62,7 +62,7 @@ const found = async (p: Promise<PrPoll[]>) => (await p).flatMap((x) => (x.pr ? [
 test("GitHub: gh pr list by head branch; a pending check run makes the checks pending", async () => {
   const { root, work } = await repo("https://github.com/o/n.git");
   const gh = fakeGh([{
-    number: 7, url: "https://github.com/o/n/pull/7", state: "OPEN", mergedAt: null,
+    number: 7, url: "https://github.com/o/n/pull/7", state: "OPEN", mergedAt: null, headRefOid: "sha1",
     statusCheckRollup: [
       { __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS" },
       { __typename: "CheckRun", status: "IN_PROGRESS", conclusion: "" },
@@ -70,15 +70,15 @@ test("GitHub: gh pr list by head branch; a pending check run makes the checks pe
   }]);
   const s = { ...ROW, worktree: work, branch: "feat" };
   const prs = await found(checkPrs({ sessions: [s], root, gh: gh.run, fetcher: noFetch, giteaUrls: [], giteaToken: () => undefined, onError: (id, e) => { throw e; } }));
-  expect(prs).toEqual([{ sessionId: s.id, number: 7, url: "https://github.com/o/n/pull/7", state: "open", checks: "pending" }]);
-  expect(gh.calls).toEqual([["gh", "pr", "list", "--repo", "o/n", "--head", "feat", "--state", "all", "--limit", "1", "--json", "number,url,state,mergedAt,statusCheckRollup"]]);
+  expect(prs).toEqual([{ sessionId: s.id, number: 7, url: "https://github.com/o/n/pull/7", state: "open", checks: "pending", headSha: "sha1" }]);
+  expect(gh.calls).toEqual([["gh", "pr", "list", "--repo", "o/n", "--head", "feat", "--state", "all", "--limit", "1", "--json", "number,url,state,mergedAt,statusCheckRollup,headRefOid"]]);
 });
 
 test("GitHub: rollup success / failure / none, merged and closed states", async () => {
   const { root, work } = await repo("git@github.com:o/n.git");
   const s = { ...ROW, worktree: work, branch: "feat" };
   const one = async (pr: Record<string, unknown>) => {
-    const gh = fakeGh([{ number: 3, url: "u", state: "OPEN", mergedAt: null, statusCheckRollup: [], ...pr }]);
+    const gh = fakeGh([{ number: 3, url: "u", state: "OPEN", mergedAt: null, headRefOid: "sha1", statusCheckRollup: [], ...pr }]);
     const r = await found(checkPrs({ sessions: [s], root, gh: gh.run, fetcher: noFetch, giteaUrls: [], giteaToken: () => undefined, onError: (_id, e) => { throw e; } }));
     return r[0];
   };
@@ -95,7 +95,7 @@ test("GitHub: rollup success / failure / none, merged and closed states", async 
 test("GitHub: an unknown check conclusion is an error, not a guess", async () => {
   const { root, work } = await repo("https://github.com/o/n.git");
   const s = { ...ROW, worktree: work, branch: "feat" };
-  const gh = fakeGh([{ number: 3, url: "u", state: "OPEN", mergedAt: null, statusCheckRollup: [{ __typename: "CheckRun", status: "COMPLETED", conclusion: "WEIRD" }] }]);
+  const gh = fakeGh([{ number: 3, url: "u", state: "OPEN", mergedAt: null, headRefOid: "sha1", statusCheckRollup: [{ __typename: "CheckRun", status: "COMPLETED", conclusion: "WEIRD" }] }]);
   const errors: string[] = [];
   const prs = await found(checkPrs({ sessions: [s], root, gh: gh.run, fetcher: noFetch, giteaUrls: [], giteaToken: () => undefined, onError: (id, e) => errors.push(`${id}: ${e.message}`) }));
   expect(prs).toEqual([]);
@@ -162,7 +162,7 @@ test("Gitea: PR by head branch through the API with the instance token, combined
   };
   const s = { ...ROW, worktree: work, branch: "feat" };
   const run = () => found(checkPrs({ sessions: [s], root, gh: async () => { throw new Error("no gh for gitea"); }, fetcher, giteaUrls: ["http://gitea.test:3000"], giteaToken: (host) => (host === "gitea.test:2222" ? "tok" : undefined), onError: (_id, e) => { throw e; } }));
-  expect(await run()).toEqual([{ sessionId: s.id, number: 5, url: "http://gitea.test:3000/o/n/pulls/5", state: "open", checks: "pending" }]);
+  expect(await run()).toEqual([{ sessionId: s.id, number: 5, url: "http://gitea.test:3000/o/n/pulls/5", state: "open", checks: "pending", headSha: "abc" }]);
   expect(urls).toEqual(["http://gitea.test:3000/api/v1/repos/o/n/pulls?state=all&sort=recentupdate&limit=50", "http://gitea.test:3000/api/v1/repos/o/n/commits/abc/status"]);
   expect(auth).toEqual(["token tok", "token tok"]);
   status = "failure";
@@ -271,7 +271,9 @@ function setup(opts: { dbPath?: string; seed?: boolean; dir?: string; now?: numb
         const head = heads.has(s.id) ? heads.get(s.id)! : "h1";
         if (head !== null && want && !want(s.id, head)) continue;
         polled.push(s.id);
-        out.push({ sessionId: s.id, branch: s.branch ?? null, head, pr: prs.get(s.id) ?? null });
+        const pr = prs.get(s.id);
+        // The PR's head commit: as set by the test, else the branch's pushed head.
+        out.push({ sessionId: s.id, branch: s.branch ?? null, head, pr: pr ? { ...pr, headSha: pr.headSha ?? head } : null });
       }
       return out;
     },
@@ -296,8 +298,8 @@ function setup(opts: { dbPath?: string; seed?: boolean; dir?: string; now?: numb
     chatHub.onStatus(id, "connecting", () => snapshot(id));
     chatHub.onStatus(id, "connected", () => snapshot(id));
   };
-  const pr = (id: string, state: PrState["state"], checks: PrState["checks"], number = 7) =>
-    prs.set(id, { sessionId: id, number, url: `https://github.com/o/n/pull/${number}`, state, checks });
+  const pr = (id: string, state: PrState["state"], checks: PrState["checks"], number = 7, headSha: string | null = null) =>
+    prs.set(id, { sessionId: id, number, url: `https://github.com/o/n/pull/${number}`, state, checks, headSha });
   const attention = (id: string) => inbox.item(getSession(db, id)!).attention;
   const sweep = () => { now += QUIET; hub.sweep(); };
   const messages = () => notified.map((n) => n.message);
@@ -518,7 +520,7 @@ test("polls of one session are serialized: an older result never overwrites a ne
     check: (sessions) => { calls.push(sessions[0].id); return new Promise((res) => answers.push(res)); },
     inbox: t.inbox, notify: () => {}, log: () => {},
   });
-  const pollOf = (checks: PrState["checks"]): PrPoll[] => [{ sessionId: CHAT.id, branch: CHAT.branch!, head: "h1", pr: { sessionId: CHAT.id, number: 7, url: "u", state: "open", checks } }];
+  const pollOf = (checks: PrState["checks"]): PrPoll[] => [{ sessionId: CHAT.id, branch: CHAT.branch!, head: "h1", pr: { sessionId: CHAT.id, number: 7, url: "u", state: "open", checks, headSha: "h1" } }];
   const tick = w.tick();
   const now = w.checkNow(CHAT.id);
   await Bun.sleep(0);
@@ -764,7 +766,7 @@ test("S5-R29: a session registered on main whose worktree is on a feature branch
   const gh = async (_cwd: string, ...cmd: string[]) => {
     const head = cmd[cmd.indexOf("--head") + 1];
     heads.push(head);
-    const out = head === "feat" ? [{ number: 7, url: "https://github.com/o/n/pull/7", state: "OPEN", mergedAt: null, statusCheckRollup: rollup }] : [];
+    const out = head === "feat" ? [{ number: 7, url: "https://github.com/o/n/pull/7", state: "OPEN", mergedAt: null, headRefOid: "sha1", statusCheckRollup: rollup }] : [];
     return { code: 0, stdout: JSON.stringify(out), stderr: "" };
   };
   const w = new PrWatch({
@@ -798,7 +800,7 @@ test("S5-R29: a session registered on main whose worktree is on a feature branch
 
 test("S5-R29: a session with no registered branch but a worktree is watched; a detached HEAD skips the poll", async () => {
   const { root, work } = await repo("https://github.com/o/n.git");
-  const gh = fakeGh([{ number: 3, url: "u", state: "OPEN", mergedAt: null, statusCheckRollup: [] }]);
+  const gh = fakeGh([{ number: 3, url: "u", state: "OPEN", mergedAt: null, headRefOid: "sha1", statusCheckRollup: [] }]);
   const s = { ...ROW, worktree: work, branch: null };
   expect(await found(checkPrs({ sessions: [s], root, gh: gh.run, fetcher: noFetch, giteaUrls: [], giteaToken: () => undefined, onError: (_id, e) => { throw e; } })))
     .toMatchObject([{ number: 3 }]);
@@ -855,4 +857,96 @@ test("S5-R29 deploy: adding the branch column re-arms the seed, so old rows and 
   t.tick(2 * MIN);
   await t.watch.tick();
   expect(t.messages()).toEqual(["CI failed on PR #9"]);
+});
+
+// ---------------------------------------------------------------- Hotfix 2: a new head on the same PR
+
+test("a failure on a new head of the same PR is a new failure: ci-failed after the run, notified again", async () => {
+  const t = setup();
+  t.pr(CHAT.id, "open", "failure");
+  await t.watch.tick(); // head h1 failed
+  await t.feed(CHAT.id, [started("r1")]);
+  t.tick(30_000);
+  t.heads.set(CHAT.id, "h2"); // the run pushed a fix; CI fails again on h2
+  await t.feed(CHAT.id, [completed("r1")]);
+  expect(getSessionPr(t.db, CHAT.id)).toMatchObject({ checks: "failure", head_sha: "h2" });
+  expect(t.attention(CHAT.id)).toMatchObject({ section: "needs_you", reason: "ci-failed" });
+  expect(t.messages()).toEqual(["CI failed on PR #7", "CI failed on PR #7"]);
+});
+
+test("a new head with no check runs yet, after the PR had checks: pending (held) until its checks report", async () => {
+  const t = setup();
+  t.pr(CHAT.id, "open", "failure");
+  await t.watch.tick(); // head h1 failed (notified)
+  await t.feed(CHAT.id, [started("r1")]);
+  t.tick(30_000);
+  t.heads.set(CHAT.id, "h2");
+  t.pr(CHAT.id, "open", "none"); // GitHub has not registered h2's check runs yet
+  await t.feed(CHAT.id, [completed("r1")]);
+  expect(getSessionPr(t.db, CHAT.id)).toMatchObject({ checks: "pending", head_sha: "h2" });
+  expect(t.attention(CHAT.id)).toMatchObject({ section: "working", reason: "pr-checks" });
+  t.sweep();
+  t.sweep();
+  t.tick(MIN);
+  await t.watch.tick(); // still none, inside the grace: still pending
+  expect(t.watch.pending(CHAT.id)).toBe(true);
+  t.pr(CHAT.id, "open", "failure");
+  t.tick(MIN);
+  await t.watch.tick();
+  t.sweep();
+  t.sweep();
+  expect(t.attention(CHAT.id)).toMatchObject({ section: "needs_you", reason: "ci-failed" });
+  expect(t.messages()).toEqual(["CI failed on PR #7", "CI failed on PR #7"]); // no "finished" for the held run
+});
+
+test("a new head whose checks never appear is released after PR_CHECKS_GRACE_MS", async () => {
+  const t = setup();
+  t.pr(CHAT.id, "open", "success");
+  await t.watch.tick();
+  t.heads.set(CHAT.id, "h2");
+  t.pr(CHAT.id, "open", "none");
+  await t.feed(CHAT.id, [started("r1"), completed("r1")]);
+  expect(t.watch.pending(CHAT.id)).toBe(true);
+  t.tick(PR_CHECKS_GRACE_MS);
+  await t.watch.tick();
+  expect(getSessionPr(t.db, CHAT.id)).toMatchObject({ checks: "none", head_sha: "h2" });
+  expect(t.logs.some((l) => l.includes("no checks"))).toBe(true);
+  t.sweep();
+  expect(t.messages()).toEqual(["Claude finished working"]);
+});
+
+test("a PR that never had checks is not held on a new head", async () => {
+  const t = setup();
+  t.pr(CHAT.id, "open", "none");
+  await t.watch.tick();
+  t.heads.set(CHAT.id, "h2");
+  await t.feed(CHAT.id, [started("r1"), completed("r1")]);
+  expect(t.watch.pending(CHAT.id)).toBe(false);
+});
+
+test("an open PR with settled checks is polled on the next tick once the branch's pushed head moves", async () => {
+  const t = setup();
+  t.pr(TMUX.id, "open", "success");
+  await t.watch.tick();
+  t.polled.length = 0;
+  t.tick(2 * MIN);
+  await t.watch.tick();
+  expect(t.polled).not.toContain(TMUX.id); // settled, head unchanged: 10-min cadence
+  t.heads.set(TMUX.id, "h2"); // a tmux agent pushed (no checkNow)
+  t.pr(TMUX.id, "open", "pending");
+  t.tick(2 * MIN);
+  await t.watch.tick();
+  expect(t.polled).toContain(TMUX.id);
+  expect(t.attention(TMUX.id)).toMatchObject({ section: "working", reason: "pr-checks" });
+});
+
+test("a row from before the head column adopts the PR head silently (no second notification)", async () => {
+  const t = setup();
+  t.pr(TMUX.id, "open", "failure");
+  await t.watch.tick();
+  t.db.run("UPDATE session_prs SET head_sha=NULL WHERE session_id=?", [TMUX.id]);
+  t.tick(PR_SETTLED_POLL_MS);
+  await t.watch.tick();
+  expect(getSessionPr(t.db, TMUX.id)).toMatchObject({ checks: "failure", head_sha: "h1" });
+  expect(t.messages()).toEqual(["CI failed on PR #7"]);
 });
