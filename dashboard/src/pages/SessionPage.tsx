@@ -7,11 +7,12 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, ApiError } from "../api";
 import { Composer } from "../components/chat/Composer";
 import { MessageList } from "../components/chat/MessageList";
+import { Switchers } from "../components/chat/Switchers";
 import { EmptyState, RowsSkeleton } from "../components/primitives";
 import { profileFor } from "../newSession";
 import { useStore } from "../store";
 import { terminalTabUrl } from "../terminalRoute";
-import { activeRun, applyThreadEvent, mergeSnapshot, queuedRunIds } from "../threadView";
+import { activeRun, applyNotice, applyThreadEvent, mergeSnapshot, queuedRunIds } from "../threadView";
 import { useEventStream } from "../useEventStream";
 
 // Same lazy import as TerminalPage: xterm stays in its own chunk.
@@ -49,6 +50,7 @@ function ChatPage({ id }: { id: string }) {
     afterSeq: () => threadRef.current!.lastSeq,
     onSnapshot: (m) => setThread((t) => (t ? mergeSnapshot(t, m) : t)),
     onThread: (e) => setThread((t) => (t ? applyThreadEvent(t, e) : t)),
+    onNotice: (item) => setThread((t) => (t ? applyNotice(t, item) : t)),
   });
 
   // Opening the page marks the thread seen; so does a run ending while the user looks at it, and coming back to
@@ -135,7 +137,10 @@ function ChatPage({ id }: { id: string }) {
           </div>
           {/* Above the mobile bottom bar (h-16); from lg there is none. */}
           <div className="sticky bottom-16 z-10 -mx-4 mt-4 border-t bg-background/95 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6 lg:bottom-0 lg:-mx-10 lg:px-10">
-            <Composer running={running} onSend={async (text) => { await api.sendMessage(id, text); }} onStop={() => api.interrupt(id)} />
+            <Composer
+              running={running} onSend={async (text) => { await api.sendMessage(id, text); }} onStop={() => api.interrupt(id)}
+              toolbar={<Switchers sessionId={id} thread={thread} />}
+            />
           </div>
         </>
       )}

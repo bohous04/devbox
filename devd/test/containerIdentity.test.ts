@@ -241,6 +241,16 @@ test("shared S: clipboard and notify → 403 even for its own session; lease onl
   expect(await denied(call(`/api/accounts/lease?client=mac`))).toBe(true);
 });
 
+test("shared S: thread read (devbox_thread_read) only for its own session, a foreign one is 403", async () => {
+  const { call } = setup();
+  const own = await call(`/api/sessions/${S}/thread?limit=5`, { headers: { "x-devbox-session": S } });
+  expect(own.status).not.toBe(403);
+  expect(await denied(call(`/api/sessions/${T}/thread?limit=5`, { headers: { "x-devbox-session": S } }))).toBe(true);
+  expect(await denied(call(`/api/sessions/${T}/thread`))).toBe(true);
+  // Only the read: the chat commands stay off limits for the container.
+  expect(await denied(call(`/api/sessions/${S}/thread/messages`, { json: { text: "x" } }))).toBe(true);
+});
+
 test("shared S: /api/open → 403 even for its own session (launching a .command on the Mac)", async () => {
   const { call } = setup();
   expect(await denied(call("/api/open", { json: { sessionId: S, path: "/workspace/x.command" } }))).toBe(true);

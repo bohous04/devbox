@@ -53,7 +53,8 @@ function terminal(n: ThreadSnapshot, seq: number, ts: number, runId: string, sta
 function dispatch(n: ThreadSnapshot, { seq, ts, event: ev }: LoggedEvent) {
   switch (ev.type) {
     case "thread.native":
-      n.native = { harness: ev.harness, nativeThreadId: ev.nativeThreadId, account: ev.account, model: ev.model };
+      // A resumed Claude thread is announced before the CLI names its model: null keeps the harness's known one (as in ThreadStore).
+      n.native = { harness: ev.harness, nativeThreadId: ev.nativeThreadId, account: ev.account, model: ev.model ?? (n.native?.harness === ev.harness ? n.native.model : null) };
       return;
     case "run.queued":
       insertRun(n, ev.runId, { origin: "user", status: "queued", nativeThreadId: null, model: null, queuedAt: ts, startedAt: null });
@@ -137,6 +138,8 @@ function dispatch(n: ThreadSnapshot, { seq, ts, event: ev }: LoggedEvent) {
       terminal(n, seq, ts, ev.runId, "interrupted", { error: null });
       return;
     case "run.failed":
+      // resume-failed for a run id never announced is a switch's: devd's own notice says it (as in ThreadStore).
+      if (ev.error === "resume-failed" && !n.runs.some((r) => r.runId === ev.runId)) return;
       terminal(n, seq, ts, ev.runId, "failed", { error: ev.error });
       insertItem(n, seq, ts, { runId: ev.runId, itemId: null, kind: "notice", text: ev.error, status: "done" });
       return;
@@ -174,6 +177,13 @@ export function mergeSnapshot(t: ThreadSnapshot, m: { afterSeq: number; snapshot
     else runs.push(r);
   }
   return { lastSeq: Math.max(t.lastSeq, s.lastSeq), seenSeq: s.seenSeq, items, runs, pending: s.pending, background: s.background, native: s.native };
+}
+
+/** A devd notice from the stream (`thread-notice`, devd's ThreadStore.addNotice): it has an item id `notice:<n>` and no
+ *  seq of its own, so lastSeq stays; the same notice again (live and in a replay snapshot) is not added twice. */
+export function applyNotice(t: ThreadSnapshot, item: ThreadItem): ThreadSnapshot {
+  if (t.items.some((i) => i.itemId === item.itemId)) return t;
+  return { ...t, items: [...t.items, item] };
 }
 
 /** The run the Stop button interrupts. */

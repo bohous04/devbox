@@ -5,24 +5,25 @@ export const SOLO = "claudeSolo";
 
 // Mirrors devd/src/agents.ts (the dashboard is deliberately separated from devd sources, see
 // SessionLive in api.ts) — only the fields the dashboard needs: label for the select,
-// short for the badge/heading, yolo for the option caption, proxy for InstaBox (usesProxy
+// short for the badge/heading, yolo for the option caption, runtime for chat (the harness the
+// chat bridge runs, and so the models a chat session offers), proxy for InstaBox (usesProxy
 // in devd/src/agents.ts — proxy profiles go through CLIProxyAPI/OpenRouter and are not
 // reachable from VM v1, the server rejects them on InstaBox with 400). The order is the UI order,
 // same as AGENT_IDS in devd (default first, then proxy variants, then standalone CLIs).
 // Parity with devd is guarded by a test in newSession.test.ts that compares both tables directly —
 // a silent drift could not be detected otherwise, because production code must not import
 // devd here (the dashboard is a vite bundle for the browser, devd is a server).
-export interface AgentProfile { label: string; short: string; yolo: boolean; proxy: boolean }
+export interface AgentProfile { label: string; short: string; yolo: boolean; proxy: boolean; runtime: "claude" | "codex" | "grok" | "agy" }
 
 export const AGENT_PROFILES: Record<AgentName, AgentProfile> = {
-  claude:        { label: "Claude Code",        short: "Claude",      yolo: true, proxy: false },
-  "claude-gpt":  { label: "Claude Code + GPT",  short: "Claude+GPT",  yolo: true, proxy: true },
-  "claude-grok": { label: "Claude Code + Grok", short: "Claude+Grok", yolo: true, proxy: true },
-  "claude-gemini": { label: "Claude Code + Gemini", short: "Claude+Gemini", yolo: true, proxy: true },
-  "claude-openrouter": { label: "Claude Code + OpenRouter", short: "Claude+OR", yolo: true, proxy: true },
-  codex:         { label: "Codex",              short: "Codex",       yolo: true, proxy: false },
-  grok:          { label: "Grok Build",         short: "Grok",        yolo: true, proxy: false },
-  antigravity:   { label: "Antigravity",        short: "Antigravity", yolo: true, proxy: false },
+  claude:        { label: "Claude Code",        short: "Claude",      yolo: true, proxy: false, runtime: "claude" },
+  "claude-gpt":  { label: "Claude Code + GPT",  short: "Claude+GPT",  yolo: true, proxy: true, runtime: "claude" },
+  "claude-grok": { label: "Claude Code + Grok", short: "Claude+Grok", yolo: true, proxy: true, runtime: "claude" },
+  "claude-gemini": { label: "Claude Code + Gemini", short: "Claude+Gemini", yolo: true, proxy: true, runtime: "claude" },
+  "claude-openrouter": { label: "Claude Code + OpenRouter", short: "Claude+OR", yolo: true, proxy: true, runtime: "claude" },
+  codex:         { label: "Codex",              short: "Codex",       yolo: true, proxy: false, runtime: "codex" },
+  grok:          { label: "Grok Build",         short: "Grok",        yolo: true, proxy: false, runtime: "grok" },
+  antigravity:   { label: "Antigravity",        short: "Antigravity", yolo: true, proxy: false, runtime: "agy" },
 };
 
 export const AGENT_IDS = Object.keys(AGENT_PROFILES) as AgentName[];
@@ -43,10 +44,12 @@ export function instaboxAgentBlock(agent: AgentName): string | null {
 }
 
 // Mirrors chatRuntimeBlock from devd/src/agents.ts: the chat bridge speaks only to the Claude and Codex
-// harnesses and runs only in VPS containers (devd refuses anything else with this same message).
+// harnesses (the proxy profiles run Claude Code) and runs only in VPS containers (devd refuses anything else
+// with this same message).
 export function chatRuntimeBlock(agent: AgentName, host: "vps" | "instabox"): string | null {
   if (host === "instabox") return "Chat sessions run only on the VPS";
-  if (agent !== "claude" && agent !== "codex") return `${AGENT_PROFILES[agent].label} is not available in chat sessions yet`;
+  const { runtime, label } = AGENT_PROFILES[agent];
+  if (runtime !== "claude" && runtime !== "codex") return `${label} is not available in chat sessions yet`;
   return null;
 }
 

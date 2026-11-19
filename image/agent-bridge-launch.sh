@@ -21,14 +21,36 @@ case "${DEVD_AGENT:-}" in
       if [ -n "$pool_dir" ]; then export CLAUDE_CONFIG_DIR="$pool_dir"; fi
     fi
     ;;
+  claude-gpt|claude-grok|claude-gemini|claude-openrouter)
+    # Claude Code against a third-party upstream: no Anthropic account, so no lease (agent-launch takes none either);
+    # the image's CLAUDE_CONFIG_DIR stays. `agent-bridge serve` turns the DEVD_* inputs into the profile env.
+    ;;
   codex)
     # Installed next to this script, as for `co`.
     . "$(dirname -- "${BASH_SOURCE[0]}")/codex-account-env.sh"
     # Exports CODEX_HOME for a standalone account; the default account keeps the image's CODEX_HOME.
+    codex_home_before=${CODEX_HOME:-}
     codex_account_prepare || { echo "agent-bridge-launch: Codex account preparation failed" >&2; exit 1; }
+    # Chat sessions run on a per-account shadow home that shares threads/history/sqlite with every account
+    # (so an account switch is a restart with thread/resume); auth.json stays the account's own, linked in place.
+    codex_root=${DEVD_CODEX_ACCOUNTS_DIR:-/home/dev/.codex-accounts}
+    codex_id=${DEVD_CODEX_ACCOUNT_ID:-}
+    if [ -z "$codex_id" ]; then
+      if [ "${CODEX_HOME:-}" = "$codex_home_before" ]; then
+        codex_id=default # codex_account_prepare left CODEX_HOME alone: the default account
+      elif [ "$(dirname -- "$CODEX_HOME")" = "$codex_root" ]; then
+        codex_id=$(basename -- "$CODEX_HOME")
+      else
+        echo "agent-bridge-launch: cannot tell the Codex account from CODEX_HOME=$CODEX_HOME" >&2
+        exit 1
+      fi
+    fi
+    codex_shadow=$(agent-bridge codex-home "$codex_id") \
+      || { echo "agent-bridge-launch: Codex shadow home for the account failed" >&2; exit 1; }
+    export CODEX_HOME=$codex_shadow CODEX_SQLITE_HOME=$codex_shadow/sqlite DEVD_CODEX_ACCOUNT_ID=$codex_id
     ;;
   *)
-    echo "agent-bridge-launch: unknown DEVD_AGENT \"${DEVD_AGENT:-}\" (chat sessions support claude and codex)" >&2
+    echo "agent-bridge-launch: unknown DEVD_AGENT \"${DEVD_AGENT:-}\" (chat sessions support claude, codex and the claude proxy profiles)" >&2
     exit 2
     ;;
 esac

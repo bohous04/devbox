@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -70,3 +70,62 @@ test("a long run resets the failure counter and the delay", () => {
   const r = launch([[1, 0], [1, 0], [1, 0], [1, 3], [1, 0], [1, 0], [0, 0]]);
   expect(r).toMatchObject({ status: 0, runs: 7, delays: [2, 4, 8, 2, 2, 4] });
 }, 15_000);
+
+test("a proxy profile starts serve on the image's claude home (serve translates the profile env)", () => {
+  writeFileSync(join(dir, "agent-bridge"), `#!/usr/bin/env bash\necho "$DEVD_AGENT|$CLAUDE_CONFIG_DIR" > "${dir}/env"\nexit 0\n`);
+  chmodSync(join(dir, "agent-bridge"), 0o755);
+  const p = Bun.spawnSync(["bash", LAUNCHER], {
+    env: { PATH: `${dir}:/usr/bin:/bin`, DEVD_AGENT: "claude-gpt", CLAUDE_CONFIG_DIR: "/home/dev/.claude" },
+    stderr: "pipe",
+  });
+  expect(p.stderr.toString()).toBe("");
+  expect(p.exitCode).toBe(0);
+  expect(readFileSync(join(dir, "env"), "utf8").trim()).toBe("claude-gpt|/home/dev/.claude");
+});
+
+test("codex chat runs on the shadow home reported by `agent-bridge codex-home`", () => {
+  writeFileSync(
+    join(dir, "agent-bridge"),
+    `#!/usr/bin/env bash
+if [ "$1" = codex-home ]; then echo "/shadow/$2"; exit 0; fi
+echo "$CODEX_HOME|$CODEX_SQLITE_HOME|$DEVD_CODEX_ACCOUNT_ID|$DEVD_CODEX_REMOTE" > "${dir}/env"
+exit 0
+`,
+  );
+  chmodSync(join(dir, "agent-bridge"), 0o755);
+  const p = Bun.spawnSync(["bash", LAUNCHER], {
+    env: { PATH: `${dir}:/usr/bin:/bin`, DEVD_AGENT: "codex", CODEX_HOME: "/home/dev/.codex", DEVD_CODEX_ACCOUNTS_DIR: dir },
+    stderr: "pipe",
+  });
+  expect(p.stderr.toString()).toBe("");
+  expect(p.exitCode).toBe(0);
+  expect(readFileSync(join(dir, "env"), "utf8").trim()).toBe("/shadow/default|/shadow/default/sqlite|default|");
+});
+
+test.skipIf(Bun.spawnSync(["python3", "-c", "import tomllib"]).exitCode !== 0)("codex chat derives a standalone account from CODEX_HOME under DEVD_CODEX_ACCOUNTS_DIR", () => {
+  const id = "11111111-2222-3333-4444-555555555555";
+  mkdirSync(join(dir, id));
+  writeFileSync(join(dir, id, "auth.json"), "{}");
+  mkdirSync(join(dir, "default-home"));
+  writeFileSync(
+    join(dir, "agent-bridge"),
+    `#!/usr/bin/env bash
+if [ "$1" = codex-home ]; then echo "/shadow/$2"; exit 0; fi
+echo "$CODEX_HOME|$CODEX_SQLITE_HOME|$DEVD_CODEX_ACCOUNT_ID" > "${dir}/env"
+exit 0
+`,
+  );
+  chmodSync(join(dir, "agent-bridge"), 0o755);
+  const p = Bun.spawnSync(["bash", LAUNCHER], {
+    env: {
+      PATH: `${dir}:${process.env.PATH}`,
+      DEVD_AGENT: "codex",
+      CODEX_HOME: join(dir, "default-home"),
+      DEVD_CODEX_ACCOUNTS_DIR: dir,
+      DEVD_CODEX_ACCOUNT_ID: id,
+    },
+    stderr: "pipe",
+  });
+  expect(p.stderr.toString()).toBe("");
+  expect(readFileSync(join(dir, "env"), "utf8").trim()).toBe(`/shadow/${id}|/shadow/${id}/sqlite|${id}`);
+});

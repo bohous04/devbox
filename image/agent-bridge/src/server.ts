@@ -23,7 +23,12 @@ interface Client {
   commands: Promise<void>;
 }
 
-export function startServer(o: { socketPath: string; log: EventLog; onCommand: CommandHandler; logError?: (msg: string) => void }): {
+export interface Handshake {
+  version: string;
+  awaitingTarget: boolean;
+}
+
+export function startServer(o: { socketPath: string; log: EventLog; onCommand: CommandHandler; handshake: () => Handshake; logError?: (msg: string) => void }): {
   publish(e: BridgeEvent): LoggedEvent;
   close(): Promise<void>;
 } {
@@ -78,7 +83,7 @@ export function startServer(o: { socketPath: string; log: EventLog; onCommand: C
     for (const e of c.pending) if (e.seq > replayed) send(c, { t: "event", e });
     c.pending = [];
     c.replaying = false;
-    send(c, { t: "ready", lastSeq: o.log.lastSeq() });
+    send(c, { t: "ready", lastSeq: o.log.lastSeq(), ...o.handshake() });
   };
 
   const listener = Bun.listen<Client>({

@@ -3,11 +3,15 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { serve, type Bridge, type HarnessOpenOptions } from "../../image/agent-bridge/src/serve";
-import type { HarnessSession } from "../../image/agent-bridge/src/claudeSession";
+import { CLAUDE_CAPABILITIES, ResumeFailedError, type HarnessSession } from "../../image/agent-bridge/src/claudeSession";
 import type { BridgeEvent } from "../../image/agent-bridge/src/events";
+import type { SwitchTarget } from "../../image/agent-bridge/src/protocol";
 import { applyThreadEvent, emptyThread } from "../../dashboard/src/threadView";
 import type { ThreadSnapshot } from "../../shared/thread";
-import { BridgeLinks } from "../src/bridgeLink";
+import { BridgeLinks, type BridgeHandshake } from "../src/bridgeLink";
+import { ChatSwitch } from "../src/chatSwitch";
+import { ACCOUNT_POOL_DEFAULTS } from "../src/config";
+import { insertSession, openDb } from "../src/db";
 import { ThreadStore } from "../src/threadStore";
 
 // The seam no per-package test crosses: the real bridge (`serve`, with a scripted harness) → its unix socket →
@@ -44,7 +48,11 @@ function scriptedHarness() {
         async answer(requestId, answer) {
           o.emit({ type: "request.resolved", requestId, answer, by: "user" });
         },
+        async setModel() {},
+        async injectItems() {},
+        capabilities: () => CLAUDE_CAPABILITIES,
         async close() { end({}); },
+        ready: Promise.resolve(),
         ended,
       };
     },
@@ -59,7 +67,7 @@ test("a normal exchange: devd's store and the dashboard's copy agree, user messa
   const h = scriptedHarness();
   const bridge: Bridge = await serve({
     bridgeDir: join(root, "bridge"), socketPath: join(ctl, "agent.sock"), harness: "claude", account: null, model: null,
-    openHarness: (o) => h.open(o), logError: () => {},
+    openHarness: (o) => h.open(o), resolveTarget: (t) => t, logError: () => {},
   });
   const store = ThreadStore.open(root, ID);
   let client: ThreadSnapshot = emptyThread();
@@ -101,4 +109,100 @@ test("a normal exchange: devd's store and the dashboard's copy agree, user messa
     ["assistant", "Fixed the code.", "done"],
   ]);
   expect(stored.runs).toEqual([expect.objectContaining({ runId, origin: "user", status: "completed", harness: "claude" })]);
+});
+
+/** A harness whose resume of `deadThread` fails, as Codex does for a thread outside the shared home. */
+function resumeFailingHarness(deadThread: string) {
+  const h = {
+    opens: [] as (string | null)[],
+    turns: [] as string[],
+    open(o: HarnessOpenOptions): HarnessSession {
+      h.opens.push(o.resume);
+      let end: (r: { error?: string }) => void = () => {};
+      const ended = new Promise<{ error?: string }>((r) => (end = r));
+      const dead = o.resume === deadThread;
+      const ready = dead ? Promise.reject(new ResumeFailedError(`thread/resume ${deadThread} failed`)) : Promise.resolve();
+      ready.catch(() => {});
+      if (dead) end({ error: "resume failed" });
+      return {
+        async startTurn(runId, text, origin) {
+          h.turns.push(text);
+          o.emit({ type: "run.started", runId, origin, nativeThreadId: null, model: null });
+          o.emit({ type: "thread.native", harness: "claude", nativeThreadId: "thread-fresh", account: null, model: "claude-opus-5-5", caps: CLAUDE_CAPABILITIES });
+          o.emit({ type: "run.completed", runId, nativeThreadId: "thread-fresh", usage: null, costUsd: null });
+        },
+        async interrupt() {},
+        async answer() {},
+        async setModel() {},
+        async injectItems() {},
+        capabilities: () => CLAUDE_CAPABILITIES,
+        async close() { end({}); },
+        ready,
+        ended,
+      };
+    },
+  };
+  return h;
+}
+
+test("C1 end to end: a thread the restarted bridge cannot resume becomes a fresh thread with the conversation handed over", async () => {
+  const root = mkdtempSync(join(tmpdir(), "contract-"));
+  const ctl = join(root, "ctl", ID);
+  mkdirSync(ctl, { recursive: true });
+  const bridgeDir = join(root, "bridge");
+  const db = openDb(":memory:");
+  insertSession(db, {
+    id: ID, folder: "acme", project: "a", repo: "b", container: ID, port_base: 40100, status: "running", solo: 0,
+    created_at: 0, last_active_at: 0, important: 0, agent: "claude", runtime: "chat",
+  });
+  const store = ThreadStore.open(root, ID);
+  const handshakes: BridgeHandshake[] = [];
+  let sw!: ChatSwitch;
+  const links = new BridgeLinks({
+    controlDir: () => ctl, store: () => store,
+    onEvent: (id, e) => sw.onEvent(id, e),
+    onStatus: () => {}, onBehind: () => {},
+    onHandshake: (id, h) => { handshakes.push(h); sw.onHandshake(id, h); },
+    retryMs: 20, log: () => {},
+  });
+  sw = new ChatSwitch({
+    db, links, threads: () => store, claudePool: () => ACCOUNT_POOL_DEFAULTS,
+    codexAccounts: { list: () => ({ accounts: [] }), select: () => { throw new Error("no Codex here"); } },
+    proxyInputs: async () => { throw new Error("no proxy here"); },
+    now: () => Date.now(), log: () => {}, resendDelaysMs: [20],
+  });
+  const opts = { bridgeDir, socketPath: join(ctl, "agent.sock"), harness: "claude" as const, account: null, model: null, resolveTarget: (t: SwitchTarget) => t, logError: () => {} };
+  cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => store.close(), () => links.drop(ID), () => sw.drop(ID));
+
+  // The first bridge has a conversation on thread-1.
+  const first = scriptedHarness();
+  const b1: Bridge = await serve({ ...opts, openHarness: (o) => first.open(o) });
+  links.ensure(ID);
+  await waitFor(() => links.status(ID) === "connected", "link");
+  first.emit({ type: "thread.native", harness: "claude", nativeThreadId: "thread-1", account: null, model: "claude-opus-5-5", caps: CLAUDE_CAPABILITIES });
+  await links.send(ID, { kind: "startTurn", text: "remember the number 42" });
+  first.emit({ type: "message.final", runId: first.runId!, itemId: "m1", role: "assistant", text: "Noted: 42." });
+  first.emit({ type: "run.completed", runId: first.runId!, nativeThreadId: "thread-1", usage: null, costUsd: null });
+  await waitFor(() => store.snapshot().runs[0]?.status === "completed", "first run");
+  await b1.close();
+
+  // The restarted bridge cannot resume thread-1: it stays up, devd re-plans and sends the fresh target with the handoff.
+  const second = resumeFailingHarness("thread-1");
+  const b2: Bridge = await serve({ ...opts, openHarness: (o) => second.open(o) });
+  cleanups.push(() => b2.close());
+  await waitFor(() => second.opens.length === 2, "the fresh thread devd asked for", 3000);
+  expect(second.opens).toEqual(["thread-1", null]);
+  expect(handshakes.at(-1)).toEqual({ version: expect.any(String), awaitingTarget: expect.any(Boolean) });
+  expect(handshakes.every((h) => h.version !== null)).toBe(true);
+  expect(store.providerThread("claude")).toMatchObject({ nativeThreadId: "thread-1", resumeFailed: true });
+
+  await links.send(ID, { kind: "startTurn", text: "which number?" });
+  await waitFor(() => second.turns.length === 1, "the handed-over turn");
+  expect(second.turns[0]).toContain("[user] remember the number 42");
+  expect(second.turns[0]).toContain("[assistant] Noted: 42.");
+  expect(second.turns[0].endsWith("User message:\nwhich number?")).toBe(true);
+  const notices = store.snapshot().items.filter((i) => i.kind === "notice").map((i) => i.text);
+  expect(notices.filter((t) => t.includes("resume"))).toEqual(["Could not resume the earlier claude thread; started a fresh one · context handed over (2 items)"]);
+  const status = await Promise.race([b2.closed, Bun.sleep(20).then(() => "open")]);
+  expect(status).toBe("open");
 });

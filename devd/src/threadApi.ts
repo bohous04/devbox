@@ -2,6 +2,7 @@ import type { Context, Hono } from "hono";
 import type { Database } from "bun:sqlite";
 import type { LoggedEvent } from "../../shared/thread";
 import { AgentDisconnected, CommandFailed, CommandTimeout, type BridgeLinks } from "./bridgeLink";
+import { SwitchRefused, type ChatSwitch, type SwitchRequest } from "./chatSwitch";
 import { getSession, type SessionRow } from "./db";
 import type { BusTopic, EventBus } from "./eventBus";
 import type { Inbox } from "./sessionInbox";
@@ -18,6 +19,8 @@ export interface ThreadApiDeps {
   threads: (id: string) => ThreadStore;
   bus: EventBus;
   inbox: Inbox;
+  /** Model, account and harness switching (chatSwitch.ts); without it those routes answer 503. */
+  switcher?: Pick<ChatSwitch, "switch" | "target">;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -61,8 +64,8 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
   app.get("/api/sessions/:id/thread", (c) => {
     const r = chat(c, c.req.param("id"));
     if ("res" in r) return r.res;
-    const opts: { afterSeq?: number; limit?: number } = {};
-    for (const key of ["afterSeq", "limit"] as const) {
+    const opts: { afterSeq?: number; beforeSeq?: number; limit?: number } = {};
+    for (const key of ["afterSeq", "beforeSeq", "limit"] as const) {
       const raw = c.req.query(key);
       if (raw === undefined) continue;
       const n = nonNegInt(raw);
@@ -108,6 +111,37 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
     return c.body(null, 202);
   });
 
+  /** Model, account and harness switches: 202 {kind} once the bridge confirmed (or `unchanged: true` when there was
+   *  nothing to switch), 409 `run-active` while a run is active or queued, 400 for a bad request. */
+  const switchRoute = (what: string, parse: (body: Record<string, unknown>) => SwitchRequest | string) =>
+    app.post(`/api/sessions/:id/thread/${what}`, async (c) => {
+      const id = c.req.param("id");
+      const r = chat(c, id);
+      if ("res" in r) return r.res;
+      if (!d.switcher) return c.json({ error: "switching is not configured" }, 503);
+      const body = await c.req.json().catch(() => null);
+      const req = isRecord(body) ? parse(body) : "body must be a JSON object";
+      if (typeof req === "string") return c.json({ error: req }, 400);
+      try { return c.json(await d.switcher.switch(id, req), 202); }
+      catch (e) {
+        if (e instanceof SwitchRefused) return c.json(e.detail === undefined ? { error: e.code } : { error: e.code, message: e.detail }, e.status);
+        return commandError(c, e);
+      }
+    });
+  app.get("/api/sessions/:id/thread/target", (c) => {
+    const id = c.req.param("id");
+    const r = chat(c, id);
+    if ("res" in r) return r.res;
+    if (!d.switcher) return c.json({ error: "switching is not configured" }, 503);
+    return c.json(d.switcher.target(id));
+  });
+  const nonEmpty = (v: unknown): v is string => typeof v === "string" && v !== "";
+  switchRoute("model", (b) => (nonEmpty(b.model) ? { kind: "model", model: b.model } : "model must be a non-empty string"));
+  // No accountId: the pool's choice.
+  switchRoute("account", (b) => (b.accountId === undefined ? { kind: "account" }
+    : nonEmpty(b.accountId) ? { kind: "account", accountId: b.accountId } : "accountId must be a non-empty string"));
+  switchRoute("harness", (b) => (nonEmpty(b.agent) ? { kind: "harness", agent: b.agent } : "agent must be a non-empty string"));
+
   app.post("/api/sessions/:id/thread/seen", async (c) => {
     const id = c.req.param("id");
     const r = chat(c, id);
@@ -125,7 +159,8 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
   app.get("/api/inbox", (c) => c.json({ items: d.inbox.list() }));
 
   /** Server-sent events: `inbox` (InboxItem, coalesced per session by Inbox), `ping` every 25 s and, with
-   *  `?session=<id>`, `thread` (LoggedEvent, `id: <seq>`) for that chat session only.
+   *  `?session=<id>`, `thread` (LoggedEvent, `id: <seq>`) and `thread-notice` (a devd notice, ThreadItem with item id
+   *  `notice:<n>`, no id) for that chat session only.
    *
    *  Replay contract (dashboard): with `Last-Event-ID: <seq>` (an EventSource reconnect) or `?afterSeq=<seq>` (first
    *  connect after loading the thread at that seq; the header wins when both are present) the stream first sends
@@ -171,6 +206,8 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
         // Subscribed BEFORE the store is read, so nothing published in between is lost.
         const unsubscribe = d.bus.subscribe(topics, (topic, data) => {
           if (topic === "inbox") { send(sseFrame("inbox", data)); return; }
+          // A devd notice (ThreadStore.addNotice) has no seq of its own: no id, so Last-Event-ID stays the bridge's.
+          if (isRecord(data) && "notice" in data) { send(sseFrame("thread-notice", data.notice)); return; }
           const e = data as LoggedEvent;
           if (e.seq <= sentSeq) return;
           sentSeq = e.seq;

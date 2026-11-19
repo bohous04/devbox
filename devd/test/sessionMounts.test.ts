@@ -7,3 +7,9 @@ test("sessions mount /etc/devd/mac-mcp read-only at /opt/mac-mcp", () => {
   const src = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
   expect(src).toContain("/etc/devd/mac-mcp:/opt/mac-mcp:ro");
 });
+
+test("only chat sessions mount the shared Codex v2 volume", async () => {
+  const { codexV2Mounts } = await import("../src/sessions");
+  expect(codexV2Mounts("chat")).toEqual(["codex-v2-shared:/home/dev/.codex-v2"]);
+  expect(codexV2Mounts("tmux")).toEqual([]);
+});

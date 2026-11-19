@@ -1,22 +1,37 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { BackgroundWork, LoggedEvent, PendingRequest, RunRow, ThreadItem, ThreadSnapshot } from "../../shared/thread";
+import type { BackgroundWork, Capabilities, LoggedEvent, PendingRequest, RunRow, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
 const TERMINAL: ReadonlySet<string> = new Set(["completed", "interrupted", "failed"]);
+
+/** A native thread this session has used, kept so a later switch back to its harness can resume it. */
+export interface ProviderThread {
+  harness: string;
+  account: string | null;
+  nativeThreadId: string;
+  /** The last run this thread has seen; null until a run started in it. */
+  coveredThroughRun: string | null;
+  lastUsedAt: number;
+  /** null until the bridge reports capabilities with `thread.native`. */
+  caps: Capabilities | null;
+  /** Resuming it failed; cleared when the bridge announces the thread again. */
+  resumeFailed: boolean;
+}
 
 /** Per-session conversation store: `<root>/_threads/<id>.sqlite`. Conversation data stays out of the
  *  main devd DB on purpose. Items are ordered by their own `id`; `seq` is the log seq of the event that created them (one event can create
  *  several items); `updated_seq`
  *  is the seq of their last change, so `snapshot({afterSeq})` also returns items that kept streaming. */
 export class ThreadStore {
-  private constructor(private db: Database) {}
+  private constructor(private db: Database, private onNotice: (item: ThreadItem) => void) {}
 
   static path(root: string, sessionId: string): string {
     return join(root, "_threads", `${sessionId}.sqlite`);
   }
 
-  static open(root: string, sessionId: string): ThreadStore {
+  /** `onNotice`: a notice devd added (addNotice), for the session's SSE stream (index.ts publishes it). */
+  static open(root: string, sessionId: string, opts: { onNotice?: (item: ThreadItem) => void } = {}): ThreadStore {
     mkdirSync(join(root, "_threads"), { recursive: true });
     const db = new Database(ThreadStore.path(root, sessionId));
     db.run("PRAGMA busy_timeout = 5000");
@@ -40,7 +55,11 @@ export class ThreadStore {
     db.run(`CREATE TABLE IF NOT EXISTS native (
       id INTEGER PRIMARY KEY CHECK (id = 1), harness TEXT NOT NULL, native_thread_id TEXT NOT NULL,
       account TEXT, model TEXT)`);
-    return new ThreadStore(db);
+    db.run(`CREATE TABLE IF NOT EXISTS provider_threads (
+      harness TEXT NOT NULL, account TEXT, native_thread_id TEXT NOT NULL, covered_through_run TEXT,
+      last_used_at INTEGER NOT NULL, caps TEXT, resume_failed INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (harness, native_thread_id))`);
+    return new ThreadStore(db, opts.onNotice ?? (() => {}));
   }
 
   lastSeq(): number { return this.meta("last_seq"); }
@@ -75,7 +94,18 @@ export class ThreadStore {
       case "thread.native":
         db.query(`INSERT INTO native (id, harness, native_thread_id, account, model) VALUES (1, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET harness=excluded.harness, native_thread_id=excluded.native_thread_id,
-          account=excluded.account, model=excluded.model`).run(ev.harness, ev.nativeThreadId, ev.account, ev.model);
+          account=excluded.account,
+          -- A resumed Claude thread is announced before the CLI names its model: null keeps the harness's known one.
+          model=COALESCE(excluded.model, CASE WHEN native.harness=excluded.harness THEN native.model END)`).run(ev.harness, ev.nativeThreadId, ev.account, ev.model);
+        // caps describe the adapter that announced the thread now: an announcement without them clears old ones.
+        db.query(`INSERT INTO provider_threads (harness, account, native_thread_id, last_used_at, caps) VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(harness, native_thread_id) DO UPDATE SET account=excluded.account, last_used_at=excluded.last_used_at,
+          caps=excluded.caps, resume_failed=0`).run(ev.harness, ev.account, ev.nativeThreadId, ts, ev.caps ? JSON.stringify(ev.caps) : null);
+        // A run that started before its thread was known (Claude announces it at init, inside the run) ran in it.
+        for (const r of db.query(`SELECT run_id FROM runs WHERE status='running' AND native_thread_id IS NULL`).all() as { run_id: string }[]) {
+          db.query(`UPDATE runs SET native_thread_id=?, updated_seq=? WHERE run_id=?`).run(ev.nativeThreadId, seq, r.run_id);
+          this.touchProviderThread(r.run_id, ts);
+        }
         return;
       case "run.queued":
         this.insertRun(seq, ev.runId, "user", "queued", null, null, ts, null);
@@ -87,8 +117,8 @@ export class ThreadStore {
         else if (row.status === "queued") {
           db.query(`UPDATE runs SET origin=?, status='running', native_thread_id=?, model=?, started_at=?, updated_seq=? WHERE run_id=?`)
             .run(ev.origin, ev.nativeThreadId, ev.model, ts, seq, ev.runId);
-        }
-        // A start for a run that already ended or runs is a replay artefact: do not regress it.
+        } else return; // A start for a run that already ended or runs is a replay artefact: do not regress it.
+        this.touchProviderThread(ev.runId, ts);
         return;
       }
       case "message.delta": {
@@ -151,6 +181,9 @@ export class ThreadStore {
         this.terminal(seq, ts, ev.runId, "interrupted", { error: null });
         return;
       case "run.failed":
+        // resume-failed comes for a switch, not a run: its run id was never announced (contract with the bridge).
+        // devd says it in one notice of its own (chatSwitch), so the event adds none.
+        if (ev.error === "resume-failed" && !db.query("SELECT 1 FROM runs WHERE run_id=?").get(ev.runId)) return;
         this.terminal(seq, ts, ev.runId, "failed", { error: ev.error });
         this.insertItem(seq, ts, { runId: ev.runId, itemId: null, kind: "notice", text: ev.error, status: "done" });
         return;
@@ -186,6 +219,23 @@ export class ThreadStore {
       native_thread_id=COALESCE(?, native_thread_id), usage=CASE WHEN ? THEN ? ELSE usage END, updated_seq=? WHERE run_id=?`)
       .run(status, ts, seq, f.error, f.nativeThreadId ?? null, setUsage ? 1 : 0, f.usage ? JSON.stringify(f.usage) : null, seq, runId);
     this.db.query(`UPDATE items SET status='done', updated_seq=? WHERE run_id=? AND status='streaming'`).run(seq, runId);
+    this.touchProviderThread(runId, ts);
+  }
+
+  /** The run's own native thread has seen `runId`. While that thread is unknown nothing is marked: the
+   *  `thread.native` inside the run or `run.completed` names it later. */
+  private touchProviderThread(runId: string, ts: number) {
+    const r = this.db.query("SELECT native_thread_id FROM runs WHERE run_id=?").get(runId) as { native_thread_id: string | null } | null;
+    if (r?.native_thread_id == null) return;
+    this.db.query(`UPDATE provider_threads SET covered_through_run=?, last_used_at=? WHERE native_thread_id=?`)
+      .run(runId, ts, r.native_thread_id);
+  }
+
+  /** Resuming `nativeThreadId` failed: later plans must not try it again. A thread without a row (a store file
+   *  from before provider_threads) gets one, so the flag is never lost. */
+  markResumeFailed(harness: string, nativeThreadId: string, ts: number): void {
+    this.db.query(`INSERT INTO provider_threads (harness, account, native_thread_id, last_used_at, resume_failed) VALUES (?, NULL, ?, ?, 1)
+      ON CONFLICT(harness, native_thread_id) DO UPDATE SET resume_failed=1`).run(harness, nativeThreadId, ts);
   }
 
   private findItem(runId: string, itemId: string): { id: number } | null {
@@ -199,20 +249,32 @@ export class ThreadStore {
       i.output ?? null, i.isError === undefined ? null : i.isError ? 1 : 0, i.status ?? null, ts, seq);
   }
 
-  /** A notice devd itself adds (not a bridge event): it carries the current seq, so it shows on the next full
-   *  load of the thread. */
+  /** A notice devd itself adds (not a bridge event). Seqs belong to the bridge's log (the link's hello asks for
+   *  everything after `lastSeq`, `apply` drops what is at or below it), so a notice takes none: it sits at the current
+   *  seq with its own item id `notice:<n>` and is announced through `onNotice` (the SSE stream). A replay from that
+   *  seq still includes it (see snapshot), for a client whose stream was down when it was added. */
   addNotice(text: string, ts: number): void {
     const seq = this.lastSeq();
-    this.insertItem(seq, ts, { runId: null, itemId: null, kind: "notice", text, status: "done" });
+    const n = this.meta("notice_count") + 1;
+    const item: ThreadItem = { seq, runId: null, itemId: `notice:${n}`, kind: "notice", text, status: "done", ts };
+    this.db.transaction(() => {
+      this.setMeta("notice_count", n);
+      this.insertItem(seq, ts, item);
+    })();
+    this.onNotice(item);
   }
 
-  /** Without `limit` all items; with it the newest `limit` ones, oldest first. */
-  snapshot(opts: { afterSeq?: number; limit?: number } = {}): ThreadSnapshot {
+  /** Without `limit` all items; with it the newest `limit` ones, oldest first. `beforeSeq` keeps only items
+   *  created before that seq (paging back through history); runs, pending requests etc. are not affected. */
+  snapshot(opts: { afterSeq?: number; beforeSeq?: number; limit?: number } = {}): ThreadSnapshot {
     const after = opts.afterSeq ?? 0;
     const limit = opts.limit ?? -1;
+    const before = opts.beforeSeq ?? Number.MAX_SAFE_INTEGER;
     const itemRows = this.db.query(
-      `SELECT * FROM (SELECT * FROM items WHERE updated_seq > ? ORDER BY id DESC LIMIT ?) ORDER BY id`,
-    ).all(after, limit) as Record<string, any>[];
+      // devd notices (addNotice) at the replay's own seq too: they took no seq of their own.
+      `SELECT * FROM (SELECT * FROM items WHERE (updated_seq > ? OR (item_id LIKE 'notice:%' AND seq >= ?)) AND seq < ?
+        ORDER BY id DESC LIMIT ?) ORDER BY id`,
+    ).all(after, after, before, limit) as Record<string, any>[];
     const items: ThreadItem[] = itemRows.map((r) => {
       const it: ThreadItem = { seq: r.seq, runId: r.run_id, itemId: r.item_id, kind: r.kind, text: r.text, ts: r.ts };
       if (r.tool !== null) it.tool = r.tool;
@@ -240,6 +302,17 @@ export class ThreadStore {
       lastSeq: this.lastSeq(), seenSeq: this.meta("seen_seq"), runs, items, pending,
       background: bg ? (JSON.parse(bg.work) as BackgroundWork[]) : [],
       native: n ? { harness: n.harness, nativeThreadId: n.native_thread_id, account: n.account, model: n.model } : null,
+    };
+  }
+
+  /** The most recently used native thread of `harness`, or null when this session never used that harness. */
+  providerThread(harness: string): ProviderThread | null {
+    const r = this.db.query(`SELECT * FROM provider_threads WHERE harness=? ORDER BY last_used_at DESC, rowid DESC LIMIT 1`)
+      .get(harness) as Record<string, any> | null;
+    if (!r) return null;
+    return {
+      harness: r.harness, account: r.account, nativeThreadId: r.native_thread_id, coveredThroughRun: r.covered_through_run,
+      lastUsedAt: r.last_used_at, caps: r.caps === null ? null : (JSON.parse(r.caps) as Capabilities), resumeFailed: r.resume_failed === 1,
     };
   }
 

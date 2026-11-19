@@ -92,6 +92,9 @@ const PRICES: Record<string, ModelPrice> = {
 
 export function hasPrice(model: string): boolean { return Object.hasOwn(PRICES, model); }
 
+/** Every model id with a price: the ids harnesses report (effort variants, dated snapshots, aliases). */
+export const PRICED_MODELS: readonly string[] = Object.keys(PRICES);
+
 /** `promptTokens` = the request's prompt size, decides the long-context rate.
  *  Without it (OTLP ingestion does not know request boundaries) the standard rate is used — a deliberate
  *  approximation, also recorded in the spec. `at` = consumption time (ms) for `rateChange`. */

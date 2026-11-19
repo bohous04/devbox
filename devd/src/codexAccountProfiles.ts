@@ -45,6 +45,13 @@ export function codexAccountMountList(ids: string[]): string[] {
     .map(id => `${codexAccountVolume(id)}:${CODEX_PROFILE_ROOT}/${id}`);
 }
 
+/** Whether a container's mounts (docker inspect `.Mounts`) include the Codex account's home. The default account is
+ *  the image's own CODEX_HOME, mounted in every container. */
+export function codexAccountMounted(mounts: { Name?: string; Destination: string }[], id: string): boolean {
+  if (id === "default") return true;
+  return mounts.some(m => m.Name === codexAccountVolume(id) && m.Destination === `${CODEX_PROFILE_ROOT}/${id}`);
+}
+
 function containerName(id: string): string { return `devbox-codex-login-${id}`; }
 function img(d: CodexAuthDeps): string { return d.image ?? "devbox:latest"; }
 

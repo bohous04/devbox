@@ -55,7 +55,7 @@ import { CodexAccounts } from "./codexAccounts";
 import { readCodexServerAuth } from "./codexServerAuth";
 import { CodexSessionAccounts } from "./codexSessionAccounts";
 import { initCodexAccounts, listCodexAccounts } from "./codexAccountsDb";
-import { codexAccountMountList } from "./codexAccountProfiles";
+import { codexAccountMounted, codexAccountMountList } from "./codexAccountProfiles";
 import { buildGrokView, pollGrok } from "./grokPoller";
 import { pollAgy } from "./antigravityPoller";
 import { harvestAgy } from "./antigravityHarvester";
@@ -74,6 +74,7 @@ import { DEFAULT_CONTROL_ROOT, DEFAULT_DEVD_URL, DEFAULT_OPENROUTER_URL, Session
 import { BridgeLinks } from "./bridgeLink";
 import { ThreadStore } from "./threadStore";
 import { ChatHub } from "./chatHub";
+import { ChatSwitch } from "./chatSwitch";
 import { EventBus } from "./eventBus";
 import { Inbox } from "./sessionInbox";
 import { chatAttention, chatBusy } from "./attention";
@@ -388,7 +389,8 @@ const threadStore = (id: string): ThreadStore => {
   if (mgr.isEnding(id)) throw new Error(`session ${id} is ending`);
   const s = getSession(db, id);
   if (!s || storedRuntime(s) !== "chat") throw new Error(`session ${id} is not a chat session`);
-  const store = ThreadStore.open(root, id);
+  // `bus` is declared below; no store is opened before startup finished.
+  const store = ThreadStore.open(root, id, { onNotice: (item) => bus.publish(`thread:${id}`, { notice: item }) });
   threadStores.set(id, store);
   return store;
 };
@@ -415,6 +417,7 @@ const bridgeLinks = new BridgeLinks({
   onEvent: (id, e) => {
     bus.publish(`thread:${id}`, e);
     chatHub.onEvent(id, e, () => chatSnapshot(id));
+    chatSwitch.onEvent(id, e);
     inbox.changed(id);
   },
   onStatus: (id, s) => {
@@ -422,10 +425,12 @@ const bridgeLinks = new BridgeLinks({
     inbox.changed(id);
   },
   onBehind: (id) => inbox.changed(id),
+  onHandshake: (id, h) => chatSwitch.onHandshake(id, h),
 });
 const releaseThread = (id: string) => {
   bridgeLinks.drop(id);
   chatHub.drop(id);
+  chatSwitch.drop(id);
   threadStores.get(id)?.close();
   threadStores.delete(id);
   // Dropping a link fires no status callback: the inbox learns of the stop here (an ending session is removed).
@@ -835,6 +840,22 @@ const accountSwitchDeps = () => ({
   inFlight: accountSwitchInFlight,
 });
 
+// Chat sessions: model/account/harness switching through the agent bridge (late-bound into the link callbacks
+// above; no bridge event arrives before startup finishes). Account choice and profile attachment as accountSwitch.
+const chatSwitch = new ChatSwitch({
+  db, links: bridgeLinks, threads: threadStore,
+  claudePool: () => resolveAccountPool(freshCfg().settings),
+  codexAccounts,
+  ensureClaudeProfile: accountSwitchDeps().ensureProfile,
+  codexAccountMounted: async (container, accountId) => {
+    const r = await runDocker(container, ["inspect", "--format", "{{json .Mounts}}", container], { timeoutMs: 15_000 });
+    if (r.code !== 0 || r.timedOut) throw new Error(`docker inspect ${container} failed`);
+    return codexAccountMounted(JSON.parse(r.stdout) as { Name?: string; Destination: string }[], accountId);
+  },
+  proxyInputs: (a) => mgr.proxyEnvFor(a),
+  now: () => Date.now(),
+});
+
 // Live agent (harness) swap: shares `inFlight` with accountSwitch — both operations
 // restart the same panels and concurrency on one session would discard each other's
 // in-progress turns. proxyEnvFor goes through SessionManager so that the key/model/window
@@ -985,7 +1006,7 @@ const apiDeps: ApiDeps = {
     },
   },
   agentEvents, liveActivities, gitea, spawnPty: realSpawnPty, scheduler, critic, codexAuth,
-  links: bridgeLinks, threads: threadStore, bus, inbox,
+  links: bridgeLinks, threads: threadStore, bus, inbox, switcher: chatSwitch,
   codexUsage: { view: () => buildCodexView(db) },
   codexAccounts,
   codexSessionAccounts: new CodexSessionAccounts({

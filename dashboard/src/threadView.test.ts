@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import type { BridgeEvent, LoggedEvent, ThreadSnapshot } from "../../shared/thread";
-import { activeRun, applyThreadEvent, composerErrorText, emptyThread, mergeSnapshot, queuedRunIds } from "./threadView";
+import { activeRun, applyNotice, applyThreadEvent, composerErrorText, emptyThread, mergeSnapshot, queuedRunIds } from "./threadView";
 
 let seq = 0;
 const ev = (event: BridgeEvent, ts = 1000 + seq): LoggedEvent => ({ seq: ++seq, ts, event });
@@ -203,4 +203,31 @@ test("deltas after a run's terminal event are ignored: the item stays done", () 
   ]);
   expect(t.items.map((i) => [i.itemId, i.text, i.status])).toEqual([["m1", "Hel", "done"]]);
   expect(t.lastSeq).toBe(5);
+});
+
+test("a devd notice from the stream is added once, after what is there, and leaves lastSeq alone", () => {
+  seq = 0;
+  const t = run(emptyThread(), [{ type: "run.queued", runId: "r1", text: "hi", attachments: [] }]);
+  const notice = { seq: 1, runId: null, itemId: "notice:1", kind: "notice" as const, text: "Switched to Codex", status: "done" as const, ts: 9 };
+  const once = applyNotice(t, notice);
+  expect(once.items.map((i) => i.text)).toEqual(["hi", "Switched to Codex"]);
+  expect(once.lastSeq).toBe(1);
+  // The same notice again (live frame and replay snapshot both carried it): still one.
+  expect(applyNotice(once, notice).items).toHaveLength(2);
+  expect(mergeSnapshot(once, { afterSeq: 1, snapshot: { ...emptyThread(), lastSeq: 1, items: [notice] } }).items).toHaveLength(2);
+});
+
+test("resume-failed for a run id never announced adds no item (devd's notice says it), like the store", () => {
+  const t = run(emptyThread(), [{ type: "run.failed", runId: "never-started", error: "resume-failed" }]);
+  expect(t.items).toEqual([]);
+  expect(t.lastSeq).toBeGreaterThan(0);
+});
+
+test("a thread.native without a model keeps the harness's known model, like the store", () => {
+  const t = run(emptyThread(), [
+    { type: "thread.native", harness: "claude", nativeThreadId: "t1", account: "a", model: "claude-opus-5-5" },
+    { type: "thread.native", harness: "claude", nativeThreadId: "t1", account: "b", model: null },
+  ]);
+  expect(t.native).toEqual({ harness: "claude", nativeThreadId: "t1", account: "b", model: "claude-opus-5-5" });
+  expect(run(t, [{ type: "thread.native", harness: "codex", nativeThreadId: "x1", account: "c", model: null }]).native!.model).toBeNull();
 });

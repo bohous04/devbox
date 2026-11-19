@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Send, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ApiError } from "../../api";
@@ -7,8 +7,10 @@ import { composerErrorText } from "../../threadView";
 /** Message input: with a mouse/trackpad Enter sends and Shift+Enter is a newline; on touch Enter is a newline and
  *  the Send button sends. A message sent while a run is active is queued by the
  *  bridge and shows as queued in the thread. On a failed send the text stays and nothing is retried. */
-export function Composer({ running, onSend, onStop }: {
+export function Composer({ running, onSend, onStop, toolbar }: {
   running: boolean;
+  /** Above the input: the session's model, account and harness switchers. */
+  toolbar?: ReactNode;
   onSend: (text: string) => Promise<void>;
   onStop: () => Promise<void>;
 }) {
@@ -38,6 +40,7 @@ export function Composer({ running, onSend, onStop }: {
 
   return (
     <form className="flex flex-col gap-1.5" onSubmit={(e) => { e.preventDefault(); void send(); }}>
+      {toolbar}
       <div className="flex items-end gap-2">
         <textarea
           aria-label="Message"

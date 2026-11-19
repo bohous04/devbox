@@ -32,6 +32,7 @@ beforeEach(async () => {
       if (cmd.kind === "endWait") return void waits.clear();
       throw new Error(`unexpected ${cmd.kind}`);
     },
+    handshake: () => ({ version: "test", awaitingTarget: false }),
     logError: () => {},
   });
   closers.push(() => server.close());
@@ -102,7 +103,122 @@ test("expired declared wait is removed and background.changed emitted", () => {
   expect(changes).toEqual([[]]);
 });
 
-test("mcp config helpers", () => {
-  expect(claudeMcpServers()).toEqual({ devbox: { type: "stdio", command: "agent-bridge", args: ["mcp"] } });
-  expect(codexMcpArgs()).toEqual(["-c", 'mcp_servers.devbox.command="agent-bridge"', "-c", 'mcp_servers.devbox.args=["mcp"]']);
+test("mcp config helpers forward the devd env that is set and omit the rest", () => {
+  const saved = { ...process.env };
+  try {
+    process.env.DEVD_URL = "http://devd:4300";
+    process.env.DEVD_SESSION_ID = "dev-x";
+    delete process.env.DEVD_AGENT_SOCK;
+    expect(claudeMcpServers()).toEqual({
+      devbox: { type: "stdio", command: "agent-bridge", args: ["mcp"], env: { DEVD_URL: "http://devd:4300", DEVD_SESSION_ID: "dev-x" } },
+    });
+    expect(codexMcpArgs()).toEqual([
+      "-c", 'mcp_servers.devbox.command="agent-bridge"', "-c", 'mcp_servers.devbox.args=["mcp"]',
+      "-c", 'mcp_servers.devbox.env_vars=["DEVD_URL","DEVD_SESSION_ID"]',
+    ]);
+    delete process.env.DEVD_URL;
+    expect((claudeMcpServers().devbox as { env: object }).env).toEqual({ DEVD_SESSION_ID: "dev-x" });
+  } finally {
+    process.env = saved;
+  }
+});
+
+// --- devbox_thread_read ---
+type FakeItem = { seq: number; kind: string; text: string; tool?: string; input?: unknown; output?: string };
+function threadClient(all: FakeItem[], calls: string[] = []) {
+  const fake = (async (url: string | URL | Request, init?: RequestInit) => {
+    const u = new URL(String(url));
+    calls.push(`${u.pathname}${u.search}|${(init?.headers as Record<string, string>)["x-devbox-session"]}`);
+    const before = u.searchParams.has("beforeSeq") ? Number(u.searchParams.get("beforeSeq")) : Infinity;
+    const limit = Number(u.searchParams.get("limit"));
+    const items = all.filter((i) => i.seq < before).slice(-limit);
+    return Response.json({ items });
+  }) as unknown as typeof fetch;
+  return (async () => {
+    const mcp = createMcpServer(join(dir, "none.sock"), { url: "http://devd:4300/", sessionId: "dev-x", fetch: fake });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await mcp.connect(a);
+    const c = new Client({ name: "t", version: "0" });
+    await c.connect(b);
+    closers.push(() => c.close());
+    return c;
+  })();
+}
+const msgs = (n: number): FakeItem[] => Array.from({ length: n }, (_, k) => ({ seq: k + 1, kind: k % 2 ? "assistant" : "user", text: `message ${k + 1}` }));
+const read = async (c: Client, args: Record<string, unknown>) => parse(await c.callTool({ name: "devbox_thread_read", arguments: args }));
+
+test("thread_read pages newest-first with nextBeforeSeq and a default limit of 20", async () => {
+  const calls: string[] = [];
+  const c = await threadClient(msgs(45), calls);
+  const p1 = await read(c, {});
+  expect(p1.items).toHaveLength(20);
+  expect(p1.items[0]).toBe("[45] user: message 45");
+  expect(p1.nextBeforeSeq).toBe(26);
+  expect(calls[0]).toBe("/api/sessions/dev-x/thread?limit=100|dev-x");
+  const p2 = await read(c, { beforeSeq: p1.nextBeforeSeq });
+  expect(p2.items[0]).toBe("[25] user: message 25");
+  expect(p2.nextBeforeSeq).toBe(6);
+  const p3 = await read(c, { beforeSeq: p2.nextBeforeSeq });
+  expect(p3.items).toHaveLength(5);
+  expect(p3.nextBeforeSeq).toBeNull();
+});
+
+test("thread_read limit above 50 is a tool error; 50 is allowed", async () => {
+  const c = await threadClient(msgs(60));
+  const bad: any = await c.callTool({ name: "devbox_thread_read", arguments: { limit: 51 } });
+  expect(bad.isError).toBe(true);
+  expect((await read(c, { limit: 50 })).items).toHaveLength(50);
+});
+
+test("thread_read query is a case-insensitive substring filter and scans past one page", async () => {
+  const all = msgs(250);
+  all[9]!.text = "Deploy the FOO service";
+  all[199]!.text = "foo again";
+  const c = await threadClient(all);
+  const r = await read(c, { query: "foo" });
+  expect(r.items).toEqual(["[200] assistant: foo again", "[10] assistant: Deploy the FOO service"]);
+  expect(r.nextBeforeSeq).toBeNull();
+});
+
+test("thread_read keeps items that share a seq (notice after an item) across pages", async () => {
+  const all: FakeItem[] = [];
+  for (let s = 1; s <= 30; s++) { all.push({ seq: s, kind: "user", text: `m${s}` }); all.push({ seq: s, kind: "notice", text: `n${s}` }); }
+  const c = await threadClient(all);
+  const seen: string[] = [];
+  let before: number | undefined;
+  for (let guard = 0; guard < 20; guard++) {
+    const r = await read(c, before === undefined ? { limit: 7 } : { limit: 7, beforeSeq: before });
+    seen.push(...r.items);
+    if (r.nextBeforeSeq === null) break;
+    before = r.nextBeforeSeq;
+  }
+  expect(seen).toHaveLength(60);
+  expect(new Set(seen).size).toBe(60);
+});
+
+test("thread_read renders tool items with the command and the first 2 KB of output", async () => {
+  const c = await threadClient([{ seq: 1, kind: "tool", text: "", tool: "Bash", input: { command: "ls -la" }, output: "x".repeat(3000) }]);
+  const [line] = (await read(c, {})).items as string[];
+  expect(line.startsWith("[1] tool Bash: ls -la\n")).toBe(true);
+  expect(line).toContain("x".repeat(2048));
+  expect(line).not.toContain("x".repeat(2049));
+  expect(line).toContain("[output truncated, 3000 bytes]");
+});
+
+test("thread_read without devd access is a tool error, not a silent empty result", async () => {
+  const r: any = await client.callTool({ name: "devbox_thread_read", arguments: {} });
+  expect(r.isError).toBe(true);
+  expect(r.content[0].text).toContain("DEVD_URL");
+});
+
+test("thread_read query scan is bounded and returns a cursor to continue", async () => {
+  const all = msgs(5000);
+  all[0]!.text = "needle";
+  const c = await threadClient(all);
+  const r1 = await read(c, { query: "needle" });
+  expect(r1.items).toEqual([]);
+  expect(typeof r1.nextBeforeSeq).toBe("number");
+  let r = r1;
+  for (let g = 0; g < 5 && r.nextBeforeSeq !== null && r.items.length === 0; g++) r = await read(c, { query: "needle", beforeSeq: r.nextBeforeSeq });
+  expect(r.items).toEqual(["[1] user: needle"]);
 });

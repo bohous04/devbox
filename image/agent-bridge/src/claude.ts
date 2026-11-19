@@ -50,14 +50,15 @@ export function toolResultText(content: unknown): string {
 export type ClaudeSdkOptions = NonNullable<Parameters<QueryFn>[0]["options"]>;
 
 // Options shared by the one-shot turn and the long-lived session.
-export function claudeQueryOptions(o: { cwd: string; model: string | null; claudeExecutable: string; configDir: string; entrypoint?: string; resume?: string | null }): ClaudeSdkOptions {
+// `baseEnv` is the environment the CLI starts from: the bridge's own unless a switch target names another.
+export function claudeQueryOptions(o: { cwd: string; model: string | null; claudeExecutable: string; configDir: string; entrypoint?: string; resume?: string | null; baseEnv?: Record<string, string | undefined> }): ClaudeSdkOptions {
   return {
     pathToClaudeCodeExecutable: o.claudeExecutable,
     permissionMode: "bypassPermissions",
     allowDangerouslySkipPermissions: true,
     ...(o.model !== null ? { model: o.model } : {}),
     cwd: o.cwd,
-    env: claudeEnv(process.env, o),
+    env: claudeEnv(o.baseEnv ?? process.env, o),
     includePartialMessages: true,
     // Without it the SDK sends an empty system prompt, not the CLI's; the TUI always sends
     // Claude Code's, so the two paths would not cost or behave the same.

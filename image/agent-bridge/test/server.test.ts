@@ -75,7 +75,7 @@ async function connect(): Promise<TestClient> {
 let errors: string[] = [];
 function start(onCommand: CommandHandler = async () => {}, log = new EventLog(logPath)) {
   errors = [];
-  const server = startServer({ socketPath, log, onCommand, logError: (m) => errors.push(m) });
+  const server = startServer({ socketPath, log, onCommand, handshake: () => ({ version: "9.9.9", awaitingTarget: false }), logError: (m) => errors.push(m) });
   closers.push(() => server.close());
   return server;
 }
@@ -90,6 +90,19 @@ test("hello replays only events after afterSeq, then ready, then live events in 
   expect(seqs(await c.waitFor(3))).toEqual([2, 3, "ready3"]);
   server.publish(ev("d"));
   expect(seqs(await c.waitFor(4))).toEqual([2, 3, "ready3", 4]);
+});
+
+test("every handshake's ready frame carries the bridge's version and whether it awaits a target", async () => {
+  let awaitingTarget = true;
+  const server = startServer({ socketPath, log: new EventLog(logPath), onCommand: async () => {}, handshake: () => ({ version: "1.2.3", awaitingTarget }) });
+  closers.push(() => server.close());
+  const a = await connect();
+  a.send({ t: "hello", afterSeq: 0 });
+  expect((await a.waitFor(1))[0]).toEqual({ t: "ready", lastSeq: 0, version: "1.2.3", awaitingTarget: true });
+  awaitingTarget = false;
+  const b = await connect();
+  b.send({ t: "hello", afterSeq: 0 });
+  expect((await b.waitFor(1))[0]).toEqual({ t: "ready", lastSeq: 0, version: "1.2.3", awaitingTarget: false });
 });
 
 test("an event published during replay is delivered once, after the replay", async () => {

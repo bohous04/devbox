@@ -20,16 +20,26 @@ class AccountError extends Error {
   constructor(message: string, readonly status: 400 | 404 | 409 | 502 = 400) { super(message); }
 }
 
+/** Enabled, signed in and its credentials not rejected. */
+export function codexAccountUsable(a: CodexAccountView): boolean {
+  return !a.disabled && a.usage?.state !== "signed-out"
+    && !(a.usage?.state === "error" && /HTTP (401|402|403)|deactivated|invalid_grant/i.test(a.usage.error ?? ""));
+}
+
+/** The account reported its usage limit and a measured window has not reset since. */
+export function codexLimitLive(a: CodexAccountView, now: number): boolean {
+  const measured = a.usage?.windows.filter(w => w.usedPct !== null) ?? [];
+  return !!a.usage?.limitReached && (!measured.length || measured.some(w => w.resetsAt === null || w.resetsAt > now));
+}
+
 // Deterministic launch selection; running agents keep their existing account.
 export function chooseCodexAccount(accounts: CodexAccountView[], preferred: string | null, now: number): CodexAccountView | null {
-  const usable = accounts.filter(a => !a.disabled && a.usage?.state !== "signed-out"
-    && !(a.usage?.state === "error" && /HTTP (401|402|403)|deactivated|invalid_grant/i.test(a.usage.error ?? "")));
+  const usable = accounts.filter(codexAccountUsable);
   if (preferred !== null) return usable.find(a => a.id === preferred) ?? null;
   const score = (a: CodexAccountView): number => {
     const measured = a.usage?.windows.filter(w => w.usedPct !== null) ?? [];
     const score = measured.length ? Math.max(...measured.map(w => w.resetsAt !== null && w.resetsAt <= now ? 0 : w.usedPct!)) : 50;
-    const liveLimit = a.usage?.limitReached && (!measured.length || measured.some(w => w.resetsAt === null || w.resetsAt > now));
-    return liveLimit ? Math.max(100, score) : score;
+    return codexLimitLive(a, now) ? Math.max(100, score) : score;
   };
   return usable.sort((a, b) => score(a) - score(b) || Number(b.isDefault) - Number(a.isDefault) || a.id.localeCompare(b.id))[0] ?? null;
 }
