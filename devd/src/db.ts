@@ -618,7 +618,10 @@ export function setSessionAgent(db: Database, id: string, agent: AgentName): voi
 
 // Remembered agent choice for a repo (claudeSolo is remembered under the repo "claudeSolo",
 // not under a specific claudeSolo-N). Upsert — one row per repo.
+// Ruling S4-P6: a chat-only profile is never remembered — the memory also picks the agent of tmux sessions
+// and scheduled runs, which cannot run it — so picking one leaves the earlier choice in place.
 export function setRepoAgent(db: Database, folder: string, project: string, repo: string, agent: AgentName, now: number): void {
+  if (AGENTS[agent].chatOnly) return;
   db.query(`INSERT INTO repo_prefs (folder,project,repo,agent,updated_at) VALUES (?,?,?,?,?)
     ON CONFLICT(folder,project,repo) DO UPDATE SET agent=excluded.agent, updated_at=excluded.updated_at`)
     .run(folder, project, repo, agent, now);

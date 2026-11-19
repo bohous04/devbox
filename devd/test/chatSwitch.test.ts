@@ -13,10 +13,11 @@ import { PRICED_MODELS } from "../src/pricing";
 import type { CodexAccountView } from "../src/codexAccounts";
 import { ACCOUNT_POOL_DEFAULTS } from "../src/config";
 import {
-  getRepoAgent, getSession, insertAccount, insertLease, insertSession, leaseHistory, openDb, upsertAccountUsage,
+  getRepoAgent, getSession, insertAccount, insertLease, insertSession, leaseHistory, openDb, setRepoAgent, upsertAccountUsage,
   type AccountUsageRow, type SessionRow,
 } from "../src/db";
 import { EventBus } from "../src/eventBus";
+import { resolveAgent } from "../src/sessions";
 import { registerThreadRoutes } from "../src/threadApi";
 import { ThreadStore } from "../src/threadStore";
 import { historyOmittedNotice } from "../src/transition";
@@ -398,6 +399,17 @@ test("harness: Claude → Vibe is a fresh thread with the handoff, on no account
   expect(cmd.handoff!.preamble).toContain("[user] Fix the login bug");
   expect(getSession(t.db, CHAT.id)!.agent).toBe("vibe");
   expect(activeLeases(t)).toEqual([]);
+});
+
+test("harness: a switch to Vibe leaves the repo's remembered agent alone (S4-P6); a scheduled open still gets it", async () => {
+  const t = setup();
+  claudeThread(t);
+  setRepoAgent(t.db, CHAT.folder, CHAT.project, CHAT.repo, "codex", NOW - HOUR);
+  expect((await t.post("harness", { agent: "vibe" })).status).toBe(202);
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("vibe");
+  expect(getRepoAgent(t.db, CHAT.folder, CHAT.project, CHAT.repo)).toBe("codex");
+  // The scheduler opens without an agent: SessionManager.open resolves it from memory.
+  expect(resolveAgent(undefined, getRepoAgent(t.db, CHAT.folder, CHAT.project, CHAT.repo))).toBe("codex");
 });
 
 test("harness: back to Vibe resumes its thread with a delta; an ACP agent that cannot resume gets a fresh thread", async () => {
