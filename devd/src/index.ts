@@ -500,7 +500,7 @@ const mgr = new SessionManager({
   // VS Code server again into every session.
   // prod-db catalog from the HOST (not the one baked into the image): the `prod-db list/connect` skill
   // in the container would otherwise not know databases approved after the last image build. Read-only, only if it exists.
-  extraMounts: [...(dindEnabled ? [] : ["/var/run/docker.sock:/var/run/docker.sock"]), ...(existsSync(prodCatalogPath) ? [`${prodCatalogPath}:/srv/prod-db/catalog.json:ro`] : []), "claude-home:/home/dev/.claude", "codex-home:/home/dev/.codex", "grok-home:/home/dev/.grok", "antigravity-home:/home/dev/.gemini", "vscode-server:/home/dev/.vscode-server", "/etc/devd/mac-mcp:/opt/mac-mcp:ro", ...(existsSync(toolsDir) ? [`${toolsDir}:/opt/devbox-tools:ro`] : [])],
+  extraMounts: [...(dindEnabled ? [] : ["/var/run/docker.sock:/var/run/docker.sock"]), ...(existsSync(prodCatalogPath) ? [`${prodCatalogPath}:/srv/prod-db/catalog.json:ro`] : []), "claude-home:/home/dev/.claude", "codex-home:/home/dev/.codex", "grok-home:/home/dev/.grok", "antigravity-home:/home/dev/.gemini", "vibe-home:/home/dev/.vibe", "vscode-server:/home/dev/.vscode-server", "/etc/devd/mac-mcp:/opt/mac-mcp:ro", ...(existsSync(toolsDir) ? [`${toolsDir}:/opt/devbox-tools:ro`] : [])],
   ghConfigDir, // presence re-checked per-session in SessionManager.runOpts (existsSync there), so a post-startup `gh auth login` doesn't need a devd restart
   giteaTokensPath,                                                // always materialized above, so always present
   credentials: credentialsForUrl,
