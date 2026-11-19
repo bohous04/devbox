@@ -3,12 +3,12 @@ import UniformTypeIdentifiers
 import XCTest
 @testable import DevboxApp
 
-/// Chat images before upload (dashboard/src/imageView.ts limits): at most 2048 px and 4 MB, re-encoded as JPEG
-/// (which drops EXIF, GPS included), over 20 MB refused, at most 10 per message.
+/// Chat images before upload (dashboard/src/imageView.ts limits): at most 2048 px and 4 MB, re-encoded without
+/// metadata (EXIF, GPS included) as JPEG, or as PNG when the image has alpha; over 20 MB refused, at most 10 per message.
 final class ImagePrepTests: XCTestCase {
-    private func image(width: Int, height: Int, type: UTType, gps: Bool = false) throws -> Data {
-        let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    private func image(width: Int, height: Int, type: UTType, gps: Bool = false, alpha: Bool = false) throws -> Data {
+        let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: (alpha ? CGImageAlphaInfo.premultipliedLast : .noneSkipLast).rawValue)!
         // Noise, so the encoder cannot squeeze it to nothing.
         for i in stride(from: 0, to: width, by: 16) {
             ctx.setFillColor(CGColor(red: CGFloat(i % 255) / 255, green: CGFloat((i * 7) % 255) / 255, blue: 0.5, alpha: 1))
@@ -43,6 +43,25 @@ final class ImagePrepTests: XCTestCase {
         let i = try info(try ImagePrep.prepare(input))
         XCTAssertEqual([i.width, i.height], [400, 300])
         XCTAssertNil(i.props[kCGImagePropertyGPSDictionary])
+    }
+
+    /// S5-R27: as the dashboard, a PNG with alpha stays PNG so its transparency survives; metadata still goes.
+    func testPngWithAlphaStaysPngWithoutMetadata() throws {
+        let input = try image(width: 3000, height: 1500, type: .png, gps: true, alpha: true)
+        XCTAssertEqual(try info(input).props[kCGImagePropertyHasAlpha] as? Bool, true, "the fixture must have alpha")
+        let out = try ImagePrep.prepare(input)
+        let i = try info(out)
+        XCTAssertEqual(i.type, UTType.png.identifier)
+        XCTAssertEqual(i.props[kCGImagePropertyHasAlpha] as? Bool, true)
+        XCTAssertEqual([i.width, i.height], [2048, 1024])
+        XCTAssertNil(i.props[kCGImagePropertyGPSDictionary])
+        XCTAssertLessThanOrEqual(out.count, ImagePrep.maxImageBytes)
+    }
+
+    func testOpaquePngBecomesJpeg() throws {
+        let input = try image(width: 400, height: 300, type: .png)
+        XCTAssertNotEqual(try info(input).props[kCGImagePropertyHasAlpha] as? Bool, true, "the fixture must be opaque")
+        XCTAssertEqual(try info(try ImagePrep.prepare(input)).type, UTType.jpeg.identifier)
     }
 
     func testOver20MbIsRefusedWithTheDashboardsMessage() {

@@ -4,8 +4,8 @@ import UniformTypeIdentifiers
 
 /// Chat images before upload, with the dashboard's limits (dashboard/src/imageView.ts): the longest side at most
 /// 2048 px and at most 4 MB, inputs over 20 MB refused, at most 10 per message (devd refuses more). Every image is
-/// re-encoded as JPEG without its metadata, so EXIF (the GPS position included) never leaves the phone; a
-/// transparent PNG loses its transparency (a known difference from the dashboard, which keeps PNG).
+/// re-encoded without its metadata, so EXIF (the GPS position included) never leaves the phone: as PNG when it has
+/// alpha (its transparency kept, as the dashboard keeps PNG), as JPEG otherwise (photos, opaque screenshots).
 enum ImagePrep {
     static let maxImageSide = 2048
     static let maxImageBytes = 4 * 1024 * 1024
@@ -17,7 +17,7 @@ enum ImagePrep {
         var description: String { message }
     }
 
-    /// The image as JPEG within the limits, or a `Failure` with the user-facing reason.
+    /// The image as PNG (with alpha) or JPEG within the limits, or a `Failure` with the user-facing reason.
     static func prepare(_ data: Data) throws -> Data {
         if data.count > maxInputBytes {
             throw Failure(message: String(format: "The image is %.1f MB; images over 20 MB cannot be attached", Double(data.count) / 1024 / 1024))
@@ -27,19 +27,20 @@ enum ImagePrep {
               let w = props[kCGImagePropertyPixelWidth] as? Int, let h = props[kCGImagePropertyPixelHeight] as? Int else {
             throw Failure(message: "The image could not be read")
         }
+        let type: UTType = props[kCGImagePropertyHasAlpha] as? Bool == true ? .png : .jpeg
         var side = min(max(w, h), maxImageSide)
         // Each round shrinks by area; a few are plenty, more means the encoder does not get under 4 MB.
         for _ in 0..<4 {
-            let out = try encode(src, maxSide: side)
+            let out = try encode(src, maxSide: side, as: type)
             if out.count <= maxImageBytes { return out }
             side = max(1, Int(Double(side) * (Double(maxImageBytes) / Double(out.count)).squareRoot() * 0.9))
         }
         throw Failure(message: "The image could not be scaled down under 4 MB")
     }
 
-    /// Decodes at most `maxSide` on the longest side (upright: the EXIF orientation is applied) and writes a JPEG
-    /// with no properties copied over.
-    private static func encode(_ src: CGImageSource, maxSide: Int) throws -> Data {
+    /// Decodes at most `maxSide` on the longest side (upright: the EXIF orientation is applied) and writes it as
+    /// `type` with no properties copied over.
+    private static func encode(_ src: CGImageSource, maxSide: Int, as type: UTType) throws -> Data {
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
@@ -49,10 +50,11 @@ enum ImagePrep {
             throw Failure(message: "The image could not be read")
         }
         let out = NSMutableData()
-        guard let dest = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil) else {
+        guard let dest = CGImageDestinationCreateWithData(out, type.identifier as CFString, 1, nil) else {
             throw Failure(message: "The image could not be scaled down")
         }
-        CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        let quality: [CFString: Any] = type == .jpeg ? [kCGImageDestinationLossyCompressionQuality: 0.85] : [:]
+        CGImageDestinationAddImage(dest, image, quality as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { throw Failure(message: "The image could not be scaled down") }
         return out as Data
     }
