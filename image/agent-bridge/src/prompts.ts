@@ -17,3 +17,9 @@ export function codexMcpArgs(): string[] {
     "-c", `mcp_servers.devbox.env_vars=${JSON.stringify(presentMcpEnv())}`,
   ];
 }
+
+/** The devbox MCP server for ACP `session/new` (stdio); the agent may start it with a filtered environment too. */
+export function acpMcpServers(): { name: string; command: string; args: string[]; env: Record<string, string> }[] {
+  const env = Object.fromEntries(presentMcpEnv().map((n) => [n, process.env[n]!]));
+  return [{ name: "devbox", command: "agent-bridge", args: ["mcp"], env }];
+}

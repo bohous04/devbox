@@ -1,5 +1,5 @@
-// JSON-RPC over newline-delimited JSON, in the dialect of `codex app-server`: JSON-RPC 2.0 without the
-// "jsonrpc" header, requests in both directions.
+// JSON-RPC over newline-delimited JSON, requests in both directions. By default in the dialect of
+// `codex app-server` (JSON-RPC 2.0 without the "jsonrpc" header); ACP agents need the header.
 
 export class JsonRpcError extends Error {
   constructor(
@@ -33,6 +33,7 @@ export class JsonRpcPeer {
   constructor(
     private io: { write(line: string): void; onLine(cb: (line: string) => void): void },
     private logError: (msg: string) => void = (msg) => console.error(msg),
+    private dialect: { jsonrpc?: "2.0" } = {},
   ) {
     io.onLine((line) => this.receive(line));
   }
@@ -68,7 +69,8 @@ export class JsonRpcPeer {
   }
 
   private send(msg: Record<string, unknown>): void {
-    this.io.write(JSON.stringify(msg) + "\n");
+    const framed = this.dialect.jsonrpc ? { jsonrpc: this.dialect.jsonrpc, ...msg } : msg;
+    this.io.write(JSON.stringify(framed) + "\n");
   }
 
   private receive(line: string): void {

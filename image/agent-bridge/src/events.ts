@@ -33,7 +33,8 @@ export interface BackgroundWork {
 }
 
 export type BridgeEvent =
-  | { type: "thread.native"; harness: "claude" | "codex"; nativeThreadId: string; account: string | null; model: string | null; caps?: Capabilities }
+  // harness: "claude", "codex" or an ACP agent's id (ACP_AGENTS).
+  | { type: "thread.native"; harness: "claude" | "codex" | (string & {}); nativeThreadId: string; account: string | null; model: string | null; caps?: Capabilities }
   | { type: "run.queued"; runId: string; text: string; attachments: string[] }
   | { type: "run.started"; runId: string; origin: RunOrigin; nativeThreadId: string | null; model: string | null }
   | { type: "message.delta"; runId: string; itemId: string; text: string }

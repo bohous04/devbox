@@ -79,8 +79,8 @@ const ACCESS = { approvalPolicy: "never", sandbox: "danger-full-access" } as con
 
 const CLIENT_INFO: InitializeParams["clientInfo"] = { name: "devbox-agent-bridge", title: null, version: "1.0.0" };
 
-export function spawnCodex(argv: string[], env: Record<string, string>): CodexProcess {
-  const proc = Bun.spawn(argv, { env, stdin: "pipe", stdout: "pipe", stderr: "inherit" });
+export function spawnCodex(argv: string[], env: Record<string, string>, cwd?: string): CodexProcess {
+  const proc = Bun.spawn(argv, { env, ...(cwd !== undefined ? { cwd } : {}), stdin: "pipe", stdout: "pipe", stderr: "inherit" });
   async function* lines(): AsyncIterable<string> {
     const decoder = new TextDecoder();
     let buffer = "";
