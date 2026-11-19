@@ -1307,16 +1307,40 @@ describe("step 6 hardening", () => {
     expect(keptSeqs().filter((s) => s > 2)).toEqual(Array.from({ length: last - 2 }, (_, i) => i + 3));
   });
 
-  test("a long-lived connection still trims: the periodic sweep promotes an ack once it is 10 minutes old", async () => {
+  test("the periodic sweep promotes an ack once a later hello confirmed it and it is 10 minutes old", async () => {
     let clock = NOW;
     const last = await finishedThenOpen({ now: () => clock, sweepMs: 5 });
     await handshake(3);
-    await new Promise((r) => setTimeout(r, 30));
-    expect(state().trimSeq).toBe(0);
     clock += 10 * MIN;
+    await new Promise((r) => setTimeout(r, 30));
+    // Old enough, but not confirmed by a later ack in this process: not trimmed to.
+    expect(state()).toMatchObject({ trimSeq: 0, ackCandidate: { seq: 3 } });
+    clock -= 5 * MIN;
+    await handshake(last);
+    clock += 5 * MIN;
     await new Promise((r) => setTimeout(r, 30));
     expect(state()).toMatchObject({ trimSeq: 3, ackCandidate: null });
     expect(keptSeqs()).toEqual([1, ...Array.from({ length: last - 3 }, (_, i) => i + 4)]);
+  });
+
+  test("power loss with a long downtime: a persisted old candidate is never trimmed to before devd confirms it", async () => {
+    priorLog(
+      { type: "run.started", runId: "r-1", origin: "user", nativeThreadId: null, model: null },
+      { type: "run.completed", runId: "r-1", nativeThreadId: "thread-1", usage: null, costUsd: null },
+      { type: "run.started", runId: "r-2", origin: "user", nativeThreadId: null, model: null },
+      { type: "run.completed", runId: "r-2", nativeThreadId: "thread-1", usage: null, costUsd: null },
+    );
+    // Acknowledged through 4 just before the power loss; the host was down for an hour.
+    saveState(join(dir, "state.json"), baseState({ nativeThreadId: "thread-1", ackCandidate: { seq: 4, at: NOW - 60 * MIN } }));
+    await start(fakeHarness(), { logCompactMinBytes: 0, sweepMs: 5 });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(state().trimSeq).toBe(0);
+    expect(keptSeqs().slice(0, 4)).toEqual([1, 2, 3, 4]);
+    // devd's store came back at 2: everything after it is still there to replay.
+    await handshake(2);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(state()).toMatchObject({ trimSeq: 0, ackCandidate: { seq: 2 } });
+    expect(keptSeqs().slice(0, 4)).toEqual([1, 2, 3, 4]);
   });
 
   test("S6-R19: hellos in quick succession do not reset the candidate's age", async () => {

@@ -738,6 +738,8 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
    *  a later hello comes at least ACK_TRIM_DELAY_MS after it and is not below it (a devd that came back lower
    *  replaces the candidate and keeps everything it misses). Persisted, so the next start trims with it too; a failure here
    *  is logged and never drops the link (the log just stays longer). */
+  /** devd re-acknowledged `state.ackCandidate` in this process (never true for a candidate loaded from disk). */
+  let candidateConfirmed = false;
   function onHello(afterSeq: number): void {
     try {
       if (afterSeq < state.trimSeq) {
@@ -755,9 +757,14 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
         // A first ack, or devd came back below the candidate (it lost events it had acknowledged): the candidate is
         // not trimmed to; this ack starts ageing instead.
         state.ackCandidate = { seq: ack, at: t };
+        candidateConfirmed = false;
       } else if (t - c.at >= ACK_TRIM_DELAY_MS) {
         state.trimSeq = c.seq;
         state.ackCandidate = { seq: ack, at: t };
+        candidateConfirmed = false;
+      } else {
+        // devd still has the candidate: the sweep may promote it once it is old enough.
+        candidateConfirmed = true;
       }
       persist();
       const n = log.compact(state.trimSeq);
@@ -767,16 +774,18 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     }
   }
 
-  /** A connection that lives for weeks says one hello: its ack is promoted here once it is ACK_TRIM_DELAY_MS old (the
-   *  same lag as on a later hello, S6-R19), and the log is compacted when it has grown past the thresholds (one fstat
-   *  per sweep otherwise; a compaction is one streamed pass, at most once per doubling of the log). Events after the
-   *  connection's hello are not acknowledged until devd's next hello. Failures are logged; the log just stays longer. */
+  /** Promotes a candidate that devd confirmed in this process (a later hello with an ack not below it) once it is
+   *  ACK_TRIM_DELAY_MS old (S6-R19), and compacts the log once it has grown past the thresholds (one fstat per sweep
+   *  otherwise; a compaction is one streamed pass, at most once per doubling of the log). Age alone never promotes: a
+   *  candidate loaded from disk may predate a power loss that devd's store did not survive whole. Failures are logged;
+   *  the log just stays longer. */
   function maintainLog(): void {
     try {
       const c = state.ackCandidate;
-      if (c !== null && now() - c.at >= ACK_TRIM_DELAY_MS) {
+      if (c !== null && candidateConfirmed && now() - c.at >= ACK_TRIM_DELAY_MS) {
         state.trimSeq = c.seq;
         state.ackCandidate = null;
+        candidateConfirmed = false;
         persist();
       }
       const n = log.compact(state.trimSeq);
