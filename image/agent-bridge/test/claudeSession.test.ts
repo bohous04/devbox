@@ -340,6 +340,30 @@ describe("openClaudeSession", () => {
     expect(events.find((e) => e.type === "run.started" && e.runId === "run-3")).toMatchObject({ origin: "continuation" });
   });
 
+  test("images go to the CLI as base64 image blocks read from their files, before the text", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "claude-images-"));
+    writeFileSync(join(dir, "a.png"), new Uint8Array([1, 2, 3]));
+    writeFileSync(join(dir, "b.jpg"), new Uint8Array([4, 5]));
+    const sdk = fakeSdk();
+    const { session } = open(sdk);
+    await session.startTurn("run-1", "what is this?", "user", [join(dir, "a.png"), join(dir, "b.jpg")]);
+    await flush();
+    expect(sdk.inputs[0]!.message.content).toEqual([
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "AQID" } },
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "BAU=" } },
+      { type: "text", text: "what is this?" },
+    ]);
+  });
+
+  test("an image that cannot be read refuses the turn; nothing is written", async () => {
+    const sdk = fakeSdk();
+    const { session, events } = open(sdk);
+    await expect(session.startTurn("run-1", "see", "user", ["/nonexistent/gone.png"])).rejects.toThrow();
+    await flush();
+    expect(sdk.inputs).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
   test("interrupt calls query.interrupt and emits run.interrupted", async () => {
     const sdk = fakeSdk();
     const { session, events } = open(sdk);

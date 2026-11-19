@@ -23,6 +23,7 @@ export interface HandoffDelivery {
 export type TurnOrigin = "user" | "critic";
 
 export type BridgeCommand =
+  // `attachments` (bridge 1.4.0+; older ones refuse a turn that has them): image paths under /inbox.
   // `origin` (bridge 1.3.0+): who sends the turn; absent = the user. devd's critic sends "critic".
   | { kind: "startTurn"; text: string; attachments?: string[]; origin?: TurnOrigin }
   | { kind: "interrupt" }

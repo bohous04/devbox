@@ -571,7 +571,11 @@ export const api = {
     const qs = q.toString();
     return j<ThreadSnapshot>(`/api/sessions/${encodeURIComponent(id)}/thread${qs ? `?${qs}` : ""}`);
   },
-  sendMessage: (id: string, text: string) => j<{ queued: true }>(`/api/sessions/${encodeURIComponent(id)}/thread/messages`, post({ text })),
+  sendMessage: (id: string, text: string, attachments: string[] = []) => j<{ queued: true }>(`/api/sessions/${encodeURIComponent(id)}/thread/messages`,
+    post(attachments.length > 0 ? { text, attachments: attachments.map((path) => ({ path })) } : { text })),
+  /** A chat image into the session's own inbox dir; its container path goes with the message (sendMessage). */
+  uploadThreadImage: (id: string, image: Blob) => j<{ path: string; size: number }>(`/api/sessions/${encodeURIComponent(id)}/inbox?for=thread`,
+    { method: "POST", headers: { "content-type": "application/octet-stream" }, body: image }),
   interrupt: (id: string) => j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/interrupt`, { method: "POST" }),
   answerRequest: (id: string, requestId: string, answer: string) =>
     j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/requests/${encodeURIComponent(requestId)}`, post({ answer })),

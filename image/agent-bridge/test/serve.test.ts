@@ -25,7 +25,8 @@ import {
   type HarnessOpenOptions,
 } from "../src/serve";
 import type { ServerFrame, SwitchTarget } from "../src/protocol";
-import { ACP_MIN_BRIDGE_VERSION, CRITIC_MIN_BRIDGE_VERSION, versionAtLeast } from "../../../shared/bridgeVersion";
+import { ACP_MIN_BRIDGE_VERSION, CRITIC_MIN_BRIDGE_VERSION, IMAGES_MIN_BRIDGE_VERSION, versionAtLeast } from "../../../shared/bridgeVersion";
+import { withImagePaths } from "../src/images";
 import { loadState, saveState, type BridgeState } from "../src/state";
 
 const MIN = 60_000;
@@ -55,7 +56,7 @@ function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities; readyErr
     /** Fails the next startTurn with this error. */
     failNextStart: null as Error | null,
     injected: [] as unknown[][],
-    turns: [] as { runId: string; text: string; origin: RunOrigin }[],
+    turns: [] as { runId: string; text: string; origin: RunOrigin; images?: string[] }[],
     closes: 0,
     active: null as string | null,
     waiting: [] as { runId: string; origin: RunOrigin }[],
@@ -95,11 +96,11 @@ function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities; readyErr
         async injectItems(items) {
           f.injected.push(items);
         },
-        async startTurn(runId, text, origin) {
+        async startTurn(runId, text, origin, images) {
           const fail = f.failNextStart;
           f.failNextStart = null;
           if (fail) throw fail;
-          f.turns.push({ runId, text, origin });
+          f.turns.push({ runId, text, origin, ...(images?.length ? { images } : {}) });
           if (f.active === null && !opts.deferStart) f.start(runId, origin);
           else f.waiting.push({ runId, origin });
         },
@@ -287,11 +288,32 @@ describe("serve", () => {
     expect(events()).toContainEqual({ type: "run.queued", runId: r.runId, text: "fix it", attachments: [], origin: "critic" });
   });
 
-  test("startTurn with attachments is refused explicitly", async () => {
+  test("attachments go to a harness that takes images; the user's message records them", async () => {
     const f = fakeHarness();
     await start(f);
-    await expect(cmd({ kind: "startTurn", text: "look", attachments: ["a.png"] })).rejects.toThrow("attachments");
-    expect(f.turns).toEqual([]);
+    const r = (await cmd({ kind: "startTurn", text: "look", attachments: ["/inbox/s/a.png"] })) as { runId: string };
+    expect(f.turns).toEqual([{ runId: r.runId, text: "look", origin: "user", images: ["/inbox/s/a.png"] }]);
+    expect(events()).toContainEqual({ type: "message.final", runId: r.runId, itemId: `user:${r.runId}`, role: "user", text: "look", attachments: ["/inbox/s/a.png"] });
+  });
+
+  test("fallback: a harness without images gets the paths appended to its text; the thread keeps the user's text", async () => {
+    const f = fakeHarness({ caps: { ...CLAUDE_CAPABILITIES, images: false } });
+    await start(f);
+    const r = (await cmd({ kind: "startTurn", text: "look", attachments: ["/inbox/s/a.png", "/inbox/s/b.gif"] })) as { runId: string };
+    expect(f.turns).toEqual([{ runId: r.runId, text: withImagePaths("look", ["/inbox/s/a.png", "/inbox/s/b.gif"]), origin: "user" }]);
+    expect(events()).toContainEqual({ type: "message.final", runId: r.runId, itemId: `user:${r.runId}`, role: "user", text: "look", attachments: ["/inbox/s/a.png", "/inbox/s/b.gif"] });
+  });
+
+  test("a queued message keeps its attachments in run.queued, in state and across a bridge restart", async () => {
+    const f = fakeHarness({ deferStart: true });
+    const bridge = await start(f);
+    const r = (await cmd({ kind: "startTurn", text: "look", attachments: ["/inbox/s/a.png"] })) as { runId: string };
+    expect(events()).toContainEqual({ type: "run.queued", runId: r.runId, text: "look", attachments: ["/inbox/s/a.png"] });
+    expect(state().queue).toEqual([{ runId: r.runId, text: "look", attachments: ["/inbox/s/a.png"] }]);
+    await bridge.close();
+    const g = fakeHarness();
+    await start(g);
+    expect(g.turns).toEqual([{ runId: r.runId, text: "look", origin: "user", images: ["/inbox/s/a.png"] }]);
   });
 
   test("restartAgent while a run is active is refused", async () => {
@@ -996,8 +1018,12 @@ describe("final review fixes", () => {
     expect(versionAtLeast(BRIDGE_VERSION, ACP_MIN_BRIDGE_VERSION)).toBe(true);
   });
 
-  test("this bridge takes a startTurn origin: its version is the one devd requires for critic follow-ups", () => {
-    expect(BRIDGE_VERSION).toBe(CRITIC_MIN_BRIDGE_VERSION);
+  test("this bridge takes a startTurn origin: its version is at least the one devd requires for critic follow-ups", () => {
+    expect(versionAtLeast(BRIDGE_VERSION, CRITIC_MIN_BRIDGE_VERSION)).toBe(true);
+  });
+
+  test("this bridge takes startTurn attachments: its version is the one devd requires to send them", () => {
+    expect(BRIDGE_VERSION).toBe(IMAGES_MIN_BRIDGE_VERSION);
   });
 });
 

@@ -10,6 +10,7 @@ import { EventBus } from "../src/eventBus";
 import { Inbox } from "../src/sessionInbox";
 import type { ResetTarget } from "../src/sessionAttention";
 import { ThreadStore } from "../src/threadStore";
+import { stageThreadImage } from "../src/threadImages";
 import type { BridgeCommand } from "../../image/agent-bridge/src/protocol";
 import type { BridgeEvent, LoggedEvent, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
@@ -28,7 +29,7 @@ const completed = (runId: string): BridgeEvent => ({ type: "run.completed", runI
 const said = (runId: string, itemId: string, text: string): BridgeEvent => ({ type: "message.final", runId, itemId, role: "assistant", text });
 const asked = (runId: string, requestId: string): BridgeEvent => ({ type: "request.opened", runId, requestId, kind: "question", prompt: "Which one?" });
 
-function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown>; untilReset?: (s: SessionRow) => ResetTarget; noUntilReset?: boolean } = {}) {
+function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown>; untilReset?: (s: SessionRow) => ResetTarget; noUntilReset?: boolean; bridgeVersion?: string | null } = {}) {
   const db = openDb(":memory:");
   for (const r of [CHAT, CHAT2, TMUX]) insertSession(db, r);
   const dir = mkdtempSync(join(tmpdir(), "thread-api-"));
@@ -64,7 +65,7 @@ function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown
     cfg: { version: 1, settings: { autoStopHours: 4, portRangeStart: 40100, portsPerSession: 10, diskWarnPercent: 80 }, folders: {} },
     root: dir, tree: async () => [], listener: {} as never, notify: () => {}, stats: () => ({ sessions: [], disk: {} }),
     cloneQueue: {} as never, configRepo: {} as never, dashboardDir: dir, agentEvents: hub,
-    links, threads, bus, inbox, untilReset: opts.noUntilReset ? undefined : opts.untilReset ?? (() => ({ reason: "No usage limit is active on this account" })),
+    links, threads, bus, inbox, bridgeVersion: () => (opts.bridgeVersion === undefined ? "1.4.0" : opts.bridgeVersion), untilReset: opts.noUntilReset ? undefined : opts.untilReset ?? (() => ({ reason: "No usage limit is active on this account" })),
   } as never);
   /** Applies events to a session's store and publishes them like index.ts does (store first, then the bus). */
   const feed = (id: string, events: BridgeEvent[]) => {
@@ -78,7 +79,7 @@ function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown
     }
     return out;
   };
-  return { a, db, threads, sent, ensured, firstTurns, bus, inbox, feed, ending };
+  return { a, db, dir, threads, sent, ensured, firstTurns, bus, inbox, feed, ending };
 }
 
 const req = (method: string, path: string, body?: unknown, headers: Record<string, string> = {}) =>
@@ -148,6 +149,61 @@ test("POST messages: empty text, missing text and extra fields are 400; nothing 
     expect(r.status).toBe(400);
   }
   expect(t.sent).toEqual([]);
+});
+
+// --- images ---
+
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2]);
+
+test("POST messages with attachments staged for this session sends them with startTurn", async () => {
+  const t = setup();
+  const a = stageThreadImage(t.dir, CHAT.id, PNG);
+  const b = stageThreadImage(t.dir, CHAT.id, PNG);
+  const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/messages`, { text: "what is this?", attachments: [{ path: a }, { path: b }] }));
+  expect(r.status).toBe(202);
+  expect(t.sent).toEqual([[CHAT.id, { kind: "startTurn", text: "what is this?", attachments: [a, b] }]]);
+});
+
+test("POST messages: attachments that are not this session's staged images are 400; nothing is sent", async () => {
+  const t = setup();
+  const own = stageThreadImage(t.dir, CHAT.id, PNG);
+  const other = stageThreadImage(t.dir, CHAT2.id, PNG);
+  const name = own.split("/").pop()!;
+  for (const attachments of [
+    "x", [own], [{ path: other }], [{ path: `/inbox/${name}` }], [{ path: `/inbox/${CHAT.id}/../${CHAT.id}/${name}` }],
+    [{ path: `/inbox/${CHAT.id}/00000000-0000-4000-8000-000000000000.png` }], [{ path: own, extra: 1 }], [{}],
+  ]) {
+    const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/messages`, { text: "hi", attachments }));
+    expect(r.status).toBe(400);
+  }
+  expect(t.sent).toEqual([]);
+});
+
+test("POST messages with attachments to a bridge older than 1.4.0 is 409 bridge-too-old; text alone still goes", async () => {
+  for (const version of ["1.3.0", null]) {
+    const t = setup({ bridgeVersion: version });
+    const path = stageThreadImage(t.dir, CHAT.id, PNG);
+    const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/messages`, { text: "see", attachments: [{ path }] }));
+    expect(r.status).toBe(409);
+    expect(((await r.json()) as { error: string }).error).toBe("bridge-too-old");
+    expect(t.sent).toEqual([]);
+    expect((await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/messages`, { text: "see", attachments: [] }))).status).toBe(202);
+    expect(t.sent).toEqual([[CHAT.id, { kind: "startTurn", text: "see" }]]);
+  }
+});
+
+test("GET thread attachment serves this session's staged image with its type; anything else 404", async () => {
+  const t = setup();
+  const path = stageThreadImage(t.dir, CHAT.id, PNG);
+  const name = path.split("/").pop()!;
+  const r = await t.a.fetch(req("GET", `/api/sessions/${CHAT.id}/thread/attachments/${name}`));
+  expect(r.status).toBe(200);
+  expect(r.headers.get("content-type")).toBe("image/png");
+  expect(r.headers.get("x-content-type-options")).toBe("nosniff");
+  expect(new Uint8Array(await r.arrayBuffer())).toEqual(PNG);
+  expect((await t.a.fetch(req("GET", `/api/sessions/${CHAT2.id}/thread/attachments/${name}`))).status).toBe(404);
+  expect((await t.a.fetch(req("GET", `/api/sessions/${CHAT.id}/thread/attachments/notes.txt`))).status).toBe(404);
+  expect((await t.a.fetch(req("GET", `/api/sessions/${TMUX.id}/thread/attachments/${name}`))).status).toBe(409);
 });
 
 test("POST messages to unknown 404 and tmux 409", async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ACP_AGENTS, type AcpAgentSpec } from "../src/acpAgents.ts";
 import { negotiate, openAcpSession, type SpawnFn } from "../src/acpSession.ts";
@@ -266,6 +267,21 @@ describe("openAcpSession", () => {
     await session.ready;
     expect(fake.requests("session/new")[0]!.params.mcpServers).toEqual([
       { type: "stdio", name: "devbox", command: "agent-bridge", args: ["mcp"], env: [{ name: "DEVD_URL", value: "http://devd.test" }] },
+    ]);
+  });
+
+  test("images go to session/prompt as ACP image content read from their files", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acp-images-"));
+    writeFileSync(join(dir, "a.gif"), new Uint8Array([1, 2, 3]));
+    const fake = fakeAgent(INIT["v1-no-load"]);
+    const { session, events } = open(fake);
+    await session.ready;
+    expect(session.capabilities().images).toBe(true);
+    await session.startTurn("run-1", "what is this?", "user", [join(dir, "a.gif")]);
+    await until(() => events.some((e) => e.type === "run.completed"));
+    expect(fake.requests("session/prompt")[0]!.params.prompt).toEqual([
+      { type: "text", text: "what is this?" },
+      { type: "image", mimeType: "image/gif", data: "AQID" },
     ]);
   });
 

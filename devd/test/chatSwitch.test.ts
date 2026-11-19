@@ -101,7 +101,7 @@ function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; pro
   cleanups.push(() => sw.drop(CHAT.id));
   const app = new Hono();
   registerThreadRoutes(app, {
-    db, mgr: { isEnding: () => false }, threads: () => store, bus: new EventBus(), inbox: { changedSafe: () => {} } as never,
+    db, root: dir, mgr: { isEnding: () => false }, threads: () => store, bus: new EventBus(), inbox: { changedSafe: () => {} } as never, bridgeVersion: (id) => sw.bridgeVersion(id),
     links: { send: deps.links.send, ensure: () => {}, startTurnWhenConnected: () => {} }, switcher: sw, untilReset: () => { throw new Error("not used"); },
   });
   const post = async (what: string, body: unknown) => {

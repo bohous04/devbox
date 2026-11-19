@@ -1343,3 +1343,33 @@ test("browser inbox upload rejects foreign origins, container callers, bad media
     expect((await send({ "content-length": String(26 * 1024 * 1024) })).status).toBe(413);
   }
 });
+
+test("chat image upload (?for=thread): png, jpeg, webp, gif land in the session's own /inbox dir under a uuid name", async () => {
+  const { a, db, root } = app(undefined, undefined, undefined, {
+    remoteAddr: () => "127.0.0.1", dashboardOrigins: ["https://dev.example.com"],
+  });
+  insertSession(db, { id: "dev-acme-web", folder: "apps", project: "acme", repo: "web", container: "dev-acme-web", port_base: 40000,
+    status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0 });
+  const upload = (body: Uint8Array, headers: Record<string, string> = {}) => a.request("/api/sessions/dev-acme-web/inbox?for=thread", {
+    method: "POST", headers: { "content-type": "application/octet-stream", origin: "https://dev.example.com", ...headers }, body,
+  });
+  const enc = (s: string) => new TextEncoder().encode(s);
+  const images: [Uint8Array, string][] = [
+    [new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]), "png"],
+    [new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1]), "jpg"],
+    [enc("RIFF\x10\x00\x00\x00WEBPVP8 "), "webp"],
+    [enc("GIF89a...."), "gif"],
+  ];
+  for (const [bytes, ext] of images) {
+    const r = await upload(bytes);
+    expect(r.status).toBe(201);
+    const { path, size } = (await r.json()) as { path: string; size: number };
+    expect(path).toMatch(new RegExp(`^/inbox/dev-acme-web/[0-9a-f-]{36}\\.${ext}$`));
+    expect(size).toBe(bytes.length);
+    expect(readFileSync(join(root, "_inbox", "dev-acme-web", path.split("/").pop()!))).toEqual(Buffer.from(bytes));
+  }
+  const svg = await upload(enc("<svg/>"));
+  expect(svg.status).toBe(415);
+  expect(((await svg.json()) as { error: string }).error).toContain("png, jpeg, webp or gif");
+  expect((await upload(images[0]![0], { "content-length": String(26 * 1024 * 1024) })).status).toBe(413);
+});

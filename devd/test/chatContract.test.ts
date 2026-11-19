@@ -81,7 +81,7 @@ test("a normal exchange: devd's store and the dashboard's copy agree, user messa
   links.ensure(ID);
   await waitFor(() => links.status(ID) === "connected", "link");
   h.emit({ type: "thread.native", harness: "claude", nativeThreadId: "thread-1", account: null, model: "m" });
-  await links.send(ID, { kind: "startTurn", text: "fix the failing test" });
+  await links.send(ID, { kind: "startTurn", text: "fix the failing test", attachments: ["/inbox/dev-a-b-1/shot.png"] });
   const runId = h.runId!;
   h.emit({ type: "message.delta", runId, itemId: "m1", text: "Look" });
   h.emit({ type: "message.delta", runId, itemId: "m1", text: "ing" });
@@ -108,6 +108,7 @@ test("a normal exchange: devd's store and the dashboard's copy agree, user messa
     ["request", "Fix the test or the code?", "answered"],
     ["assistant", "Fixed the code.", "done"],
   ]);
+  expect(stored.items[0]!.attachments).toEqual(["/inbox/dev-a-b-1/shot.png"]);
   expect(stored.runs).toEqual([expect.objectContaining({ runId, origin: "user", status: "completed", harness: "claude" })]);
 });
 

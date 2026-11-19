@@ -7,7 +7,8 @@ import { prepareShadowHome, type HomesPaths } from "./codexHomes";
 import { CODEX_CAPABILITIES, openCodexSession } from "./codexSession";
 import { CONTINUATION_TEXT, CONTINUATION_WINDOW_MS, mayContinue } from "./continuation";
 import { EventLog } from "./eventLog";
-import type { BackgroundWork, BridgeEvent, UsageBaseline } from "./events";
+import type { BackgroundWork, BridgeEvent, RunOrigin, UsageBaseline } from "./events";
+import { withImagePaths } from "./images";
 import { DEFAULT_SOCKET } from "./mcp";
 import { ACP_INSTRUCTIONS, acpMcpServers, APPENDED_SYSTEM_PROMPT, claudeMcpServers, codexMcpArgs } from "./prompts";
 import type { BridgeCommand, HandoffDelivery, SwitchTarget, TurnOrigin } from "./protocol";
@@ -16,7 +17,7 @@ import { startServer } from "./server";
 import { loadState, saveState, type BridgeState, type PersistedTarget } from "./state";
 import { DeclaredWaits } from "./waits";
 
-export const BRIDGE_VERSION = "1.3.0";
+export const BRIDGE_VERSION = "1.4.0";
 export const DEFAULT_BRIDGE_DIR = "/run/devd/bridge";
 export const CLAUDE_ACCOUNTS_ROOT = "/home/dev/.claude-accounts";
 export const CODEX_ACCOUNTS_ROOT = "/home/dev/.codex-accounts";
@@ -365,7 +366,8 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
         // A user run that starts without having been queued carries its text nowhere else: store it right
         // after its start, before anything the agent says.
         if (entry && !announced.has(e.runId)) {
-          server.publish({ type: "message.final", runId: e.runId, itemId: `user:${e.runId}`, role: "user", text: entry.text });
+          server.publish({ type: "message.final", runId: e.runId, itemId: `user:${e.runId}`, role: "user", text: entry.text,
+            ...(entry.attachments.length > 0 ? { attachments: entry.attachments } : {}) });
         }
         return;
       }
@@ -461,26 +463,34 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     return { harnessText: handoff.preamble === null ? text : `${handoff.preamble}\n\n${label}:\n${text}`, putBack: handoff };
   }
 
-  async function startTurn(text: string, origin: TurnOrigin): Promise<{ runId: string }> {
+  /** Images go to a harness that takes them; any other gets their paths in its text (the thread still shows the
+   *  user's own text with the images). */
+  function sendTurn(session: HarnessSession, runId: string, harnessText: string, origin: RunOrigin, attachments: string[]): Promise<void> {
+    if (attachments.length === 0) return session.startTurn(runId, harnessText, origin);
+    if (!session.capabilities().images) return session.startTurn(runId, withImagePaths(harnessText, attachments), origin);
+    return session.startTurn(runId, harnessText, origin, attachments);
+  }
+
+  async function startTurn(text: string, origin: TurnOrigin, attachments: string[]): Promise<{ runId: string }> {
     // The critic reviews the run that just ended; behind another run its follow-up would review stale work.
     if (origin === "critic" && (state.activeRunId !== null || state.queue.length > 0)) throw new Error("run-active");
     const runId = crypto.randomUUID();
     const queuedOrigin = origin === "critic" ? { origin } : {};
     if (recoveryPending) {
       // No usable harness yet: the message waits in the queue and starts with the recovered ones.
-      state.queue.push({ runId, text, attachments: [], ...queuedOrigin });
+      state.queue.push({ runId, text, attachments, ...queuedOrigin });
       persist();
-      announceQueued(runId, text, origin);
+      announceQueued(runId, text, origin, attachments);
       return { runId };
     }
     const session = harness!.session;
     const { harnessText, putBack } = await consumeHandoff(session, text, origin);
     // Persisted before the harness sees it: a crash from here on still runs the message after the restart.
     // `run.started` removes it again.
-    state.queue.push({ runId, text, attachments: [], ...(harnessText !== text ? { harnessText } : {}), ...queuedOrigin });
+    state.queue.push({ runId, text, attachments, ...(harnessText !== text ? { harnessText } : {}), ...queuedOrigin });
     persist();
     try {
-      await session.startTurn(runId, harnessText, origin);
+      await sendTurn(session, runId, harnessText, origin, attachments);
     } catch (e) {
       state.queue = state.queue.filter((q) => q.runId !== runId);
       state.pendingHandoff = putBack;
@@ -488,13 +498,13 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       throw e;
     }
     // The harness holds the turn (a run is active, or Codex has no thread yet).
-    if (state.queue.some((q) => q.runId === runId)) announceQueued(runId, text, origin);
+    if (state.queue.some((q) => q.runId === runId)) announceQueued(runId, text, origin, attachments);
     return { runId };
   }
 
-  function announceQueued(runId: string, text: string, origin: TurnOrigin): void {
+  function announceQueued(runId: string, text: string, origin: TurnOrigin, attachments: string[]): void {
     announced.add(runId);
-    server.publish({ type: "run.queued", runId, text, attachments: [], ...(origin === "critic" ? { origin } : {}) });
+    server.publish({ type: "run.queued", runId, text, attachments, ...(origin === "critic" ? { origin } : {}) });
   }
 
   function refuseWhileRunning(what: string): void {
@@ -608,9 +618,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   async function handle(cmd: BridgeCommand): Promise<unknown> {
     switch (cmd.kind) {
       case "startTurn":
-        // HarnessSession has no attachment input yet; refusing beats dropping files the user sent.
-        if (cmd.attachments?.length) throw new Error("attachments are not supported yet");
-        return startTurn(cmd.text, cmd.origin ?? "user");
+        return startTurn(cmd.text, cmd.origin ?? "user", cmd.attachments ?? []);
       case "interrupt":
         return liveHarness().session.interrupt();
       case "answer":
@@ -726,9 +734,9 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
           persist();
         }
       }
-      await session.startTurn(q.runId, sent, q.origin ?? "user");
+      await sendTurn(session, q.runId, sent, q.origin ?? "user", q.attachments);
       // A crash between persist() and the run.queued publish left the message unannounced.
-      if (!announced.has(q.runId) && state.queue.some((x) => x.runId === q.runId)) announceQueued(q.runId, q.text, q.origin ?? "user");
+      if (!announced.has(q.runId) && state.queue.some((x) => x.runId === q.runId)) announceQueued(q.runId, q.text, q.origin ?? "user", q.attachments);
     }
   }
 

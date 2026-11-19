@@ -54,6 +54,7 @@ import { join } from "node:path";
 import { readUpload, UploadError } from "./uploads";
 import { stageFile, stageShared } from "./inbox";
 import { registerThreadRoutes, type ThreadApiDeps } from "./threadApi";
+import { sniffImage, stageThreadImage, THREAD_IMAGE_KINDS } from "./threadImages";
 import type { SshKeyRef } from "./op";
 import { resolveSshTarget, type SshServer } from "./sshServers";
 import { createScopeGrant, keyCovered, listScopeGrants, liveScopeGrant, revokeScopeGrant, scopeIssue, scopeLabel } from "./sshScopeGrants";
@@ -182,6 +183,7 @@ export interface ApiDeps { mgr: SessionManager; db: Database; cfg: DevConfig; ro
   bus?: ThreadApiDeps["bus"];
   inbox?: ThreadApiDeps["inbox"];
   untilReset?: ThreadApiDeps["untilReset"];
+  bridgeVersion?: ThreadApiDeps["bridgeVersion"];
   switcher?: ThreadApiDeps["switcher"];
   // "Update now": status of the server checkout vs origin/main and a manual start of devbox-update.service
   // (the nightly unit). `run` returns null when an update is already running.
@@ -361,8 +363,8 @@ export function createApp(d: ApiDeps): Hono {
     return c.json(buildWeeklyUsage(d.db,range.from,range.to,now));
   });
   app.route("/api/live-activities", liveActivitiesRoutes(d.db, d.liveActivities));
-  registerThreadRoutes(app, d.links && d.threads && d.bus && d.inbox
-    ? { db: d.db, mgr: d.mgr, links: d.links, threads: d.threads, bus: d.bus, inbox: d.inbox, switcher: d.switcher, untilReset: d.untilReset } : null);
+  registerThreadRoutes(app, d.links && d.threads && d.bus && d.inbox && d.bridgeVersion
+    ? { db: d.db, root: d.root, mgr: d.mgr, links: d.links, threads: d.threads, bus: d.bus, inbox: d.inbox, bridgeVersion: d.bridgeVersion, switcher: d.switcher, untilReset: d.untilReset } : null);
 
   // The git proxy MUST be registered first: further down the file is a catch-all that
   // serves the dashboard SPA, and Hono matches in registration order — otherwise requests
@@ -1482,6 +1484,20 @@ export function createApp(d: ApiDeps): Hono {
     if (session.status !== "running") return c.json({ error: "session is not running" }, 409);
     if (c.req.header("content-type") !== "application/octet-stream")
       return c.json({ error: "Content-Type must be application/octet-stream" }, 415);
+    // A chat image (`?for=thread`): stored in the session's own dir under a uuid name, so a message can only carry
+    // images uploaded for its session (threadApi checks it).
+    if (c.req.query("for") === "thread") {
+      try {
+        const bytes = await readUpload(c.req.raw);
+        if (sniffImage(bytes) === null) return c.json({ error: `Only ${THREAD_IMAGE_KINDS} images can be attached` }, 415);
+        const path = stageThreadImage(d.root, session.id, bytes);
+        logEvent(d.db, session.id, "file_inbox", { name: path.split("/").pop(), size: bytes.length, source: "browser", thread: true });
+        return c.json({ path, size: bytes.length }, 201);
+      } catch (e) {
+        if (e instanceof UploadError) return c.json({ error: e.message }, e.status);
+        return c.json({ error: "Could not save the image" }, 400);
+      }
+    }
     const name = c.req.query("name");
     if (!name || name.length > 240) return c.json({ error: "A file name of at most 240 characters is required" }, 400);
     try {

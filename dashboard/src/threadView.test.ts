@@ -187,6 +187,22 @@ test("composerErrorText: the three command failures, the rest by message", () =>
   expect(composerErrorText(500, null)).toBe("HTTP 500");
 });
 
+test("the user item keeps its attachments, from run.queued or from the start echo, like ThreadStore", () => {
+  seq = 0;
+  const t = run(emptyThread(), [
+    { type: "run.queued", runId: "r1", text: "look", attachments: ["/inbox/s/a.png"] },
+    { type: "run.started", runId: "r2", origin: "user", nativeThreadId: null, model: null },
+    { type: "message.final", runId: "r2", itemId: "user:r2", role: "user", text: "and this", attachments: ["/inbox/s/b.gif"] },
+    { type: "run.queued", runId: "r3", text: "plain", attachments: [] },
+  ]);
+  expect(t.items.map((i) => [i.text, i.attachments])).toEqual([["look", ["/inbox/s/a.png"]], ["and this", ["/inbox/s/b.gif"]], ["plain", undefined]]);
+  expect("attachments" in t.items[2]!).toBe(false);
+});
+
+test("composerErrorText shows a bridge-too-old refusal's message", () => {
+  expect(composerErrorText(409, { error: "bridge-too-old", message: "recreate the container" })).toBe("recreate the container");
+});
+
 test("a run that starts at once has its user item", () => {
   seq = 0;
   const t = run(emptyThread(), [

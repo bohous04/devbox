@@ -3,6 +3,7 @@ import { capText, HOST_SESSION_VARS } from "./claude.ts";
 import { ResumeFailedError, type HarnessSession } from "./claudeSession.ts";
 import { spawnCodex, type CodexProcess } from "./codexSession.ts";
 import type { BridgeEvent, Capabilities, RunOrigin, TokenUsage } from "./events.ts";
+import { readImageBase64 } from "./images.ts";
 import { JsonRpcError, JsonRpcPeer, type Id } from "./jsonRpc.ts";
 
 // Generic ACP (Agent Client Protocol) adapter over stdio. Message shapes follow the ACP schema (v1 and the v2
@@ -154,6 +155,8 @@ interface Turn {
   runId: string;
   text: string;
   origin: RunOrigin;
+  /** ACP image content blocks, read when the turn was accepted. */
+  images: { type: "image"; mimeType: string; data: string }[];
 }
 
 interface Conn {
@@ -330,7 +333,7 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
         if (run.interrupted) return finishRun(run, "cancelled", undefined);
         const text = instructions === null ? t.text : `${instructions}\n\n${t.text}`;
         run.prompted = true;
-        const r = await c.peer.request<unknown>("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
+        const r = await c.peer.request<unknown>("session/prompt", { sessionId, prompt: [{ type: "text", text }, ...t.images] });
         if (instructions !== null) {
           instructions = null;
           o.onInstructionsDelivered?.();
@@ -586,9 +589,14 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
   );
 
   return {
-    async startTurn(runId, text, origin) {
+    async startTurn(runId, text, origin, images = []) {
       if (endReason !== null) throw new Error(endReason);
-      waiting.push({ runId, text, origin });
+      // Read now: a file that cannot be read refuses the turn instead of failing it later.
+      const blocks = images.map((p) => {
+        const { mediaType, data } = readImageBase64(p);
+        return { type: "image" as const, mimeType: mediaType, data };
+      });
+      waiting.push({ runId, text, origin, images: blocks });
       startNext();
     },
     async interrupt() {

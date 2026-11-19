@@ -16,3 +16,7 @@ export function versionAtLeast(version: string, min: string): boolean {
 /** The first agent bridge that takes a `startTurn` origin. An older bridge ignores the field and runs a critic
  *  follow-up as the user's turn, which would restart the critic's rounds: devd runs no critic on such a bridge. */
 export const CRITIC_MIN_BRIDGE_VERSION = "1.3.0";
+
+/** The first agent bridge that takes `startTurn` attachments (images). An older bridge refuses a turn that has them:
+ *  devd answers 409 bridge-too-old instead of sending. */
+export const IMAGES_MIN_BRIDGE_VERSION = "1.4.0";

@@ -40,7 +40,8 @@ export type BridgeEvent =
   | { type: "run.queued"; runId: string; text: string; attachments: string[]; origin?: "critic" }
   | { type: "run.started"; runId: string; origin: RunOrigin; nativeThreadId: string | null; model: string | null }
   | { type: "message.delta"; runId: string; itemId: string; text: string }
-  | { type: "message.final"; runId: string; itemId: string; role: "assistant" | "user"; text: string }
+  // attachments (bridge 1.4.0+): the user's images (paths under /inbox), only on a user message that has them.
+  | { type: "message.final"; runId: string; itemId: string; role: "assistant" | "user"; text: string; attachments?: string[] }
   | { type: "tool.started"; runId: string; itemId: string; tool: string; input: unknown }
   | { type: "tool.finished"; runId: string; itemId: string; isError: boolean; output: string }
   | { type: "request.opened"; runId: string; requestId: string; kind: RequestKind; prompt: string; options?: { label: string; description?: string }[]; multiSelect?: boolean }

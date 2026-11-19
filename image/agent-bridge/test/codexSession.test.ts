@@ -191,6 +191,18 @@ describe("openCodexSession", () => {
     expect(events[1]).toMatchObject({ type: "run.started", runId: "run-1", origin: "continuation", nativeThreadId: resumed });
   });
 
+  test("images go to turn/start as localImage items after the text", async () => {
+    const fake = fakeCodex();
+    const { session } = open(fake);
+    await session.startTurn("run-1", "what is this?", "user", ["/inbox/s/a.png", "/inbox/s/b.webp"]);
+    await until(() => fake.requests("turn/start").length === 1);
+    expect(fake.requests("turn/start")[0]!.params.input).toEqual([
+      { type: "text", text: "what is this?", text_elements: [] },
+      { type: "localImage", path: "/inbox/s/a.png" },
+      { type: "localImage", path: "/inbox/s/b.webp" },
+    ]);
+  });
+
   test("a model of null is not sent with turn/start", async () => {
     const fake = fakeCodex();
     const { session } = open(fake, { model: null });

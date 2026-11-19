@@ -13,6 +13,8 @@ export interface ThreadItem {
   output?: string;
   isError?: boolean;
   status?: "streaming" | "done" | "open" | "answered" | "expired";
+  /** A user message's images: container paths under `/inbox/<sessionId>/` (devd/src/threadImages.ts). */
+  attachments?: string[];
   ts: number;
 }
 

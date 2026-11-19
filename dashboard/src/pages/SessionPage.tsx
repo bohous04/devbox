@@ -129,7 +129,7 @@ function ChatPage({ id }: { id: string }) {
           <div className="flex-1">
             {thread.items.length === 0
               ? <EmptyState title="No messages yet" hint="Write the first message below." />
-              : <MessageList items={thread.items} pending={thread.pending} queued={queuedRunIds(thread)} critic={criticRunIds(thread)} onAnswer={(rid, a) => api.answerRequest(id, rid, a)} />}
+              : <MessageList sessionId={id} items={thread.items} pending={thread.pending} queued={queuedRunIds(thread)} critic={criticRunIds(thread)} onAnswer={(rid, a) => api.answerRequest(id, rid, a)} />}
             {thread.background.length > 0 && (
               <p className="mt-3 text-xs text-muted-foreground">background: {thread.background.map((b) => b.label).join(", ")}</p>
             )}
@@ -138,7 +138,12 @@ function ChatPage({ id }: { id: string }) {
           {/* Above the mobile bottom bar (h-16); from lg there is none. */}
           <div className="sticky bottom-16 z-10 -mx-4 mt-4 border-t bg-background/95 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6 lg:bottom-0 lg:-mx-10 lg:px-10">
             <Composer
-              running={running} onSend={async (text) => { await api.sendMessage(id, text); }} onStop={() => api.interrupt(id)}
+              running={running} onStop={() => api.interrupt(id)}
+              onSend={async (text, images) => {
+                const paths: string[] = [];
+                for (const image of images) paths.push((await api.uploadThreadImage(id, image)).path);
+                await api.sendMessage(id, text, paths);
+              }}
               toolbar={<Switchers sessionId={id} thread={thread} />}
             />
           </div>

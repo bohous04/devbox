@@ -1070,7 +1070,7 @@ const apiDeps: ApiDeps = {
     },
   },
   agentEvents, liveActivities, gitea, spawnPty: realSpawnPty, scheduler, critic, codexAuth,
-  links: bridgeLinks, threads: threadStore, bus, inbox, switcher: chatSwitch,
+  links: bridgeLinks, threads: threadStore, bus, inbox, switcher: chatSwitch, bridgeVersion: (id) => chatSwitch.bridgeVersion(id),
   untilReset: (s) => untilReset(s, resetDeps({ db, threads: threadStore, codexAccounts }), Date.now()),
   codexUsage: { view: () => buildCodexView(db) },
   codexAccounts,
