@@ -8,7 +8,7 @@ import { sanitizeSessionName, type AgentName } from "../../devd/src/db";
 import { sh } from "./sh";
 import type { TreeProject } from "../../devd/src/tree";
 import { ApiClient, type SessionInfo, type WriteRow } from "./api";
-import { agentLabel, altCfg, buildExecArgv, probeArgv, runAttach, sessionPickerOptions, tmuxCommand, withSessionName } from "./attach";
+import { agentLabel, altCfg, buildExecArgv, probeArgv, runAttach, sessionPickerOptions, tmuxCommand, withChatLink, withSessionName } from "./attach";
 import { parseProbe } from "../../devd/src/tmux";
 import { loadCliConfig, type CliConfig } from "./config";
 import { runDoctor } from "./doctor";
@@ -836,7 +836,11 @@ async function runExitAware(deps: Deps, container: string, tmuxSession: string, 
   let name = s?.name ?? null;
   const status = offlineStatus();
   for (;;) {
-    const namedCommand = withSessionName(tmuxCommand(tmuxSession, grokSupport, existingOnly), name);
+    const attachCommand = (existing: boolean) => {
+      const cmd = tmuxCommand(tmuxSession, grokSupport, existing);
+      return withSessionName(s?.runtime === "chat" ? withChatLink(cmd, chatLinkLine(s.id, deps.cfg.devdUrl)) : cmd, name);
+    };
+    const namedCommand = attachCommand(existingOnly);
     const code = await attachLoop({
       argv: buildExecArgv(deps.cfg, container, namedCommand),
       argvAlt: alt ? buildExecArgv(alt, container, namedCommand) : undefined,
@@ -847,7 +851,7 @@ async function runExitAware(deps: Deps, container: string, tmuxSession: string, 
         // Creating a default agent here would race server cold recovery.
         const dialCfg = alt && argv.includes(alt.sshHost!) ? alt : deps.cfg;
         return runAttach(buildExecArgv(dialCfg, container,
-          withSessionName(tmuxCommand(tmuxSession, grokSupport, existingOnly || connectionAttempt++ > 0), name)));
+          attachCommand(existingOnly || connectionAttempt++ > 0)));
       },
       status,
       retryRemoteErrors: true,
