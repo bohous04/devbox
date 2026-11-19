@@ -64,7 +64,8 @@ final class ChatSwitchTests: XCTestCase {
     func testHarnessOptionsDisableWhatChatCannotRunAndAcpOnAnOldBridge() {
         let opts = ChatSwitch.harnessOptions(target())
         XCTAssertEqual(opts.map(\.value), ["claude", "claude-gemini", "claude-openrouter", "codex", "grok", "antigravity", "vibe"])
-        XCTAssertEqual(opts.first { $0.value == "grok" }?.disabled, "Grok Build is not available in chat sessions yet")
+        XCTAssertNil(opts.first { $0.value == "grok" }?.disabled)
+        XCTAssertEqual(opts.first { $0.value == "antigravity" }?.disabled, "Antigravity is not available in chat sessions yet")
         XCTAssertNil(opts.first { $0.value == "vibe" }?.disabled)
         XCTAssertTrue(opts.first { $0.value == "claude" }!.current)
         let old = ChatSwitch.harnessOptions(target(bridge: "1.1.0"))

@@ -298,7 +298,7 @@ test("fireSchedule (chat): an agent chat cannot run fails before open, creating 
     db, open: async (t) => { opened.push(t); return { session: { id: "x" } }; },
     notify: (_t, m) => { notes.push(m); }, ...chatDeps(f, ended),
   });
-  await s.fireSchedule(sched({ runtime: "chat", agent: "grok" }));
+  await s.fireSchedule(sched({ runtime: "chat", agent: "antigravity" }));
   // NULL agent: the repo's remembered one counts
   const s2 = createScheduler({
     db, open: async (t) => { opened.push(t); return { session: { id: "x" } }; },

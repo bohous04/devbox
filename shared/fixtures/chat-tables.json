@@ -46,7 +46,7 @@
       "proxy": false,
       "runtime": "grok",
       "acp": "grok",
-      "acpLive": false,
+      "acpLive": true,
       "chatOnly": false
     },
     "antigravity": {
@@ -82,6 +82,8 @@
       "gpt-5.3-codex"
     ],
     "grok": [
+      "grok-4.7",
+      "grok-4.7-build-fast",
       "grok-4.6",
       "grok-4.5"
     ],

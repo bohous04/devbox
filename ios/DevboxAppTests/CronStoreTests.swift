@@ -156,7 +156,7 @@ final class CronStoreTests: XCTestCase {
     func testSetRuntimeToChatResetsAnAgentChatCannotRun() async throws {
         let store = makeStore { _ in .init(statusCode: 200, data: self.scheduleJSON(self.schedule())) }
         var s = schedule()
-        s.agent = "grok"
+        s.agent = "antigravity"
         try await store.setRuntime(s, "chat")
         XCTAssertEqual(bodyJSON(MockURLProtocol.capturedRequests[0]) as NSDictionary, ["runtime": "chat", "agent": NSNull()] as NSDictionary)
     }
@@ -170,7 +170,7 @@ final class CronStoreTests: XCTestCase {
     }
 
     func testAgentChoicesPerRuntime() {
-        XCTAssertEqual(CronStore.agentChoices(runtime: "chat"), ["claude", "claude-gemini", "claude-openrouter", "codex", "vibe"])
+        XCTAssertEqual(CronStore.agentChoices(runtime: "chat"), ["claude", "claude-gemini", "claude-openrouter", "codex", "grok", "vibe"])
         XCTAssertEqual(CronStore.agentChoices(runtime: "tmux"), ["claude", "claude-gemini", "claude-openrouter", "codex", "grok", "antigravity"])
     }
 }

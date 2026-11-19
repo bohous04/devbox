@@ -312,11 +312,9 @@ test("account: a proxy profile has no account pool (400)", async () => {
 test("harness: an unknown agent or one chat cannot run is 400", async () => {
   const t = setup();
   expect((await t.post("harness", { agent: "nope" })).status).toBe(400);
-  for (const agent of ["grok", "antigravity"]) {
-    const r = await t.post("harness", { agent });
-    expect(r).toMatchObject({ status: 400, body: { error: "unknown-agent" } });
-    expect(String(r.body.message)).toContain("is not available in chat sessions yet");
-  }
+  const r = await t.post("harness", { agent: "antigravity" });
+  expect(r).toMatchObject({ status: 400, body: { error: "unknown-agent" } });
+  expect(String(r.body.message)).toContain("is not available in chat sessions yet");
   expect((await t.post("harness", {})).status).toBe(400);
   expect(t.sent).toEqual([]);
 });
@@ -440,6 +438,20 @@ test("model: Vibe switches among its models live; another harness's model is 400
   expect(await t.post("model", { model: "claude-opus-5-5" })).toMatchObject({ status: 400, body: { error: "unknown-model" } });
   // A reloaded Vibe session names Medium 3.5 "mistral-medium-latest": an alias with a window, not a default.
   expect(MODEL_WINDOW_ALIASES["mistral-medium-latest"]).toBe("mistral-medium-3.5");
+});
+
+test("Grok: its default grok-4.7 switches to another Grok model live and hands over to Claude", async () => {
+  const t = setup({ agent: "grok" });
+  t.feed([
+    { type: "thread.native", harness: "grok", nativeThreadId: "t-grok", account: null, model: "grok-4.7", caps: { ...VIBE_CAPS, images: false } },
+    { type: "run.queued", runId: "r1", text: "ask r1", attachments: [] },
+    { type: "run.started", runId: "r1", origin: "user", nativeThreadId: "t-grok", model: "grok-4.7" },
+    { type: "message.final", runId: "r1", itemId: "m-r1", role: "assistant", text: "answer r1" },
+    { type: "run.completed", runId: "r1", nativeThreadId: "t-grok", usage: null, costUsd: null },
+  ]);
+  expect(await t.post("model", { model: "grok-4.6" })).toEqual({ status: 202, body: { kind: "set-model" } });
+  expect(t.sent).toEqual([{ kind: "setModel", model: "grok-4.6" }]);
+  expect(await t.post("harness", { agent: "claude" })).toMatchObject({ status: 202, body: { kind: "fresh-with-handoff" } });
 });
 
 test("account: an ACP agent runs on its own CLI login, not on an account pool (400)", async () => {

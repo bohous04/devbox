@@ -36,7 +36,7 @@ enum ChatSwitch {
         "claude-gemini": Profile(label: "Claude Code + Gemini", proxy: true, runtime: "claude", acp: nil, acpLive: false),
         "claude-openrouter": Profile(label: "Claude Code + OpenRouter", proxy: true, runtime: "claude", acp: nil, acpLive: false),
         "codex": Profile(label: "Codex", proxy: false, runtime: "codex", acp: nil, acpLive: false),
-        "grok": Profile(label: "Grok Build", proxy: false, runtime: "grok", acp: "grok", acpLive: false),
+        "grok": Profile(label: "Grok Build", proxy: false, runtime: "grok", acp: "grok", acpLive: true),
         "antigravity": Profile(label: "Antigravity", proxy: false, runtime: "agy", acp: "antigravity", acpLive: false),
         "vibe": Profile(label: "Mistral Vibe", proxy: false, runtime: "vibe", acp: "vibe", acpLive: true, chatOnly: true),
     ]
@@ -48,7 +48,7 @@ enum ChatSwitch {
     static let chatModels: [String: [String]] = [
         "claude": ["claude-opus-5-5", "claude-sonnet-5-5"],
         "codex": ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini", "gpt-5.3-codex"],
-        "grok": ["grok-4.6", "grok-4.5"],
+        "grok": ["grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"],
         "vibe": ["mistral-large-4-0", "mistral-medium-3.5"],
         "antigravity": ["gemini-4-neon"],
     ]

@@ -119,7 +119,7 @@ test("harness menu: every profile chat can run is enabled, the others carry devd
   expect(by.claude).toMatchObject({ current: true, disabled: null, label: "Claude Code" });
   expect(by.codex.disabled).toBeNull();
   expect(by["claude-gemini"].disabled).toBeNull();
-  expect(by.grok.disabled).toMatch(/not available in chat/);
+  expect(by.grok).toMatchObject({ disabled: null, label: "Grok Build" });
   expect(by.antigravity.disabled).toMatch(/not available in chat/);
   expect(by.vibe).toMatchObject({ disabled: null, label: "Mistral Vibe" });
 });

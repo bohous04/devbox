@@ -42,7 +42,7 @@ const BASE_WINDOWS: Readonly<Record<string, number>> = {
   "gpt-5.4-mini": 272_000, "gpt-5.3-codex": 272_000,
   // ACP agents, as they reported them live (step 4 Task 3): Grok's initialize `totalContextTokens`, Vibe's and
   // Antigravity's `usage_update` size (Vibe reported 202,144 for Medium 3.5).
-  "grok-4.6": 500_000, "grok-4.5": 500_000,
+  "grok-4.7": 256_000, "grok-4.7-build-fast": 256_000, "grok-4.6": 500_000, "grok-4.5": 500_000,
   "mistral-large-4-0": 400_000, "mistral-medium-3.5": 200_000,
   "gemini-4-neon": 1_048_576,
 };

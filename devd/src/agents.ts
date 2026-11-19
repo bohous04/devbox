@@ -44,7 +44,7 @@ const AGENTS_TABLE = {
   "claude-gemini": { runtime: "claude", label: "Claude Code + Gemini", short: "Claude+Gemini", yolo: true, anthropicAccount: false, modelKey: "gemini", upstream: "cliproxy" },
   "claude-openrouter": { runtime: "claude", label: "Claude Code + OpenRouter", short: "Claude+OR", yolo: true, anthropicAccount: false, modelKey: "openrouter", upstream: "openrouter" },
   codex:         { runtime: "codex",  label: "Codex",              short: "Codex",       yolo: true, anthropicAccount: false },
-  grok:          { runtime: "grok",   label: "Grok Build",         short: "Grok",        yolo: true, anthropicAccount: false, acp: "grok" },
+  grok:          { runtime: "grok",   label: "Grok Build",         short: "Grok",        yolo: true, anthropicAccount: false, acp: "grok", acpLive: true },
   antigravity:   { runtime: "agy",    label: "Antigravity",        short: "Antigravity", yolo: true, anthropicAccount: false, acp: "antigravity" },
   vibe:          { runtime: "vibe",   label: "Mistral Vibe",       short: "Vibe",        yolo: true, anthropicAccount: false, acp: "vibe", acpLive: true, chatOnly: true },
 } as const satisfies Record<string, AgentSpec>;
