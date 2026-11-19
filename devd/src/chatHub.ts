@@ -7,10 +7,9 @@ import type { SessionRow } from "./db";
 const QUESTION_TOOL = "AskUserQuestion";
 
 interface ChatState {
-  /** The run whose `stop` was deferred by holding work or pending PR checks; its `stop` is re-sent once, when both
-   *  are over. */
+  /** The run whose `stop` was deferred by holding work; its `stop` is re-sent once, when holding drops to 0. */
   heldRun: string | null;
-  /** The completed run whose PR check (`pr.check`) is still running; a later run event cancels it. */
+  /** The completed run whose PR read (`prCheck`) is still running; a later run event cancels it. */
   completing: string | null;
   /** Open requests by id, so their resolution can clear the hub's wait for the same call. */
   requests: Map<string, { runId: string; kind: RequestKind }>;
@@ -36,10 +35,9 @@ export class ChatHub {
   constructor(private d: {
     hub: AgentEventHub;
     session: (id: string) => SessionRow | null;
-    /** The PR watch (prWatch.ts): pending CI checks of the session's open PR hold a completion like holding work,
-     *  so no "done" goes out while CI runs. `check` polls the PR now (a run often ends right after its push);
-     *  `pending` is the last known state. Absent = completions are never held for CI. */
-    pr?: { pending: (id: string) => boolean; check: (id: string) => Promise<boolean> };
+    /** Reads the session's PR now (PrWatch.checkNow), before the completion goes to the hub: the run often pushed
+     *  just before, and the hub holds the "finished" while its CI checks are pending (HubDeps.prChecks). */
+    prCheck?: (id: string) => Promise<unknown>;
     now?: () => number;
     log?: (msg: string) => void;
   }) {
@@ -66,7 +64,7 @@ export class ChatHub {
     st.seeded = true;
     const last = lastEndedRun(t);
     const active = t.runs.some((r) => r.endedSeq === null);
-    if (!active && last?.status === "completed" && this.holding(sessionId, t) > 0) st.heldRun = last.runId;
+    if (!active && last?.status === "completed" && holdingCount(t) > 0) st.heldRun = last.runId;
     const s = this.d.session(sessionId);
     if (!s) {
       this.log(`chat hub: no session ${sessionId} to restore subagents for`);
@@ -92,27 +90,10 @@ export class ChatHub {
     this.d.hub.handle(s, "subagent_start");
   }
 
-  /** What holds a completion: the bridge's holding background work plus the PR's pending checks (one). */
-  private holding(sessionId: string, t: ThreadSnapshot): number {
-    return holdingCount(t) + (this.d.pr?.pending(sessionId) ? 1 : 0);
-  }
-
   private complete(s: SessionRow, st: ChatState, runId: string, snapshot: () => ThreadSnapshot): void {
-    const holding = this.holding(s.id, snapshot());
+    const holding = holdingCount(snapshot());
     st.heldRun = holding > 0 ? runId : null;
     this.d.hub.handle(s, "stop", { promptId: runId, backgroundTasks: holding });
-  }
-
-  /** The PR watch saw the session's pending checks end (success, failure, merge, close): a completion they held
-   *  goes out once no holding work is left either. */
-  prChecksEnded(sessionId: string, snapshot: () => ThreadSnapshot): void {
-    const st = this.state.get(sessionId);
-    if (!st || st.heldRun === null || this.holding(sessionId, snapshot()) > 0) return;
-    const s = this.d.session(sessionId);
-    if (!s) { this.log(`chat hub: no session ${sessionId} to release run ${st.heldRun}`); return; }
-    const runId = st.heldRun;
-    st.heldRun = null;
-    this.d.hub.handle(s, "stop", { promptId: runId, backgroundTasks: 0 });
   }
 
   /** `snapshot` returns the store's state after `e` was applied; it is read only for events the hub uses. */
@@ -183,15 +164,15 @@ export class ChatHub {
         return;
       }
       case "run.completed": {
-        const pr = this.d.pr;
-        if (!pr) { this.complete(s, st, ev.runId, snapshot); return; }
-        st.completing = ev.runId;
+        if (!this.d.prCheck) { this.complete(s, st, ev.runId, snapshot); return; }
         const runId = ev.runId;
-        pr.check(sessionId).catch((err: Error) => {
-          // The last known PR state still decides (`pr.pending`); the run is not held forever on an unreadable PR.
-          this.log(`chat hub: PR checks of ${sessionId} not read at completion: ${err.message}`);
+        st.completing = runId;
+        this.d.prCheck(sessionId).catch((err: Error) => {
+          // S5-R18 (approved fallback): the PR is read once (≤ 30 s); when that fails, the last known PR state decides
+          // the hold, and the failure is logged.
+          this.log(`chat hub: PR of ${sessionId} not read at completion, using its last known state: ${err.message}`);
         }).finally(() => {
-          // A newer run event, a stop or a drop of the session overtook the check: this completion is stale.
+          // A newer run event or a drop of the session overtook the read: this completion is stale.
           if (this.state.get(sessionId) !== st || st.completing !== runId) return;
           st.completing = null;
           const cur = this.d.session(sessionId);
@@ -210,7 +191,7 @@ export class ChatHub {
           st.subagents.delete(id);
           hub.handle(s, "subagent_stop");
         }
-        if (st.heldRun !== null && this.holding(sessionId, t) === 0) {
+        if (st.heldRun !== null && holdingCount(t) === 0) {
           const runId = st.heldRun;
           st.heldRun = null;
           hub.handle(s, "stop", { promptId: runId, backgroundTasks: 0 });

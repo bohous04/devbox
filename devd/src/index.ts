@@ -257,6 +257,14 @@ function hydrate(s: Secrets): void {
 const agentEvents = new AgentEventHub({
   db, notify,
   ...hubShelfDeps({ activity: (id, kind) => inbox.activity(id, kind), snoozed: (id) => inbox.snoozed(id) }, (m) => console.error(m)),
+  // Chat sessions only: a tmux "finished" is not held for CI (S5-R19). `prWatch` is declared below; the sweep runs
+  // after startup. An unreadable PR state does not hold: the "finished" goes out and the error is logged (S5-R14).
+  prChecks: (id) => {
+    try {
+      const s = getSession(db, id);
+      return s && storedRuntime(s) === "chat" ? prWatch.hold(id)?.checks ?? null : null;
+    } catch (e) { console.error(`PR state of ${id} unreadable, not holding its finished:`, e); return null; }
+  },
 });
 // State of running sessions surviving a devd restart (see agentEvents.ts loadPersisted):
 // working/waiting come back as unknown (that state cannot be restored reliably without
@@ -403,10 +411,7 @@ const threadStore = (id: string): ThreadStore => {
   return store;
 };
 // `prWatch` is declared below; ChatHub asks it only when a run completes, after startup.
-const chatHub = new ChatHub({
-  hub: agentEvents, session: (id) => getSession(db, id),
-  pr: { pending: (id) => prWatch.pending(id), check: (id) => prWatch.checkNow(id) },
-});
+const chatHub = new ChatHub({ hub: agentEvents, session: (id) => getSession(db, id), prCheck: (id) => prWatch.checkNow(id) });
 // The hub-facing snapshot needs runs, pending and background only: `limit: 0` skips loading every item per event.
 const chatSnapshot = (id: string) => threadStore(id).snapshot({ limit: 0 });
 // SSE fan-out (threadApi.ts) and the inbox over all sessions; an ending session is left out (its store is being archived).
@@ -430,13 +435,12 @@ const prWatch: PrWatch = new PrWatch({
   db,
   sessions: () => listSessions(db).filter((s) => !mgr.isEnding(s.id)),
   session: (id) => (mgr.isEnding(id) ? null : getSession(db, id)),
-  check: (sessions, onError) => checkPrs({
-    sessions, root, onError,
+  check: (sessions, onError, want) => checkPrs({
+    sessions, root, onError, want,
     giteaUrls: getGiteaInstances().map((i) => i.url),
     giteaToken: (host) => giteaTokensByHost(getGiteaInstances(), giteaTokens)[host],
   }),
   inbox,
-  checksEnded: (id) => chatHub.prChecksEnded(id, () => chatSnapshot(id)),
   notify,
 });
 const bridgeLinks = new BridgeLinks({

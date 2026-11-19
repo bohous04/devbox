@@ -286,12 +286,20 @@ function prNumber(url: string): number | null {
 
 // ---------------------------------------------------------------- PR read (prWatch.ts)
 
-/** The branch is on the remote: its remote-tracking ref exists (a push, devd's or the agent's, updates it). */
-export async function pushedBranch(dir: string, branch: string): Promise<boolean> {
-  const r = await git(dir, "rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`);
-  if (r.code === 0) return true;
-  if (r.code === 1) return false; // --quiet: 1 = no such ref; anything else is git failing
+/** The branch's head on the remote as this clone last saw it (its remote-tracking ref; a push, devd's or the
+ *  agent's, updates it); null = the branch was never pushed. */
+export async function remoteHead(dir: string, branch: string): Promise<string | null> {
+  const r = await git(dir, "rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}^{commit}`);
+  if (r.code === 0) return r.stdout.trim();
+  if (r.code === 1) return null; // --quiet: 1 = no such ref; anything else is git failing
   throw new Error((r.stderr || r.stdout).trim() || `git rev-parse failed (${r.code})`);
+}
+
+/** The repo's remote names. */
+export async function remoteNames(dir: string): Promise<string[]> {
+  const r = await git(dir, "remote");
+  if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `git remote failed (${r.code})`);
+  return r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
 }
 
 /** The configured Gitea instance URL serving the remote's host (git may go over ssh on another port). */
@@ -302,8 +310,9 @@ export function giteaUrlFor(giteaUrls: string[], remote: RemoteInfo): string | u
 export interface FoundPr { number: number; url: string; state: "open" | "merged" | "closed"; checks: "pending" | "success" | "failure" | "none" }
 
 // GitHub check runs: any status but COMPLETED is still running; StatusContext (commit statuses) carry `state`.
-const GH_SUCCESS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
-const GH_FAILURE = new Set(["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"]);
+// STALE (a check GitHub gave up on after 14 days) blocks nothing: neutral, as SKIPPED.
+const GH_SUCCESS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED", "STALE"]);
+const GH_FAILURE = new Set(["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
 const GH_STATUS = new Map<string, "pending" | "success" | "failure">([["SUCCESS", "success"], ["PENDING", "pending"], ["EXPECTED", "pending"], ["FAILURE", "failure"], ["ERROR", "failure"]]);
 
 type GhCheck = { __typename?: string; status?: string; conclusion?: string; state?: string };

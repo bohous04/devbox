@@ -240,6 +240,11 @@ export function openDb(path: string): Database {
     snooze_until INTEGER, snooze_kind TEXT, updated_at INTEGER NOT NULL)`);
   // The PR of a session's pushed branch as the PR watch last saw it (prWatch.ts). Kept across devd restarts so a
   // CI failure is notified once and a merge settles once. One row per session, deleted with it (deleteSession).
+  // First deploy of the PR watch: the table is new, so PRs that are already failing or merged are not news. The
+  // marker makes the PR watch's first tick a seed pass (record, no notification, no settle); the PR watch deletes it.
+  const prsExisted = db.query(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_prs'`).get() !== null;
+  db.run(`CREATE TABLE IF NOT EXISTS pr_watch_seed (pending INTEGER NOT NULL)`);
+  if (!prsExisted) db.run(`INSERT INTO pr_watch_seed (pending) VALUES (1)`);
   db.run(`CREATE TABLE IF NOT EXISTS session_prs (
     session_id TEXT PRIMARY KEY, number INTEGER NOT NULL, url TEXT NOT NULL, state TEXT NOT NULL, checks TEXT NOT NULL,
     since INTEGER NOT NULL, merge_settled_at INTEGER, updated_at INTEGER NOT NULL)`);
@@ -1128,9 +1133,11 @@ export function putSessionAttention(db: Database, r: SessionAttentionRow): void 
 
 export type PrStatus = "open" | "merged" | "closed";
 export type PrChecks = "pending" | "success" | "failure" | "none";
-/** `since`: when the PR's state or checks last changed; `merge_settled_at`: when the merge settled the session. */
+/** `since`: when the PR's state or checks last changed; `merge_settled_at`: when the merge settled the session (or the
+ *  first-deploy seed took the merge as already seen). `checks` "unknown": pending checks the PR watch could not read
+ *  several times in a row (the hold is released). */
 export interface SessionPrRow {
-  session_id: string; number: number; url: string; state: PrStatus; checks: PrChecks;
+  session_id: string; number: number; url: string; state: PrStatus; checks: PrChecks | "unknown";
   since: number; merge_settled_at: number | null; updated_at: number;
 }
 export function getSessionPr(db: Database, sessionId: string): SessionPrRow | null {
@@ -1138,6 +1145,12 @@ export function getSessionPr(db: Database, sessionId: string): SessionPrRow | nu
 }
 export function listSessionPrs(db: Database): SessionPrRow[] {
   return db.query(`SELECT * FROM session_prs`).all() as SessionPrRow[];
+}
+export function prWatchSeedPending(db: Database): boolean {
+  return db.query(`SELECT 1 FROM pr_watch_seed LIMIT 1`).get() !== null;
+}
+export function clearPrWatchSeed(db: Database): void {
+  db.run(`DELETE FROM pr_watch_seed`);
 }
 export function putSessionPr(db: Database, r: SessionPrRow): void {
   db.query(`INSERT OR REPLACE INTO session_prs (session_id,number,url,state,checks,since,merge_settled_at,updated_at)
