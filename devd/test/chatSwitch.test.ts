@@ -47,7 +47,7 @@ const codexAccount = (id: string, over: Partial<CodexAccountView> = {}): CodexAc
 
 const PROXY_INPUTS = { DEVD_UPSTREAM_URL: "http://proxy:8317", DEVD_UPSTREAM_KEY: "k-secret", DEVD_AGENT_MODEL: "gpt-x", DEVD_AGENT_CTX: "1000000" };
 
-function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; proxyInputs?: Record<string, string>; ensureProfile?: ChatSwitchDeps["ensureClaudeProfile"] } = {}) {
+function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; proxyInputs?: Record<string, string>; ensureProfile?: ChatSwitchDeps["ensureClaudeProfile"]; codexMounted?: ChatSwitchDeps["codexAccountMounted"] } = {}) {
   const db = openDb(":memory:");
   insertSession(db, { ...CHAT, agent: o.agent ?? "claude" });
   insertAccount(db, { id: "primary", label: "primary", disabled: 0, quarantined_at: null, added_at: 1 });
@@ -90,6 +90,7 @@ function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; pro
       },
     },
     ensureClaudeProfile: o.ensureProfile,
+    codexAccountMounted: o.codexMounted,
     resendDelaysMs: [10, 20, 40],
     proxyInputs: async () => o.proxyInputs ?? PROXY_INPUTS,
     now: () => NOW,
@@ -714,6 +715,18 @@ test("M1: a bridge older than switching is refused with 409 bridge-too-old befor
   expect(t.sent).toEqual([]);
   t.handshake(false, "1.1.0");
   expect((await t.post("model", { model: "claude-sonnet-5-5" })).status).toBe(202);
+});
+
+test("M5: a Codex account not mounted in the container is refused with 409 account-not-mounted before anything is sent", async () => {
+  const checked: string[] = [];
+  const t = setup({ agent: "codex", codexMounted: async (_c, id) => { checked.push(id); return id === "default"; } });
+  t.feed([{ type: "thread.native", harness: "codex", nativeThreadId: "t-codex", account: "default", model: "gpt-5.5", caps: CODEX_CAPS }]);
+  expect(await t.post("account", { accountId: "c-two" })).toEqual({ status: 409, body: { error: "account-not-mounted", message: expect.stringContaining("recreate") } });
+  expect(checked).toEqual(["c-two"]);
+  expect(t.sent).toEqual([]);
+  const broken = setup({ agent: "codex", codexMounted: async () => { throw new Error("docker inspect failed"); } });
+  broken.feed([{ type: "thread.native", harness: "codex", nativeThreadId: "t-codex", account: "default", model: "gpt-5.5", caps: CODEX_CAPS }]);
+  expect((await broken.post("account", { accountId: "c-two" })).body.error).toBe("profile-unavailable");
 });
 
 // --- proxy profile env ---

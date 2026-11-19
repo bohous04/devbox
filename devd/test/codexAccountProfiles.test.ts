@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  accountLoginStatus, cancelAccountLogin, codexAccountMountList, codexAccountVolume,
+  accountLoginStatus, cancelAccountLogin, codexAccountMounted, codexAccountMountList, codexAccountVolume,
   CodexProfileInUseError, readAccountAuth, removeAccountProfile, startAccountLogin,
 } from "../src/codexAccountProfiles";
 import type { CodexAuthDeps } from "../src/agentAuth";
@@ -283,4 +283,12 @@ test("daemon failures cannot be mistaken for missing profiles and do not leak st
   expect(read.dockerError).not.toContain(SECRET);
   await expect(removeAccountProfile(f.deps, "work")).rejects.toThrow("safely remove");
   expect(f.calls.every(cmd => cmd[0] === "volume" && cmd[1] === "ls")).toBe(true);
+});
+
+test("M5: a Codex account counts as mounted only with its own volume at its home; default is the image's home", () => {
+  const mounts = [{ Name: "codex-acct-two", Destination: "/home/dev/.codex-accounts/two" }, { Name: "codex-acct-three", Destination: "/elsewhere" }];
+  expect(codexAccountMounted(mounts, "two")).toBe(true);
+  expect(codexAccountMounted(mounts, "three")).toBe(false);
+  expect(codexAccountMounted(mounts, "four")).toBe(false);
+  expect(codexAccountMounted([], "default")).toBe(true);
 });

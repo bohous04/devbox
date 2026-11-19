@@ -55,7 +55,7 @@ import { CodexAccounts } from "./codexAccounts";
 import { readCodexServerAuth } from "./codexServerAuth";
 import { CodexSessionAccounts } from "./codexSessionAccounts";
 import { initCodexAccounts, listCodexAccounts } from "./codexAccountsDb";
-import { codexAccountMountList } from "./codexAccountProfiles";
+import { codexAccountMounted, codexAccountMountList } from "./codexAccountProfiles";
 import { buildGrokView, pollGrok } from "./grokPoller";
 import { pollAgy } from "./antigravityPoller";
 import { harvestAgy } from "./antigravityHarvester";
@@ -847,6 +847,11 @@ const chatSwitch = new ChatSwitch({
   claudePool: () => resolveAccountPool(freshCfg().settings),
   codexAccounts,
   ensureClaudeProfile: accountSwitchDeps().ensureProfile,
+  codexAccountMounted: async (container, accountId) => {
+    const r = await runDocker(container, ["inspect", "--format", "{{json .Mounts}}", container], { timeoutMs: 15_000 });
+    if (r.code !== 0 || r.timedOut) throw new Error(`docker inspect ${container} failed`);
+    return codexAccountMounted(JSON.parse(r.stdout) as { Name?: string; Destination: string }[], accountId);
+  },
   proxyInputs: (a) => mgr.proxyEnvFor(a),
   now: () => Date.now(),
 });

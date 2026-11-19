@@ -84,6 +84,8 @@ export interface ChatSwitchDeps {
   codexAccounts: { list(): { accounts: CodexAccountView[] }; select(): { accountId: string; label: string } };
   /** Attaches a pool account's Claude profile to the container (accountSwitch's ensureProfile). */
   ensureClaudeProfile?: (container: string, accountId: string) => Promise<void>;
+  /** Whether the container has the Codex account's home mounted (mounts are fixed at container creation). */
+  codexAccountMounted?: (container: string, accountId: string) => Promise<boolean>;
   /** DEVD_* inputs of a proxy profile: SessionManager.proxyEnvFor, the same assembly as a new container's env. */
   proxyInputs: (agent: AgentName) => Promise<Record<string, string>>;
   now: () => number;
@@ -302,6 +304,17 @@ export class ChatSwitch {
   /** A Claude pool account's profile must be attached to the container before the bridge can use it. The cause is
    *  logged here only: it may carry host paths or docker output. */
   private async attachProfile(s: SessionRow, t: SwitchTarget): Promise<void> {
+    if (t.harness === "codex" && t.account !== null && this.d.codexAccountMounted) {
+      let mounted: boolean;
+      try { mounted = await this.d.codexAccountMounted(s.container, t.account); }
+      catch (e) {
+        this.log(`chat switch ${s.id}: checking the mount of Codex account ${t.account} failed: ${e instanceof Error ? e.message : String(e)}`);
+        throw new SwitchRefused(409, "profile-unavailable", "could not check whether the Codex account is mounted in this session");
+      }
+      // A Codex account home is mounted when the container is created; one added later needs a recreate.
+      if (!mounted) throw new SwitchRefused(409, "account-not-mounted", `Codex account ${t.account} is not mounted in this session's container; recreate the container first`);
+      return;
+    }
     if (t.harness !== "claude" || t.account === null || !this.d.ensureClaudeProfile) return;
     try { await this.d.ensureClaudeProfile(s.container, t.account); }
     catch (e) {
