@@ -46,6 +46,19 @@ After deploying devd, the image and the listener:
 6. **Remote control:** the session shows up in the Claude app / claude.ai/code as
    `dev-<project>-<repo>`; a message from the phone arrives in tmux.
 
+## Runtimes
+
+Sessions have a `runtime`, `tmux` or `chat` (user-facing description in the
+[README](../README.md#runtimes)). The tmux-only machinery exists for tmux sessions and stays
+as it is: `ccUpkeep.restartPane`, `codexConversation`, the Claude/Codex/Grok hooks and Warp
+sequences, `apiErrorRetry`, `devbox-recovery` and `devbox-ctrlv`. Chat sessions have no pane to
+restart or hook to fire; their notifications and state come from the bridge's events. Do not
+extend the tmux machinery to chat sessions, and do not remove it while tmux sessions can exist.
+Running tmux sessions are never converted.
+
+The chat bridge is `image/agent-bridge/`; changing it needs an image rebuild like any
+`image/` change, and containers keep the bridge they were created with until recreated.
+
 ## Warp integration
 
 `image/vendor/warp-hooks/warp-hook.sh` and `warp-title.py` send Warp `cli-agent` events

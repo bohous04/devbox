@@ -1,6 +1,6 @@
 # iOS app
 
-The app in `ios/` shows your sessions, lets you answer SSH and production-write approvals,
+The app in `ios/` shows your sessions, opens chat sessions as threads, lets you answer SSH and production-write approvals,
 unlock the vault, and keeps a Live Activity with what is waiting for you. It is not in the
 App Store — you build it yourself with your own Apple developer account.
 
@@ -25,6 +25,15 @@ Before the first build, change these placeholders in `ios/project.yml` (then run
 The last one matters: over the tailnet the app talks plain HTTP to devd's IP, and iOS only
 allows that for the IP listed there. With the placeholder left in, every request over the
 tailnet fails. Behind Cloudflare Access (HTTPS) no exception is needed.
+
+## Chat sessions
+
+Sessions that run in the chat runtime ([Runtimes](../README.md#runtimes)) open as a thread:
+messages, tool calls, images, questions you answer in place and a queue for follow-ups.
+The Inbox lists what is waiting, working or done across sessions. Creating a session without
+picking a runtime follows the server's *Default runtime* setting, and the app shows the
+server's notice when it had to use the other runtime. Terminal (tmux) sessions are still listed, with the existing approvals and Live
+Activity.
 
 ## Connect
 

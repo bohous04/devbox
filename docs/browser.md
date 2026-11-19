@@ -70,7 +70,7 @@ arguments or logs. Codex, Grok and Antigravity have their own login controls on 
 | Images and files | listener + Mac hotkeys | screenshot/file paste, drop, **Upload files** |
 | Claude login | CLI or dashboard | dashboard login, or CLI over SSH |
 | SSH/DB approvals | native dialog, dashboard or iOS | dashboard approval pages |
-| Session activity | native notifications and Warp badges | dashboard Overview and session state |
+| Session activity | native notifications and Warp badges | dashboard Inbox and session state |
 | Finder mount / Warp recovery | macOS-specific integrations | optional SMB share in Explorer; SSH or dashboard |
 
 The browser does not install a native Windows notification service or replace terminal

@@ -36,7 +36,8 @@ keeps you in the loop from wherever you are.
 ## A session in one command
 
 `dev acme/web` gives the agent its own container, its own git worktree and branch, and a
-port range for dev servers — then drops you into its tmux. Close the lid; it keeps going.
+port range for dev servers — then drops you into a shell in it (into the agent's tmux for a
+terminal session; see [Runtimes](#runtimes)). Close the lid; it keeps going.
 
 <p align="center">
   <img src="docs/assets/cli-open.gif" width="760" alt="dev acme/web opens a new session with a progress bar">
@@ -49,14 +50,14 @@ port range for dev servers — then drops you into its tmux. Close the lid; it k
 ## What it does
 
 - **Sessions in containers.** One Docker container per session with the repo checked out in
-  its own git worktree, the agent in tmux and a private Docker daemon (dind). Several
+  its own git worktree, the agent in tmux or in a chat, and a private Docker daemon (dind). Several
   sessions can work on the same repo in parallel.
 - **Multiple agents.** Claude Code, Codex CLI and Grok Build, plus proxy profiles that run
   Claude Code against other models. Switch a running session to another agent or account.
 - **Notifications that matter.** Hooks report when an agent is blocked on a question, needs
   a permission, finishes, or gets stuck. They arrive on the Mac (click → focuses the Warp
   tab) and on the phone (Pushover or the iOS app with a Live Activity).
-- **Dashboard.** Sessions with a live web terminal, usage statistics, schedules (cron
+- **Dashboard.** An Inbox of everything that needs you, chat threads, sessions with a live web terminal, usage statistics, schedules (cron
   prompts), unpushed work, approvals, settings and host health.
 - **Secrets stay on the host.** An encrypted vault unlocked in the dashboard. SSH keys are
   brokered through a per-session ssh-agent socket after a human approves (`srv`). Production
@@ -69,6 +70,48 @@ port range for dev servers — then drops you into its tmux. Close the lid; it k
 - **Upkeep.** Nightly agent updates with safe pane restarts that resume the same
   conversation, auto-deploys of `main` after CI, memory limits per session, offsite-verified
   storage cleanup, borg backups and an external watchdog.
+
+## Runtimes
+
+A session runs its agent in one of two runtimes, chosen when the session is created:
+
+- **Terminal (`tmux`).** The agent's own terminal UI runs in tmux in the container. You attach
+  from the `dev` CLI, Warp or the web terminal. Best when you want the real TUI.
+- **Chat (`chat`).** A small bridge in the container drives the agent through its
+  structured protocol, and devd keeps the conversation. You use it from the dashboard, the iOS
+  app or the Mac app: a thread with tool calls, images, questions and approvals,
+  queued messages, switching agent or account mid-conversation, and a turn that survives a
+  devd restart. The container still has a shell, so `dev <repo>` on a chat session attaches
+  a shell and prints a link line (`devbox://thread/<id>` and the dashboard URL) to the thread.
+
+**Default runtime.** Settings → Runtime → *Default runtime* (`settings.defaultRuntime` in
+`config.json`) is the runtime of new sessions and schedules that do not name one. The code
+default is `tmux`; to make chat the default, set it to *Chat* and save. It affects only what
+is created afterwards:
+
+- Running sessions are never migrated or restarted. A request that names no runtime and
+  matches a running session of the repo (either runtime) joins it instead of starting another.
+- A schedule keeps the runtime stored with it; the setting applies only to schedules that
+  have none.
+- When the default cannot run the requested agent (a tmux-only or chat-only agent), the
+  session starts in the other runtime and the response carries a `runtimeNotice` that the
+  dashboard, iOS app and CLI show. InstaBox and solo sessions are always tmux and say so the
+  same way.
+- An explicit runtime in the request always wins.
+
+**Agents in chat.** Claude, Codex, Mistral Vibe and Grok. The proxy profiles
+(`claude-gemini`, `claude-openrouter`) are allowed in chat but have not been verified there
+live. Antigravity is not available in chat yet. Vibe runs only in chat.
+
+**Home.** The dashboard opens on the Inbox (waiting, working, done), and Overview moved to
+`/overview`.
+
+**What the bridge keeps.** Each chat session stores its conversation as an event log
+(`events.jsonl`) and a small `state.json` in the container's bridge directory; the bridge trims the log
+once devd has stored the events, and recovers a damaged state file from the log.
+
+The tmux-only parts (pane restarts, hooks, Warp integration, API-error retry) keep working for
+tmux sessions only; see [docs/internals.md](docs/internals.md#runtimes).
 
 ## Dashboard
 

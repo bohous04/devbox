@@ -43,7 +43,7 @@ Common commands (`dev --help` lists all of them):
 | Command | What it does |
 |---|---|
 | `dev` | pick a running session (preview, attach, stop) or start a new one |
-| `dev <project>/<repo>` | attach to a running session, or start another one on the same repo |
+| `dev <project>/<repo>` | attach to a running session, or start another one on the same repo (on a chat session: a shell, see below) |
 | `dev --agent codex <target>` | start with a given agent (`claude`, `claude-gemini`, `claude-openrouter`, `codex`, `grok`) |
 | `dev ls` / `dev ports [target]` | overview / port mapping |
 | `dev stop <target>` / `dev end <target>` | stop the container / end the session |
@@ -51,6 +51,19 @@ Common commands (`dev --help` lists all of them):
 | `dev switch <target>` | move the session to a fresher account and resume the same conversation |
 | `dev doctor` | check the whole setup |
 | `dev backup [file]` / `dev restore <file>` | download / restore volumes, secrets and the database |
+
+**Chat sessions.** When the default runtime is chat (see [Runtimes](../README.md#runtimes)),
+`dev <repo>` creates a chat session. The CLI never names a runtime, so it follows the setting.
+It attaches a shell in the container (the tmux window `main`) and prints a line first:
+
+```
+Chat session: devbox://thread/<id>  <dashboard-url>/#/s/<id>
+```
+
+Click the first link to open the thread in the Mac app (below), or the second for the
+dashboard. Changing agent or account is done in the thread, so the exit menu hides those
+options for chat sessions. If devd started the session in another runtime than the default,
+the CLI prints the notice first. `dev ls` is unchanged.
 
 ## 3. Listener and notifications
 
@@ -91,6 +104,23 @@ Check: `curl http://$(tailscale ip -4):7777/health`. Log: `/tmp/devbox-listener.
 
 The listener trusts whoever holds the token, i.e. devd. `open` can launch workspace content
 (`.command`, `.app`), so treat workspaces as trusted code.
+
+### Mac app (chat)
+
+`ios/DevboxMac` is a native app for chat sessions: the Inbox and a thread side by side, a
+Terminal tab, a menu bar count and launch at login. It handles `devbox://thread/<id>` links,
+and the listener opens a chat notification's thread in it (in the dashboard when the app is not
+installed). Windows are restored after a quit or restart. Like the iOS app it is not
+distributed: build and sign it yourself with your own developer team.
+
+```sh
+brew install xcodegen
+cd ios && xcodegen generate     # set DEVELOPMENT_TEAM for the DevboxMac target in project.yml first
+xcodebuild -project DevboxApp.xcodeproj -scheme DevboxMac -skipPackagePluginValidation build
+```
+
+Copy the built app to `~/Applications`, open it and fill in the connection in its settings, the same as in the iOS app
+([ios.md](ios.md#connect)).
 
 ## 4. Finder mount (SMB, optional)
 
