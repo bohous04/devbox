@@ -113,13 +113,29 @@ and the listener opens a chat notification's thread in it (in the dashboard when
 installed). Windows are restored after a quit or restart. Like the iOS app it is not
 distributed: build and sign it yourself with your own developer team.
 
+The app stores its connection in the data protection keychain, which needs a team-signed build with a
+provisioning profile. Pass the team, your bundle id and a local entitlements copy with a keychain group on the
+command line, so nothing team-specific is committed:
+
 ```sh
 brew install xcodegen
-cd ios && xcodegen generate     # set DEVELOPMENT_TEAM for the DevboxMac target in project.yml first
-xcodebuild -project DevboxApp.xcodeproj -scheme DevboxMac -skipPackagePluginValidation build
+cp ios/DevboxMac/DevboxMac.entitlements /tmp/DevboxMac.local.entitlements
+/usr/libexec/PlistBuddy -c 'Add :keychain-access-groups array' \
+  -c 'Add :keychain-access-groups:0 string $(AppIdentifierPrefix)<your.bundle.id>' /tmp/DevboxMac.local.entitlements
+cd ios && xcodegen generate
+xcodebuild -project DevboxApp.xcodeproj -scheme DevboxMac -configuration Release -destination 'platform=macOS' \
+  -skipPackagePluginValidation -allowProvisioningUpdates \
+  DEVELOPMENT_TEAM=<team-id> PRODUCT_BUNDLE_IDENTIFIER=<your.bundle.id> CODE_SIGN_STYLE=Automatic \
+  CODE_SIGN_ENTITLEMENTS=/tmp/DevboxMac.local.entitlements build
 ```
 
-Copy the built app to `~/Applications`, open it and fill in the connection in its settings, the same as in the iOS app
+`-allowProvisioningUpdates` needs an Apple account in Xcode, or an App Store Connect API key
+(`-authenticationKeyPath`, `-authenticationKeyID`, `-authenticationKeyIssuerID`); the Mac must be registered as a
+device in the team. For the plain-HTTP tailnet URL, put devd's tailnet IP in place of the placeholder
+`100.64.0.10` under the DevboxMac `NSAppTransportSecurity` in `project.yml` before generating (a local edit, as for
+iOS), or use the Cloudflare Access path.
+
+Copy the built app to `/Applications`, open it and fill in the connection in its settings, the same as in the iOS app
 ([ios.md](ios.md#connect)).
 
 ## 4. Finder mount (SMB, optional)
