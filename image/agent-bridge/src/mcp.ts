@@ -55,30 +55,56 @@ const TOOLS = [
   },
 ];
 
-/** One connection per command: the bridge accepts `cmd` frames without `hello`. */
-export function sendCommand(socketPath: string, cmd: BridgeCommand): Promise<unknown> {
+/** How long the MCP server waits for the bridge's answer: a stuck bridge must not hang the agent's tool call. */
+export const BRIDGE_COMMAND_TIMEOUT_MS = 30_000;
+
+/** One connection per command: the bridge accepts `cmd` frames without `hello`. Rejects (never hangs) when the
+ *  bridge does not answer within `timeoutMs` or sends a frame that is not JSON. */
+export function sendCommand(
+  socketPath: string,
+  cmd: BridgeCommand,
+  timeoutMs = BRIDGE_COMMAND_TIMEOUT_MS,
+  logError: (msg: string) => void = (msg) => console.error(msg),
+): Promise<unknown> {
   const id = crypto.randomUUID();
   return new Promise((resolve, reject) => {
     let buf = "";
     let settled = false;
+    let conn: { end(): void } | null = null;
     const decoder = new TextDecoder();
     const finish = (fn: () => void) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       fn();
     };
+    const timer = setTimeout(() => {
+      finish(() => reject(new Error(`agent bridge did not answer ${cmd.kind} within ${timeoutMs} ms`)));
+      conn?.end();
+    }, timeoutMs);
     Bun.connect({
       unix: socketPath,
       socket: {
         open(socket) {
+          conn = socket;
           socket.write(encodeFrame({ t: "cmd", id, cmd }));
         },
         data(socket, chunk) {
           buf += decoder.decode(chunk, { stream: true });
           let nl: number;
           while ((nl = buf.indexOf("\n")) >= 0) {
-            const frame = JSON.parse(buf.slice(0, nl)) as ServerFrame;
+            const line = buf.slice(0, nl);
             buf = buf.slice(nl + 1);
+            let frame: ServerFrame;
+            try {
+              frame = JSON.parse(line) as ServerFrame;
+            } catch {
+              const msg = `agent bridge sent a malformed frame for ${cmd.kind}: ${line.slice(0, 200)}`;
+              logError(`devbox mcp: ${msg}`);
+              finish(() => reject(new Error(msg)));
+              socket.end();
+              return;
+            }
             if (frame.t !== "res" || frame.id !== id) continue;
             finish(() => (frame.ok ? resolve(frame.result) : reject(new Error(frame.error ?? "command failed"))));
             socket.end();
