@@ -517,7 +517,7 @@ test.skipIf(!hasDocker)("restartSolo: a stopped proxy session picks up the key a
   await mgr.restartSolo(s.session.id);
   expect(containerId(s.session.id)).not.toBe(born);
   expect(inspectEnv(s.session.id).DEVD_CLIPROXY_KEY).toBe("k-after-unlock");
-  expect(inspectEnv(s.session.id).DEVD_AGENT_MODEL).toBe("gpt-5.6-sol");
+  expect(inspectEnv(s.session.id).DEVD_AGENT_MODEL).toBe("gemini-3-pro");
   const recreates = listEvents(d.db, { session: s.session.id }).filter((e) => e.type === "recreate");
   expect(recreates.some((e) => JSON.parse(e.data ?? "{}").reason === "proxy-env")).toBe(true);
 
@@ -819,7 +819,7 @@ test.skipIf(!hasDocker)("proxy profile: an unlocked vault propagates into an exi
   await mgr.open(t);
   expect(containerId(APP_ID)).not.toBe(born);
   expect(inspectEnv(APP_ID).DEVD_CLIPROXY_KEY).toBe("k-after-unlock");
-  expect(inspectEnv(APP_ID).DEVD_AGENT_MODEL).toBe("gpt-5.6-sol");
+  expect(inspectEnv(APP_ID).DEVD_AGENT_MODEL).toBe("gemini-3-pro");
   const withKey = containerId(APP_ID);
 
   // 3) Without a config change the container is not rebuilt (no needless recreates).
