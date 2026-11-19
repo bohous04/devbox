@@ -1,10 +1,10 @@
 import type { Database } from "bun:sqlite";
 import { cronMatch } from "./cron";
-import { getSchedule, getSession, listSchedules, listSessions, logEvent, setAutoEnd, setImportant, setScheduleLastRun, type ScheduleRow } from "./db";
-import type { NotifyFn } from "./agentEvents";
+import { getSchedule, getSession, listSchedules, listSessions, logEvent, setAutoEnd, setImportant, setScheduleLastRun, type ScheduleRow, type SessionRow } from "./db";
+import type { NotifyFn, NotifySession } from "./agentEvents";
 import type { AgentName, SessionRuntime } from "./db";
 import { chatRuntimeBlock } from "./agents";
-import { resolveAgent } from "./sessions";
+import { resolveAgent, storedRuntime } from "./sessions";
 import { endSessionKeepingWork, type AutoEndDeps } from "./autoEnd";
 import { CommandTimeout } from "./bridgeLink";
 
@@ -128,7 +128,8 @@ export function createScheduler(d: SchedulerDeps) {
       // every minute for a whole hour until you acknowledge it — and "run started" wants nothing from you.
       // The morning cron used to wake the phone just by starting at all. The `sch.important` flag
       // is carried over to the session above, so only the block/completion of that work stays loud.
-      d.notify(`${sch.project}/${sch.repo}`, `Scheduled run "${sch.name}" started`, { session: { id: r.session.id, project: sch.project, repo: sch.repo } });
+      // With the runtime: a click on the Mac (listener) opens a chat session's thread, a tmux session's terminal.
+      d.notify(`${sch.project}/${sch.repo}`, `Scheduled run "${sch.name}" started`, { session: { id: r.session.id, project: sch.project, repo: sch.repo, runtime: sch.runtime } });
     } catch (e) {
       // A chat session this run opened has no prompt and is marked auto_end: left running it would make every later
       // run of the repo skip. End it (keeping a dirty worktree, as autoEnd does), and say whether that worked.
@@ -162,4 +163,9 @@ export function createScheduler(d: SchedulerDeps) {
   }
 
   return { tick, fireNow, fireSchedule };
+}
+
+/** The notification target of a scheduled run's session, with its runtime (index.ts onRestoredTurnDone). */
+export function scheduledNotifySession(s: SessionRow): NotifySession {
+  return { id: s.id, project: s.project, repo: s.repo, runtime: storedRuntime(s) };
 }

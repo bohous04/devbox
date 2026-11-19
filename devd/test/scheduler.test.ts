@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { openDb, insertSchedule, getSession, insertSession, type ScheduleRow, type SessionRow } from "../src/db";
 import { CommandTimeout } from "../src/bridgeLink";
-import { createScheduler, dueSchedules, scheduledPrompt, slug, stamp } from "../src/scheduler";
+import { createScheduler, dueSchedules, scheduledNotifySession, scheduledPrompt, slug, stamp } from "../src/scheduler";
 
 function sched(over: Partial<ScheduleRow> = {}): ScheduleRow {
   return { id: "s1", name: "Nightly bump", cron: "0 3 * * *", folder: "acme", project: "shop", repo: "cms", clone_url: "https://x/cms.git", prompt: "bump deps", important: 1, enabled: 1, last_run_at: null, runtime: "tmux", agent: null, ...over };
@@ -335,4 +335,21 @@ test("fireSchedule (tmux): still opens with the prompt file channel and no runti
   expect(opened[0].runtime).toBeUndefined();
   expect(opened[0].agent).toBeUndefined();
   expect(String(opened[0].prompt)).toContain("bump deps");
+});
+
+test("the scheduled run's started notification carries the session runtime (the Mac click opens a chat thread)", async () => {
+  for (const runtime of ["chat", "tmux"] as const) {
+    const db = openDb(":memory:");
+    const extras: unknown[] = [];
+    const f = fakeLinks();
+    insertSession(db, { ...row(), runtime });
+    const s = createScheduler({
+      db, open: async () => ({ session: { id: "dev-shop-cms" } }),
+      notify: (_t, _m, e) => { extras.push(e); }, ...chatDeps(f, []),
+    });
+    await s.fireSchedule(sched({ runtime }));
+    expect(extras).toEqual([{ session: { id: "dev-shop-cms", project: "shop", repo: "cms", runtime } }]);
+  }
+  // onRestoredTurnDone (index.ts) builds its target from the session row the same way.
+  expect(scheduledNotifySession({ ...row(), runtime: "chat" })).toEqual({ id: "dev-shop-cms", project: "shop", repo: "cms", runtime: "chat" });
 });

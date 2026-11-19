@@ -111,7 +111,7 @@ import { IBX_PATHS } from "./instabox/runOpts";
 import { readHostLoad } from "./placement";
 import { run, timeoutFor } from "./proc";
 import { COMMIT } from "./version";
-import { createScheduler } from "./scheduler";
+import { createScheduler, scheduledNotifySession } from "./scheduler";
 import { ccStatus, dueForCheck, inWindow, resolveCcUpkeep, runCcUpkeep, type UpkeepDeps, type UpkeepResult } from "./ccUpkeep";
 import { beszelFrom, createHardware, loadMachines, sshArgv } from "./hardware";
 
@@ -481,7 +481,7 @@ const bridgeLinks = new BridgeLinks({
   // outcome is logged and notified here. (No session end on failure: that needs the schedule run's own state.)
   onRestoredTurnDone: (id, schedule, err) => {
     const s = getSession(db, id);
-    const target = s ? { session: { id, project: s.project, repo: s.repo } } : undefined;
+    const target = s ? { session: scheduledNotifySession(s) } : undefined;
     if (err === null) {
       logEvent(db, id, "schedule_run", { schedule, restored: true });
       notify(s ? `${s.project}/${s.repo}` : id, `Scheduled run "${schedule}" started`, target);
