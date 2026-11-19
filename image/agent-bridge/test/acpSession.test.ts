@@ -150,7 +150,7 @@ async function until(cond: () => boolean) {
 const SPEC: AcpAgentSpec = { id: "example", argv: ["example-agent", "acp"] };
 const MCP = [{ name: "devbox", command: "agent-bridge", args: ["mcp"], env: { DEVD_URL: "http://devd.test" } }];
 
-function open(fake: ReturnType<typeof fakeAgent>, o: { spec?: AcpAgentSpec; resume?: string | null; model?: string | null; instructions?: string } = {}) {
+function open(fake: ReturnType<typeof fakeAgent>, o: { spec?: AcpAgentSpec; resume?: string | null; model?: string | null; instructions?: string; onInstructionsDelivered?: () => void } = {}) {
   const events: BridgeEvent[] = [];
   const logs: string[] = [];
   const session = openAcpSession(
@@ -161,6 +161,7 @@ function open(fake: ReturnType<typeof fakeAgent>, o: { spec?: AcpAgentSpec; resu
       resume: o.resume ?? null,
       mcpServers: MCP,
       ...(o.instructions === undefined ? {} : { instructions: o.instructions }),
+      ...(o.onInstructionsDelivered === undefined ? {} : { onInstructionsDelivered: o.onInstructionsDelivered }),
       emit: (e) => events.push(e),
       logError: (m) => logs.push(m),
     },
@@ -396,21 +397,46 @@ describe("openAcpSession", () => {
     expect(events.at(-1)).toEqual({ type: "run.failed", runId: "run-1", error: "rate-limited: session/prompt: Rate limit exceeded", reason: "rate-limited" });
   });
 
-  test("the instructions go ahead of the first message of a new session only", async () => {
+  test("the instructions go ahead of the first message that gets through, and say when they did", async () => {
     const fake = fakeAgent();
-    const { session, events } = open(fake, { instructions: "<devbox-instructions>x</devbox-instructions>" });
+    let delivered = 0;
+    const { session, events } = open(fake, { instructions: "<devbox-instructions>x</devbox-instructions>", onInstructionsDelivered: () => delivered++ });
     await session.ready;
     await session.startTurn("run-1", "one", "user");
     await session.startTurn("run-2", "two", "user");
     await until(() => events.filter((e) => e.type === "run.completed").length === 2);
     expect(fake.requests("session/prompt").map((r) => r.params.prompt[0].text)).toEqual(["<devbox-instructions>x</devbox-instructions>\n\none", "two"]);
+    expect(delivered).toBe(1);
 
+    // The bridge decides whether they are still due (a reopened thread whose first prompt never got through).
     const reopened = fakeAgent();
     const r = open(reopened, { resume: "sess-old", instructions: "<devbox-instructions>x</devbox-instructions>" });
     await r.session.ready;
     await r.session.startTurn("run-3", "three", "user");
     await until(() => r.events.some((e) => e.type === "run.completed"));
-    expect(reopened.requests("session/prompt")[0]!.params.prompt[0].text).toBe("three");
+    expect(reopened.requests("session/prompt")[0]!.params.prompt[0].text).toBe("<devbox-instructions>x</devbox-instructions>\n\nthree");
+  });
+
+  test("a first prompt that fails keeps the instructions for the next one", async () => {
+    const fake = fakeAgent();
+    let fail = true;
+    fake.responders["session/prompt"] = () => {
+      if (fail) {
+        fail = false;
+        throw Object.assign(new Error("boom"), { code: -32603 });
+      }
+      return { stopReason: "end_turn" };
+    };
+    let delivered = 0;
+    const { session, events } = open(fake, { instructions: "I", onInstructionsDelivered: () => delivered++ });
+    await session.ready;
+    await session.startTurn("run-1", "one", "user");
+    await until(() => events.some((e) => e.type === "run.failed"));
+    expect(delivered).toBe(0);
+    await session.startTurn("run-2", "two", "user");
+    await until(() => events.some((e) => e.type === "run.completed"));
+    expect(fake.requests("session/prompt").map((r) => r.params.prompt[0].text)).toEqual(["I\n\none", "I\n\ntwo"]);
+    expect(delivered).toBe(1);
   });
 
   test("an interrupt while the model is being applied never sends the prompt", async () => {

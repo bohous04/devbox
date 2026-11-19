@@ -117,7 +117,7 @@ function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities; readyErr
 }
 
 function baseState(over: Partial<BridgeState> = {}): BridgeState {
-  return { harness: "claude", nativeThreadId: null, account: null, model: null, activeRunId: null, queue: [], continuations: [], usageBaseline: null, target: null, pendingHandoff: null, ...over };
+  return { harness: "claude", nativeThreadId: null, account: null, model: null, activeRunId: null, queue: [], continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, ...over };
 }
 
 // Account homes for switch targets, under the test dir.
@@ -716,6 +716,27 @@ describe("switching: fix round 1", () => {
     expect(state()).toMatchObject({ harness: "vibe", account: null, target: { harness: "vibe", account: null } });
     g.emit({ type: "thread.native", harness: "vibe", nativeThreadId: "vibe-thread", account: null, model: "mistral-large-4-0" });
     expect(events().at(-1)).toMatchObject({ type: "thread.native", harness: "vibe", account: null });
+  });
+
+  test("S4-P3: a new thread gets the instructions until a prompt got through, also across a bridge restart", async () => {
+    const f = fakeHarness();
+    const bridge = await start(f, { account: "a" });
+    f.emit({ type: "thread.native", harness: "claude", nativeThreadId: "thread-a", account: null, model: "m" });
+    f.opens[0].onInstructionsDelivered(); // Claude has a system prompt; the flag only matters to ACP agents
+    await switchCmd({ harness: "vibe", account: null, model: null, env: {} }, null);
+    expect(f.opens[1].instructionsPending).toBe(true);
+    f.emit({ type: "thread.native", harness: "vibe", nativeThreadId: "vibe-thread", account: null, model: null });
+    await bridge.close();
+    // Restarted before any prompt: the reopened thread still owes them.
+    const g = fakeHarness();
+    const again = await start(g, { account: "a" });
+    expect(g.opens[0]).toMatchObject({ resume: "vibe-thread", instructionsPending: true });
+    g.opens[0].onInstructionsDelivered();
+    expect(state().instructionsPending).toBe(false);
+    await again.close();
+    const h = fakeHarness();
+    await start(h, { account: "a" });
+    expect(h.opens[0]).toMatchObject({ resume: "vibe-thread", instructionsPending: false });
   });
 
   test("a switch to an ACP agent that cannot open goes back to the previous target and fails with the agent's error", async () => {

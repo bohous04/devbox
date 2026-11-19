@@ -24,8 +24,11 @@ export interface AcpSessionOptions {
   resume: string | null;
   mcpServers: AcpMcpServer[];
   emit: (e: BridgeEvent) => void;
-  /** Put ahead of the first user message of a new session (ACP has no system prompt); none when omitted. */
+  /** Put ahead of the first user message that gets through (ACP has no system prompt); none when omitted. The bridge
+   *  passes them while its thread has not had that message yet (BridgeState.instructionsPending). */
   instructions?: string;
+  /** The first prompt with the instructions got through. */
+  onInstructionsDelivered?: () => void;
   /** Environment the agent starts from; the bridge's own when omitted. */
   baseEnv?: Record<string, string | undefined>;
   logError?: (msg: string) => void;
@@ -186,8 +189,8 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
   // While session/load replays the history: those updates belong to no run.
   let replaying = false;
   let endReason: string | null = null;
-  // Until the first prompt of a new session got through; a reopened session had its first prompt already.
-  let instructions = o.resume === null ? (o.instructions ?? null) : null;
+  // Until the first prompt got through.
+  let instructions = o.instructions ?? null;
 
   let markReady: () => void = () => {};
   let failReady: (e: Error) => void = () => {};
@@ -328,7 +331,10 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
         const text = instructions === null ? t.text : `${instructions}\n\n${t.text}`;
         run.prompted = true;
         const r = await c.peer.request<unknown>("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
-        instructions = null;
+        if (instructions !== null) {
+          instructions = null;
+          o.onInstructionsDelivered?.();
+        }
         // v2 only accepts the prompt here; its idle state update ends the turn.
         if (version === 1) finishRun(run, isObject(r) ? r.stopReason : undefined, isObject(r) ? r.usage : undefined);
       } catch (e) {

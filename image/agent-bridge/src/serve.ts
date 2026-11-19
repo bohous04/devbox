@@ -55,6 +55,9 @@ export interface HarnessOpenOptions {
   usageBaseline: UsageBaseline | null;
   emit: (e: BridgeEvent) => void;
   onUsageBaseline: (b: UsageBaseline) => void;
+  /** The thread has not had a prompt get through since it was opened new (BridgeState.instructionsPending). */
+  instructionsPending: boolean;
+  onInstructionsDelivered: () => void;
 }
 
 export type OpenHarness = (o: HarnessOpenOptions) => HarnessSession;
@@ -232,7 +235,8 @@ function harnessOpener(launchEnv: Env, logError: (msg: string) => void): OpenHar
         model: o.target.model,
         resume: o.resume,
         mcpServers: acpMcpServers(mcpCommand),
-        instructions: ACP_INSTRUCTIONS,
+        ...(o.instructionsPending ? { instructions: ACP_INSTRUCTIONS } : {}),
+        onInstructionsDelivered: o.onInstructionsDelivered,
         baseEnv: env,
         emit: o.emit,
         logError,
@@ -312,6 +316,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     usageBaseline: null,
     target: null,
     pendingHandoff: null,
+    instructionsPending: false,
   };
   // A Claude/Codex target without its own home (a setModel on the launch target) keeps only the model choice: the
   // account is the one this launch leased, which a recreated container may have changed. An ACP target has no home
@@ -395,6 +400,11 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   // that failed to open in a way the caller handles (`handlesFailure`: a failed resume, devd re-plans; a switched
   // target that cannot open); any other end exits serve so the launcher starts a fresh bridge that resumes the thread.
   function openHarness(handlesFailure: (e: unknown) => boolean = () => false): { session: HarnessSession; retired: boolean } {
+    // No thread yet: the harness opens a new one, whose first prompt is still to come.
+    if (state.nativeThreadId === null && !state.instructionsPending) {
+      state.instructionsPending = true;
+      persist();
+    }
     const h = {
       retired: false,
       session: o.openHarness({
@@ -404,6 +414,11 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
         emit: onHarnessEvent,
         onUsageBaseline: (b) => {
           state.usageBaseline = b;
+          persist();
+        },
+        instructionsPending: state.instructionsPending,
+        onInstructionsDelivered: () => {
+          state.instructionsPending = false;
           persist();
         },
       }),
@@ -525,6 +540,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     const previous = {
       current, target: state.target, harness: state.harness, account: state.account, model: state.model,
       nativeThreadId: state.nativeThreadId, pendingHandoff: state.pendingHandoff, usageBaseline: state.usageBaseline,
+      instructionsPending: state.instructionsPending,
     };
     // A different thread (or harness) does not continue the old running usage totals.
     if (target.harness !== state.harness || cmd.resume !== state.nativeThreadId) state.usageBaseline = null;
@@ -537,6 +553,8 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     state.harness = target.harness;
     state.account = target.account;
     state.model = target.model;
+    // Another thread resumed: it had its first prompt (a new one is marked when it opens).
+    if (cmd.resume !== state.nativeThreadId) state.instructionsPending = false;
     state.nativeThreadId = cmd.resume;
     if (cmd.handoff !== null || !sameThread) state.pendingHandoff = cmd.handoff;
     persist();
@@ -560,6 +578,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       state.nativeThreadId = previous.nativeThreadId;
       state.pendingHandoff = previous.pendingHandoff;
       state.usageBaseline = previous.usageBaseline;
+      state.instructionsPending = previous.instructionsPending;
       persist();
       if (current !== null) await openCurrent();
       throw e;

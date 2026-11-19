@@ -22,13 +22,20 @@ export interface BridgeState {
   target: PersistedTarget | null;
   /** A switch's handoff not yet delivered with a user turn. */
   pendingHandoff: HandoffDelivery | null;
+  /** The thread was opened new and no prompt has got through yet: an ACP agent still gets the devbox instructions
+   *  (ruling S4-P3), also after a restart. */
+  instructionsPending: boolean;
 }
 
 /** Null when the file is missing; throws on corrupt JSON so a damaged state is never silently reset. */
 export function loadState(path: string): BridgeState | null {
   if (!existsSync(path)) return null;
-  // Files written before switching existed have neither field: such a session never switched.
-  return { target: null, pendingHandoff: null, ...(JSON.parse(readFileSync(path, "utf8")) as Omit<BridgeState, "target" | "pendingHandoff">) };
+  // Files written before switching existed have neither field: such a session never switched. Files from before
+  // ACP agents have no instructionsPending: their threads were never ACP threads.
+  return {
+    target: null, pendingHandoff: null, instructionsPending: false,
+    ...(JSON.parse(readFileSync(path, "utf8")) as Omit<BridgeState, "target" | "pendingHandoff" | "instructionsPending">),
+  };
 }
 
 export function saveState(path: string, s: BridgeState): void {
