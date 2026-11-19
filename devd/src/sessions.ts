@@ -310,13 +310,18 @@ export function existingSessionId(db: Database, project: string, repo: string, a
   return rows[0]?.id ?? null;
 }
 
-/** The existing session `open` joins: the first runtime in `runtimes` (in order of preference) that has one, picked
- *  by existingSessionId. A scheduled run (`scheduled`) never joins an InstaBox session: its prompt channel is in the
- *  VM and resume does not write the prompt — the work would silently not get done. The scheduler is VPS-only. */
+/** The existing session `open` joins among the `runtimes` it may join: a running one first (in runtime order), so a
+ *  repo never gets a second container next to a live session (S6-R17); else the first runtime in order that has
+ *  one, picked by existingSessionId. A scheduled run (`scheduled`) never joins an InstaBox session: its prompt channel
+ *  is in the VM and resume does not write the prompt — the work would silently not get done. The scheduler is VPS-only. */
 export function joinableSessionId(db: Database, project: string, repo: string, runtimes: SessionRuntime[], scheduled: boolean): string | null {
-  for (const runtime of runtimes) {
-    const id = existingSessionId(db, project, repo, (s) => storedRuntime(s) === runtime && (!scheduled || (s.host ?? "vps") === "vps"));
-    if (id) return id;
+  const pick = (runtime: SessionRuntime, runningOnly: boolean) => existingSessionId(db, project, repo, (s) =>
+    storedRuntime(s) === runtime && (!runningOnly || s.status === "running") && (!scheduled || (s.host ?? "vps") === "vps"));
+  for (const runningOnly of [true, false]) {
+    for (const runtime of runtimes) {
+      const id = pick(runtime, runningOnly);
+      if (id) return id;
+    }
   }
   return null;
 }

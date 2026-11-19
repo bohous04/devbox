@@ -45,6 +45,22 @@ test("joinableSessionId: tries the runtimes in order, ignores runtimes not liste
   expect(joinableSessionId(db, "p", "r", ["tmux", "chat"], false)).toBe("dev-p-r");
 });
 
+test("joinableSessionId: a running session of any listed runtime wins over a stopped one of the preferred runtime (S6-R17)", () => {
+  const db = openDb(":memory:");
+  const mk = (id: string, runtime: SessionRuntime, status: "running" | "stopped", port: number) => insertSession(db, {
+    id, folder: "f", project: "x", repo: "r", container: id, port_base: port, status, solo: 0,
+    created_at: 0, last_active_at: 0, important: 0, runtime });
+  mk("dev-x-r", "tmux", "running", 40100);
+  mk("dev-x-r-2", "chat", "stopped", 40200);
+  expect(joinableSessionId(db, "x", "r", ["chat", "tmux"], false)).toBe("dev-x-r");
+  // Nothing running: runtime order decides.
+  db.run("UPDATE sessions SET status = 'stopped' WHERE id = 'dev-x-r'");
+  expect(joinableSessionId(db, "x", "r", ["chat", "tmux"], false)).toBe("dev-x-r-2");
+  // Both running: runtime order decides too.
+  db.run("UPDATE sessions SET status = 'running'");
+  expect(joinableSessionId(db, "x", "r", ["chat", "tmux"], false)).toBe("dev-x-r-2");
+});
+
 type OpenArgs = Record<string, unknown>;
 function harness(initial: DevConfig, created = true) {
   let cfg = initial;
@@ -185,3 +201,4 @@ test("a schedule keeps its stored runtime when the default flips (create, then f
   expect(put.status).toBe(200);
   expect(getSchedule(h.db, id)).toMatchObject({ name: "renamed", runtime: "tmux" });
 });
+
