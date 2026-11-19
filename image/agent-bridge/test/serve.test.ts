@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLAUDE_CAPABILITIES, ResumeFailedError, type HarnessSession } from "../src/claudeSession";
@@ -16,6 +16,7 @@ import {
   EXIT_STOPPED,
   harnessEnv,
   BRIDGE_VERSION,
+  LOST_QUEUED_ERROR,
   NO_THREAD_ERROR,
   OPEN_FAILED,
   RESTART_LOOP_ERROR,
@@ -121,7 +122,7 @@ function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities | (() => 
 }
 
 function baseState(over: Partial<BridgeState> = {}): BridgeState {
-  return { harness: "claude", nativeThreadId: null, account: null, model: null, activeRunId: null, queue: [], continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, ...over };
+  return { harness: "claude", nativeThreadId: null, account: null, model: null, activeRunId: null, queue: [], continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, ackedSeq: 0, awaitingTarget: false, ...over };
 }
 
 // Account homes for switch targets, under the test dir.
@@ -144,7 +145,7 @@ function codexAccount(id: string, auth = '{"tokens":{}}'): void {
   writeFileSync(join(homes().sharedHome, "config.toml"), 'model = "x"\n');
 }
 
-async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string | null; claudeExecutable?: string | null; acpBins?: string[] } = {}) {
+async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string | null; claudeExecutable?: string | null; acpBins?: string[]; logError?: (msg: string) => void; logCompactMinBytes?: number } = {}) {
   const bridge = await serve({
     bridgeDir: dir,
     socketPath,
@@ -159,7 +160,8 @@ async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string
       which: (bin) => ((over.acpBins ?? ["vibe-acp"]).includes(bin) ? `/usr/local/bin/${bin}` : null),
     }),
     now: () => NOW,
-    logError: () => {},
+    logError: over.logError ?? (() => {}),
+    ...(over.logCompactMinBytes === undefined ? {} : { logCompactMinBytes: over.logCompactMinBytes }),
   });
   closers.push(() => bridge.close());
   return bridge;
@@ -545,10 +547,6 @@ describe("serve", () => {
     expect(await bridge.closed).toBe(EXIT_HARNESS_ENDED);
   });
 
-  test("a corrupt state.json is a configuration error", async () => {
-    writeFileSync(join(dir, "state.json"), "{not json");
-    await expect(start(fakeHarness())).rejects.toBeInstanceOf(ConfigError);
-  });
 });
 
 const ACCT = "11111111-2222-3333-4444-555555555555";
@@ -914,7 +912,7 @@ describe("switching: fix round 1", () => {
 });
 
 /** The `ready` frame of a new connection's handshake. */
-async function handshake(): Promise<Extract<ServerFrame, { t: "ready" }>> {
+async function handshake(afterSeq = 1_000_000): Promise<Extract<ServerFrame, { t: "ready" }>> {
   let buf = "";
   let done: (f: Extract<ServerFrame, { t: "ready" }>) => void = () => {};
   const ready = new Promise<Extract<ServerFrame, { t: "ready" }>>((r) => (done = r));
@@ -930,7 +928,7 @@ async function handshake(): Promise<Extract<ServerFrame, { t: "ready" }>> {
       },
     },
   });
-  socket.write(JSON.stringify({ t: "hello", afterSeq: 1_000_000 }) + "\n");
+  socket.write(JSON.stringify({ t: "hello", afterSeq }) + "\n");
   try {
     return await ready;
   } finally {
@@ -1063,7 +1061,7 @@ describe("final review fixes", () => {
   });
 
   test("this bridge takes startTurn attachments: its version is the one devd requires to send them", () => {
-    expect(BRIDGE_VERSION).toBe(IMAGES_MIN_BRIDGE_VERSION);
+    expect(versionAtLeast(BRIDGE_VERSION, IMAGES_MIN_BRIDGE_VERSION)).toBe(true);
   });
 });
 
@@ -1139,5 +1137,152 @@ describe("launch env", () => {
     const launch = { PATH: "/bin", ANTHROPIC_BASE_URL: "http://old", ANTHROPIC_AUTH_TOKEN: "old", ANTHROPIC_API_KEY: "api", DEVBOX_PROXY_PROFILE: "1" };
     expect(harnessEnv(launch, { CLAUDE_CONFIG_DIR: "/a" })).toEqual({ PATH: "/bin", CLAUDE_CONFIG_DIR: "/a" });
     expect(harnessEnv(launch, { ANTHROPIC_BASE_URL: "http://new" })).toEqual({ PATH: "/bin", ANTHROPIC_BASE_URL: "http://new" });
+  });
+});
+
+const logPath = () => join(dir, "events.jsonl");
+/** Writes events to the log as an earlier bridge did. */
+function priorLog(...evs: BridgeEvent[]): void {
+  const log = new EventLog(logPath());
+  for (const e of evs) log.append(e);
+}
+
+describe("step 6 hardening", () => {
+  test("M2: a run the log shows started without its end, which state no longer holds, is interrupted at start", async () => {
+    priorLog(
+      { type: "run.started", runId: "r-lost", origin: "user", nativeThreadId: null, model: null },
+      { type: "message.delta", runId: "r-lost", itemId: "a", text: "x" },
+    );
+    saveState(join(dir, "state.json"), baseState({ nativeThreadId: "thread-1" }));
+    const f = fakeHarness();
+    await start(f);
+    expect(events().slice(2)).toEqual([...STARTED_IDLE.map((e) => (e.type === "bridge.started" ? { ...e, resumed: true } : e)), { type: "run.interrupted", runId: "r-lost" }]);
+    // Its end was lost, not the run: no automatic continuation.
+    expect(f.turns).toEqual([]);
+  });
+
+  test("M2: a queued run the log announced, which state no longer holds, fails visibly at start", async () => {
+    priorLog({ type: "run.queued", runId: "r-q", text: "later", attachments: [] });
+    saveState(join(dir, "state.json"), baseState({ nativeThreadId: "thread-1" }));
+    await start(fakeHarness());
+    expect(events().at(-1)).toEqual({ type: "run.failed", runId: "r-q", error: LOST_QUEUED_ERROR });
+  });
+
+  test("M2: the active and queued runs of state are left to recovery, ended runs are not touched", async () => {
+    priorLog(
+      { type: "run.started", runId: "r-done", origin: "user", nativeThreadId: null, model: null },
+      { type: "run.completed", runId: "r-done", nativeThreadId: "thread-1", usage: null, costUsd: null },
+      { type: "run.started", runId: "r-old", origin: "user", nativeThreadId: null, model: null },
+      { type: "run.queued", runId: "r-q", text: "next", attachments: [] },
+    );
+    saveState(join(dir, "state.json"), baseState({ nativeThreadId: "thread-1", activeRunId: "r-old", queue: [{ runId: "r-q", text: "next", attachments: [] }] }));
+    const f = fakeHarness();
+    await start(f);
+    const ends = events().slice(4).filter((e) => e.type === "run.interrupted" || e.type === "run.failed");
+    expect(ends).toEqual([{ type: "run.interrupted", runId: "r-old" }]);
+    expect(f.turns.map((t) => t.text)).toEqual([CONTINUATION_TEXT, "next"]);
+  });
+
+  test("T2: an empty state.json is rebuilt from the log: the thread resumes, the run continues, the queue runs, and it is said", async () => {
+    priorLog(
+      { type: "thread.native", harness: "claude", nativeThreadId: "thread-7", account: null, model: "m7" },
+      { type: "run.started", runId: "r-a", origin: "user", nativeThreadId: null, model: null },
+      { type: "run.queued", runId: "r-q", text: "next", attachments: [] },
+    );
+    writeFileSync(join(dir, "state.json"), "");
+    const logged: string[] = [];
+    const f = fakeHarness();
+    await start(f, { logError: (m) => logged.push(m) });
+    expect(f.opens[0]).toMatchObject({ resume: "thread-7", target: { harness: "claude" } });
+    const started = events().find((e, i) => i >= 3 && e.type === "bridge.started") as Extract<BridgeEvent, { type: "bridge.started" }>;
+    expect(started.resumed).toBe(true);
+    expect(started.notice).toContain("state.json was unusable (the file is empty)");
+    expect(started.notice).toContain("resumes thread thread-7");
+    expect(logged).toContainEqual(expect.stringContaining("state.json was unusable (the file is empty)"));
+    expect(readdirSync(dir)).toContain(`state.json.corrupt-${NOW}`);
+    expect(events().filter((e) => e.type === "run.interrupted")).toEqual([{ type: "run.interrupted", runId: "r-a" }]);
+    expect(f.turns.map((t) => [t.runId, t.text])).toEqual([[expect.any(String), CONTINUATION_TEXT], ["r-q", "next"]]);
+    expect(state()).toMatchObject({ harness: "claude", nativeThreadId: "thread-7", awaitingTarget: false });
+  });
+
+  test("T2: a corrupt state.json of a thread on another harness waits for devd's target, also across a restart", async () => {
+    codexAccount(ACCT);
+    priorLog({ type: "thread.native", harness: "codex", nativeThreadId: "thread-c", account: ACCT, model: "gpt" });
+    writeFileSync(join(dir, "state.json"), "{not json");
+    const f = fakeHarness();
+    const bridge = await start(f);
+    expect(f.opens).toEqual([]);
+    expect(await handshake(0)).toMatchObject({ awaitingTarget: true });
+    expect(state()).toMatchObject({ harness: "codex", nativeThreadId: "thread-c", awaitingTarget: true });
+    await bridge.close();
+
+    const g = fakeHarness();
+    await start(g);
+    expect(g.opens).toEqual([]);
+    expect(await handshake(0)).toMatchObject({ awaitingTarget: true });
+    await switchCmd({ harness: "codex", account: ACCT, model: "gpt", env: {} }, "thread-c");
+    expect(g.opens[0]).toMatchObject({ resume: "thread-c", target: { harness: "codex", account: ACCT } });
+    expect(state()).toMatchObject({ awaitingTarget: false });
+    expect(await handshake(0)).toMatchObject({ awaitingTarget: false });
+  });
+
+  test("T2: a malformed state.json with no thread in the log starts fresh and says so", async () => {
+    writeFileSync(join(dir, "state.json"), JSON.stringify({ harness: "claude", queue: "x" }));
+    const f = fakeHarness();
+    await start(f);
+    expect(f.opens[0].resume).toBeNull();
+    const started = events()[0] as Extract<BridgeEvent, { type: "bridge.started" }>;
+    expect(started).toMatchObject({ type: "bridge.started", resumed: false });
+    expect(started.notice).toContain("no thread to resume");
+  });
+
+  test("I8: a hello's afterSeq is persisted as devd's ack and the log is trimmed to what is open", async () => {
+    priorLog(
+      { type: "thread.native", harness: "claude", nativeThreadId: "thread-1", account: null, model: "m" },
+      { type: "run.started", runId: "r-done", origin: "user", nativeThreadId: null, model: null },
+      { type: "run.completed", runId: "r-done", nativeThreadId: "thread-1", usage: null, costUsd: null },
+    );
+    saveState(join(dir, "state.json"), baseState({ nativeThreadId: "thread-1" }));
+    const f = fakeHarness();
+    await start(f, { logCompactMinBytes: 0 });
+    await cmd({ kind: "startTurn", text: "open run" });
+    const last = new EventLog(logPath()).lastSeq();
+    await handshake(last - 1);
+    expect(state().ackedSeq).toBe(last - 1);
+    const kept = new EventLog(logPath()).readFrom(0).map((e) => e.event);
+    // The thread, the open run (its start and the user's message); the finished run and the start's events are gone.
+    expect(kept.map((e) => e.type)).toEqual(["thread.native", "run.started", "message.final"]);
+    expect(new EventLog(logPath()).lastSeq()).toBe(last);
+  });
+
+  test("I8: the next start trims with the ack persisted earlier and never past it", async () => {
+    priorLog(
+      { type: "run.started", runId: "r-1", origin: "user", nativeThreadId: null, model: null },
+      { type: "run.completed", runId: "r-1", nativeThreadId: "thread-1", usage: null, costUsd: null },
+      { type: "run.started", runId: "r-2", origin: "user", nativeThreadId: null, model: null },
+      { type: "run.completed", runId: "r-2", nativeThreadId: "thread-1", usage: null, costUsd: null },
+    );
+    saveState(join(dir, "state.json"), baseState({ nativeThreadId: "thread-1", ackedSeq: 2 }));
+    await start(fakeHarness(), { logCompactMinBytes: 0 });
+    expect(events().slice(0, 2)).toEqual([
+      { type: "run.started", runId: "r-2", origin: "user", nativeThreadId: null, model: null },
+      { type: "run.completed", runId: "r-2", nativeThreadId: "thread-1", usage: null, costUsd: null },
+    ]);
+  });
+
+  test("a log and state written by bridge 1.4 start unchanged", async () => {
+    const fixture = join(import.meta.dir, "fixtures", "state", "state-1.4.json");
+    const raw = JSON.parse(readFileSync(fixture, "utf8"));
+    // The fixture's switched Codex target, as a Claude-launched container would hold it, with its secret dropped.
+    writeFileSync(join(dir, "state.json"), JSON.stringify({ ...raw, activeRunId: null, queue: [] }));
+    priorLog(
+      { type: "bridge.started", version: "1.4.0", resumed: true },
+      { type: "thread.native", harness: "codex", nativeThreadId: raw.nativeThreadId, account: "acct-1", model: "gpt-5" },
+    );
+    const f = fakeHarness();
+    await start(f);
+    expect(f.opens).toEqual([]);
+    expect(events().slice(2)).toEqual([{ type: "bridge.started", version: BRIDGE_VERSION, resumed: true, awaitingTarget: true }, { type: "background.changed", work: [] }]);
+    expect(state()).toMatchObject({ harness: "codex", nativeThreadId: raw.nativeThreadId, ackedSeq: 0, awaitingTarget: false, pendingHandoff: raw.pendingHandoff });
   });
 });

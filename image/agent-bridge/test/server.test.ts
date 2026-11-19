@@ -73,9 +73,11 @@ async function connect(): Promise<TestClient> {
 }
 
 let errors: string[] = [];
+let acks: number[] = [];
 function start(onCommand: CommandHandler = async () => {}, log = new EventLog(logPath)) {
   errors = [];
-  const server = startServer({ socketPath, log, onCommand, handshake: () => ({ version: "9.9.9", awaitingTarget: false }), logError: (m) => errors.push(m) });
+  acks = [];
+  const server = startServer({ socketPath, log, onCommand, handshake: () => ({ version: "9.9.9", awaitingTarget: false }), onHello: (s) => acks.push(s), logError: (m) => errors.push(m) });
   closers.push(() => server.close());
   return server;
 }
@@ -108,16 +110,19 @@ test("every handshake's ready frame carries the bridge's version and whether it 
 test("an event published during replay is delivered once, after the replay", async () => {
   const log = new EventLog(logPath);
   log.append(ev("a"));
-  const real = log.readFrom.bind(log);
+  const real = log.stream.bind(log);
   let server!: ReturnType<typeof start>;
   let injected = false;
   // Publishing from inside the replay read is the worst-case interleaving.
-  log.readFrom = (after) => {
-    if (!injected) {
-      injected = true;
-      server.publish(ev("during"));
+  log.stream = function* (after) {
+    const it = real(after);
+    for (const e of it) {
+      if (!injected) {
+        injected = true;
+        server.publish(ev("during"));
+      }
+      yield e;
     }
-    return real(after);
   };
   server = start(undefined, log);
   const c = await connect();
@@ -217,4 +222,30 @@ test("a large replay completes in order", async () => {
   const s = seqs(c.frames);
   expect(s.slice(0, N)).toEqual(Array.from({ length: N }, (_, i) => i + 1));
   expect(s[N]).toBe(`ready${N}`);
+});
+
+test("a hello reports devd's acknowledged seq before its replay; a command sent with it is answered after ready", async () => {
+  const server = start();
+  for (const t of ["a", "b", "c"]) server.publish(ev(t));
+  const c = await connect();
+  c.send({ t: "hello", afterSeq: 2 });
+  c.send({ t: "cmd", id: "1", cmd: { kind: "interrupt" } });
+  expect(seqs(await c.waitFor(3))).toEqual([3, "ready3", "res"]);
+  expect(acks).toEqual([2]);
+});
+
+test("a replay larger than the socket buffer waits for drain and arrives whole, followed by live events", async () => {
+  const log = new EventLog(logPath);
+  const N = 3000;
+  for (let i = 0; i < N; i++) log.append(ev("y".repeat(10_000)));
+  const server = start(undefined, log);
+  const c = await connect();
+  c.send({ t: "hello", afterSeq: 0 });
+  await c.waitFor(1);
+  // Published while the replay is under way: it waits in pending and follows the replay.
+  server.publish(ev("live"));
+  await c.waitFor(N + 2);
+  const s = seqs(c.frames);
+  expect(s.slice(0, N)).toEqual(Array.from({ length: N }, (_, i) => i + 1));
+  expect(s.slice(N)).toEqual([N + 1, `ready${N + 1}`]);
 });

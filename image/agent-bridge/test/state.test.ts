@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadState, saveState, type BridgeState } from "../src/state";
+import { loadState, saveState, StateCorruptError, type BridgeState } from "../src/state";
 
 let dir: string;
 beforeEach(() => {
@@ -22,27 +22,53 @@ const state: BridgeState = {
   target: { harness: "codex", account: "a1", model: "m", env: { CODEX_HOME: "/h" }, droppedEnvKeys: [] },
   pendingHandoff: { preamble: "earlier" },
   instructionsPending: true,
+  ackedSeq: 7,
+  awaitingTarget: false,
 };
 
-test("saveState then loadState round-trips", () => {
+test("saveState then loadState round-trips and leaves no temp file", () => {
   const p = join(dir, "state.json");
   saveState(p, state);
   expect(loadState(p)).toEqual(state);
+  expect(existsSync(`${p}.tmp`)).toBe(false);
 });
 
 test("loadState returns null when missing", () => {
   expect(loadState(join(dir, "nope.json"))).toBeNull();
 });
 
-test("corrupt state throws", () => {
+test("corrupt JSON, an empty file and a wrong shape are StateCorruptError with the reason", () => {
   const p = join(dir, "state.json");
   writeFileSync(p, "{not json");
-  expect(() => loadState(p)).toThrow();
+  expect(() => loadState(p)).toThrow(StateCorruptError);
+  writeFileSync(p, "");
+  expect(() => loadState(p)).toThrow("empty");
+  writeFileSync(p, "[]");
+  expect(() => loadState(p)).toThrow("not an object");
+  writeFileSync(p, JSON.stringify({ ...state, queue: {} }));
+  expect(() => loadState(p)).toThrow("queue");
+  writeFileSync(p, JSON.stringify({ ...state, harness: 3 }));
+  expect(() => loadState(p)).toThrow("harness");
+  writeFileSync(p, JSON.stringify({ ...state, queue: [{ runId: "r", text: "t" }] }));
+  expect(() => loadState(p)).toThrow("queue[0].attachments");
+  writeFileSync(p, JSON.stringify({ ...state, target: { ...state.target, droppedEnvKeys: undefined } }));
+  expect(() => loadState(p)).toThrow("target.droppedEnvKeys");
+  writeFileSync(p, JSON.stringify({ ...state, ackedSeq: -1 }));
+  expect(() => loadState(p)).toThrow("ackedSeq");
 });
 
 test("a state file from before switching loads with no target and no pending handoff", () => {
   const p = join(dir, "state.json");
-  const { target: _t, pendingHandoff: _h, instructionsPending: _i, ...old } = state;
+  const { target: _t, pendingHandoff: _h, instructionsPending: _i, ackedSeq: _a, awaitingTarget: _w, ...old } = state;
   writeFileSync(p, JSON.stringify(old));
-  expect(loadState(p)).toEqual({ ...old, target: null, pendingHandoff: null, instructionsPending: false });
+  expect(loadState(p)).toEqual({ ...old, target: null, pendingHandoff: null, instructionsPending: false, ackedSeq: 0, awaitingTarget: false });
+});
+
+test("state files written by bridge 1.2 and 1.4 load unchanged, with nothing acknowledged and no awaited target", () => {
+  for (const v of ["1.2", "1.4"]) {
+    const raw = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "state", `state-${v}.json`), "utf8"));
+    const p = join(dir, `state-${v}.json`);
+    writeFileSync(p, JSON.stringify(raw));
+    expect(loadState(p)).toEqual({ instructionsPending: false, ...raw, ackedSeq: 0, awaitingTarget: false });
+  }
 });
