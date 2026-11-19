@@ -18,7 +18,7 @@ export interface AcpAgentSpec {
   overrides?: Partial<Capabilities>;
 }
 
-// Quirks from the T3 Code reference (commit eebb6bcc); Task 3 verifies each agent live.
+// Quirks from the T3 Code reference (commit eebb6bcc), checked live in step 4 Task 3 (see each entry).
 export const ACP_AGENTS: Record<AcpAgentId, AcpAgentSpec> = {
   // Full access: Grok approves its own tool calls. grok 1.0.13 (live): ACP v1, session/resume, no image prompts, models
   // in initialize `_meta.modelState`. Not offered in chat yet: no login in grok-home to record a turn with.
@@ -26,8 +26,10 @@ export const ACP_AGENTS: Record<AcpAgentId, AcpAgentSpec> = {
   // -31001 is Mistral Vibe's rate-limit code, outside ACP. mistral-vibe 3.1.3 (live): ACP v1, session/load only, image
   // prompts, model as a config option; sessions open in "accept-edits", devbox runs them in "auto-approve".
   vibe: { id: "vibe", argv: ["vibe-acp"], rateLimitCodes: [-31001], modes: { allowed: ["auto-approve"] } },
-  // Releases before 1.5.1 offer non-Gemini models only to allowlisted editors such as Zed. The agy CLI rejects the
-  // "yolo" and "auto_edit" modes; in "default" it asks before acting and devbox allows every request.
+  // Releases before 1.5.1 offer non-Gemini models only to allowlisted editors such as Zed (1.5.9, live, lists the same
+  // models under either name). In "default" it asks before acting and devbox allows every request. 1.5.9 (live): ACP
+  // v1 shape with protocolVersion 1, session/resume, image prompts, model as a config option. Not offered in chat yet:
+  // the account behind antigravity-home must be verified with Google first (403 "Verify your account to continue").
   antigravity: { id: "antigravity", argv: ["agy", "acp"], clientName: "zed", modes: { allowed: ["default"] } },
   // Through ACP, not OpenCode's native HTTP server.
   opencode: { id: "opencode", argv: ["opencode", "acp"] },

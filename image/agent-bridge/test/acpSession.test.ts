@@ -801,3 +801,42 @@ describe("Mistral Vibe (live)", () => {
     expect(fake.requests("session/prompt")).toHaveLength(1);
   });
 });
+
+describe("Antigravity (live)", () => {
+  const lines = recording("acp-antigravity-live.jsonl");
+  const init = lines.find((l) => l.in?.id === 1)!.in.result;
+  const created = lines.find((l) => l.proc === "first" && l.in?.id === 2)!.in.result;
+
+  test("Antigravity client name and the mode limit: initialize as zed, only allowed modes are requested", async () => {
+    const fake = fakeAgent();
+    replay(fake, lines);
+    const { session, events } = open(fake, { spec: ACP_AGENTS.antigravity });
+    await session.ready;
+    expect(fake.spawns[0]!.argv).toEqual(["agy", "acp"]);
+    expect(fake.requests("initialize")[0]!.params.clientInfo.name).toBe("zed");
+    // agy 1.5.9 opens in "default", which devbox allows: no mode is requested.
+    expect(created.modes.currentModeId).toBe("default");
+    expect(fake.requests("session/set_mode")).toEqual([]);
+    expect(events[0]).toMatchObject({ type: "thread.native", harness: "antigravity", model: "gemini-4-neon", caps: { resume: true, images: true, liveModelSwitch: true } });
+
+    // A session in a mode outside the allowed ones (here "auto") is put back to "default", never to another mode.
+    const other = fakeAgent(init);
+    other.responders["session/new"] = () => ({ ...created, sessionId: "sess-2", modes: { ...created.modes, currentModeId: "auto" } });
+    const o = open(other, { spec: ACP_AGENTS.antigravity });
+    await o.session.ready;
+    expect(other.requests("session/set_mode").map((r) => r.params)).toEqual([{ sessionId: "sess-2", modeId: "default" }]);
+  });
+
+  test("agy 1.5.9 speaks ACP v1 (protocolVersion 1), resumes with session/resume and selects models by config option", async () => {
+    expect(negotiate(init)).toMatchObject({ version: 1, caps: { resume: true, images: true } });
+    const fake = fakeAgent();
+    replay(fake, lines);
+    const { session, events } = open(fake, { spec: ACP_AGENTS.antigravity, model: "claude-opus-5-5" });
+    await session.ready;
+    expect(fake.requests("session/set_config_option")[0]!.params).toEqual({ sessionId: "sess-1", configId: "model", value: "claude-opus-5-5" });
+    // An account Google wants verified answers with a warning as the agent's text and end_turn: visible, not a failure.
+    await session.startTurn("run-1", "list the files", "user");
+    await until(() => events.some((e) => e.type === "run.completed"));
+    expect(events.filter((e) => e.type === "message.final").map((e) => (e as { text: string }).text)).toEqual(["\n⚠ Verification Required\n"]);
+  });
+});
