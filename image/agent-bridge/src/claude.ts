@@ -83,6 +83,8 @@ export function sumModelUsage(modelUsage: SDKResultMessage["modelUsage"]): Token
 // null for a successful result, else the error text for run.failed.
 export function resultError(msg: SDKResultMessage): string | null {
   if (msg.subtype === "success" && !msg.is_error) return null;
+  // An error reported as a "success" result (e.g. a usage limit) carries its message in `result`.
+  if (msg.subtype === "success" && msg.result) return msg.result;
   const errors = "errors" in msg ? msg.errors : [];
   return errors.join("; ") || `run ended with ${msg.subtype}`;
 }
