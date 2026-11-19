@@ -226,7 +226,13 @@ export function openDb(path: string): Database {
   // devd's own first message of a chat session until the bridge confirmed it (BridgeLinks.startTurnWhenConnected):
   // a devd restart between open and connect must not lose a scheduled run's prompt.
   db.run(`CREATE TABLE IF NOT EXISTS pending_first_turns (
-    session_id TEXT PRIMARY KEY, text TEXT NOT NULL, created_at INTEGER NOT NULL)`);
+    session_id TEXT PRIMARY KEY, text TEXT NOT NULL, created_at INTEGER NOT NULL,
+    after_seq INTEGER NOT NULL DEFAULT 0, tag TEXT)`);
+  // after_seq: the thread's lastSeq when the message was queued (a run started after it means it was delivered);
+  // tag: the schedule that queued it, so the outcome can be logged after a devd restart.
+  const pendingCols = (db.query("PRAGMA table_info(pending_first_turns)").all() as { name: string }[]).map((c) => c.name);
+  if (!pendingCols.includes("after_seq")) db.run(`ALTER TABLE pending_first_turns ADD COLUMN after_seq INTEGER NOT NULL DEFAULT 0`);
+  if (!pendingCols.includes("tag")) db.run(`ALTER TABLE pending_first_turns ADD COLUMN tag TEXT`);
   // Dummy git tokens. In the database, not only in memory — a devd restart must not break git
   // in running sessions (the container has the dummy in a file and devd must be able to translate it).
   db.run(`CREATE TABLE IF NOT EXISTS git_placeholders (
@@ -1088,12 +1094,13 @@ export interface ScheduleRow {
   runtime: SessionRuntime; agent: AgentName | null;
 }
 
-export function savePendingFirstTurn(db: Database, sessionId: string, text: string): void {
-  db.query(`INSERT OR REPLACE INTO pending_first_turns (session_id,text,created_at) VALUES (?,?,?)`).run(sessionId, text, Date.now());
+export interface PendingFirstTurn { text: string; seq: number; tag: string | null }
+export function savePendingFirstTurn(db: Database, sessionId: string, text: string, seq: number, tag: string | null): void {
+  db.query(`INSERT OR REPLACE INTO pending_first_turns (session_id,text,created_at,after_seq,tag) VALUES (?,?,?,?,?)`).run(sessionId, text, Date.now(), seq, tag);
 }
-export function getPendingFirstTurn(db: Database, sessionId: string): string | null {
-  const r = db.query(`SELECT text FROM pending_first_turns WHERE session_id=?`).get(sessionId) as { text: string } | null;
-  return r?.text ?? null;
+export function getPendingFirstTurn(db: Database, sessionId: string): PendingFirstTurn | null {
+  const r = db.query(`SELECT text, after_seq, tag FROM pending_first_turns WHERE session_id=?`).get(sessionId) as { text: string; after_seq: number; tag: string | null } | null;
+  return r ? { text: r.text, seq: r.after_seq, tag: r.tag } : null;
 }
 /** On devd start: a pending first message of a session that is gone or not running will never be delivered. */
 export function prunePendingFirstTurns(db: Database): number {

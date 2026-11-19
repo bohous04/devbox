@@ -330,22 +330,39 @@ test("devd's first message on a connected link goes out at once; a refused one i
   expect(b.cmds).toHaveLength(1);
 });
 
+type Saved = { text: string; seq: number; tag: string | null };
+function persistence() {
+  const saved = new Map<string, Saved>();
+  return { saved, pendingTurns: {
+    save: (id: string, text: string, seq: number, tag: string | null) => { saved.set(id, { text, seq, tag }); },
+    load: (id: string) => saved.get(id) ?? null,
+    remove: (id: string) => { saved.delete(id); },
+  } };
+}
+const started = (seq: number, runId: string): LoggedEvent => ({ seq, ts: seq, event: { type: "run.started", runId, origin: "user", nativeThreadId: null, model: null } });
+const completed = (seq: number, runId: string): LoggedEvent => ({ seq, ts: seq, event: { type: "run.completed", runId, nativeThreadId: "n", usage: null, costUsd: null } });
+
+/** One devd process over `root`: a fresh BridgeLinks and thread store, like after a restart. */
+function devdOver(root: string, pendingTurns: ReturnType<typeof persistence>["pendingTurns"], extra: { onRestoredTurnDone?: (id: string, tag: string, err: Error | null) => void } = {}) {
+  mkdirSync(join(root, ID), { recursive: true });
+  const store = ThreadStore.open(root, ID);
+  const logs: string[] = [];
+  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); }, pendingTurns, ...extra });
+  cleanups.push(() => { links.drop(ID); store.close(); });
+  return { links, store, logs, sock: join(root, ID, "agent.sock") };
+}
+function tmpRoot() {
+  const root = mkdtempSync(join(tmpdir(), "bl-"));
+  cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+
 test("devd's first message is persisted, survives a restart and is deleted once the bridge answered", async () => {
-  const saved = new Map<string, string>();
-  const pendingTurns = { save: (id: string, t: string) => { saved.set(id, t); }, load: (id: string) => saved.get(id) ?? null, remove: (id: string) => { saved.delete(id); } };
-  const mk = () => {
-    const root = mkdtempSync(join(tmpdir(), "bl-"));
-    mkdirSync(join(root, ID));
-    const store = ThreadStore.open(root, ID);
-    const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: () => {}, pendingTurns });
-    cleanups.push(() => { links.drop(ID); store.close(); rmSync(root, { recursive: true, force: true }); });
-    return { links, sock: join(root, ID, "agent.sock") };
-  };
-  // First devd: the message is stored while no bridge is reachable, then devd "restarts" (a new BridgeLinks).
-  const first = mk();
-  first.links.startTurnWhenConnected(ID, "scheduled prompt");
-  expect(saved.get(ID)).toBe("scheduled prompt");
-  const second = mk();
+  const { saved, pendingTurns } = persistence();
+  const root = tmpRoot();
+  devdOver(root, pendingTurns).links.startTurnWhenConnected(ID, "scheduled prompt");
+  expect(saved.get(ID)).toMatchObject({ text: "scheduled prompt", seq: 0 });
+  const second = devdOver(root, pendingTurns);
   const b = fakeBridge(second.sock);
   cleanups.push(() => b.close());
   second.links.ensure(ID);
@@ -354,23 +371,53 @@ test("devd's first message is persisted, survives a restart and is deleted once 
   await waitFor(() => !saved.has(ID), "persisted row deleted after the bridge answered");
 });
 
-test("a persisted first turn is dropped on ensure when the thread already has a run", async () => {
-  const saved = new Map<string, string>([[ID, "scheduled prompt"]]);
-  const pendingTurns = { save: () => {}, load: (id: string) => saved.get(id) ?? null, remove: (id: string) => { saved.delete(id); } };
-  const root = mkdtempSync(join(tmpdir(), "bl-"));
-  mkdirSync(join(root, ID));
-  const store = ThreadStore.open(root, ID);
-  store.apply({ seq: 1, ts: 1, event: { type: "run.started", runId: "r1", origin: "user", nativeThreadId: null, model: null } });
-  const logs: string[] = [];
-  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); }, pendingTurns });
-  const b = fakeBridge(join(root, ID, "agent.sock"));
-  cleanups.push(() => { links.drop(ID); b.close(); store.close(); rmSync(root, { recursive: true, force: true }); });
-  links.ensure(ID);
-  await waitFor(() => links.status(ID) === "connected", "connected");
+// A reused session has runs from earlier work: they must not make a not yet delivered first turn look delivered.
+test("a reused thread with old runs still gets its persisted first turn after a restart", async () => {
+  const { saved, pendingTurns } = persistence();
+  const root = tmpRoot();
+  const first = devdOver(root, pendingTurns);
+  first.store.apply(started(1, "old")); first.store.apply(completed(2, "old"));
+  first.links.startTurnWhenConnected(ID, "scheduled prompt");
+  expect(saved.get(ID)!.seq).toBe(2);
+  first.links.drop(ID); first.store.close();
+  saved.set(ID, { text: "scheduled prompt", seq: 2, tag: null }); // drop() discards the row, as a real crash would not
+  const second = devdOver(root, pendingTurns);
+  const b = fakeBridge(second.sock);
+  cleanups.push(() => b.close());
+  second.links.ensure(ID);
+  await waitFor(() => b.cmds.length === 1, "first turn delivered into the reused thread");
+});
+
+test("a persisted first turn is dropped on ensure when a run started after it was saved", async () => {
+  const { saved, pendingTurns } = persistence();
+  const root = tmpRoot();
+  const first = devdOver(root, pendingTurns);
+  first.store.apply(started(1, "old")); first.store.apply(completed(2, "old"));
+  first.store.apply(started(3, "new"));   // the bridge accepted the turn, devd died before deleting the row
+  first.links.drop(ID); first.store.close();
+  saved.set(ID, { text: "scheduled prompt", seq: 2, tag: null });
+  const second = devdOver(root, pendingTurns);
+  const b = fakeBridge(second.sock);
+  cleanups.push(() => b.close());
+  second.links.ensure(ID);
+  await waitFor(() => second.links.status(ID) === "connected", "connected");
   await Bun.sleep(30);
   expect(b.cmds).toEqual([]);
   expect(saved.has(ID)).toBe(false);
-  expect(logs.some((l) => l.includes("already has a run"))).toBe(true);
+  expect(second.logs.some((l) => l.includes("already has a run"))).toBe(true);
+});
+
+test("a restored first turn reports its outcome with the saved tag", async () => {
+  const { saved, pendingTurns } = persistence();
+  const root = tmpRoot();
+  saved.set(ID, { text: "scheduled prompt", seq: 0, tag: "Nightly bump" });
+  const heard: [string, string, Error | null][] = [];
+  const second = devdOver(root, pendingTurns, { onRestoredTurnDone: (id, tag, err) => { heard.push([id, tag, err]); } });
+  const b = fakeBridge(second.sock);
+  cleanups.push(() => b.close());
+  second.links.ensure(ID);
+  await waitFor(() => heard.length === 1, "outcome");
+  expect(heard).toEqual([[ID, "Nightly bump", null]]);
 });
 
 test("startTurnWhenConnected reports the bridge's answer to onDone", async () => {

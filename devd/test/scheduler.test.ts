@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { openDb, insertSchedule, getSession, insertSession, type ScheduleRow, type SessionRow } from "../src/db";
+import { CommandTimeout } from "../src/bridgeLink";
 import { createScheduler, dueSchedules, scheduledPrompt, slug, stamp } from "../src/scheduler";
 
 function sched(over: Partial<ScheduleRow> = {}): ScheduleRow {
@@ -150,7 +151,7 @@ test("fireSchedule: a skipped run does not set auto_end", async () => {
 
 // Chat schedules: no prompt file; the prompt is the session's first turn, sent through the bridge once it connects.
 // `mode`: how the bridge reacts to the first turn.
-function fakeLinks(mode: "accept" | "refuse" | "never" | "late" = "accept") {
+function fakeLinks(mode: "accept" | "refuse" | "never" | "late" | "unknown" = "accept") {
   const calls: string[] = []; const turns: Record<string, string> = {};
   let done: ((e: Error | null) => void) | null = null;
   return {
@@ -163,13 +164,14 @@ function fakeLinks(mode: "accept" | "refuse" | "never" | "late" = "accept") {
         calls.push(`start ${id}`); turns[id] = text; done = onDone;
         if (mode === "accept") onDone(null);
         if (mode === "refuse") onDone(new Error("bridge refused the turn"));
+        if (mode === "unknown") onDone(new CommandTimeout("bridge did not answer startTurn"));
       },
       discardFirstTurn: (id: string) => { calls.push(`discard ${id}`); delete turns[id]; return mode === "never"; },
     },
   };
 }
 const chatDeps = (f: ReturnType<typeof fakeLinks>, ended: string[], over: Record<string, unknown> = {}) => ({
-  links: f.links, end: async (id: string) => { ended.push(id); }, repoAgent: () => null, bridgeWaitMs: 30,
+  links: f.links, end: async (id: string) => { ended.push(id); }, changes: async () => [] as string[], repoAgent: () => null, bridgeWaitMs: 30,
   containerRunning: async () => false, ...over,
 });
 const row = () => ({ id: "dev-shop-cms", folder: "acme", project: "shop", repo: "cms", container: "dev-shop-cms", port_base: 1, status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0, runtime: "chat" } as SessionRow);
@@ -208,6 +210,7 @@ test("fireSchedule (chat): a bridge that never connects fails visibly, drops the
   const db = openDb(":memory:");
   const notes: string[] = []; const extras: unknown[] = []; const ended: string[] = [];
   const f = fakeLinks("never");
+  insertSession(db, row());
   const s = createScheduler({
     db, open: async () => ({ session: { id: "dev-shop-cms" } }),
     notify: (_t, m, e) => { notes.push(m); extras.push(e); }, ...chatDeps(f, ended),
@@ -216,9 +219,9 @@ test("fireSchedule (chat): a bridge that never connects fails visibly, drops the
   expect(f.calls).toContain("discard dev-shop-cms");
   expect(ended).toEqual(["dev-shop-cms"]);
   const ev = db.query("SELECT type, data FROM events").all() as { type: string; data: string }[];
-  expect(ev.map((e) => e.type)).toEqual(["schedule_error"]);
-  expect(ev[0].data).toContain("did not connect");
-  expect(ev[0].data).toContain("dev-shop-cms ended");
+  expect(ev.map((e) => e.type)).toEqual(["auto_end", "schedule_error"]);
+  expect(ev[1].data).toContain("did not connect");
+  expect(ev[1].data).toContain("dev-shop-cms ended");
   expect(notes).toHaveLength(1);
   expect(notes[0]).toContain("failed");
   expect(notes[0]).toContain("ended");
@@ -228,6 +231,7 @@ test("fireSchedule (chat): a bridge that never connects fails visibly, drops the
 test("fireSchedule (chat): a bridge refusal of the first turn is a failure and ends the session", async () => {
   const db = openDb(":memory:");
   const notes: string[] = []; const ended: string[] = [];
+  insertSession(db, row());
   const s = createScheduler({
     db, open: async () => ({ session: { id: "dev-shop-cms" } }),
     notify: (_t, m) => { notes.push(m); }, ...chatDeps(fakeLinks("refuse"), ended),
@@ -236,7 +240,38 @@ test("fireSchedule (chat): a bridge refusal of the first turn is a failure and e
   expect(notes).toHaveLength(1);
   expect(notes[0]).toContain("bridge refused the turn");
   expect(ended).toEqual(["dev-shop-cms"]);
-  expect((db.query("SELECT type FROM events").all() as { type: string }[]).map((e) => e.type)).toEqual(["schedule_error"]);
+  expect((db.query("SELECT type FROM events").all() as { type: string }[]).map((e) => e.type)).toEqual(["auto_end", "schedule_error"]);
+});
+
+test("fireSchedule (chat): a failure on a reused session with a dirty tree keeps the worktree", async () => {
+  const db = openDb(":memory:");
+  insertSession(db, { ...row(), worktree: "/w" } as SessionRow);
+  const calls: unknown[] = [];
+  const s = createScheduler({
+    db, open: async () => ({ session: { id: "dev-shop-cms" } }), notify: () => {},
+    ...chatDeps(fakeLinks("refuse"), [], { end: async (id: string, _a: unknown, opts: unknown) => { calls.push([id, opts]); }, changes: async () => ["M src/a.ts"] }),
+  });
+  await s.fireSchedule(sched({ runtime: "chat" }));
+  expect(calls).toEqual([["dev-shop-cms", { keepWorktree: true }]]);
+  expect((db.query("SELECT type FROM events").all() as { type: string }[]).map((e) => e.type)).toContain("auto_end_kept");
+});
+
+test("fireSchedule (chat): a first turn with an unknown outcome keeps the session and says to check it", async () => {
+  const db = openDb(":memory:");
+  insertSession(db, row());
+  const notes: string[] = []; const ended: string[] = [];
+  const s = createScheduler({
+    db, open: async () => ({ session: { id: "dev-shop-cms" } }),
+    notify: (_t, m) => { notes.push(m); }, ...chatDeps(fakeLinks("unknown"), ended),
+  });
+  await s.fireSchedule(sched({ runtime: "chat" }));
+  expect(ended).toEqual([]);
+  expect(notes).toHaveLength(1);
+  expect(notes[0]).toContain("outcome unknown");
+  expect(notes[0]).toContain("check the session");
+  const ev = db.query("SELECT type, data FROM events").all() as { type: string; data: string }[];
+  expect(ev.map((e) => e.type)).toEqual(["schedule_error"]);
+  expect(ev[0].data).toContain("check the session");
 });
 
 test("fireSchedule (chat): a turn sent right at the deadline counts as started, not failed", async () => {

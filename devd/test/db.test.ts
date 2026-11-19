@@ -491,8 +491,8 @@ test("prunePendingFirstTurns keeps rows of running sessions only", () => {
   const db = openDb(":memory:");
   const mk = (id: string, status: string, port: number) => insertSession(db, { id, folder: "f", project: id, repo: "r", container: id, port_base: port, status, solo: 0, created_at: 0, last_active_at: 0, important: 0 } as SessionRow);
   mk("run", "running", 1); mk("stop", "stopped", 2);
-  for (const id of ["run", "stop", "ghost"]) savePendingFirstTurn(db, id, "t");
+  for (const id of ["run", "stop", "ghost"]) savePendingFirstTurn(db, id, "t", 7, "tag");
   expect(prunePendingFirstTurns(db)).toBe(2);
-  expect(getPendingFirstTurn(db, "run")).toBe("t");
+  expect(getPendingFirstTurn(db, "run")).toEqual({ text: "t", seq: 7, tag: "tag" });
   expect(getPendingFirstTurn(db, "stop")).toBeNull();
 });

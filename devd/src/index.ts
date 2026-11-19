@@ -428,9 +428,22 @@ const bridgeLinks = new BridgeLinks({
   onBehind: (id) => inbox.changed(id),
   onHandshake: (id, h) => chatSwitch.onHandshake(id, h),
   pendingTurns: {
-    save: (id, text) => savePendingFirstTurn(db, id, text),
+    save: (id, text, seq, tag) => savePendingFirstTurn(db, id, text, seq, tag),
     load: (id) => getPendingFirstTurn(db, id),
     remove: (id) => deletePendingFirstTurn(db, id),
+  },
+  // A scheduled run's first message delivered after a devd restart: the scheduler that queued it is gone, so the
+  // outcome is logged and notified here. (No session end on failure: that needs the schedule run's own state.)
+  onRestoredTurnDone: (id, schedule, err) => {
+    const s = getSession(db, id);
+    const target = s ? { session: { id, project: s.project, repo: s.repo } } : undefined;
+    if (err === null) {
+      logEvent(db, id, "schedule_run", { schedule, restored: true });
+      notify(s ? `${s.project}/${s.repo}` : id, `Scheduled run "${schedule}" started`, target);
+    } else {
+      logEvent(db, id, "schedule_error", { schedule, restored: true, error: err.message });
+      notify(s ? `${s.project}/${s.repo}` : id, `Scheduled run "${schedule}" failed after a devd restart: ${err.message}`, { target: { kind: "schedules" } });
+    }
   },
 });
 const releaseThread = (id: string) => {
@@ -690,7 +703,7 @@ const scheduler = createScheduler({
   db, notify,
   open: (t) => mgr.open(t),
   links: bridgeLinks,
-  end: (id) => mgr.end(id),
+  end: (id, soloAction, opts) => mgr.end(id, soloAction, opts),
   repoAgent: (t) => getRepoAgent(db, t.folder, t.project, t.repo),
   containerRunning: async (id) => (await containerState(id)) === "running",
 });

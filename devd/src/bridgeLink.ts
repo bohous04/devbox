@@ -88,7 +88,14 @@ export class BridgeLinks {
     /** Every handshake, after the replayed events were applied. */
     onHandshake?: (sessionId: string, h: BridgeHandshake) => void;
     /** Where devd's first message survives a devd restart (main DB); without it the message is memory only. */
-    pendingTurns?: { save: (id: string, text: string) => void; load: (id: string) => string | null; remove: (id: string) => void };
+    pendingTurns?: {
+      save: (id: string, text: string, seq: number, tag: string | null) => void;
+      load: (id: string) => { text: string; seq: number; tag: string | null } | null;
+      remove: (id: string) => void;
+    };
+    /** Outcome of a first message that was loaded from `pendingTurns` after a restart and carries a tag
+     *  (the schedule name): there is no caller left to hear it. */
+    onRestoredTurnDone?: (sessionId: string, tag: string, err: Error | null) => void;
     retryMs?: number;
     log?: (msg: string) => void;
   }) {
@@ -102,13 +109,17 @@ export class BridgeLinks {
     // A first message persisted before a restart is delivered on this link's first connection.
     if (!this.firstTurns.has(sessionId)) {
       const saved = this.d.pendingTurns?.load(sessionId);
-      if (saved != null) {
-        // The bridge may have accepted the turn just before devd died, leaving the row behind: a thread with a run
-        // already has its first turn, so the row is stale and must not be sent again.
-        if (this.d.store(sessionId).snapshot({ limit: 0 }).runs.length > 0) {
+      if (saved) {
+        // The bridge may have accepted the turn just before devd died, leaving the row behind: a run started after
+        // the row was saved means it was delivered. Runs from before (a reused session) say nothing.
+        if (this.d.store(sessionId).snapshot({ afterSeq: saved.seq, limit: 0 }).runs.length > 0) {
           this.d.pendingTurns?.remove(sessionId);
-          this.log(`bridge link ${sessionId}: dropped a persisted first message, the thread already has a run`);
-        } else this.firstTurns.set(sessionId, saved);
+          this.log(`bridge link ${sessionId}: dropped a persisted first message, the thread already has a run since it was queued`);
+        } else {
+          this.firstTurns.set(sessionId, saved.text);
+          const { tag } = saved;
+          if (tag !== null && this.d.onRestoredTurnDone) this.firstTurnDone.set(sessionId, (err) => this.d.onRestoredTurnDone!(sessionId, tag, err));
+        }
       }
     }
     const link: Link = {
@@ -164,9 +175,10 @@ export class BridgeLinks {
    *  of a session (a pull conflict on open, a scheduled run's prompt). Not sent because the bridge was unreachable:
    *  tried again on the next connection, also after a devd restart (persisted until the bridge answered). Timed out
    *  (outcome unknown) or refused: logged, never resent. `onDone` hears the outcome once: null = the bridge accepted
-   *  the turn, an Error = it was refused, timed out, discarded or dropped. It is memory only (not after a restart). */
-  startTurnWhenConnected(sessionId: string, text: string, onDone?: (err: Error | null) => void): void {
-    this.d.pendingTurns?.save(sessionId, text);
+   *  the turn, an Error = it was refused, timed out, discarded or dropped. It is memory only; `tag` is persisted
+   *  and reaches `onRestoredTurnDone` instead after a restart. */
+  startTurnWhenConnected(sessionId: string, text: string, onDone?: (err: Error | null) => void, tag: string | null = null): void {
+    this.d.pendingTurns?.save(sessionId, text, this.d.store(sessionId).lastSeq(), tag);
     this.firstTurns.set(sessionId, text);
     if (onDone) this.firstTurnDone.set(sessionId, onDone);
     if (this.status(sessionId) === "connected") this.sendFirstTurn(sessionId);

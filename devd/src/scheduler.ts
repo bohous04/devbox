@@ -1,10 +1,12 @@
 import type { Database } from "bun:sqlite";
 import { cronMatch } from "./cron";
-import { getSchedule, listSchedules, listSessions, logEvent, setAutoEnd, setImportant, setScheduleLastRun, type ScheduleRow } from "./db";
+import { getSchedule, getSession, listSchedules, listSessions, logEvent, setAutoEnd, setImportant, setScheduleLastRun, type ScheduleRow } from "./db";
 import type { NotifyFn } from "./agentEvents";
 import type { AgentName, SessionRuntime } from "./db";
 import { chatRuntimeBlock } from "./agents";
 import { resolveAgent } from "./sessions";
+import { endSessionKeepingWork, type AutoEndDeps } from "./autoEnd";
+import { CommandTimeout } from "./bridgeLink";
 
 /** How long a chat schedule waits for the new session's bridge before it fails visibly. */
 export const BRIDGE_WAIT_MS = 120_000;
@@ -15,11 +17,13 @@ export interface SchedulerDeps {
   /** The bridge links of chat sessions; required for a chat schedule. */
   links?: {
     ensure: (id: string) => void;
-    startTurnWhenConnected: (id: string, text: string, onDone: (err: Error | null) => void) => void;
+    startTurnWhenConnected: (id: string, text: string, onDone: (err: Error | null) => void, tag: string) => void;
     discardFirstTurn: (id: string) => boolean;
   };
   /** Ends a session this schedule opened but could not start. */
-  end?: (id: string) => Promise<void>;
+  end?: AutoEndDeps["end"];
+  /** Working tree status for the end's dirty-tree guard (autoEnd.ts); tests only. */
+  changes?: AutoEndDeps["changes"];
   /** The repo's remembered agent, used when a chat schedule names none. */
   repoAgent?: (t: { folder: string; project: string; repo: string }) => AgentName | null;
   bridgeWaitMs?: number;
@@ -106,7 +110,7 @@ export function createScheduler(d: SchedulerDeps) {
         links.ensure(r.session.id);
         // Persisted until the bridge confirms, so a devd restart while waiting still delivers it.
         const accepted = new Promise<Error | null>((resolve) =>
-          links.startTurnWhenConnected(r.session.id, r.claudePrompt ? `${r.claudePrompt}\n\n${text}` : text, resolve));
+          links.startTurnWhenConnected(r.session.id, r.claudePrompt ? `${r.claudePrompt}\n\n${text}` : text, resolve, sch.name));
         const waitMs = d.bridgeWaitMs ?? BRIDGE_WAIT_MS;
         let timer: ReturnType<typeof setTimeout> | undefined;
         const outcome = await Promise.race([accepted, new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), waitMs); })]);
@@ -127,11 +131,15 @@ export function createScheduler(d: SchedulerDeps) {
       d.notify(`${sch.project}/${sch.repo}`, `Scheduled run "${sch.name}" started`, { session: { id: r.session.id, project: sch.project, repo: sch.repo } });
     } catch (e) {
       // A chat session this run opened has no prompt and is marked auto_end: left running it would make every later
-      // run of the repo skip. End it, and say whether that worked.
+      // run of the repo skip. End it (keeping a dirty worktree, as autoEnd does), and say whether that worked.
+      // Not when the first turn's outcome is unknown (the bridge did not answer): the agent may be working.
       let error = (e as Error).message;
-      if (openedId) {
-        try { await d.end!(openedId); error += `; session ${openedId} ended`; }
-        catch (endErr) { error += `; ending session ${openedId} failed: ${(endErr as Error).message}`; }
+      if (openedId && e instanceof CommandTimeout) error = `first turn outcome unknown (${error}); check the session ${openedId}`;
+      else if (openedId) {
+        try {
+          const s = getSession(d.db, openedId);
+          if (s) { await endSessionKeepingWork({ db: d.db, end: d.end!, changes: d.changes }, s, "schedule-failed"); error += `; session ${openedId} ended`; }
+        } catch (endErr) { error += `; ending session ${openedId} failed: ${(endErr as Error).message}`; }
       }
       logEvent(d.db, openedId ?? id, "schedule_error", { schedule: sch.name, error, at });
       d.notify(`${sch.project}/${sch.repo}`, `Scheduled run "${sch.name}" failed: ${error}`, { target: { kind: "schedules" } });
