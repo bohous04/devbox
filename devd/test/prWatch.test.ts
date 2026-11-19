@@ -673,3 +673,24 @@ test("seed window: a session whose poll failed during the seed tick is seeded on
   await t.watch.tick();
   expect(t.messages()).toEqual(["CI failed on PR #7"]);
 });
+
+test("a held finished already released and notified is not re-armed after a session stop/start", async () => {
+  const t = setup();
+  t.pr(CHAT.id, "open", "pending");
+  await t.feed(CHAT.id, [started("r1"), completed("r1")]);
+  t.sweep();
+  t.pr(CHAT.id, "open", "success");
+  await t.watch.tick();
+  t.sweep();
+  expect(t.messages()).toEqual(["Claude finished working"]);
+  t.tick(PR_SETTLED_POLL_MS);
+  t.pr(CHAT.id, "merged", "none"); // a later PR row change, run still unseen
+  await t.watch.tick();
+  // Session stop/start: the hub forgets the live state, ChatHub drops its state.
+  t.hub.retainRunning(new Set());
+  t.chatHub.drop(CHAT.id);
+  t.connect(CHAT.id);
+  t.sweep();
+  t.sweep();
+  expect(t.messages()).toEqual(["Claude finished working"]);
+});

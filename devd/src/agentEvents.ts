@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite";
 import { specFor } from "./agents";
 import type { Activity } from "./sessionAttention";
 import {
-  deleteAgentLiveState, getAgentLiveState, insertNotifyLog, insertWorkInterval, lastMetricTs, logEvent, updateSession,
+  deleteAgentLiveState, getAgentLiveState, insertNotifyLog, insertWorkInterval, lastMetricTs, lastSweepDone, logEvent, updateSession,
   upsertAgentLiveState, type AgentName, type NotifyDecision, type SessionRow, type SessionRuntime,
 } from "./db";
 
@@ -605,6 +605,13 @@ export class AgentEventHub {
         return;
       }
     }
+  }
+
+  /** The session's "finished" for a run that ended at `endedAt` was held for CI and never sent or silenced (the
+   *  newest `sweep_done` row since then is the hold's deferral). Survives a devd restart and a session stop/start. */
+  heldForPr(sessionId: string, endedAt: number): boolean {
+    const last = lastSweepDone(this.d.db, sessionId, endedAt);
+    return last?.decision === "deferred" && last.reason === "pr-checks";
   }
 
   /** ChatHub after a devd restart: the completion it just re-sent was held for CI before the restart, so it counts as

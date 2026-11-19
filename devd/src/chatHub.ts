@@ -73,12 +73,12 @@ export class ChatHub {
       return;
     }
     for (const id of subagentIds(t)) this.subagentStart(s, st, id);
-    // A "finished" the hub held for CI died with the old devd (its quiet window is in memory). Unseen, not notified
-    // (the restored live state is not done) and its PR still pending or changed since the run ended: send the
-    // completion again, marked as held, so the sweep holds, releases or silences it as before the restart.
+    // A "finished" the hub held for CI died with the old devd (its quiet window is in memory). Unseen, still held by
+    // notify_log's record (deferred for pr-checks, never sent or silenced since) and its PR still pending or changed
+    // since the run ended: send the completion again, marked as held, so the sweep holds, releases or silences it.
     if (!active && last?.status === "completed" && holdingCount(t) === 0 && this.d.prRow
         && last.endedSeq !== null && last.endedAt !== null && t.seenSeq < last.endedSeq
-        && this.d.hub.liveSnapshot(sessionId)?.status !== "done") {
+        && this.d.hub.heldForPr(sessionId, last.endedAt)) {
       const row = this.d.prRow(sessionId);
       if (row && (row.checks === "pending" || row.since >= last.endedAt)) {
         this.d.hub.handle(s, "stop", { promptId: last.runId, backgroundTasks: 0 });
