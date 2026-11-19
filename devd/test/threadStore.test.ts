@@ -207,6 +207,12 @@ test("a bridge.started notice (state.json rebuilt) is shown in the thread, also 
   ]);
 });
 
+test("a bridge.notice is shown in the thread", () => {
+  const s = store();
+  s.apply(ev({ type: "bridge.notice", text: "events 1-2 are no longer available" }));
+  expect(s.snapshot().items.map((i) => [i.kind, i.text])).toEqual([["notice", "events 1-2 are no longer available"]]);
+});
+
 test("runs carry when they were queued and the seq that ended them", () => {
   const s = store(); n = 0;
   s.apply(ev({ type: "run.queued", runId: "r1", text: "hi", attachments: [] }));

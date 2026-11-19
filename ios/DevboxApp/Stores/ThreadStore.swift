@@ -212,6 +212,9 @@ enum ThreadView {
             if resumed { notice(&n, seq, ts, runId: nil, "Agent bridge restarted (v\(version))") }
             if let text, !text.isEmpty { notice(&n, seq, ts, runId: nil, text) }
 
+        case let .bridgeNotice(text):
+            notice(&n, seq, ts, runId: nil, text)
+
         case let .unknown(type):
             logger.error("thread view: unknown event type \(type, privacy: .public) at seq \(seq)")
             notice(&n, seq, ts, runId: nil, "unknown event \(type)")

@@ -740,6 +740,14 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
    *  is logged and never drops the link (the log just stays longer). */
   function onHello(afterSeq: number): void {
     try {
+      if (afterSeq < state.trimSeq) {
+        // devd's store went back (restored from an older backup?): what was trimmed above its seq is gone here too.
+        const text = `devd's thread store asked for events after seq ${afterSeq}, but the agent bridge's log was trimmed `
+          + `through seq ${state.trimSeq}: events ${afterSeq + 1}-${state.trimSeq} are no longer available, except runs and `
+          + `questions still open and the latest thread announcement.`;
+        logError(`agent-bridge: ${text}`);
+        server.publish({ type: "bridge.notice", text });
+      }
       const ack = Math.min(afterSeq, log.lastSeq());
       const t = now();
       const c = state.ackCandidate;

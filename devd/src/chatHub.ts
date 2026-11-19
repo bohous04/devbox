@@ -218,6 +218,7 @@ export class ChatHub {
       case "run.queued":
       case "message.delta":
       case "bridge.started":
+      case "bridge.notice":
         return; // nothing for the hub; the thread store keeps them
       case "message.final":
         if (ev.role !== "user" || this.state.get(sessionId)?.promptRun !== ev.runId) return;

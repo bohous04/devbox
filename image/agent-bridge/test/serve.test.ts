@@ -1336,6 +1336,23 @@ describe("step 6 hardening", () => {
     expect(() => lstatSync(join(dir, "events.jsonl.tmp"))).toThrow("ENOENT");
   });
 
+  test("a hello below the trim point (devd's store restored from a backup) is logged and said in the thread", async () => {
+    priorLog(
+      { type: "run.started", runId: "r-1", origin: "user", nativeThreadId: null, model: null },
+      { type: "run.completed", runId: "r-1", nativeThreadId: "thread-1", usage: null, costUsd: null },
+    );
+    saveState(join(dir, "state.json"), baseState({ nativeThreadId: "thread-1", trimSeq: 2 }));
+    const logged: string[] = [];
+    await start(fakeHarness(), { logError: (m) => logged.push(m) });
+    await handshake(0);
+    const notice = { type: "bridge.notice" as const, text: expect.stringContaining("events 1-2") };
+    expect(events()).toContainEqual(notice);
+    expect(logged).toContainEqual(expect.stringContaining("events 1-2"));
+    // Not again for a hello at or above it.
+    await handshake(2);
+    expect(events().filter((e) => e.type === "bridge.notice")).toHaveLength(1);
+  });
+
   test("I8: the next start trims with the ack persisted earlier and never past it", async () => {
     priorLog(
       { type: "run.started", runId: "r-1", origin: "user", nativeThreadId: null, model: null },

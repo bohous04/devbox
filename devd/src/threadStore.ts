@@ -204,6 +204,9 @@ export class ThreadStore {
         if (ev.resumed) this.insertItem(seq, ts, { runId: null, itemId: null, kind: "notice", text: `Agent bridge restarted (v${ev.version})`, status: "done" });
         if (ev.notice) this.insertItem(seq, ts, { runId: null, itemId: null, kind: "notice", text: ev.notice, status: "done" });
         return;
+      case "bridge.notice":
+        this.insertItem(seq, ts, { runId: null, itemId: null, kind: "notice", text: ev.text, status: "done" });
+        return;
       default: {
         const unknown: never = ev;
         const type = (unknown as { type?: unknown }).type;

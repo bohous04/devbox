@@ -1244,6 +1244,40 @@
       }
     },
     {
+      "name": "bridge.notice (bridge 1.5.0+) is a notice in the thread",
+      "steps": [
+        {
+          "event": {
+            "seq": 4,
+            "ts": 1000,
+            "event": {
+              "type": "bridge.notice",
+              "text": "events 1-2 are no longer available"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 4,
+        "seenSeq": 0,
+        "runs": [],
+        "items": [
+          {
+            "seq": 4,
+            "runId": null,
+            "itemId": null,
+            "kind": "notice",
+            "text": "events 1-2 are no longer available",
+            "ts": 1000,
+            "status": "done"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      }
+    },
+    {
       "name": "background.changed replaces the list; active and queued runs",
       "steps": [
         {

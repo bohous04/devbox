@@ -1124,6 +1124,8 @@ enum BridgeEvent: Decodable, Equatable {
     case runFailed(runId: String, error: String, reason: String?)
     /// `notice` (bridge 1.5.0+): something the user must know about this start, e.g. state.json rebuilt from the log.
     case bridgeStarted(version: String, resumed: Bool, notice: String?)
+    /// (bridge 1.5.0+) A notice for the thread that is not about a run.
+    case bridgeNotice(text: String)
     case unknown(type: String)
 
     private enum K: String, CodingKey {
@@ -1169,6 +1171,8 @@ enum BridgeEvent: Decodable, Equatable {
             self = .runFailed(runId: try s(.runId), error: try s(.error), reason: try o(.reason))
         case "bridge.started":
             self = .bridgeStarted(version: try s(.version), resumed: try c.decode(Bool.self, forKey: .resumed), notice: try o(.notice))
+        case "bridge.notice":
+            self = .bridgeNotice(text: try s(.text))
         default:
             self = .unknown(type: type)
         }
