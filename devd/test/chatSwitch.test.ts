@@ -863,3 +863,29 @@ test("proxyProfileEnv matches agent-launch.sh --print-env for each proxy profile
 test("proxy profile env keys are the ones an agent switch clears (PROFILE_ENV)", () => {
   expect([...PROXY_PROFILE_ENV_KEYS].sort()).toEqual([...PROFILE_ENV].sort());
 });
+
+test("a harness switch the bridge could not open says so in the thread; the session stays where it was", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.setOnSend((cmd) => { if (cmd.kind === "switchTarget") throw new CommandFailed("Authentication required"); });
+  expect(await t.post("harness", { agent: "vibe" })).toEqual({ status: 409, body: { error: "command-failed", message: "Authentication required" } });
+  expect(notices(t).at(-1)).toBe("Switching to Mistral Vibe failed: Authentication required. The session stays on Claude Code.");
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("claude");
+  expect(activeLeases(t)).toEqual(["primary"]);
+});
+
+test("open-failed: the bridge could not open its persisted target and awaits one; devd re-sends it and the user can switch away", async () => {
+  const t = setup({ agent: "vibe" });
+  vibeTurn(t, "r1");
+  t.setOnSend((cmd) => { if (cmd.kind === "switchTarget" && cmd.target.harness === "vibe") throw new CommandFailed("Authentication required"); });
+  t.feed([{ type: "run.failed", runId: "never-started", error: "open-failed" }]);
+  await waitUntil(() => t.sent.length >= 1, "the re-send");
+  // Same thread, no re-plan: the thread was fine, the agent could not start.
+  expect(t.sent[0]).toMatchObject({ kind: "switchTarget", target: { harness: "vibe" }, resume: "t-vibe" });
+  expect(t.sw.target(CHAT.id).awaitingTarget).toBe(true);
+  expect(notices(t).at(-1)).toContain("Authentication required");
+  expect(t.store.snapshot().items.some((i) => i.text.includes("never-started"))).toBe(false);
+  expect(await t.post("harness", { agent: "claude" })).toMatchObject({ status: 202 });
+  expect(t.sent.at(-1)).toMatchObject({ kind: "switchTarget", target: { harness: "claude" } });
+  expect(t.sw.target(CHAT.id).awaitingTarget).toBe(false);
+});

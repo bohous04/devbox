@@ -23,7 +23,7 @@ import { toCandidates } from "./accounts";
 import { AGENTS, agentNameFor, chatHarness, chatRuntimeBlock, isAgentName, specFor, type AgentName, type ChatHarness } from "./agents";
 import { codexAccountUsable, codexLimitLive, type CodexAccountView } from "./codexAccounts";
 import type { AccountPoolSettings } from "./config";
-import { AgentDisconnected, CommandTimeout, type BridgeHandshake } from "./bridgeLink";
+import { AgentDisconnected, CommandFailed, CommandTimeout, type BridgeHandshake } from "./bridgeLink";
 import { getSession, insertLease, leaseHistory, logEvent, releaseLeasesForSession, setRepoAgent, setSessionAgent, type SessionRow } from "./db";
 import type { Handoff } from "./handoff";
 import { historyOmittedNotice, planAfterResumeFailure, planTransition, resumeFailedNotice, type Target, type Transition } from "./transition";
@@ -227,6 +227,13 @@ export class ChatSwitch {
       // A bridge awaiting its target has no harness to set a model on: it gets the target.
       if (plan.kind === "set-model" && !awaiting) await this.d.links.send(s.id, { kind: "setModel", model: plan.model }, SWITCH_TIMEOUT_MS);
       else await this.sendTarget(s.id, next);
+    } catch (e) {
+      // The bridge answered: it could not open the new agent (e.g. its CLI is not signed in) and is back where it was.
+      if (e instanceof CommandFailed && req.kind === "harness") {
+        const after = awaiting ? "The agent still waits for its target." : `The session stays on ${specFor(from).label}.`;
+        store.addNotice(`Switching to ${specFor(profile).label} failed: ${e.message}. ${after}`, this.d.now());
+      }
+      throw e;
     } finally {
       this.pending.delete(s.id);
     }
@@ -443,6 +450,14 @@ export class ChatSwitch {
         if (l && ev.origin === "user") l.handoff = null;
         return;
       case "run.failed": {
+        if (ev.error === "open-failed") {
+          // The bridge could not open its persisted target at start (e.g. an ACP agent's login is gone) and awaits
+          // one: devd sends it again with backoff, and the failure's own text lands in the thread (retryLater); the
+          // user can switch away meanwhile. The thread itself is fine: no re-plan.
+          this.awaiting.add(sessionId);
+          this.resend(sessionId);
+          return;
+        }
         if (ev.error !== "resume-failed") return;
         // The bridge now awaits a fresh target (also at its start, e.g. a thread from before the shared Codex home).
         this.awaiting.add(sessionId);

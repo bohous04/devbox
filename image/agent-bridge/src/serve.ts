@@ -25,12 +25,18 @@ export const NO_THREAD_ERROR = "restart before the conversation started; resend 
 /** `run.failed` error for a resume that did not work, at a switch or at start (on a run id no `run.started`
  *  announced); the bridge then awaits devd's fresh target. */
 export const RESUME_FAILED = "resume-failed";
+/** `run.failed` error (on a run id no `run.started` announced) for a switched target the bridge could not open at
+ *  start, for another reason than a failed resume (an ACP agent without its login): the bridge awaits devd's target
+ *  instead of exiting into a restart loop on it. */
+export const OPEN_FAILED = "open-failed";
 const AWAITING_TARGET_ERROR = "the bridge waits for devd to send switchTarget (after a restart or a failed resume)";
 
 // Exit statuses of `agent-bridge serve`, read by agent-bridge-launch.
 export const EXIT_STOPPED = 0;
 export const EXIT_HARNESS_ENDED = 1;
 export const EXIT_CONFIG = 3;
+
+const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** A configuration problem that a restart cannot fix; serve exits with EXIT_CONFIG. */
 export class ConfigError extends Error {}
@@ -386,9 +392,9 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   const close = () => shutdown(EXIT_STOPPED);
 
   // `retired` marks a harness serve closes on purpose (restartAgent, shutdown) or, opened by a switch or at start, one
-  // whose resume failed (devd re-plans); any other end exits serve so the launcher starts a fresh bridge that resumes
-  // the thread.
-  function openHarness(handlesResumeFailure = false): { session: HarnessSession; retired: boolean } {
+  // that failed to open in a way the caller handles (`handlesFailure`: a failed resume, devd re-plans; a switched
+  // target that cannot open); any other end exits serve so the launcher starts a fresh bridge that resumes the thread.
+  function openHarness(handlesFailure: (e: unknown) => boolean = () => false): { session: HarnessSession; retired: boolean } {
     const h = {
       retired: false,
       session: o.openHarness({
@@ -402,12 +408,10 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
         },
       }),
     };
-    // Registered before the end handler, so a failed resume is retired before its session's end is looked at.
-    if (handlesResumeFailure) {
-      h.session.ready.catch((e) => {
-        if (e instanceof ResumeFailedError) h.retired = true;
-      });
-    }
+    // Registered before the end handler, so a handled failure is retired before its session's end is looked at.
+    h.session.ready.catch((e) => {
+      if (handlesFailure(e)) h.retired = true;
+    });
     const settled = h.session.ready.catch(() => {});
     void settled.then(async () => {
       const r = await h.session.ended;
@@ -518,6 +522,10 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       throw new Error(`switch refused: ${target.harness} cannot inject handoff items and the handoff has no preamble`);
     }
     await retireHarness();
+    const previous = {
+      current, target: state.target, harness: state.harness, account: state.account, model: state.model,
+      nativeThreadId: state.nativeThreadId, pendingHandoff: state.pendingHandoff, usageBaseline: state.usageBaseline,
+    };
     // A different thread (or harness) does not continue the old running usage totals.
     if (target.harness !== state.harness || cmd.resume !== state.nativeThreadId) state.usageBaseline = null;
     // The bridge owns the pending handoff: a handoff is a delta for its thread, so a switch without one that resumes
@@ -532,14 +540,29 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     state.nativeThreadId = cmd.resume;
     if (cmd.handoff !== null || !sameThread) state.pendingHandoff = cmd.handoff;
     persist();
-    const h = openHarness(true);
+    const h = openHarness(() => true);
     harness = h;
     try {
       await h.session.ready;
     } catch (e) {
-      if (!(e instanceof ResumeFailedError)) throw e;
-      resumeFailed(e);
-      return;
+      if (e instanceof ResumeFailedError) {
+        resumeFailed(e);
+        return;
+      }
+      // Persisting a target that cannot open would restart the bridge into it forever, while devd's DB still names
+      // the previous one: go back to that and fail the switch with the agent's error.
+      logError(`agent-bridge: opening ${target.harness} failed: ${errorText(e)}; back to ${previous.harness}`);
+      current = previous.current;
+      state.target = previous.target;
+      state.harness = previous.harness;
+      state.account = previous.account;
+      state.model = previous.model;
+      state.nativeThreadId = previous.nativeThreadId;
+      state.pendingHandoff = previous.pendingHandoff;
+      state.usageBaseline = previous.usageBaseline;
+      persist();
+      if (current !== null) await openCurrent();
+      throw e;
     }
     awaitingTarget = false;
     if (recoveryPending) await recover();
@@ -610,18 +633,30 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       publishBackground();
     }
   }, o.sweepMs ?? SWEEP_MS);
-  /** Opens the target at start; a thread that cannot be resumed is devd's to re-plan (resumeFailed), any other
-   *  failure ends the harness and serve exits for a restart. */
-  async function startHarness(): Promise<void> {
-    const h = openHarness(true);
+  /** Opens `current` (at start, or again after a switch that could not open its target). A thread that cannot be
+   *  resumed is devd's to re-plan (resumeFailed); a switched target that cannot open awaits devd's target (the user
+   *  can switch away from it); any other failure ends the harness and serve exits for a restart. */
+  async function openCurrent(): Promise<void> {
+    const switched = state.target !== null;
+    const h = openHarness((e) => e instanceof ResumeFailedError || switched);
     harness = h;
     try {
       await h.session.ready;
     } catch (e) {
       if (e instanceof ResumeFailedError) resumeFailed(e);
+      else if (switched) openFailed(e);
       return;
     }
-    await recover();
+    awaitingTarget = false;
+    if (recoveryPending) await recover();
+  }
+
+  function openFailed(e: unknown): void {
+    logError(`agent-bridge: opening ${state.harness} failed: ${errorText(e)}; waiting for devd's target`);
+    current = null;
+    recoveryPending = true;
+    awaitingTarget = true;
+    server.publish({ type: "run.failed", runId: crypto.randomUUID(), error: OPEN_FAILED });
   }
 
   server.publish({
@@ -675,7 +710,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   }
 
   let harness: { session: HarnessSession; retired: boolean } | null = null;
-  if (!awaitingTarget) await startHarness();
+  if (!awaitingTarget) await openCurrent();
 
   return { closed, close };
 }

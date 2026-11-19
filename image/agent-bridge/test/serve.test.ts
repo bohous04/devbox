@@ -17,6 +17,7 @@ import {
   harnessEnv,
   BRIDGE_VERSION,
   NO_THREAD_ERROR,
+  OPEN_FAILED,
   RESTART_LOOP_ERROR,
   serve,
   resolveTarget,
@@ -715,6 +716,40 @@ describe("switching: fix round 1", () => {
     expect(state()).toMatchObject({ harness: "vibe", account: null, target: { harness: "vibe", account: null } });
     g.emit({ type: "thread.native", harness: "vibe", nativeThreadId: "vibe-thread", account: null, model: "mistral-large-4-0" });
     expect(events().at(-1)).toMatchObject({ type: "thread.native", harness: "vibe", account: null });
+  });
+
+  test("a switch to an ACP agent that cannot open goes back to the previous target and fails with the agent's error", async () => {
+    const f = fakeHarness({ readyErrors: [undefined, new Error("Authentication required")] });
+    const bridge = await start(f, { account: "a" });
+    f.emit({ type: "thread.native", harness: "claude", nativeThreadId: "thread-a", account: null, model: "m" });
+    await expect(switchCmd({ harness: "vibe", account: null, model: null, env: {} }, null, { preamble: "[user] earlier" }))
+      .rejects.toThrow("Authentication required");
+    // The previous target is open again on its own thread; no crash loop on the target that cannot open.
+    expect(f.opens.length).toBe(3);
+    expect(f.opens[2]).toMatchObject({ resume: "thread-a", target: { harness: "claude", account: "a" } });
+    const status = await Promise.race([bridge.closed, new Promise((r) => setTimeout(() => r("open"), 20))]);
+    expect(status).toBe("open");
+    expect(state()).toMatchObject({ harness: "claude", account: "a", nativeThreadId: "thread-a", target: null, pendingHandoff: null });
+    expect((await handshake()).awaitingTarget).toBe(false);
+    await cmd({ kind: "startTurn", text: "hi" });
+    expect(f.turns.map((t) => t.text)).toEqual(["hi"]);
+  });
+
+  test("a persisted ACP target that cannot open at start awaits devd's target instead of exiting, and says so", async () => {
+    saveState(join(dir, "state.json"), baseState({
+      harness: "vibe", nativeThreadId: "vibe-thread",
+      target: { harness: "vibe", account: null, model: null, env: {}, droppedEnvKeys: [] },
+      queue: [{ runId: "r-q", text: "queued", attachments: [] }],
+    }));
+    const f = fakeHarness({ readyErrors: [new Error("Authentication required")] });
+    const bridge = await start(f, { account: "a" });
+    const status = await Promise.race([bridge.closed, new Promise((r) => setTimeout(() => r("open"), 20))]);
+    expect(status).toBe("open");
+    expect((await handshake()).awaitingTarget).toBe(true);
+    expect(events().filter((e) => e.type === "run.failed")).toEqual([{ type: "run.failed", runId: expect.any(String), error: OPEN_FAILED }]);
+    // The user switches back: the queued message goes to the harness that opens.
+    await switchCmd({ harness: "claude", account: "a", model: null, env: { CLAUDE_CONFIG_DIR: claudeProfile("a") } }, null, { preamble: "P" });
+    expect(f.turns.map((t) => t.text)).toEqual(["P\n\nUser message:\nqueued"]);
   });
 
   test("an ACP target with an account, or without its binary, is refused before the current harness is retired", async () => {
