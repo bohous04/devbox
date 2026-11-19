@@ -825,6 +825,7 @@ test("a 1.2.0 bridge takes an ACP harness", async () => {
   t.handshake(false, "1.2.0");
   expect(await t.post("harness", { agent: "vibe" })).toMatchObject({ status: 202 });
   expect(t.sw.target(CHAT.id).bridgeVersion).toBe("1.2.0");
+  expect(t.sw.bridgeVersion(CHAT.id)).toBe("1.2.0");
 });
 
 test("M5: a Codex account not mounted in the container is refused with 409 account-not-mounted before anything is sent", async () => {

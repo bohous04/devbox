@@ -21,11 +21,13 @@ function RequestItem({ item, pending, onAnswer }: { item: ThreadItem; pending: P
 }
 
 /** The thread: user and assistant messages, tool calls, requests (open ones as a form) and notices. */
-export function MessageList({ items, pending, queued, onAnswer }: {
+export function MessageList({ items, pending, queued, critic, onAnswer }: {
   items: ThreadItem[];
   pending: PendingRequest[];
   /** Runs still waiting behind the active one: their user message shows as queued. */
   queued: Set<string>;
+  /** Runs the critic started: their "user" message is the critic's review, labelled as such. */
+  critic: Set<string>;
   onAnswer: (requestId: string, answer: string) => Promise<void>;
 }) {
   return (
@@ -34,6 +36,7 @@ export function MessageList({ items, pending, queued, onAnswer }: {
         <li key={`${it.seq}:${it.runId}:${it.itemId}:${i}`} className={cn("min-w-0", it.kind === "user" && "flex justify-end")}>
           {it.kind === "user" ? (
             <div className={cn("max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-primary px-3.5 py-2 text-sm text-primary-foreground", it.runId && queued.has(it.runId) && "opacity-70")}>
+              {it.runId && critic.has(it.runId) && <Badge variant="secondary" className="mb-1.5 block w-fit">from the critic</Badge>}
               {it.text}
               {it.runId && queued.has(it.runId) && <Badge variant="secondary" className="ml-2 align-middle">queued</Badge>}
             </div>

@@ -410,9 +410,17 @@ const threadStore = (id: string): ThreadStore => {
   threadStores.set(id, store);
   return store;
 };
-// `prWatch` is declared below; ChatHub asks it only when a run completes, after startup.
+// `prWatch`, `critic`, `chatSwitch`, `bridgeLinks` and `inbox` are declared below; ChatHub uses them only on bridge
+// events, after startup.
 const chatHub = new ChatHub({
   hub: agentEvents, session: (id) => getSession(db, id), prCheck: (id) => prWatch.checkNow(id), prRow: (id) => getSessionPr(db, id),
+  critic: {
+    gate: { onPrompt: (s, task) => critic.onPrompt(s, task), onStop: (s) => critic.onStop(s) },
+    bridgeVersion: (id) => chatSwitch.bridgeVersion(id),
+    userText: (id, runId) => threadStore(id).userText(runId),
+    followUp: (id, text) => bridgeLinks.send(id, { kind: "startTurn", text, origin: "critic" }),
+  },
+  changed: (id) => inbox.changed(id),
 });
 // The hub-facing snapshot needs runs, pending and background only: `limit: 0` skips loading every item per event.
 const chatSnapshot = (id: string) => threadStore(id).snapshot({ limit: 0 });
@@ -741,7 +749,8 @@ const scheduler = createScheduler({
   containerRunning: async (id) => (await containerState(id)) === "running",
 });
 
-// Standing critic: Stop hook → criticGate → review in the SAME container via docker exec.
+// Standing critic: Stop hook (tmux) or ChatHub's run completion (chat) → criticGate → review in the SAME container
+// via docker exec.
 // Config is read fresh (freshCfg), so a provider/model change from the dashboard
 // applies without restarting devd.
 const critic = createCriticGate({

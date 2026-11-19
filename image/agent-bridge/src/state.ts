@@ -11,8 +11,9 @@ export interface BridgeState {
   account: string | null;
   model: string | null;
   activeRunId: string | null;
-  /** `harnessText` is what the harness was given when it differs from the user's text (a handoff preamble). */
-  queue: { runId: string; text: string; attachments: string[]; harnessText?: string }[];
+  /** `harnessText` is what the harness was given when it differs from the user's text (a handoff preamble);
+   *  `origin` is set for a critic follow-up only (absent = the user's message). */
+  queue: { runId: string; text: string; attachments: string[]; harnessText?: string; origin?: "critic" }[];
   /** Epoch ms of automatic continuations. */
   continuations: number[];
   /** Claude's running usage totals at the last result; null for Codex or before the first result. */

@@ -10,13 +10,13 @@ import { EventLog } from "./eventLog";
 import type { BackgroundWork, BridgeEvent, UsageBaseline } from "./events";
 import { DEFAULT_SOCKET } from "./mcp";
 import { ACP_INSTRUCTIONS, acpMcpServers, APPENDED_SYSTEM_PROMPT, claudeMcpServers, codexMcpArgs } from "./prompts";
-import type { BridgeCommand, HandoffDelivery, SwitchTarget } from "./protocol";
+import type { BridgeCommand, HandoffDelivery, SwitchTarget, TurnOrigin } from "./protocol";
 import { INHERITED_STRIP, isProxyProfile, proxyProfileEnv } from "./proxyProfile";
 import { startServer } from "./server";
 import { loadState, saveState, type BridgeState, type PersistedTarget } from "./state";
 import { DeclaredWaits } from "./waits";
 
-export const BRIDGE_VERSION = "1.2.0";
+export const BRIDGE_VERSION = "1.3.0";
 export const DEFAULT_BRIDGE_DIR = "/run/devd/bridge";
 export const CLAUDE_ACCOUNTS_ROOT = "/home/dev/.claude-accounts";
 export const CODEX_ACCOUNTS_ROOT = "/home/dev/.codex-accounts";
@@ -460,11 +460,12 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     return { harnessText: handoff.preamble === null ? text : `${handoff.preamble}\n\nUser message:\n${text}`, putBack: handoff };
   }
 
-  async function startTurn(text: string): Promise<{ runId: string }> {
+  async function startTurn(text: string, origin: TurnOrigin): Promise<{ runId: string }> {
     const runId = crypto.randomUUID();
+    const queuedOrigin = origin === "critic" ? { origin } : {};
     if (recoveryPending) {
       // No usable harness yet: the message waits in the queue and starts with the recovered ones.
-      state.queue.push({ runId, text, attachments: [] });
+      state.queue.push({ runId, text, attachments: [], ...queuedOrigin });
       persist();
       announceQueued(runId, text);
       return { runId };
@@ -473,10 +474,10 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     const { harnessText, putBack } = await consumeHandoff(session, text);
     // Persisted before the harness sees it: a crash from here on still runs the message after the restart.
     // `run.started` removes it again.
-    state.queue.push({ runId, text, attachments: [], ...(harnessText !== text ? { harnessText } : {}) });
+    state.queue.push({ runId, text, attachments: [], ...(harnessText !== text ? { harnessText } : {}), ...queuedOrigin });
     persist();
     try {
-      await session.startTurn(runId, harnessText, "user");
+      await session.startTurn(runId, harnessText, origin);
     } catch (e) {
       state.queue = state.queue.filter((q) => q.runId !== runId);
       state.pendingHandoff = putBack;
@@ -606,7 +607,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       case "startTurn":
         // HarnessSession has no attachment input yet; refusing beats dropping files the user sent.
         if (cmd.attachments?.length) throw new Error("attachments are not supported yet");
-        return startTurn(cmd.text);
+        return startTurn(cmd.text, cmd.origin ?? "user");
       case "interrupt":
         return liveHarness().session.interrupt();
       case "answer":
@@ -722,7 +723,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
           persist();
         }
       }
-      await session.startTurn(q.runId, sent, "user");
+      await session.startTurn(q.runId, sent, q.origin ?? "user");
       // A crash between persist() and the run.queued publish left the message unannounced.
       if (!announced.has(q.runId) && state.queue.some((x) => x.runId === q.runId)) announceQueued(q.runId, q.text);
     }

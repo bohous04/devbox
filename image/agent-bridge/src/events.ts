@@ -21,7 +21,8 @@ export interface Capabilities {
   backgroundVisibility: boolean;
 }
 
-export type RunOrigin = "user" | "agent" | "continuation";
+/** `critic`: devd's automatic follow-up when its critic blocked the previous run (a `startTurn` with that origin). */
+export type RunOrigin = "user" | "agent" | "continuation" | "critic";
 export type RequestKind = "question" | "plan" | "approval";
 
 export interface BackgroundWork {

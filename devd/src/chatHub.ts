@@ -1,6 +1,8 @@
+import { CRITIC_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
 import type { LinkStatus, LoggedEvent, RequestKind, ThreadSnapshot } from "../../shared/thread";
 import type { AgentEventHub, HookMeta } from "./agentEvents";
 import { lastEndedRun, type LinkState } from "./attention";
+import type { Decision } from "./criticGate";
 import type { SessionRow } from "./db";
 
 /** The tool name the hub's QUESTION_TOOLS treats as "waiting for input"; questions and plans pose as it. */
@@ -18,6 +20,21 @@ interface ChatState {
   link: LinkState | null;
   /** The held run and subagents were taken over from the store at the first connect (devd restart). */
   seeded: boolean;
+  /** A user run whose text had not reached the store at its start: the critic gets it with its user message. */
+  promptRun: string | null;
+  /** Since when the critic reviews the completed run; until a later run event, or the verdict lets it finish. */
+  reviewingSince: number | null;
+}
+
+/** The standing critic (criticGate.ts) for chat sessions with `critic = 1`. */
+export interface ChatCritic {
+  gate: { onPrompt(s: SessionRow, task: string): void; onStop(s: SessionRow): Promise<Decision> };
+  /** The bridge version of the session's latest handshake; null before one (or for a 1.0.0 bridge). */
+  bridgeVersion: (sessionId: string) => string | null;
+  /** The user message of a run in the thread store, or null while it has none. */
+  userText: (sessionId: string, runId: string) => string | null;
+  /** Sends the critic's reason as a `startTurn` with origin `critic`; resolves once the bridge took it. */
+  followUp: (sessionId: string, text: string) => Promise<void>;
 }
 
 const holdingCount = (t: ThreadSnapshot) => t.background.filter((w) => w.holding).length;
@@ -30,6 +47,7 @@ const subagentIds = (t: ThreadSnapshot) => new Set(t.background.filter((w) => w.
 export class ChatHub {
   private state = new Map<string, ChatState>();
   private unknownLogged = new Set<string>();
+  private criticOffLogged = new Set<string>();
   private log: (msg: string) => void;
 
   constructor(private d: {
@@ -40,6 +58,10 @@ export class ChatHub {
     prCheck?: (id: string) => Promise<unknown>;
     /** The session's PR row as the PR watch last wrote it (session_prs): a devd restart re-sends a completion it held. */
     prRow?: (id: string) => { checks: string; since: number } | null;
+    /** Reviews a completed run before its `stop` goes to the hub; a block becomes a follow-up run instead. */
+    critic?: ChatCritic;
+    /** The session's inbox state changed outside a bridge event (the critic's verdict let the run finish). */
+    changed?: (id: string) => void;
     now?: () => number;
     log?: (msg: string) => void;
   }) {
@@ -51,7 +73,10 @@ export class ChatHub {
   private stateOf(sessionId: string): ChatState {
     let st = this.state.get(sessionId);
     if (!st) {
-      st = { heldRun: null, completing: null, requests: new Map(), subagents: new Set(), link: null, seeded: false };
+      st = {
+        heldRun: null, completing: null, requests: new Map(), subagents: new Set(), link: null, seeded: false,
+        promptRun: null, reviewingSince: null,
+      };
       this.state.set(sessionId, st);
     }
     return st;
@@ -88,10 +113,12 @@ export class ChatHub {
   }
 
   /** The link while the session runs; null when it does not (devd dropped the link on purpose) or before the
-   *  link reported any status. */
+   *  link reported any status. Carries `reviewingSince` while the critic reviews. */
   link(sessionId: string): LinkState | null {
     if (this.d.session(sessionId)?.status !== "running") return null;
-    return this.state.get(sessionId)?.link ?? null;
+    const st = this.state.get(sessionId);
+    if (!st?.link) return null;
+    return st.reviewingSince === null ? st.link : { ...st.link, reviewingSince: st.reviewingSince };
   }
 
   /** The session stopped or ended: its next link starts from the store again. */
@@ -110,6 +137,64 @@ export class ChatHub {
     this.d.hub.handle(s, "stop", { promptId: runId, backgroundTasks: holding });
   }
 
+  /** The critic reviews this completion: it is on for the session, nothing holds the turn open (the run that ends
+   *  the holding work is reviewed instead) and the bridge can tell a critic follow-up from the user's turn. */
+  private criticReviews(s: SessionRow, snapshot: () => ThreadSnapshot): boolean {
+    const c = this.d.critic;
+    if (!c || s.critic !== 1 || holdingCount(snapshot()) > 0) return false;
+    const version = c.bridgeVersion(s.id);
+    if (version !== null && versionAtLeast(version, CRITIC_MIN_BRIDGE_VERSION)) return true;
+    // An older bridge would run the follow-up as the user's turn, which restarts the critic's rounds (S5-R8).
+    const key = `${s.id}:${version}`;
+    if (!this.criticOffLogged.has(key)) {
+      this.criticOffLogged.add(key);
+      this.log(`chat hub: critic disabled for ${s.id}: bridge ${version ?? "without a version"} is older than ${CRITIC_MIN_BRIDGE_VERSION}`);
+    }
+    return false;
+  }
+
+  /** The critic's verdict, then the PR read, then the completion goes to the hub. Each step first checks that no
+   *  newer run event or drop of the session overtook this completion. */
+  private async finish(sessionId: string, s: SessionRow, st: ChatState, runId: string, review: boolean, snapshot: () => ThreadSnapshot): Promise<void> {
+    const stale = () => this.state.get(sessionId) !== st || st.completing !== runId;
+    if (review) {
+      const c = this.d.critic!;
+      let decision: Decision;
+      // FAIL-OPEN like the Stop hook: the gate records its own failures (critic_error); anything it throws lets
+      // the run finish unreviewed.
+      try { decision = await c.gate.onStop(s); }
+      catch (err) {
+        this.log(`chat hub: critic of ${sessionId} failed, run ${runId} finishes unreviewed: ${(err as Error).message}`);
+        decision = { block: false };
+      }
+      if (stale()) return;
+      if (decision.block) {
+        try {
+          await c.followUp(sessionId, decision.reason);
+          return; // the follow-up run carries the turn on; its run.started ends the review
+        } catch (err) {
+          this.log(`chat hub: critic follow-up for ${sessionId} not sent, run ${runId} finishes: ${(err as Error).message}`);
+        }
+        if (stale()) return;
+      }
+    }
+    if (this.d.prCheck) {
+      await this.d.prCheck(sessionId).catch((err: Error) => {
+        // S5-R18 (approved fallback): the PR is read once (≤ 30 s); when that fails, the last known PR state decides
+        // the hold, and the failure is logged.
+        this.log(`chat hub: PR of ${sessionId} not read at completion, using its last known state: ${err.message}`);
+      });
+      if (stale()) return;
+    }
+    st.completing = null;
+    st.reviewingSince = null;
+    const cur = this.d.session(sessionId);
+    if (!cur) { this.log(`chat hub: no session ${sessionId} to complete run ${runId}`); return; }
+    try { this.complete(cur, st, runId, snapshot); }
+    catch (err) { this.log(`chat hub: completion of ${sessionId} run ${runId} failed: ${(err as Error).message}`); }
+    if (review) this.d.changed?.(sessionId);
+  }
+
   /** `snapshot` returns the store's state after `e` was applied; it is read only for events the hub uses. */
   onEvent(sessionId: string, e: LoggedEvent, snapshot: () => ThreadSnapshot): void {
     const ev = e.event;
@@ -117,9 +202,11 @@ export class ChatHub {
       case "thread.native":
       case "run.queued":
       case "message.delta":
-      case "message.final":
       case "bridge.started":
         return; // nothing for the hub; the thread store keeps them
+      case "message.final":
+        if (ev.role !== "user" || this.state.get(sessionId)?.promptRun !== ev.runId) return;
+        break; // the critic's task
       case "run.started":
       case "tool.started":
       case "tool.finished":
@@ -147,12 +234,25 @@ export class ChatHub {
     const st = this.stateOf(sessionId);
     const hub = this.d.hub;
     switch (ev.type) {
-      case "run.started":
+      case "run.started": {
         st.heldRun = null;
         st.completing = null;
+        st.reviewingSince = null;
+        st.promptRun = null;
         hub.handle(s, "user_prompt_submit", { promptId: ev.runId });
         // A new turn resets the hub's subagent counter; subagents still running keep counting.
         for (let i = 0; i < st.subagents.size; i++) hub.handle(s, "subagent_start");
+        // Only the user's run starts a task (baseline + rounds); a critic follow-up must not reset its rounds.
+        if (ev.origin === "user" && this.d.critic) {
+          const text = this.d.critic.userText(sessionId, ev.runId);
+          if (text === null) st.promptRun = ev.runId; // not queued: its text comes as its user message, next
+          else this.d.critic.gate.onPrompt(s, text);
+        }
+        return;
+      }
+      case "message.final":
+        st.promptRun = null;
+        this.d.critic!.gate.onPrompt(s, ev.text);
         return;
       case "tool.started":
         hub.handle(s, "tool_start", { promptId: ev.runId, toolName: ev.tool, toolCallId: ev.itemId });
@@ -178,22 +278,14 @@ export class ChatHub {
         return;
       }
       case "run.completed": {
-        if (!this.d.prCheck) { this.complete(s, st, ev.runId, snapshot); return; }
-        const runId = ev.runId;
-        st.completing = runId;
-        this.d.prCheck(sessionId).catch((err: Error) => {
-          // S5-R18 (approved fallback): the PR is read once (≤ 30 s); when that fails, the last known PR state decides
-          // the hold, and the failure is logged.
-          this.log(`chat hub: PR of ${sessionId} not read at completion, using its last known state: ${err.message}`);
-        }).finally(() => {
-          // A newer run event or a drop of the session overtook the read: this completion is stale.
-          if (this.state.get(sessionId) !== st || st.completing !== runId) return;
-          st.completing = null;
-          const cur = this.d.session(sessionId);
-          if (!cur) { this.log(`chat hub: no session ${sessionId} to complete run ${runId}`); return; }
-          try { this.complete(cur, st, runId, snapshot); }
-          catch (err) { this.log(`chat hub: completion of ${sessionId} run ${runId} failed: ${(err as Error).message}`); }
-        });
+        st.promptRun = null;
+        const review = this.criticReviews(s, snapshot);
+        if (!review && !this.d.prCheck) { this.complete(s, st, ev.runId, snapshot); return; }
+        // The hub gets no `stop` until the critic and the PR read are through: no early done, no early autoEnd.
+        st.completing = ev.runId;
+        if (review) st.reviewingSince = this.now();
+        this.finish(sessionId, s, st, ev.runId, review, snapshot)
+          .catch((err: Error) => this.log(`chat hub: completion of ${sessionId} run ${ev.runId} failed: ${err.message}`));
         return;
       }
       case "background.changed": {
@@ -215,11 +307,15 @@ export class ChatHub {
       case "run.failed":
         st.heldRun = null;
         st.completing = null;
+        st.reviewingSince = null;
+        st.promptRun = null;
         hub.handle(s, "stop_failure", { promptId: ev.runId });
         return;
       case "run.interrupted":
         st.heldRun = null;
         st.completing = null;
+        st.reviewingSince = null;
+        st.promptRun = null;
         hub.handle(s, "interrupted", { promptId: ev.runId });
         return;
     }

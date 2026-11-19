@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import type { BridgeEvent, LoggedEvent, ThreadSnapshot } from "../../shared/thread";
-import { activeRun, applyNotice, applyThreadEvent, composerErrorText, emptyThread, mergeSnapshot, queuedRunIds } from "./threadView";
+import { activeRun, applyNotice, applyThreadEvent, composerErrorText, criticRunIds, emptyThread, mergeSnapshot, queuedRunIds } from "./threadView";
 
 let seq = 0;
 const ev = (event: BridgeEvent, ts = 1000 + seq): LoggedEvent => ({ seq: ++seq, ts, event });
@@ -237,4 +237,16 @@ test("a thread.native without a model keeps the harness's known model, like the 
   ]);
   expect(t.native).toEqual({ harness: "claude", nativeThreadId: "t1", account: "b", model: "claude-opus-5-5" });
   expect(run(t, [{ type: "thread.native", harness: "codex", nativeThreadId: "x1", account: "c", model: null }]).native!.model).toBeNull();
+});
+
+test("criticRunIds: the runs devd's critic started, so their message is labelled as the critic's", () => {
+  seq = 0;
+  const t = run(emptyThread(), [
+    { type: "run.queued", runId: "r1", text: "add the table", attachments: [] },
+    { type: "run.started", runId: "r1", origin: "user", nativeThreadId: null, model: null },
+    { type: "run.completed", runId: "r1", nativeThreadId: "n", usage: null, costUsd: null },
+    { type: "run.started", runId: "r2", origin: "critic", nativeThreadId: null, model: null },
+    { type: "message.final", runId: "r2", itemId: "user:r2", role: "user", text: "fix the migration" },
+  ]);
+  expect([...criticRunIds(t)]).toEqual(["r2"]);
 });

@@ -327,6 +327,12 @@ export class ThreadStore {
     };
   }
 
+  /** The user message of run `runId` (the user's text, or the critic's follow-up); null while the store has none. */
+  userText(runId: string): string | null {
+    const r = this.db.query(`SELECT text FROM items WHERE run_id=? AND kind='user' LIMIT 1`).get(runId) as { text: string } | null;
+    return r ? r.text : null;
+  }
+
   /** Text of the newest user or assistant item (also one still streaming); null for a thread without messages. */
   lastMessageText(): string | null {
     const r = this.db.query(`SELECT text FROM items WHERE kind IN ('user', 'assistant') ORDER BY id DESC LIMIT 1`).get() as { text: string } | null;

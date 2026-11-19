@@ -5,8 +5,9 @@ import type { AgentLiveSnapshot } from "./agentEvents";
 export const WORKING_GRACE_MS = 2000;
 
 /** devd's link to a running chat session's bridge and since when it has that status; `behindSince` when the
- *  bridge's log is behind the thread store (BridgeLinks.behind). */
-export interface LinkState { status: LinkStatus; since: number; behindSince?: number }
+ *  bridge's log is behind the thread store (BridgeLinks.behind); `reviewingSince` while devd's critic reviews the
+ *  run that just completed (ChatHub): the turn is not over until its verdict. */
+export interface LinkState { status: LinkStatus; since: number; behindSince?: number; reviewingSince?: number }
 
 /** The CI checks of the session's open PR as the PR watch (prWatch.ts) last saw them, when they matter for the
  *  inbox: pending is holding work, a failure needs the user. `since` = when they became so. */
@@ -57,6 +58,7 @@ export function chatAttention(t: ThreadSnapshot, link: LinkState | null, now: nu
     const since = required(queued.queuedAt, "queuedAt", queued);
     return live ? { section: "working", reason: "queued", since } : { section: "idle", reason: null, since };
   }
+  if (link?.reviewingSince !== undefined) return { section: "working", reason: "running", since: link.reviewingSince };
 
   // Every run has ended here (running and queued returned above).
   const last = lastEndedRun(t);

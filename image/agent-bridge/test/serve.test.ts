@@ -25,7 +25,7 @@ import {
   type HarnessOpenOptions,
 } from "../src/serve";
 import type { ServerFrame, SwitchTarget } from "../src/protocol";
-import { ACP_MIN_BRIDGE_VERSION } from "../../../shared/bridgeVersion";
+import { ACP_MIN_BRIDGE_VERSION, CRITIC_MIN_BRIDGE_VERSION, versionAtLeast } from "../../../shared/bridgeVersion";
 import { loadState, saveState, type BridgeState } from "../src/state";
 
 const MIN = 60_000;
@@ -244,6 +244,28 @@ describe("serve", () => {
     expect(state()).toMatchObject({ activeRunId: second.runId, queue: [] });
     f.complete();
     expect(state()).toMatchObject({ activeRunId: null, queue: [] });
+  });
+
+  test("a critic startTurn runs with origin critic; without an origin it is the user's", async () => {
+    const f = fakeHarness();
+    await start(f);
+    const r = (await cmd({ kind: "startTurn", text: "fix the failing test", origin: "critic" })) as { runId: string };
+    expect(f.turns).toEqual([{ runId: r.runId, text: "fix the failing test", origin: "critic" }]);
+    expect(events()).toContainEqual({ type: "run.started", runId: r.runId, origin: "critic", nativeThreadId: null, model: null });
+    f.complete();
+    const u = (await cmd({ kind: "startTurn", text: "thanks" })) as { runId: string };
+    expect(f.turns[1]).toEqual({ runId: u.runId, text: "thanks", origin: "user" });
+  });
+
+  test("a queued critic turn keeps its origin across a bridge restart", async () => {
+    const f = fakeHarness({ deferStart: true });
+    const bridge = await start(f);
+    const r = (await cmd({ kind: "startTurn", text: "fix it", origin: "critic" })) as { runId: string };
+    expect(state().queue).toEqual([{ runId: r.runId, text: "fix it", attachments: [], origin: "critic" }]);
+    await bridge.close();
+    const g = fakeHarness();
+    await start(g);
+    expect(g.turns).toEqual([{ runId: r.runId, text: "fix it", origin: "critic" }]);
   });
 
   test("startTurn with attachments is refused explicitly", async () => {
@@ -942,8 +964,12 @@ describe("final review fixes", () => {
     expect(await handshake()).toMatchObject({ version: BRIDGE_VERSION, awaitingTarget: false });
   });
 
-  test("this bridge knows ACP harnesses: its version is the one devd and the dashboard require for them", () => {
-    expect(BRIDGE_VERSION).toBe(ACP_MIN_BRIDGE_VERSION);
+  test("this bridge knows ACP harnesses: its version is at least the one devd and the dashboard require for them", () => {
+    expect(versionAtLeast(BRIDGE_VERSION, ACP_MIN_BRIDGE_VERSION)).toBe(true);
+  });
+
+  test("this bridge takes a startTurn origin: its version is the one devd requires for critic follow-ups", () => {
+    expect(BRIDGE_VERSION).toBe(CRITIC_MIN_BRIDGE_VERSION);
   });
 });
 

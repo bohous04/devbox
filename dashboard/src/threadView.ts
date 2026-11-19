@@ -196,6 +196,10 @@ export const activeRun = (t: ThreadSnapshot): RunRow | undefined => t.runs.find(
 export const queuedRunIds = (t: ThreadSnapshot): Set<string> =>
   new Set(t.runs.filter((r) => r.status === "queued").map((r) => r.runId));
 
+/** Runs devd's critic started (its follow-up after a block): their user message is the critic's, not the user's. */
+export const criticRunIds = (t: ThreadSnapshot): Set<string> =>
+  new Set(t.runs.filter((r) => r.origin === "critic").map((r) => r.runId));
+
 /** What the composer shows when sending failed. The text stays in the composer; nothing is retried: after a timeout
  *  the message may have been queued anyway. */
 export function composerErrorText(status: number, body: unknown): string {

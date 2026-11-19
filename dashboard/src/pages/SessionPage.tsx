@@ -12,7 +12,7 @@ import { EmptyState, RowsSkeleton } from "../components/primitives";
 import { profileFor } from "../newSession";
 import { useStore } from "../store";
 import { terminalTabUrl } from "../terminalRoute";
-import { activeRun, applyNotice, applyThreadEvent, mergeSnapshot, queuedRunIds } from "../threadView";
+import { activeRun, applyNotice, applyThreadEvent, criticRunIds, mergeSnapshot, queuedRunIds } from "../threadView";
 import { useEventStream } from "../useEventStream";
 
 // Same lazy import as TerminalPage: xterm stays in its own chunk.
@@ -129,7 +129,7 @@ function ChatPage({ id }: { id: string }) {
           <div className="flex-1">
             {thread.items.length === 0
               ? <EmptyState title="No messages yet" hint="Write the first message below." />
-              : <MessageList items={thread.items} pending={thread.pending} queued={queuedRunIds(thread)} onAnswer={(rid, a) => api.answerRequest(id, rid, a)} />}
+              : <MessageList items={thread.items} pending={thread.pending} queued={queuedRunIds(thread)} critic={criticRunIds(thread)} onAnswer={(rid, a) => api.answerRequest(id, rid, a)} />}
             {thread.background.length > 0 && (
               <p className="mt-3 text-xs text-muted-foreground">background: {thread.background.map((b) => b.label).join(", ")}</p>
             )}
