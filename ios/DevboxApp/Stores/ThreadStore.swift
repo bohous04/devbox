@@ -209,3 +209,183 @@ enum ThreadView {
         }
     }
 }
+
+/// What the chat shows when a chat command failed; mirrors `composerErrorText` (dashboard/src/threadView.ts). devd's
+/// `message` (command-failed, bridge-too-old, request-open…) is shown when it sent one. Nothing is retried: after a
+/// timeout the message may have been queued anyway.
+func chatErrorText(_ error: Error) -> String {
+    if let h = error as? DevdHTTPError {
+        if h.serverMessage == "agent-disconnected" { return "agent not connected — message not sent" }
+        if h.serverMessage == "agent-timeout" { return "no reply from the agent — check the thread before resending" }
+        if let detail = h.serverDetail, !detail.isEmpty { return detail }
+    }
+    return errorText(error)
+}
+
+/// One chat session's thread: loaded once, then kept live over devd's stream (`?session=<id>&afterSeq=<seq>`, which
+/// replays what changed after that seq as one `thread-snapshot`). iOS drops the stream in the background:
+/// `resume()` fetches the thread after its seq, merges it and resubscribes (plan review focus 3).
+@MainActor
+final class ThreadStore: ObservableObject {
+    typealias Connect = (_ path: String, _ lastEventId: String?) async throws -> AsyncThrowingStream<String, Error>
+
+    let sessionId: String
+    @Published private(set) var thread: ThreadSnapshot?
+    @Published private(set) var loadError: String?
+    /// devd answered 409 not-a-chat-session: a tmux session has no thread.
+    @Published private(set) var isTmux = false
+    /// The stream is down and reconnecting.
+    @Published private(set) var paused = false
+    /// The last frame that could not be read (also logged); the thread may miss that update until a reload.
+    @Published private(set) var badFrame: String?
+    @Published private(set) var seenError: String?
+
+    private static let logger = Logger(subsystem: "com.example.devbox", category: "Thread")
+    private let client: DevdClient
+    private let connect: Connect
+    private var stream: EventStream?
+    /// The seq last reported seen, so the same seq is not posted again.
+    private var postedSeen = 0
+
+    init(sessionId: String, client: DevdClient, connect: Connect? = nil) {
+        self.sessionId = sessionId
+        self.client = client
+        self.connect = connect ?? { path, id in try await client.streamLines(path, lastEventId: id) }
+    }
+
+    private var base: String { "/api/sessions/\(pathSegment(sessionId))" }
+
+    /// Loads the thread (once) and opens the stream from its seq.
+    func start() async {
+        if thread == nil { await load() }
+        guard thread != nil else { return }
+        openStream()
+        markSeenIfNeeded()
+    }
+
+    func stop() {
+        stream?.stop()
+        stream = nil
+        paused = false
+    }
+
+    /// Back from the background: what changed after our seq, then the stream again from the new seq.
+    func resume() async {
+        stop()
+        guard let t = thread else { return await start() }
+        do {
+            let s: ThreadSnapshot = try await client.get("\(base)/thread?afterSeq=\(t.lastSeq)")
+            update(ThreadView.mergeSnapshot(t, ThreadSnapshotFrame(afterSeq: t.lastSeq, snapshot: s)))
+        } catch {
+            // The stream's own replay (afterSeq) still catches up; the failure is shown, not hidden.
+            Self.logger.error("thread resume fetch failed: \(String(describing: error), privacy: .public)")
+            badFrame = "could not catch up after the app was away: \(errorText(error))"
+        }
+        openStream()
+        markSeenIfNeeded()
+    }
+
+    private func load() async {
+        do {
+            thread = try await client.get("\(base)/thread")
+            loadError = nil
+            isTmux = false
+        } catch let e as DevdHTTPError where e.statusCode == 409 && e.serverMessage == "not-a-chat-session" {
+            isTmux = true
+        } catch {
+            loadError = errorText(error)
+        }
+    }
+
+    private func openStream() {
+        guard stream == nil else { return }
+        let s = EventStream(
+            connect: { [weak self, connect] id in
+                // Each (re)connect asks from the seq the store holds now; devd prefers Last-Event-ID when sent.
+                let after = self?.thread?.lastSeq ?? 0
+                let session = self.map { pathSegment($0.sessionId) } ?? ""
+                return try await connect("/api/stream?session=\(session)&afterSeq=\(after)", id)
+            },
+            onOpen: { [weak self] in self?.paused = false },
+            onEvent: { [weak self] e in self?.handle(e) },
+            onDrop: { [weak self] error in
+                Self.logger.info("thread stream dropped: \(error.map { String(describing: $0) } ?? "closed by devd", privacy: .public)")
+                self?.paused = true
+            }
+        )
+        stream = s
+        s.start()
+    }
+
+    private func handle(_ e: SSEParser.Event) {
+        guard let t = thread else { return }
+        let data = Data(e.data.utf8)
+        do {
+            switch e.name {
+            case "thread-snapshot": update(ThreadView.mergeSnapshot(t, try JSONDecoder().decode(ThreadSnapshotFrame.self, from: data)))
+            case "thread": update(ThreadView.apply(t, try JSONDecoder().decode(LoggedEvent.self, from: data)))
+            case "thread-notice": update(ThreadView.applyNotice(t, try JSONDecoder().decode(ThreadItem.self, from: data)))
+            case "inbox", "ping": break
+            default: Self.logger.notice("thread stream: ignoring event \(e.name, privacy: .public)")
+            }
+        } catch {
+            Self.logger.error("unreadable \(e.name, privacy: .public) frame: \(String(describing: error), privacy: .public)")
+            badFrame = "unreadable \(e.name) update: \(errorText(error))"
+        }
+    }
+
+    private func update(_ next: ThreadSnapshot) {
+        let endedBefore = thread.map(ThreadView.lastEndedSeq) ?? 0
+        thread = next
+        // A run ending while the thread is open counts as seen.
+        if ThreadView.lastEndedSeq(next) != endedBefore { markSeenIfNeeded() }
+    }
+
+    /// Opening the thread, a run ending while it is open and coming back to it mark it seen.
+    func markSeenIfNeeded() {
+        guard let t = thread, t.lastSeq > t.seenSeq, t.lastSeq > postedSeen else { return }
+        let seq = t.lastSeq
+        postedSeen = seq
+        Task {
+            do {
+                try await client.postVoid("\(base)/thread/seen", body: SeenBody(seq: seq))
+                seenError = nil
+            } catch {
+                postedSeen = 0
+                seenError = errorText(error)
+            }
+        }
+    }
+
+    // MARK: - Commands (202 once the bridge took them; refusals come back as DevdHTTPError, see chatErrorText)
+
+    private struct SeenBody: Encodable { let seq: Int }
+    private struct Attachment: Encodable { let path: String }
+    private struct Message: Encodable {
+        let text: String
+        let attachments: [Attachment]?
+    }
+    private struct Answer: Encodable { let answer: String }
+    private struct Empty: Encodable {}
+    private struct Queued: Decodable { let queued: Bool }
+
+    /// Uploads the (already prepared) images into the session's inbox, then sends the message with their paths.
+    func send(text: String, images: [Data]) async throws {
+        var paths: [String] = []
+        for image in images {
+            let up: ThreadUpload = try await client.upload("\(base)/inbox?for=thread", data: image)
+            paths.append(up.path)
+        }
+        let _: Queued = try await client.post("\(base)/thread/messages",
+                                              body: Message(text: text, attachments: paths.isEmpty ? nil : paths.map(Attachment.init)))
+    }
+
+    func interrupt() async throws {
+        try await client.postVoid("\(base)/thread/interrupt", body: Empty())
+    }
+
+    /// Forwarded verbatim: a plan is approved by exactly "Approve", anything else is the user's reply.
+    func answer(requestId: String, answer: String) async throws {
+        try await client.postVoid("\(base)/thread/requests/\(pathSegment(requestId))", body: Answer(answer: answer))
+    }
+}
