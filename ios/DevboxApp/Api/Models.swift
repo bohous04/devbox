@@ -572,6 +572,10 @@ struct Schedule: Decodable {
     let important: Int
     let enabled: Int
     let last_run_at: Int?
+    /// `tmux` or `chat`; nil from a devd before schedules had a runtime (they ran on tmux).
+    var runtime: String? = nil
+    /// The schedule's own agent; nil = the repository's remembered one.
+    var agent: String? = nil
 }
 
 // MARK: - Notify log

@@ -25,6 +25,8 @@ enum ChatSwitch {
         let runtime: String
         let acp: String?
         let acpLive: Bool
+        /// Has no tmux launcher (devd tmuxRuntimeBlock).
+        var chatOnly = false
     }
 
     /// `AGENT_IDS` order.
@@ -36,7 +38,7 @@ enum ChatSwitch {
         "codex": Profile(label: "Codex", proxy: false, runtime: "codex", acp: nil, acpLive: false),
         "grok": Profile(label: "Grok Build", proxy: false, runtime: "grok", acp: "grok", acpLive: false),
         "antigravity": Profile(label: "Antigravity", proxy: false, runtime: "agy", acp: "antigravity", acpLive: false),
-        "vibe": Profile(label: "Mistral Vibe", proxy: false, runtime: "vibe", acp: "vibe", acpLive: true),
+        "vibe": Profile(label: "Mistral Vibe", proxy: false, runtime: "vibe", acp: "vibe", acpLive: true, chatOnly: true),
     ]
 
     /// `agentNameFor`: an unknown profile reads as claude (as devd and the dashboard do), so the UI never breaks.
