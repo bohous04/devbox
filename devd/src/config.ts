@@ -35,6 +35,13 @@ export interface Settings {
   /** InstaBox overflow (the internal design notes).
    *  Without `devdUrl` the feature is off. Read at devd startup — enabling = restart. */
   instabox?: Partial<InstaboxSettings>;
+  /** Runtime of a new session (and schedule) whose request names none. Absent = tmux; flipping it to chat is an
+   *  owner action in the dashboard settings. Read per request (resolveDefaultRuntime), no restart needed. */
+  defaultRuntime?: "tmux" | "chat";
+}
+
+export function resolveDefaultRuntime(s: Settings): "tmux" | "chat" {
+  return s.defaultRuntime ?? "tmux";
 }
 
 // `vmPort`: a second devd listener only for the InstaBox VM (C1) — hooks, OTel, git proxy, health,
@@ -128,6 +135,8 @@ export function validateConfig(value: unknown): DevConfig {
   const s = cfg.settings;
   if (!s || [s.autoStopHours, s.portRangeStart, s.portsPerSession, s.diskWarnPercent].some((n) => typeof n !== "number"))
     throw new ConfigError("config.settings must contain numeric autoStopHours, portRangeStart, portsPerSession, diskWarnPercent");
+  if (s.defaultRuntime !== undefined && s.defaultRuntime !== "tmux" && s.defaultRuntime !== "chat")
+    throw new ConfigError("config.settings.defaultRuntime must be tmux or chat");
   if (!cfg.folders || typeof cfg.folders !== "object") throw new ConfigError("config.folders must be an object");
   const sshIssues = sshServerIssues(cfg.sshServers);
   if (sshIssues.length > 0) throw new ConfigError(sshIssues[0]);

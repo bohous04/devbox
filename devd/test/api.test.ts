@@ -459,7 +459,7 @@ test("HTTP Gitea clone URL reaches Codex session creation", async () => {
   const input = { folder: "games", project: "games", repo: "game_web", cloneUrl: "http://gitea.example:3000/Alice/game_web.git", agent: "codex" };
   const response = await a.request("/api/sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
   expect(response.status).toBe(201);
-  expect(calls).toEqual([{ ...input, fresh: undefined }]);
+  expect(calls).toEqual([{ ...input, fresh: undefined, runtime: "tmux", joinRuntimes: ["tmux", "chat"] }]);
 });
 
 test("HTTP Gitea clone URL can be scheduled", async () => {

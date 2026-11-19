@@ -310,6 +310,17 @@ export function existingSessionId(db: Database, project: string, repo: string, a
   return rows[0]?.id ?? null;
 }
 
+/** The existing session `open` joins: the first runtime in `runtimes` (in order of preference) that has one, picked
+ *  by existingSessionId. A scheduled run (`scheduled`) never joins an InstaBox session: its prompt channel is in the
+ *  VM and resume does not write the prompt — the work would silently not get done. The scheduler is VPS-only. */
+export function joinableSessionId(db: Database, project: string, repo: string, runtimes: SessionRuntime[], scheduled: boolean): string | null {
+  for (const runtime of runtimes) {
+    const id = existingSessionId(db, project, repo, (s) => storedRuntime(s) === runtime && (!scheduled || (s.host ?? "vps") === "vps"));
+    if (id) return id;
+  }
+  return null;
+}
+
 /** Session worktree. Deliberately outside the repo tree: inside it would get mixed into the working
  *  directory as unversioned clutter. */
 export function sessionWorktreePath(root: string, id: string): string {
@@ -769,7 +780,7 @@ export class SessionManager {
   /** `sessionId`: open (resume/attach) EXACTLY this existing session of the repo, not the one
    *  existingSessionId would pick — e.g. a paused InstaBox session when the repo also has a VPS
    *  session (smoke test, M8). Never creates a new one. */
-  async open(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string }) {
+  async open(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; runtime?: SessionRuntime; joinRuntimes?: SessionRuntime[]; fresh?: boolean; sessionId?: string }) {
     // The repo key while the id is not known (a new session only gets it here); then also the id,
     // so open does not collide with stop/end/recreate of the same existing session.
     return this.locked([openKey(t)], "open", async () => {
@@ -778,15 +789,13 @@ export class SessionManager {
       // attaches to an existing session of the repo (see existingSessionId), and only when there is none
       // is a new one created.
       const leftover = (id: string) => existsSync(sessionWorktreePath(this.d.root, id));
-      // A scheduled run (prompt) never attaches to an InstaBox session: its prompt channel
-      // is in the VM and resume does not write the prompt — the work would silently not get done. The scheduler is VPS-only.
-      // Nor does a request attach to a session of the other runtime: a tmux `dev <repo>` has nothing
-      // to attach to in a chat session, and a chat request must not silently land in a tmux one.
-      const wanted = t.runtime ?? "tmux";
-      const accept = (s: SessionRow) => storedRuntime(s) === wanted && (t.prompt === undefined || (s.host ?? "vps") === "vps");
+      // A request with an explicit runtime does not attach to a session of the other runtime: a chat request must
+      // not silently land in a tmux one. `joinRuntimes` (a request that named no runtime, see POST /api/sessions)
+      // lists the runtimes it may join, preferred first; `runtime` then only decides a new session.
+      const joinable = t.joinRuntimes ?? [t.runtime ?? "tmux"];
       const id = t.sessionId ?? (t.fresh
         ? nextSessionId(this.d.db, t.project, t.repo, leftover)
-        : (existingSessionId(this.d.db, t.project, t.repo, accept) ?? nextSessionId(this.d.db, t.project, t.repo, leftover)));
+        : (joinableSessionId(this.d.db, t.project, t.repo, joinable, t.prompt !== undefined) ?? nextSessionId(this.d.db, t.project, t.repo, leftover)));
       try {
         return await this.locked([id], "open", () => this.openWithEarlyDind(t, id));
       } finally {
