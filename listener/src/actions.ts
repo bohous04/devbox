@@ -264,16 +264,18 @@ export function realActions(
     },
     openDashboard: () => (click.dashboardUrl ? run("open", click.dashboardUrl) : { code: 0 }),
     openThread: (sessionId) => {
+      const id = encodeURIComponent(sessionId);
       const probe = textRun("osascript", "-l", "JavaScript", "-e", THREAD_HANDLER_SCRIPT);
-      // A failed probe is not "app missing": report it instead of guessing a path.
-      if (probe.code !== 0) { console.error("thread click: handler probe failed, nothing opened"); return { code: 1, via: "app" }; }
-      if (probe.stdout.trim()) {
+      // S5-R25: a failed probe (unlike "no app") is logged loudly, then the dashboard thread opens so the click is not lost.
+      const probeFailed = probe.code !== 0;
+      if (probeFailed) console.error(`thread click: LaunchServices probe failed (exit ${probe.code}), using dashboard`);
+      else if (probe.stdout.trim()) {
         console.log(`thread click: ${sessionId} -> Devbox app`);
-        return { ...run("open", `devbox://thread/${sessionId}`), via: "app" };
+        return { ...run("open", `devbox://thread/${id}`), via: "app" };
       }
-      if (!click.dashboardUrl) { console.error("thread click: no Devbox app and no dashboardUrl, nothing opened"); return { code: 1, via: "dashboard" }; }
-      console.log(`thread click: ${sessionId} -> dashboard (Devbox app not installed)`);
-      return { ...run("open", `${click.dashboardUrl.replace(/\/+$/, "")}/#/s/${sessionId}`), via: "dashboard" };
+      if (!click.dashboardUrl) { console.error("thread click: no usable Devbox app and no dashboardUrl, nothing opened"); return { code: 1, via: "dashboard" }; }
+      if (!probeFailed) console.log(`thread click: ${sessionId} -> dashboard (Devbox app not installed)`);
+      return { ...run("open", `${click.dashboardUrl.replace(/\/+$/, "")}/#/s/${id}`), via: "dashboard" };
     },
     clipboardTargets: () => {
       if (clipBin) {

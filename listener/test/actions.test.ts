@@ -287,9 +287,16 @@ test("openThread: no handler -> dashboard /#/s/<id>", () => {
   expect(calls.at(-1)).toEqual(["open", "https://dev.example.com/#/s/dev-a-b"]);
 });
 
-test("openThread: a failing handler probe is not 'no app' and is not hidden", () => {
-  const a = realActions(() => ({ code: 0 }), null, { dashboardUrl: "https://dev.example.com" }, {}, () => ({ code: 1, stdout: "" }));
-  expect(a.openThread("dev-a-b")).toEqual({ code: 1, via: "app" });
+test("openThread: a failing handler probe is logged and opens the dashboard thread", () => {
+  const calls: string[][] = [];
+  const a = realActions((...cmd) => { calls.push(cmd); return { code: 0 }; }, null, { dashboardUrl: "https://dev.example.com" }, {}, () => ({ code: 1, stdout: "" }));
+  expect(a.openThread("dev a/b")).toEqual({ code: 0, via: "dashboard" });
+  expect(calls.at(-1)).toEqual(["open", "https://dev.example.com/#/s/dev%20a%2Fb"]);
+});
+
+test("openThread: failing probe and no dashboardUrl -> code 1", () => {
+  const a = realActions(() => ({ code: 0 }), null, {}, {}, () => ({ code: 1, stdout: "" }));
+  expect(a.openThread("dev-a-b")).toEqual({ code: 1, via: "dashboard" });
 });
 
 test("openThread: no app and no dashboardUrl -> nothing to open, reported as failure", () => {
