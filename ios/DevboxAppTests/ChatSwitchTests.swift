@@ -3,6 +3,31 @@ import XCTest
 
 /// The chat switchers' rules (dashboard/src/switchView.ts): what can be picked and why not.
 final class ChatSwitchTests: XCTestCase {
+    private struct Tables: Decodable {
+        struct Profile: Decodable, Equatable {
+            let label: String, proxy: Bool, runtime: String, acp: String?, acpLive: Bool, chatOnly: Bool
+        }
+        let agentIds: [String]
+        let profiles: [String: Profile]
+        let chatModels: [String: [String]]
+        let sameModelAliases: [String: String]
+        let acpMinBridgeVersion: String
+    }
+
+    /// The tables are copies of the dashboard's and shared/'s; the JSON is checked against those by
+    /// dashboard/src/chatTables.test.ts, so a change there that is not made here fails one of the two.
+    func testTablesMatchTheSharedOnes() throws {
+        let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "chat-tables", withExtension: "json"))
+        let t = try JSONDecoder().decode(Tables.self, from: Data(contentsOf: url))
+        XCTAssertEqual(ChatSwitch.agentIds, t.agentIds)
+        XCTAssertEqual(ChatSwitch.profiles.mapValues {
+            Tables.Profile(label: $0.label, proxy: $0.proxy, runtime: $0.runtime, acp: $0.acp, acpLive: $0.acpLive, chatOnly: $0.chatOnly)
+        }, t.profiles)
+        XCTAssertEqual(ChatSwitch.chatModels, t.chatModels)
+        XCTAssertEqual(ChatSwitch.sameModelAliases, t.sameModelAliases)
+        XCTAssertEqual(ChatSwitch.acpMinBridgeVersion, t.acpMinBridgeVersion)
+    }
+
     private func target(agent: String = "claude", harness: String = "claude", account: String? = "a1", model: String? = "claude-opus-5-5",
                         awaiting: Bool = false, bridge: String? = "1.4.0") -> ChatTarget {
         ChatTarget(agent: agent, harness: harness, account: account, model: model, awaitingTarget: awaiting, bridgeVersion: bridge)
