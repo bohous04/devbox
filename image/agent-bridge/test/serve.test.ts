@@ -773,7 +773,7 @@ describe("final review fixes", () => {
     expect(f.turns).toEqual([{ runId: r.runId, text: "full\n\nUser message:\nhi", origin: "user" }]);
   });
 
-  test("I1: after a VPS reboot, the re-sent target without a handoff keeps the bridge's pending handoff; another target replaces it", async () => {
+  test("I1: after a VPS reboot, the re-sent target without a handoff keeps the bridge's pending handoff", async () => {
     const f = fakeHarness();
     const bridge = await start(f);
     const env = { CLAUDE_CONFIG_DIR: claudeProfile("proxy", ""), ANTHROPIC_BASE_URL: "http://proxy.invalid", ANTHROPIC_AUTH_TOKEN: "tok" };
@@ -796,6 +796,22 @@ describe("final review fixes", () => {
     await switchCmd({ harness: "claude", account: null, model: "proxy-model", env }, "proxy-thread", { preamble: "Q" });
     expect(state().pendingHandoff).toEqual({ preamble: "Q" });
     await switchCmd({ harness: "claude", account: null, model: "other-model", env }, "proxy-thread", null);
+    expect(state().pendingHandoff).toEqual({ preamble: "Q" });
+  });
+
+  test("P23a: a switch without a handoff keeps the pending one on the same thread, whatever the account or model; another or no thread replaces it", async () => {
+    const f = fakeHarness();
+    await start(f, { account: "a" });
+    const b = { harness: "claude" as const, account: "b", model: "claude-sonnet-5-5", env: { CLAUDE_CONFIG_DIR: claudeProfile("b") } };
+    await switchCmd(b, null, { preamble: "P" });
+    f.emit({ type: "thread.native", harness: "claude", nativeThreadId: "t1", account: null, model: "claude-sonnet-5-5" });
+    const c = { harness: "claude" as const, account: "c", model: "claude-opus-5-5", env: { CLAUDE_CONFIG_DIR: claudeProfile("c") } };
+    await switchCmd(c, "t1", null);
+    expect(state().pendingHandoff).toEqual({ preamble: "P" });
+    await switchCmd(c, "t-other", null);
+    expect(state().pendingHandoff).toBeNull();
+    await switchCmd(b, null, { preamble: "R" });
+    await switchCmd(c, null, null);
     expect(state().pendingHandoff).toBeNull();
   });
 

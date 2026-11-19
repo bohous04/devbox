@@ -491,17 +491,17 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     await retireHarness();
     // A different thread (or harness) does not continue the old running usage totals.
     if (target.harness !== state.harness || cmd.resume !== state.nativeThreadId) state.usageBaseline = null;
-    // The bridge owns the pending handoff: the same target and thread again without one (devd re-sending after a
-    // restart) keeps it; anything else replaces it.
-    const sameTarget = target.harness === state.harness && target.account === state.account
-      && target.model === (state.target !== null ? state.target.model : current!.model) && cmd.resume === state.nativeThreadId;
+    // The bridge owns the pending handoff: a handoff is a delta for its thread, so a switch without one that resumes
+    // that same thread (a re-send after a restart, or another account or model on it) keeps it; a fresh or different
+    // thread replaces it.
+    const sameThread = cmd.resume !== null && cmd.resume === state.nativeThreadId;
     current = target;
     state.target = persistableTarget(target);
     state.harness = target.harness;
     state.account = target.account;
     state.model = target.model;
     state.nativeThreadId = cmd.resume;
-    if (cmd.handoff !== null || !sameTarget) state.pendingHandoff = cmd.handoff;
+    if (cmd.handoff !== null || !sameThread) state.pendingHandoff = cmd.handoff;
     persist();
     const h = openHarness(true);
     harness = h;
