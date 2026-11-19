@@ -289,6 +289,8 @@ struct OpenResult: Decodable {
         let container: String
         let status: SessionStatus
         let solo: Int
+        /// The runtime devd started or joined (it picks the default when the app names none); nil from an older devd.
+        let runtime: InboxItem.Runtime?
     }
     /// Present only when the repo had to be fetched/updated; `status == "conflict"` means
     /// the session was already running and the agent is now resolving the merge itself (see `NewSessionSheet` messages).
@@ -300,6 +302,8 @@ struct OpenResult: Decodable {
     let created: Bool
     let pull: Pull?
     let claudePrompt: String?
+    /// Why devd started the session in the other runtime than its default (the default cannot run the agent).
+    let runtimeNotice: String?
 }
 
 // MARK: - Auth
