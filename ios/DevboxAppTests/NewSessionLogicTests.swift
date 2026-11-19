@@ -110,4 +110,35 @@ final class NewSessionLogicTests: XCTestCase {
         XCTAssertEqual(NewSessionLogic.sessionsFor(sessions, project: "portal", repo: "api").count, 1)
         XCTAssertEqual(NewSessionLogic.sessionsFor(sessions, project: "portal", repo: "nic").count, 0)
     }
+
+    // MARK: - afterOpen (what the sheet does with devd's answer)
+
+    private func result(runtime: String?, notice: String? = nil, pull: String? = nil) throws -> OpenResult {
+        let rt = runtime.map { #","runtime":"\#($0)""# } ?? ""
+        let n = notice.map { #","runtimeNotice":"\#($0)""# } ?? ""
+        let p = pull.map { #","pull":{"status":"\#($0)"}"# } ?? ""
+        let json = """
+        {"session":{"id":"dev-shop-web","folder":"acme","project":"shop","repo":"web","container":"c1","status":"running","solo":0\(rt)},"created":true\(n)\(p)}
+        """
+        return try JSONDecoder().decode(OpenResult.self, from: Data(json.utf8))
+    }
+
+    func testAfterOpenChatWithoutNoticeOpensTheThread() throws {
+        XCTAssertEqual(NewSessionLogic.afterOpen(try result(runtime: "chat")), .openChat("dev-shop-web"))
+    }
+
+    func testAfterOpenTmuxShowsTheMessage() throws {
+        XCTAssertEqual(NewSessionLogic.afterOpen(try result(runtime: "tmux")), .show("Session dev-shop-web running.", chatId: nil))
+        XCTAssertEqual(NewSessionLogic.afterOpen(try result(runtime: nil, pull: "conflict")),
+                       .show("dev-shop-web is running — pull conflict, the agent is resolving it now", chatId: nil))
+    }
+
+    /// A runtime switch away from the default is never silent: the notice is shown, and a chat session then waits
+    /// for "Open chat" instead of leaving the sheet before the notice could be read.
+    func testAfterOpenWithANoticeShowsItFirst() throws {
+        XCTAssertEqual(NewSessionLogic.afterOpen(try result(runtime: "tmux", notice: "Antigravity is not available in chat sessions yet, so this session runs in tmux")),
+                       .show("Session dev-shop-web running. Antigravity is not available in chat sessions yet, so this session runs in tmux", chatId: nil))
+        XCTAssertEqual(NewSessionLogic.afterOpen(try result(runtime: "chat", notice: "Mistral Vibe runs only in chat sessions, so this session runs in chat")),
+                       .show("Session dev-shop-web running. Mistral Vibe runs only in chat sessions, so this session runs in chat", chatId: "dev-shop-web"))
+    }
 }

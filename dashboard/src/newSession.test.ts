@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
 import {
-  AGENT_IDS, AGENT_PROFILES, SOLO, chatRuntimeBlock, defaultAgentFor, folderChoices, instaboxAgentBlock, isProxyAgent, profileFor, projectChoices, repoChoices, sessionsFor, soleProject, tmuxRuntimeBlock,
+  AGENT_IDS, AGENT_PROFILES, SOLO, chatRuntimeBlock, defaultAgentFor, folderChoices, instaboxAgentBlock, isProxyAgent, profileFor, projectChoices, repoChoices, runningInOtherRuntime, runtimeAfterDefault, runtimeChoice, sessionsFor, soleProject, tmuxRuntimeBlock,
 } from "./newSession";
 import type { TreeProject } from "./api";
 // Only this test may import devd — it ensures the manual mirror in newSession.ts
 // (AGENT_PROFILES) does not drift from the single source of truth. Tests do not go into the vite
 // bundle, so the production separation of the dashboard from devd stays intact (Ruling 3
 // v task-6 dispatchi).
-import { AGENTS as DEVD_AGENTS, AGENT_IDS as DEVD_AGENT_IDS, chatRuntimeBlock as devdChatRuntimeBlock, tmuxRuntimeBlock as devdTmuxRuntimeBlock, usesProxy } from "../../devd/src/agents";
+import { AGENTS as DEVD_AGENTS, AGENT_IDS as DEVD_AGENT_IDS, chatRuntimeBlock as devdChatRuntimeBlock, runtimeForOmitted as devdRuntimeForOmitted, tmuxRuntimeBlock as devdTmuxRuntimeBlock, usesProxy } from "../../devd/src/agents";
 
 const tree: TreeProject[] = [
   { folder: "acme", project: "shop", repos: [
@@ -134,4 +134,36 @@ test("knows how many sessions the repo already has", () => {
   expect(sessionsFor(sessions, "portal", "web")).toHaveLength(2);
   expect(sessionsFor(sessions, "portal", "api")).toHaveLength(1);
   expect(sessionsFor(sessions, "portal", "nic")).toHaveLength(0);
+});
+
+test("runtimeChoice: keeps the wanted runtime unless it is blocked and the other is not, then says so", () => {
+  expect(runtimeChoice("chat", null, null)).toEqual({ runtime: "chat", notice: null });
+  expect(runtimeChoice("chat", "Antigravity is not available in chat sessions yet", null))
+    .toEqual({ runtime: "tmux", notice: "Antigravity is not available in chat sessions yet, so this session runs in tmux" });
+  expect(runtimeChoice("tmux", null, "Mistral Vibe runs only in chat sessions"))
+    .toEqual({ runtime: "chat", notice: "Mistral Vibe runs only in chat sessions, so this session runs in chat" });
+  // Both blocked: nothing to switch to, the wanted runtime stays and the server refuses it.
+  expect(runtimeChoice("chat", "a", "b")).toEqual({ runtime: "chat", notice: null });
+});
+
+test("runtimeChoice on the VPS mirrors devd runtimeForOmitted for every agent and default", () => {
+  for (const id of AGENT_IDS) {
+    for (const def of ["tmux", "chat"] as const) {
+      const devd = devdRuntimeForOmitted(def, id, "session");
+      expect(runtimeChoice(def, chatRuntimeBlock(id, "vps"), tmuxRuntimeBlock(id))).toEqual({ runtime: devd.runtime, notice: devd.notice ?? null });
+    }
+  }
+});
+
+test("runtimeAfterDefault: the configured default fills an unpicked runtime, never overwrites a pick (S6-R18)", () => {
+  expect(runtimeAfterDefault(null, "chat")).toBe("chat");
+  expect(runtimeAfterDefault("tmux", "chat")).toBe("tmux");
+  expect(runtimeAfterDefault("chat", "tmux")).toBe("chat");
+});
+
+test("runningInOtherRuntime: the repo's running sessions the form's runtime would not join (S6-R18)", () => {
+  const s = (id: string, runtime: "tmux" | "chat" | undefined, status: "running" | "stopped") => ({ id, runtime, status });
+  const repo = [s("dev-x-r", "tmux", "running"), s("dev-x-r-2", "chat", "stopped"), s("dev-x-r-3", undefined, "running"), s("dev-x-r-4", "chat", "running")];
+  expect(runningInOtherRuntime(repo, "chat").map((x) => x.id)).toEqual(["dev-x-r", "dev-x-r-3"]);   // no runtime = tmux
+  expect(runningInOtherRuntime(repo, "tmux").map((x) => x.id)).toEqual(["dev-x-r-4"]);
 });

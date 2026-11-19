@@ -197,3 +197,60 @@ test("a broken chat store is one needs-you item, logged once per message, not a 
   expect(logs.length).toBe(1);
   expect(logs[0]).toContain("disk I/O error");
 });
+
+test("T11: a broken store keeps the time it broke, is published once, and its recovery is logged; a new break logs again", () => {
+  const logs: string[] = [];
+  const t = setup();
+  insertSession(t.db, BASE);
+  let now = 42;
+  let broken = true;
+  const pending: (() => void)[] = [];
+  const inbox = new Inbox({
+    db: t.db, sessions: () => listSessions(t.db), session: (id) => getSession(t.db, id),
+    threads: (id) => { if (broken) throw new Error("disk I/O error"); return t.threads(id); },
+    chatLink: () => null, tmuxLive: () => null, bus: t.bus, now: () => now, log: (m) => logs.push(m), coalesceMs: 0,
+    timers: { set: (fn) => pending.push(fn), clear: () => {} },
+  });
+  inbox.changed(BASE.id);
+  now = 1042;
+  expect(inbox.item(getSession(t.db, BASE.id)!).attention).toEqual({ section: "needs_you", reason: "failed", since: 42 });
+  // A later change in the window: the trailing publish finds the same item and sends nothing.
+  inbox.changed(BASE.id);
+  pending.shift()!();
+  expect(t.published).toHaveLength(1);
+  broken = false;
+  expect(inbox.item(getSession(t.db, BASE.id)!).lastText).toBeNull();
+  broken = true;
+  now = 2042;
+  expect(inbox.item(getSession(t.db, BASE.id)!).attention.since).toBe(2042);
+  expect(logs).toEqual([
+    `inbox: thread store of ${BASE.id} unreadable: disk I/O error`,
+    `inbox: thread store of ${BASE.id} readable again`,
+    `inbox: thread store of ${BASE.id} unreadable: disk I/O error`,
+  ]);
+});
+
+test("T11: a removed session leaves no re-check timer behind", () => {
+  let now = 3000;
+  const t = setup();
+  const pending = new Map<number, () => void>();
+  let next = 0;
+  const inbox = new Inbox({
+    db: t.db, sessions: () => listSessions(t.db), session: (id) => getSession(t.db, id), threads: t.threads,
+    chatLink: () => null, tmuxLive: () => null, bus: t.bus, now: () => now, coalesceMs: 0,
+    timers: { set: (fn) => { pending.set(++next, fn); return next; }, clear: (h) => { pending.delete(h as number); } },
+  });
+  chat(t, BASE, [started("r1"), said("r1", "done"), completed("r1")]);
+  inbox.changed(BASE.id);
+  // The coalesce window and the grace window's re-check.
+  expect(pending.size).toBe(2);
+  const window = pending.get(1)!;
+  pending.delete(1);
+  window();
+  t.db.run("DELETE FROM sessions WHERE id=?", [BASE.id]);
+  now += 10;
+  inbox.changedSafe(BASE.id);
+  expect(t.published.at(-1) as unknown).toEqual({ sessionId: BASE.id, removed: true });
+  // Only the new coalesce window is left; the re-check of the removed session is gone.
+  expect(pending.size).toBe(1);
+});

@@ -47,7 +47,7 @@ function appWith(open: (t: Record<string, unknown>) => Promise<unknown>) {
   return createApp({
     mgr: { open } as never, db: openDb(":memory:"), cfg: DEFAULT_CONFIG, root: "/tmp", tree: async () => [],
     listener: {} as never, notify: () => {}, stats: () => ({}),
-    cloneQueue: {} as never, configRepo: {} as never, dashboardDir: "/tmp",
+    cloneQueue: {} as never, configRepo: { read: () => DEFAULT_CONFIG } as never, dashboardDir: "/tmp",
     backup: { build: async () => "/tmp/x", restore: async () => {} },
   } as never);
 }
@@ -63,11 +63,12 @@ test("POST /api/sessions runtime=chat agent=claude → 201 and mgr.open gets run
   expect(seen[0]!.runtime).toBe("chat");
 });
 
-test("POST /api/sessions without runtime passes none (tmux default)", async () => {
+test("POST /api/sessions without runtime passes the default (tmux unless set) and may join either runtime", async () => {
   const seen: Record<string, unknown>[] = [];
   const a = appWith(async (t) => { seen.push(t); return { created: true, session: { id: "dev-p-r", status: "running", runtime: "tmux" } }; });
   expect((await post(a, BASE)).status).toBe(201);
-  expect(seen[0]!.runtime).toBeUndefined();
+  expect(seen[0]!.runtime).toBe("tmux");
+  expect(seen[0]!.joinRuntimes).toEqual(["tmux", "chat"]);
 });
 
 test("POST /api/sessions chat with a non-chat agent, on instabox, with solo or bogus runtime → 400", async () => {
@@ -108,7 +109,7 @@ function appOn(db: ReturnType<typeof openDb>, open: () => Promise<unknown>) {
   return createApp({
     mgr: { open } as never, db, cfg: DEFAULT_CONFIG, root: "/tmp", tree: async () => [],
     listener: {} as never, notify: () => {}, stats: () => ({}),
-    cloneQueue: {} as never, configRepo: {} as never, dashboardDir: "/tmp",
+    cloneQueue: {} as never, configRepo: { read: () => DEFAULT_CONFIG } as never, dashboardDir: "/tmp",
     backup: { build: async () => "/tmp/x", restore: async () => {} },
   } as never);
 }

@@ -65,7 +65,7 @@ function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown
     db, mgr: { isEnding: (id: string) => ending.has(id), open: opts.open ?? (async () => { throw new Error("no open"); }) } as never,
     cfg: { version: 1, settings: { autoStopHours: 4, portRangeStart: 40100, portsPerSession: 10, diskWarnPercent: 80 }, folders: {} },
     root: dir, tree: async () => [], listener: {} as never, notify: () => {}, stats: () => ({ sessions: [], disk: {} }),
-    cloneQueue: {} as never, configRepo: {} as never, dashboardDir: dir, agentEvents: hub,
+    cloneQueue: {} as never, configRepo: { read: () => ({ version: 1, settings: { autoStopHours: 4, portRangeStart: 40100, portsPerSession: 10, diskWarnPercent: 80 }, folders: {} }) } as never, dashboardDir: dir, agentEvents: hub,
     links, threads, bus, inbox, bridgeVersion: () => (opts.bridgeVersion === undefined ? "1.4.0" : opts.bridgeVersion), untilReset: opts.noUntilReset ? undefined : opts.untilReset ?? (() => ({ reason: "No usage limit is active on this account" })),
   } as never);
   /** Applies events to a session's store and publishes them like index.ts does (store first, then the bus). */

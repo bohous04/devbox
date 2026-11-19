@@ -89,7 +89,7 @@ function ChatPage({ id }: { id: string }) {
   return (
     <div className="flex min-h-[calc(100dvh-12rem)] flex-col">
       <header className="mb-4 flex flex-col gap-3">
-        <Link to="/inbox" className="flex w-fit items-center gap-1 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="size-4" aria-hidden="true" />Inbox</Link>
+        <Link to="/" className="flex w-fit items-center gap-1 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="size-4" aria-hidden="true" />Inbox</Link>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <h1 className="min-w-0 truncate text-2xl font-semibold tracking-tight">{title}</h1>
           {session && <Badge variant="secondary">{profileFor(session.agent).short}</Badge>}

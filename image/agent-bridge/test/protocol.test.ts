@@ -2,6 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { encodeFrame, parseClientFrame, ProtocolError, type BridgeCommand } from "../src/protocol";
 
 describe("parseClientFrame", () => {
+  test("accepts an ack (1.5.0, S6-R21)", () => {
+    expect(parseClientFrame('{"t":"ack","seq":7}')).toEqual({ t: "ack", seq: 7 });
+  });
+
   test("accepts hello", () => {
     expect(parseClientFrame('{"t":"hello","afterSeq":0}')).toEqual({ t: "hello", afterSeq: 0 });
   });
@@ -50,6 +54,9 @@ describe("parseClientFrame", () => {
       '{"t":"hello","afterSeq":-1}',
       '{"t":"hello","afterSeq":1.5}',
       '{"t":"hello"}',
+      '{"t":"ack"}',
+      '{"t":"ack","seq":-1}',
+      '{"t":"ack","seq":"3"}',
       '{"t":"cmd","id":"c1","cmd":{"kind":"startTurn","text":""}}',
       '{"t":"cmd","id":"c1","cmd":{"kind":"startTurn","text":"x","attachments":[1]}}',
       '{"t":"cmd","id":"c1","cmd":{"kind":"startTurn","text":"x","origin":"agent"}}',

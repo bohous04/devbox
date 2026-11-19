@@ -3,7 +3,10 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Socket } from "bun";
-import { AgentDisconnected, BridgeLinks, CommandFailed, CommandTimeout } from "../src/bridgeLink";
+import { Database, type SQLiteError } from "bun:sqlite";
+import { BRIDGE_VERSION } from "../../image/agent-bridge/src/version";
+import { ACK_MIN_BRIDGE_VERSION } from "../../shared/bridgeVersion";
+import { AgentDisconnected, BridgeLinks, CommandFailed, CommandTimeout, POISON_LIMIT } from "../src/bridgeLink";
 import { ThreadStore } from "../src/threadStore";
 import type { LinkStatus, LoggedEvent } from "../../shared/thread";
 
@@ -15,9 +18,10 @@ const ev = (seq: number): LoggedEvent => ({ seq, ts: 1000 + seq, event: { type: 
 type CmdReply = { ok: true } | { ok: false; error: string } | "never";
 
 /** A unix socket server speaking the bridge's frame protocol, with knobs the real one has no need for. */
-function fakeBridge(path: string, o: { events?: LoggedEvent[]; ignoreAfterSeq?: boolean } = {}) {
+function fakeBridge(path: string, o: { events?: LoggedEvent[]; ignoreAfterSeq?: boolean; ready?: Record<string, unknown> } = {}) {
   const events = [...(o.events ?? [])];
   const hellos: number[] = [];
+  const acks: number[] = [];
   const cmds: unknown[] = [];
   let reply: CmdReply = { ok: true };
   const clients = new Set<Socket<{ buf: string; hello: boolean }>>();
@@ -36,7 +40,9 @@ function fakeBridge(path: string, o: { events?: LoggedEvent[]; ignoreAfterSeq?: 
             hellos.push(f.afterSeq);
             for (const e of events) if (o.ignoreAfterSeq || e.seq > f.afterSeq) write(s, { t: "event", e });
             s.data.hello = true;
-            write(s, { t: "ready", lastSeq: events.length ? events[events.length - 1].seq : 0 });
+            write(s, { t: "ready", lastSeq: events.length ? events[events.length - 1].seq : 0, version: BRIDGE_VERSION, ...o.ready });
+          } else if (f.t === "ack") {
+            acks.push(f.seq);
           } else if (f.t === "cmd") {
             cmds.push(f.cmd);
             if (reply !== "never") write(s, { t: "res", id: f.id, ...reply });
@@ -47,7 +53,7 @@ function fakeBridge(path: string, o: { events?: LoggedEvent[]; ignoreAfterSeq?: 
     },
   });
   return {
-    hellos, cmds,
+    hellos, acks, cmds,
     setReply(r: CmdReply) { reply = r; },
     publish(e: LoggedEvent) { events.push(e); for (const c of clients) if (c.data.hello) write(c, { t: "event", e }); },
     raw(line: string) { for (const c of clients) c.write(line); },
@@ -67,7 +73,7 @@ async function waitFor(cond: () => boolean, what: string, ms = 2000) {
 const cleanups: (() => void)[] = [];
 afterEach(() => { for (const c of cleanups.splice(0)) c(); });
 
-function setup(prior: LoggedEvent[] = []) {
+function setup(prior: LoggedEvent[] = [], o: { ackMs?: number } = {}) {
   const root = mkdtempSync(join(tmpdir(), "bl-"));
   mkdirSync(join(root, ID));
   const store = ThreadStore.open(root, ID);
@@ -86,13 +92,14 @@ function setup(prior: LoggedEvent[] = []) {
     onStatus: (id, s) => t.onStatus(id, s),
     onBehind: (id) => t.onBehind(id),
     retryMs: RETRY,
+    ...(o.ackMs === undefined ? {} : { ackMs: o.ackMs }),
     log: (m) => { logs.push(m); },
   });
   const sock = join(root, ID, "agent.sock");
   const servers: ReturnType<typeof fakeBridge>[] = [];
   const serve = (o?: Parameters<typeof fakeBridge>[1]) => { const s = fakeBridge(sock, o); servers.push(s); return s; };
   cleanups.push(() => { links.drop(ID); for (const s of servers) s.close(); store.close(); rmSync(root, { recursive: true, force: true }); });
-  return { links, store, seen, statuses, logs, serve, t };
+  return { links, store, seen, statuses, logs, serve, t, root };
 }
 
 test("reconnect replays only events after the stored seq", async () => {
@@ -434,4 +441,163 @@ test("startTurnWhenConnected reports the bridge's answer to onDone", async () =>
   links.startTurnWhenConnected(ID, "y", (e) => got.push(e));
   await waitFor(() => got.length === 2, "ok answer");
   expect(got[1]).toBeNull();
+});
+
+test("T9: an event that fails the same way on every replay is skipped after POISON_LIMIT tries, with a notice and one log line", async () => {
+  const { links, seen, serve, logs, store } = setup();
+  // A frame the store cannot take (a newer bridge's shape): message.final without text.
+  const poison = { seq: 2, ts: 1002, event: { type: "message.final", runId: "r1", itemId: "m2", role: "assistant" } } as unknown as LoggedEvent;
+  const s = serve({ events: [ev(1), poison, ev(3)] });
+  links.ensure(ID);
+  await waitFor(() => store.lastSeq() === 3, "skip past the poison frame");
+  expect(s.hellos).toEqual(Array.from({ length: POISON_LIMIT }, (_, i) => (i === 0 ? 0 : 1)));
+  expect(seen.map((e) => e.seq)).toEqual([1, 3]);
+  const notices = store.snapshot().items.filter((i) => i.kind === "notice").map((i) => i.text);
+  expect(notices).toEqual([`devd skipped event 2 from the agent bridge after ${POISON_LIMIT} failed attempts: cannot apply frame: NOT NULL constraint failed: items.text`]);
+  // First cycle: disconnected + reconnected; the repeats say nothing; the skip says it once.
+  expect(logs).toEqual([
+    `bridge link ${ID}: disconnected (cannot apply frame: NOT NULL constraint failed: items.text); retrying every ${RETRY} ms`,
+    `bridge link ${ID}: reconnected`,
+    `bridge link ${ID}: skipped event 2 after ${POISON_LIMIT} failed attempts: cannot apply frame: NOT NULL constraint failed: items.text`,
+  ]);
+  await Bun.sleep(RETRY * 3);
+  expect(s.hellos).toHaveLength(POISON_LIMIT);
+});
+
+test("T9: an event whose error message varies on every try is still skipped at POISON_LIMIT (keyed on error class + seq)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "bl-"));
+  mkdirSync(join(root, ID));
+  const real = ThreadStore.open(root, ID);
+  let tries = 0;
+  const store = new Proxy(real, {
+    get: (t, k) => k === "apply"
+      ? (e: LoggedEvent) => { if (e.seq === 2) throw new Error(`cannot store event at ${Date.now()}.${++tries}`); return t.apply(e); }
+      : (t as any)[k].bind(t),
+  });
+  const logs: string[] = [];
+  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
+  const s = fakeBridge(join(root, ID, "agent.sock"), { events: [ev(1), ev(2), ev(3)] });
+  cleanups.push(() => { links.drop(ID); s.close(); real.close(); rmSync(root, { recursive: true, force: true }); });
+  links.ensure(ID);
+  await waitFor(() => real.lastSeq() === 3, "skip past the event");
+  expect(tries).toBe(POISON_LIMIT);
+  expect(s.hellos).toHaveLength(POISON_LIMIT);
+  // The notice names the last attempt's message.
+  expect(real.snapshot().items.filter((i) => i.kind === "notice").map((i) => i.text)[0]).toContain(`.${POISON_LIMIT}`);
+});
+
+test("T9: a store that cannot write at all is never skipped past: the event waits and the link keeps retrying", async () => {
+  const root = mkdtempSync(join(tmpdir(), "bl-"));
+  mkdirSync(join(root, ID));
+  const real = ThreadStore.open(root, ID);
+  let full = true;
+  // A real SQLITE_FULL (bun:sqlite constructs SQLiteErrors only itself): a database capped at two pages.
+  const diskFull = () => {
+    const scratch = new Database(":memory:");
+    scratch.run("CREATE TABLE t (x)");
+    scratch.run("PRAGMA max_page_count = 2");
+    try { for (;;) scratch.run("INSERT INTO t VALUES (randomblob(1000))"); }
+    catch (e) { return e as SQLiteError; }
+    finally { scratch.close(); }
+  };
+  const store = new Proxy(real, {
+    get: (t, k) => (k === "apply" || k === "skipEvent")
+      ? (...a: unknown[]) => { if (full) throw diskFull(); return (t as any)[k](...a); }
+      : (t as any)[k].bind(t),
+  });
+  const seen: number[] = [];
+  const logs: string[] = [];
+  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: (_id, e) => { seen.push(e.seq); }, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
+  const s = fakeBridge(join(root, ID, "agent.sock"), { events: [ev(1)] });
+  cleanups.push(() => { links.drop(ID); s.close(); real.close(); rmSync(root, { recursive: true, force: true }); });
+  links.ensure(ID);
+  await waitFor(() => s.hellos.length >= POISON_LIMIT + 2, "retries past the limit");
+  expect(real.lastSeq()).toBe(0);
+  full = false;
+  await waitFor(() => seen.length === 1, "event 1 once the disk has room");
+  expect(real.snapshot().items.filter((i) => i.kind === "notice")).toEqual([]);
+  expect(logs.filter((l) => l.includes("disk is full"))).toEqual([
+    `bridge link ${ID}: disconnected (cannot apply frame: database or disk is full); retrying every ${RETRY} ms`,
+    `bridge link ${ID}: the thread store cannot take events (cannot apply frame: database or disk is full); retrying every ${RETRY} ms`,
+  ]);
+});
+
+test("T9: a frame without a seq that keeps failing is said once in the thread; the link keeps retrying quietly", async () => {
+  const { links, serve, logs, store } = setup([ev(1)]);
+  const s = serve({ events: [ev(1)] });
+  links.ensure(ID);
+  await waitFor(() => links.status(ID) === "connected", "connect");
+  // Every connection gets the same unreadable line right after its replay.
+  const raw = setInterval(() => s.raw("{not json\n"), 5);
+  cleanups.push(() => clearInterval(raw));
+  await waitFor(() => s.hellos.length >= POISON_LIMIT + 3, "repeated failures");
+  const notices = store.snapshot().items.filter((i) => i.kind === "notice").map((i) => i.text);
+  expect(notices).toEqual([`the agent bridge keeps sending a frame devd cannot read (malformed frame: not valid JSON); the link reconnects every ${RETRY} ms`]);
+  expect(logs.filter((l) => l.includes("not valid JSON"))).toHaveLength(2);
+});
+
+test("M12: a bridge older than this devd's is said once per version in the thread, also across reconnects", async () => {
+  const { links, serve, logs, store } = setup();
+  const a = serve({ ready: { version: "1.4.0" } });
+  links.ensure(ID);
+  await waitFor(() => links.status(ID) === "connected", "connect");
+  a.close();
+  await waitFor(() => links.status(ID) === "disconnected", "disconnect");
+  const b = serve({ ready: { version: "1.4.0" } });
+  await waitFor(() => b.hellos.length === 1 && links.status(ID) === "connected", "reconnect");
+  await Bun.sleep(RETRY);
+  const text = `this session's agent bridge is 1.4.0, older than the current ${BRIDGE_VERSION}: it lacks the newer fixes until the session's container is recreated`;
+  expect(store.snapshot().items.filter((i) => i.kind === "notice").map((i) => i.text)).toEqual([text]);
+  expect(logs.filter((l) => l.includes("older than the current"))).toEqual([`bridge link ${ID}: ${text}`]);
+  b.close();
+  await waitFor(() => links.status(ID) === "disconnected", "disconnect");
+  serve({ ready: { version: BRIDGE_VERSION } });
+  await waitFor(() => links.status(ID) === "connected", "current bridge");
+  await Bun.sleep(RETRY);
+  expect(store.snapshot().items.filter((i) => i.kind === "notice")).toHaveLength(1);
+});
+
+test("S6-R21: a bridge from 1.5.0 gets a periodic ack with the store's durable seq; older bridges never get one", async () => {
+  const { links, serve, store } = setup([ev(1), ev(2)], { ackMs: 15 });
+  const a = serve({ events: [ev(1), ev(2), ev(3)], ready: { version: ACK_MIN_BRIDGE_VERSION } });
+  links.ensure(ID);
+  await waitFor(() => a.acks.length >= 2, "two acks");
+  expect(a.acks.every((s) => s === 3)).toBe(true);
+  a.publish(ev(4));
+  await waitFor(() => a.acks.at(-1) === 4, "ack of the live event");
+  expect(store.lastSeq()).toBe(4);
+  a.close();
+  await waitFor(() => links.status(ID) === "disconnected", "disconnect");
+  const sent = a.acks.length;
+  for (const version of ["1.4.0", undefined]) {
+    const old = serve({ events: [ev(1), ev(2), ev(3), ev(4)], ready: { version } });
+    await waitFor(() => links.status(ID) === "connected", "older bridge");
+    await Bun.sleep(60);
+    expect(old.acks).toEqual([]);
+    expect(old.clients()).toBe(1);
+    old.close();
+    await waitFor(() => links.status(ID) === "disconnected", "disconnect");
+  }
+  expect(a.acks).toHaveLength(sent);
+});
+
+test("S6-R21: no ack while the store cannot say what is durable; it is logged and the link carries on", async () => {
+  const { links, serve, logs, root } = setup([ev(1)], { ackMs: 15 });
+  // Another connection holds a read snapshot from before event 2: the checkpoint cannot copy event 2's commit.
+  const reader = new Database(ThreadStore.path(root, ID));
+  reader.run("BEGIN");
+  reader.query("SELECT count(*) FROM items").get();
+  const a = serve({ events: [ev(1), ev(2)], ready: { version: ACK_MIN_BRIDGE_VERSION } });
+  links.ensure(ID);
+  await waitFor(() => logs.some((l) => l.includes("no ack")), "the skipped ack logged");
+  await Bun.sleep(100); // several more intervals without an ack
+  expect(a.acks).toEqual([]);
+  expect(links.status(ID)).toBe("connected");
+  // Once per episode, like a bridge log that is behind.
+  expect(logs.filter((l) => l.includes("no ack"))).toHaveLength(1);
+  reader.run("COMMIT");
+  reader.close();
+  await waitFor(() => a.acks.length >= 1, "ack once the checkpoint completes");
+  expect(a.acks[0]).toBe(2);
+  expect(logs.filter((l) => l.includes("acks resumed"))).toEqual([`bridge link ${ID}: acks resumed (seq 2)`]);
 });

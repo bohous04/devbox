@@ -21,6 +21,8 @@ interface Client {
   hello: boolean;
   pending: LoggedEvent[];
   commands: Promise<void>;
+  /** Resolves a replay waiting for the socket to drain (or to close). */
+  wake: (() => void) | null;
 }
 
 export interface Handshake {
@@ -28,7 +30,17 @@ export interface Handshake {
   awaitingTarget: boolean;
 }
 
-export function startServer(o: { socketPath: string; log: EventLog; onCommand: CommandHandler; handshake: () => Handshake; logError?: (msg: string) => void }): {
+export function startServer(o: {
+  socketPath: string;
+  log: EventLog;
+  onCommand: CommandHandler;
+  handshake: () => Handshake;
+  /** A hello's `afterSeq`: devd has stored every event up to it. Called before the replay. */
+  onHello?: (afterSeq: number) => void;
+  /** A periodic ack's `seq` (S6-R21): devd's store holds every event up to it durably. */
+  onAck?: (seq: number) => void;
+  logError?: (msg: string) => void;
+}): {
   publish(e: BridgeEvent): LoggedEvent;
   close(): Promise<void>;
 } {
@@ -58,6 +70,29 @@ export function startServer(o: { socketPath: string; log: EventLog; onCommand: C
     clients.delete(c);
     c.socket.end();
   };
+  const wake = (c: Client) => {
+    const w = c.wake;
+    c.wake = null;
+    w?.();
+  };
+
+  /** Streams the log after `afterSeq` from disk, waiting for the socket to drain whenever it is full, so a long
+   *  replay never sits in memory whole. Live events published meanwhile wait in `pending`. */
+  const replay = async (c: Client, afterSeq: number) => {
+    let replayed = afterSeq;
+    for (const e of o.log.stream(afterSeq)) {
+      if (!clients.has(c)) return;
+      send(c, { t: "event", e });
+      replayed = e.seq;
+      if (c.outboundHead < c.outbound.length) await new Promise<void>((r) => (c.wake = r));
+    }
+    if (!clients.has(c)) return;
+    // Skip events the replay already carried.
+    for (const e of c.pending) if (e.seq > replayed) send(c, { t: "event", e });
+    c.pending = [];
+    c.replaying = false;
+    send(c, { t: "ready", lastSeq: o.log.lastSeq(), ...o.handshake() });
+  };
 
   const runCommand = (c: Client, id: string, cmd: BridgeCommand) => {
     c.commands = c.commands.then(async () => {
@@ -73,24 +108,28 @@ export function startServer(o: { socketPath: string; log: EventLog; onCommand: C
   const handleLine = (c: Client, line: string) => {
     const frame = parseClientFrame(line);
     if (frame.t === "cmd") return runCommand(c, frame.id, frame.cmd);
+    if (frame.t === "ack") {
+      if (!c.hello) throw new Error("ack before hello");
+      o.onAck?.(frame.seq);
+      return;
+    }
     if (c.hello) throw new Error("duplicate hello");
     c.hello = true;
     c.replaying = true;
-    const replay = o.log.readFrom(frame.afterSeq);
-    for (const e of replay) send(c, { t: "event", e });
-    const replayed = replay.length ? replay[replay.length - 1].seq : frame.afterSeq;
-    // Events published while the replay was read are in `pending`; skip those the replay already carried.
-    for (const e of c.pending) if (e.seq > replayed) send(c, { t: "event", e });
-    c.pending = [];
-    c.replaying = false;
-    send(c, { t: "ready", lastSeq: o.log.lastSeq(), ...o.handshake() });
+    o.onHello?.(frame.afterSeq);
+    const done = replay(c, frame.afterSeq).catch((err) => {
+      logError(`agent-bridge: replay failed, closing client: ${err instanceof Error ? err.message : String(err)}`);
+      drop(c);
+    });
+    // Commands sent with the hello are answered after its ready, as before the replay was streamed.
+    c.commands = c.commands.then(() => done);
   };
 
   const listener = Bun.listen<Client>({
     unix: o.socketPath,
     socket: {
       open(socket) {
-        const c: Client = { socket, buffer: "", outbound: [], outboundHead: 0, decoder: new TextDecoder(), replaying: false, hello: false, pending: [], commands: Promise.resolve() };
+        const c: Client = { socket, buffer: "", outbound: [], outboundHead: 0, decoder: new TextDecoder(), replaying: false, hello: false, pending: [], commands: Promise.resolve(), wake: null };
         socket.data = c;
         clients.add(c);
       },
@@ -114,13 +153,16 @@ export function startServer(o: { socketPath: string; log: EventLog; onCommand: C
       },
       drain(socket) {
         flush(socket.data);
+        if (socket.data.outboundHead >= socket.data.outbound.length) wake(socket.data);
       },
       close(socket) {
         clients.delete(socket.data);
+        wake(socket.data);
       },
       error(socket, err) {
         logError(`agent-bridge: socket error: ${err.message}`);
         clients.delete(socket.data);
+        wake(socket.data);
       },
     },
   });
@@ -139,8 +181,12 @@ export function startServer(o: { socketPath: string; log: EventLog; onCommand: C
     },
     async close() {
       listener.stop(true);
-      for (const c of clients) c.socket.end();
+      const all = [...clients];
       clients.clear();
+      for (const c of all) {
+        c.socket.end();
+        wake(c);
+      }
       rmSync(o.socketPath, { force: true });
     },
   };

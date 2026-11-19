@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 let n = 0;
 import { Database } from "bun:sqlite";
-import { ThreadStore } from "../src/threadStore";
+import { THREAD_STORE_SCHEMA, ThreadStore } from "../src/threadStore";
 import type { BridgeEvent } from "../../shared/thread";
 
 function store() { n = 0; return ThreadStore.open(mkdtempSync(join(tmpdir(), "threads-")), "dev-a-b-1"); }
@@ -196,6 +196,23 @@ test("run.started for an unknown run creates it; resumed bridge.started adds a n
   expect(items[1]).toMatchObject({ kind: "tool", tool: "(unknown)", output: "out" });
 });
 
+test("a bridge.started notice (state.json rebuilt) is shown in the thread, also on a fresh start", () => {
+  const s = store();
+  s.apply(ev({ type: "bridge.started", version: "1.5.0", resumed: true, notice: "state.json was unusable" }));
+  s.apply(ev({ type: "bridge.started", version: "1.5.0", resumed: false, notice: "no thread to resume" }));
+  expect(s.snapshot().items.map((i) => [i.kind, i.text])).toEqual([
+    ["notice", "Agent bridge restarted (v1.5.0)"],
+    ["notice", "state.json was unusable"],
+    ["notice", "no thread to resume"],
+  ]);
+});
+
+test("a bridge.notice is shown in the thread", () => {
+  const s = store();
+  s.apply(ev({ type: "bridge.notice", text: "events 1-2 are no longer available" }));
+  expect(s.snapshot().items.map((i) => [i.kind, i.text])).toEqual([["notice", "events 1-2 are no longer available"]]);
+});
+
 test("runs carry when they were queued and the seq that ended them", () => {
   const s = store(); n = 0;
   s.apply(ev({ type: "run.queued", runId: "r1", text: "hi", attachments: [] }));
@@ -316,4 +333,81 @@ test("a queued critic run keeps its origin", () => {
     expect(store.snapshot().runs[0]).toMatchObject({ runId: "r1", origin: "critic", status: "queued" });
     expect(store.userText("r1")).toBe("fix it");
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+/** The thread store schema as step 2 shipped it (main b7919d6): no provider_threads, failure_reason or attachments. */
+function step2Store(dir: string): void {
+  mkdirSync(join(dir, "_threads"));
+  const db = new Database(ThreadStore.path(dir, "dev-a-b-1"));
+  db.run("PRAGMA journal_mode = WAL");
+  db.run(`CREATE TABLE meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)`);
+  db.run(`CREATE TABLE runs (
+    run_id TEXT PRIMARY KEY, origin TEXT NOT NULL, status TEXT NOT NULL, harness TEXT,
+    native_thread_id TEXT, model TEXT, queued_at INTEGER, started_at INTEGER, ended_at INTEGER, ended_seq INTEGER, usage TEXT, error TEXT,
+    updated_seq INTEGER NOT NULL)`);
+  db.run(`CREATE TABLE items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, seq INTEGER NOT NULL, run_id TEXT, item_id TEXT, kind TEXT NOT NULL, text TEXT NOT NULL,
+    tool TEXT, input TEXT, output TEXT, is_error INTEGER, status TEXT, ts INTEGER NOT NULL,
+    updated_seq INTEGER NOT NULL)`);
+  db.run(`CREATE INDEX items_key ON items (run_id, item_id)`);
+  db.run(`CREATE INDEX items_updated ON items (updated_seq)`);
+  db.run(`CREATE TABLE requests (
+    request_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, kind TEXT NOT NULL, prompt TEXT NOT NULL,
+    options TEXT, multi_select INTEGER, opened_at INTEGER NOT NULL, status TEXT NOT NULL)`);
+  db.run(`CREATE TABLE background (id INTEGER PRIMARY KEY CHECK (id = 1), work TEXT NOT NULL)`);
+  db.run(`CREATE TABLE native (
+    id INTEGER PRIMARY KEY CHECK (id = 1), harness TEXT NOT NULL, native_thread_id TEXT NOT NULL,
+    account TEXT, model TEXT)`);
+  db.run(`INSERT INTO meta (key, value) VALUES ('last_seq', 3), ('seen_seq', 2)`);
+  db.run(`INSERT INTO runs (run_id, origin, status, harness, native_thread_id, model, queued_at, started_at, ended_at, ended_seq, usage, error, updated_seq)
+    VALUES ('r0', 'user', 'completed', 'claude', 'th-1', 'm', 1, 2, 3, 3, NULL, NULL, 3)`);
+  db.run(`INSERT INTO items (seq, run_id, item_id, kind, text, status, ts, updated_seq) VALUES (1, 'r0', 'user:r0', 'user', 'hi', 'done', 1, 1)`);
+  db.run(`INSERT INTO native (id, harness, native_thread_id, account, model) VALUES (1, 'claude', 'th-1', NULL, 'm')`);
+  db.close();
+}
+
+const userVersion = (dir: string) => {
+  const db = new Database(ThreadStore.path(dir, "dev-a-b-1"));
+  try { return (db.query("PRAGMA user_version").get() as { user_version: number }).user_version; } finally { db.close(); }
+};
+
+test("T8: a new store records its schema version", () => {
+  const dir = mkdtempSync(join(tmpdir(), "threads-"));
+  ThreadStore.open(dir, "dev-a-b-1").close();
+  expect(userVersion(dir)).toBe(THREAD_STORE_SCHEMA);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("T8: a live store from step 2 (no schema version) opens with its data unchanged and is brought to the current schema", () => {
+  const dir = mkdtempSync(join(tmpdir(), "threads-"));
+  step2Store(dir);
+  const s = ThreadStore.open(dir, "dev-a-b-1");
+  const snap = s.snapshot();
+  expect(snap).toMatchObject({ lastSeq: 3, seenSeq: 2, native: { harness: "claude", nativeThreadId: "th-1", account: null, model: "m" } });
+  expect(snap.runs.map((r) => [r.runId, r.status, r.endedSeq])).toEqual([["r0", "completed", 3]]);
+  expect(snap.items.map((i) => [i.kind, i.text])).toEqual([["user", "hi"]]);
+  // What steps 3-5 added works on it.
+  n = 3;
+  s.apply(ev({ type: "thread.native", harness: "claude", nativeThreadId: "th-1", account: null, model: "m" }));
+  s.apply(ev({ type: "run.queued", runId: "r1", text: "img", attachments: ["/inbox/s/a.png"] }));
+  s.apply(ev({ type: "run.failed", runId: "r1", error: "limit", reason: "rate-limited" }));
+  expect(s.providerThread("claude")).toMatchObject({ nativeThreadId: "th-1", resumeFailed: false });
+  expect(s.snapshot().runs.at(-1)).toMatchObject({ runId: "r1", status: "failed", failureReason: "rate-limited" });
+  s.close();
+  expect(userVersion(dir)).toBe(THREAD_STORE_SCHEMA);
+  // Reopening a current store changes nothing.
+  const again = ThreadStore.open(dir, "dev-a-b-1");
+  expect(again.snapshot().runs).toHaveLength(2);
+  again.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("T8: a store written by a newer devd (higher schema version) is refused with an explicit error", () => {
+  const dir = mkdtempSync(join(tmpdir(), "threads-"));
+  ThreadStore.open(dir, "dev-a-b-1").close();
+  const db = new Database(ThreadStore.path(dir, "dev-a-b-1"));
+  db.run(`PRAGMA user_version = ${THREAD_STORE_SCHEMA + 1}`);
+  db.close();
+  expect(() => ThreadStore.open(dir, "dev-a-b-1")).toThrow(`thread store schema ${THREAD_STORE_SCHEMA + 1} is newer than this devd's (${THREAD_STORE_SCHEMA})`);
+  rmSync(dir, { recursive: true, force: true });
 });

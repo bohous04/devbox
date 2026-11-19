@@ -14,6 +14,8 @@ struct NewSessionSheet: View {
     @Environment(\.dismiss) private var dismiss
     let actions: SessionActions
     let onStarted: () async -> Void
+    /// Opens a chat session's thread (Inbox tab); the sheet dismisses itself first.
+    let onOpenChat: (String) -> Void
 
     @State private var tree: [TreeProject]?
     @State private var folder = ""
@@ -21,6 +23,8 @@ struct NewSessionSheet: View {
     @State private var repo = ""
     @State private var agent: AgentName = .claude
     @State private var msg: String?
+    /// A chat session whose start came with a runtime notice: opened with "Open chat" once the notice was read.
+    @State private var chatId: String?
     @State private var err: String?
     @State private var busy = false
 
@@ -113,6 +117,9 @@ struct NewSessionSheet: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    if let chatId {
+                        Button("Open chat") { openChat(chatId) }
+                    }
                     if let err {
                         Text("Error: \(err)")
                             .font(.caption)
@@ -142,10 +149,16 @@ struct NewSessionSheet: View {
         }
     }
 
+    private func openChat(_ id: String) {
+        dismiss()
+        onOpenChat(id)
+    }
+
     private func start(fresh: Bool?) {
         guard !folder.isEmpty, !project.isEmpty, !repo.isEmpty, !busy else { return }
         err = nil
         msg = nil
+        chatId = nil
         busy = true
         let choice = selected
         let capturedFolder = folder, capturedProject = project, capturedRepo = repo, capturedAgent = agent
@@ -160,11 +173,15 @@ struct NewSessionSheet: View {
                         cloneUrl: choice?.cloneUrl, agent: capturedAgent, fresh: fresh
                     )
                 }
-                msg = result.pull?.status == "conflict"
-                    ? "\(result.session.id) is running — pull conflict, the agent is resolving it now"
-                    : "Session \(result.session.id) running."
                 repo = ""
                 await onStarted()
+                switch NewSessionLogic.afterOpen(result) {
+                case .openChat(let id):
+                    openChat(id)
+                case .show(let text, let id):
+                    msg = text
+                    chatId = id
+                }
             } catch {
                 err = errorText(error)
             }

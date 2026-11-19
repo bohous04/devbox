@@ -135,6 +135,17 @@ export function tmuxRuntimeBlock(a: AgentName): string | null {
   return AGENTS[a].chatOnly ? `${AGENTS[a].label} runs only in chat sessions` : null;
 }
 
+/** The runtime of a VPS session or schedule whose request named none: the default, unless the default cannot run the
+ *  agent and the other runtime can — then the other one, with a notice the clients show (never switched silently).
+ *  When neither can, the default stays and its own block refuses the request later. */
+export function runtimeForOmitted(def: "tmux" | "chat", a: AgentName, what: "session" | "schedule"): { runtime: "tmux" | "chat"; notice?: string } {
+  const block = (r: "tmux" | "chat") => (r === "chat" ? chatRuntimeBlock(a, "vps") : tmuxRuntimeBlock(a));
+  const other = def === "chat" ? "tmux" : "chat";
+  const blocked = block(def);
+  if (blocked === null || block(other) !== null) return { runtime: def };
+  return { runtime: other, notice: `${blocked}, so this ${what} runs in ${other}` };
+}
+
 /** Why the agent must not run on an InstaBox (null = it may). Proxy profiles run via
  *  CLIProxyAPI/an upstream key on the VPS (unreachable from the VM, keys must not go into the VM); Antigravity
  *  depends on VPS-only login and the harvester (M10). Applies to create and to a live swap (I4). */

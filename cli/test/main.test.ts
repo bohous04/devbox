@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { ApiClient } from "../src/api";
-import { askFresh, closeParentTab } from "../src/main";
+import { askFresh, chatLinkLine, closeParentTab } from "../src/main";
 import type { Target } from "../src/resolve";
 
 const target: Target = { folder: "acme", project: "shop", repo: "web", cloned: true };
@@ -36,4 +36,12 @@ test("closeParentTab: an error from process.kill (ESRCH/EPERM) is swallowed, not
   } finally {
     process.kill = original;
   }
+});
+
+// A chat session has no agent UI in the terminal: `dev` attaches the shell and prints exactly one
+// line pointing at the chat (app deep link + dashboard route).
+test("chatLinkLine: one line with the app link and the dashboard link", () => {
+  const line = chatLinkLine("dev-shop-web", "http://devd.example:7000");
+  expect(line).toBe("Chat session: devbox://thread/dev-shop-web  http://devd.example:7000/#/s/dev-shop-web");
+  expect(line).not.toContain("\n");
 });

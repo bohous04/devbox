@@ -26,7 +26,7 @@ export interface SessionInfo extends SessionRow {
   tmux?: TmuxSession[];
   dockerHost?: string | null;
 }
-export interface OpenResult { session: SessionRow; pull?: PullResult; created: boolean; claudePrompt?: string }
+export interface OpenResult { session: SessionRow; pull?: PullResult; created: boolean; claudePrompt?: string; runtimeNotice?: string }
 
 // Row of GET /api/accounts (devd/src/accounts.ts buildAccountViews) — only the fields the CLI reads.
 export interface AnthropicAccountView {
@@ -136,7 +136,7 @@ export class ApiClient {
   }
   // InstaBox always creates a NEW session (a job with progress); unlike open() it does not join.
   openInstabox(t: { folder: string; project: string; repo: string; cloneUrl: string; agent?: AgentName }) {
-    return this.req<{ jobId: string; sessionId: string }>("POST", "/api/sessions", { ...t, host: "instabox" });
+    return this.req<{ jobId: string; sessionId: string; runtimeNotice?: string }>("POST", "/api/sessions", { ...t, host: "instabox" });
   }
   instaboxJob(id: string) { return this.req<IbxJob>("GET", `/api/instabox/jobs/${encodeURIComponent(id)}`); }
   instaboxStatus() { return this.req<IbxStatus | { enabled: false }>("GET", "/api/instabox/status"); }

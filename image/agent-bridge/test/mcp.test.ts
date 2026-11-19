@@ -6,7 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { EventLog } from "../src/eventLog";
 import type { BackgroundWork } from "../src/events";
-import { createMcpServer } from "../src/mcp";
+import { createMcpServer, sendCommand } from "../src/mcp";
 import { claudeMcpServers, codexMcpArgs } from "../src/prompts";
 import { startServer } from "../src/server";
 import { DeclaredWaits } from "../src/waits";
@@ -89,6 +89,38 @@ test("an unreachable bridge is a tool error, not a default", async () => {
   const r: any = await c.callTool({ name: "devbox_wait_done", arguments: {} });
   expect(r.isError).toBe(true);
   await c.close();
+});
+
+/** A unix socket that accepts commands and answers each with `reply` (nothing when null). */
+function fakeBridge(reply: string | null): string {
+  const path = join(dir, "fake.sock");
+  const l = Bun.listen({ unix: path, socket: { data(s) { if (reply !== null) s.write(reply); } } });
+  closers.push(() => l.stop(true));
+  return path;
+}
+
+test("a bridge that never answers fails the command after the timeout, it does not hang", async () => {
+  const path = fakeBridge(null);
+  const t0 = Date.now();
+  await expect(sendCommand(path, { kind: "endWait" }, 100)).rejects.toThrow("did not answer endWait within 100 ms");
+  expect(Date.now() - t0).toBeLessThan(2000);
+});
+
+test("a command that timed out before the connection opened is never delivered", async () => {
+  const path = join(dir, "slow.sock");
+  const got: string[] = [];
+  const l = Bun.listen({ unix: path, socket: { data(_s, d) { got.push(d.toString()); } } });
+  closers.push(() => l.stop(true));
+  await expect(sendCommand(path, { kind: "endWait" }, 0)).rejects.toThrow("did not answer");
+  await new Promise((r) => setTimeout(r, 100));
+  expect(got).toEqual([]);
+});
+
+test("a malformed frame from the bridge is an error result, not a crash", async () => {
+  const path = fakeBridge("{not json\n");
+  const logged: string[] = [];
+  await expect(sendCommand(path, { kind: "endWait" }, 1000, (m) => logged.push(m))).rejects.toThrow("malformed frame");
+  expect(logged).toEqual([expect.stringContaining("malformed frame")]);
 });
 
 test("expired declared wait is removed and background.changed emitted", () => {

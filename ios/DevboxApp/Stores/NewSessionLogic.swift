@@ -76,6 +76,24 @@ enum NewSessionLogic {
         sessions.filter { $0.project == project && $0.repo == repo }
             .sorted { $0.id < $1.id }
     }
+
+    enum AfterOpen: Equatable {
+        /// A chat session: leave the sheet and open its thread.
+        case openChat(String)
+        /// Show this message in the sheet; `chatId` = a chat session the user opens with "Open chat".
+        case show(String, chatId: String?)
+    }
+
+    /// What the sheet does with devd's answer. A `runtimeNotice` (devd used the other runtime than its default) is
+    /// always shown before anything else happens, so a chat session with one waits for "Open chat".
+    static func afterOpen(_ r: OpenResult) -> AfterOpen {
+        let isChat = r.session.runtime == .chat
+        if isChat, r.runtimeNotice == nil { return .openChat(r.session.id) }
+        let base = r.pull?.status == "conflict"
+            ? "\(r.session.id) is running — pull conflict, the agent is resolving it now"
+            : "Session \(r.session.id) running."
+        return .show([base, r.runtimeNotice].compactMap { $0 }.joined(separator: " "), chatId: isChat ? r.session.id : nil)
+    }
 }
 
 /// Minimal shape that `sessionsFor` needs from one session — `SessionLive` satisfies it

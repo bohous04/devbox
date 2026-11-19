@@ -21,6 +21,10 @@ export interface ProviderThread {
   resumeFailed: boolean;
 }
 
+/** The thread store's schema (`PRAGMA user_version`). A change to the schema raises it and adds a migration from the
+ *  previous version in `open`; a store with a higher version (written by a newer devd) is refused, never guessed at. */
+export const THREAD_STORE_SCHEMA = 1;
+
 /** Per-session conversation store: `<root>/_threads/<id>.sqlite`. Conversation data stays out of the
  *  main devd DB on purpose. Items are ordered by their own `id`; `seq` is the log seq of the event that created them (one event can create
  *  several items); `updated_seq`
@@ -39,6 +43,19 @@ export class ThreadStore {
     db.run("PRAGMA busy_timeout = 5000");
     db.run("PRAGMA journal_mode = WAL");
     db.run("PRAGMA synchronous = NORMAL");
+    const version = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+    if (version > THREAD_STORE_SCHEMA) {
+      db.close();
+      throw new Error(`thread store schema ${version} is newer than this devd's (${THREAD_STORE_SCHEMA}): ${ThreadStore.path(root, sessionId)}`);
+    }
+    if (version === 0) db.transaction(() => ThreadStore.createSchema1(db))();
+    return new ThreadStore(db, opts.onNotice ?? (() => {}));
+  }
+
+  /** Schema 1: every store from before `user_version` (steps 2-5 created and extended them without one) and every new
+   *  store. Idempotent on purpose: an unversioned store may be of any shape step 2-5 shipped, so tables are created if
+   *  missing and the columns added since step 2 are added if missing. */
+  private static createSchema1(db: Database) {
     db.run(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)`);
     db.run(`CREATE TABLE IF NOT EXISTS runs (
       run_id TEXT PRIMARY KEY, origin TEXT NOT NULL, status TEXT NOT NULL, harness TEXT,
@@ -69,10 +86,19 @@ export class ThreadStore {
     if (!(db.query("PRAGMA table_info(items)").all() as { name: string }[]).some((c) => c.name === "attachments")) {
       db.run("ALTER TABLE items ADD COLUMN attachments TEXT");
     }
-    return new ThreadStore(db, opts.onNotice ?? (() => {}));
+    db.run(`PRAGMA user_version = 1`);
   }
 
   lastSeq(): number { return this.meta("last_seq"); }
+
+  /** `lastSeq` once it is on disk, for the bridge's periodic ack (S6-R21): with synchronous=NORMAL the newest WAL
+   *  commits are synced only by a checkpoint, so this runs one (PASSIVE: it never waits). null when the checkpoint
+   *  could not copy the whole WAL (another connection's read snapshot holds part of it). */
+  durableSeq(): number | null {
+    const seq = this.lastSeq();
+    const r = this.db.query("PRAGMA wal_checkpoint(PASSIVE)").get() as { busy: number; log: number; checkpointed: number };
+    return r.busy === 0 && r.checkpointed === r.log ? seq : null;
+  }
 
   private meta(key: string): number {
     const r = this.db.query("SELECT value FROM meta WHERE key=?").get(key) as { value: number } | null;
@@ -202,6 +228,10 @@ export class ThreadStore {
         return;
       case "bridge.started":
         if (ev.resumed) this.insertItem(seq, ts, { runId: null, itemId: null, kind: "notice", text: `Agent bridge restarted (v${ev.version})`, status: "done" });
+        if (ev.notice) this.insertItem(seq, ts, { runId: null, itemId: null, kind: "notice", text: ev.notice, status: "done" });
+        return;
+      case "bridge.notice":
+        this.insertItem(seq, ts, { runId: null, itemId: null, kind: "notice", text: ev.text, status: "done" });
         return;
       default: {
         const unknown: never = ev;
@@ -268,12 +298,30 @@ export class ThreadStore {
    *  seq with its own item id `notice:<n>` and is announced through `onNotice` (the SSE stream). A replay from that
    *  seq still includes it (see snapshot), for a client whose stream was down when it was added. */
   addNotice(text: string, ts: number): void {
-    const seq = this.lastSeq();
+    this.notice(this.lastSeq(), text, ts, () => {});
+  }
+
+  /** `addNotice` once per `key` for the store's lifetime (persisted); false when it was said already. */
+  addNoticeOnce(key: string, text: string, ts: number): boolean {
+    if (this.db.query("SELECT 1 FROM meta WHERE key=?").get(`once:${key}`)) return false;
+    this.notice(this.lastSeq(), text, ts, () => this.setMeta(`once:${key}`, 1));
+    return true;
+  }
+
+  /** Gives up on the bridge's event `seq` (above lastSeq), which devd cannot apply: it counts as applied, and the
+   *  notice `text` takes its place at that seq. */
+  skipEvent(seq: number, text: string, ts: number): void {
+    if (seq <= this.lastSeq()) throw new Error(`skipEvent(${seq}) is not above lastSeq ${this.lastSeq()}`);
+    this.notice(seq, text, ts, () => this.setMeta("last_seq", seq));
+  }
+
+  private notice(seq: number, text: string, ts: number, also: () => void) {
     const n = this.meta("notice_count") + 1;
     const item: ThreadItem = { seq, runId: null, itemId: `notice:${n}`, kind: "notice", text, status: "done", ts };
     this.db.transaction(() => {
       this.setMeta("notice_count", n);
       this.insertItem(seq, ts, item);
+      also();
     })();
     this.onNotice(item);
   }

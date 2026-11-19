@@ -289,6 +289,8 @@ struct OpenResult: Decodable {
         let container: String
         let status: SessionStatus
         let solo: Int
+        /// The runtime devd started or joined (it picks the default when the app names none); nil from an older devd.
+        let runtime: InboxItem.Runtime?
     }
     /// Present only when the repo had to be fetched/updated; `status == "conflict"` means
     /// the session was already running and the agent is now resolving the merge itself (see `NewSessionSheet` messages).
@@ -300,6 +302,8 @@ struct OpenResult: Decodable {
     let created: Bool
     let pull: Pull?
     let claudePrompt: String?
+    /// Why devd started the session in the other runtime than its default (the default cannot run the agent).
+    let runtimeNotice: String?
 }
 
 // MARK: - Auth
@@ -1118,12 +1122,15 @@ enum BridgeEvent: Decodable, Equatable {
     case runCompleted(runId: String, nativeThreadId: String, usage: TokenUsage?)
     case runInterrupted(runId: String)
     case runFailed(runId: String, error: String, reason: String?)
-    case bridgeStarted(version: String, resumed: Bool)
+    /// `notice` (bridge 1.5.0+): something the user must know about this start, e.g. state.json rebuilt from the log.
+    case bridgeStarted(version: String, resumed: Bool, notice: String?)
+    /// (bridge 1.5.0+) A notice for the thread that is not about a run.
+    case bridgeNotice(text: String)
     case unknown(type: String)
 
     private enum K: String, CodingKey {
         case type, harness, nativeThreadId, account, model, runId, text, attachments, origin, itemId, role, tool, input
-        case isError, output, requestId, kind, prompt, options, multiSelect, answer, by, work, usage, error, reason, version, resumed
+        case isError, output, requestId, kind, prompt, options, multiSelect, answer, by, work, usage, error, reason, version, resumed, notice
     }
 
     init(from decoder: Decoder) throws {
@@ -1163,7 +1170,9 @@ enum BridgeEvent: Decodable, Equatable {
         case "run.failed":
             self = .runFailed(runId: try s(.runId), error: try s(.error), reason: try o(.reason))
         case "bridge.started":
-            self = .bridgeStarted(version: try s(.version), resumed: try c.decode(Bool.self, forKey: .resumed))
+            self = .bridgeStarted(version: try s(.version), resumed: try c.decode(Bool.self, forKey: .resumed), notice: try o(.notice))
+        case "bridge.notice":
+            self = .bridgeNotice(text: try s(.text))
         default:
             self = .unknown(type: type)
         }

@@ -310,6 +310,32 @@ final class SessionActionsTests: XCTestCase {
         XCTAssertNil(body["repo"])
     }
 
+    /// devd names the runtime it used and, when it could not use the default, why (`runtimeNotice`, step 6).
+    func testOpenSessionDecodesRuntimeAndRuntimeNotice() async throws {
+        let json = """
+        {"session":{"id":"dev-shop-web","folder":"acme","project":"shop","repo":"web",
+         "container":"c1","status":"running","solo":0,"runtime":"tmux"},"created":true,
+         "runtimeNotice":"Antigravity is not available in chat sessions yet, so this session runs in tmux"}
+        """.data(using: .utf8)!
+        let actions = makeActions { _ in .init(statusCode: 201, data: json) }
+
+        let result = try await actions.openSession(folder: "acme", project: "shop", repo: "web", cloneUrl: nil, agent: .antigravity, fresh: nil)
+
+        XCTAssertEqual(result.session.runtime, .tmux)
+        XCTAssertEqual(result.runtimeNotice, "Antigravity is not available in chat sessions yet, so this session runs in tmux")
+        // The app names no runtime: devd picks it from its default.
+        XCTAssertNil(bodyJSON(try XCTUnwrap(MockURLProtocol.capturedRequests.first))["runtime"])
+    }
+
+    func testOpenSessionWithoutRuntimeFieldsDecodesAsNil() async throws {
+        let actions = makeActions { _ in .init(statusCode: 200, data: self.openResultJSON()) }
+
+        let result = try await actions.openSession(folder: "acme", project: "shop", repo: "web", cloneUrl: nil, agent: nil, fresh: nil)
+
+        XCTAssertNil(result.session.runtime)
+        XCTAssertNil(result.runtimeNotice)
+    }
+
     func testOpenSessionDecodesPullConflict() async throws {
         let actions = makeActions { _ in .init(statusCode: 200, data: self.openResultJSON(pullStatus: "conflict")) }
 

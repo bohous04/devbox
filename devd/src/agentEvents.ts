@@ -78,6 +78,9 @@ export interface HookMeta {
   // `undefined` = the field is missing in stdin (older Claude Code) — that must stay distinguishable
   // from 0, because it contributes to the union with zero, not with "don't know".
   backgroundTasks?: number;
+  /** Set when devd sends the event itself to correct its counters (ChatHub.drop), not because an agent did
+   *  something; becomes the notify_log reason. */
+  correction?: "drop-correction";
 }
 
 // The detail in notify_log shows only the first 200 characters of the prompt, and only on the turn divider
@@ -518,7 +521,7 @@ export class AgentEventHub {
         const underflow = st.inflight === 0;
         st.inflight = Math.max(0, st.inflight - 1);
         st.lastSubagentAt = now;
-        log("none", underflow ? "counter-underflow" : undefined);
+        log("none", underflow ? "counter-underflow" : meta.correction);
         return;
       }
       case "task_created":
@@ -615,6 +618,13 @@ export class AgentEventHub {
   heldFor(sessionId: string, endedAt: number, reason: "pr-checks" | "critic-review"): boolean {
     const last = lastSweepDone(this.d.db, sessionId, endedAt);
     return last?.decision === "deferred" && last.reason === reason;
+  }
+
+  /** The "finished" for a run that ended at `endedAt` already went out or was silenced (the newest `sweep_done` row
+   *  since then says so). */
+  completionDecided(sessionId: string, endedAt: number): boolean {
+    const last = lastSweepDone(this.d.db, sessionId, endedAt);
+    return last?.decision === "sent" || last?.decision === "suppressed";
   }
 
   /** ChatHub: the critic reviews run `runId`, so its `stop` comes only after the verdict. Recorded so a devd restart

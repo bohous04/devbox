@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { ACP_AGENTS, isAcpAgent } from "./acpAgents";
 import { openAcpSession } from "./acpSession";
@@ -6,7 +6,7 @@ import { CLAUDE_CAPABILITIES, openClaudeSession, ResumeFailedError, type Harness
 import { prepareShadowHome, type HomesPaths } from "./codexHomes";
 import { CODEX_CAPABILITIES, openCodexSession } from "./codexSession";
 import { CONTINUATION_TEXT, CONTINUATION_WINDOW_MS, mayContinue } from "./continuation";
-import { EventLog } from "./eventLog";
+import { EventLog, type LogScan } from "./eventLog";
 import type { BackgroundWork, BridgeEvent, RunOrigin, UsageBaseline } from "./events";
 import { withImagePaths } from "./images";
 import { DEFAULT_SOCKET } from "./mcp";
@@ -14,15 +14,19 @@ import { ACP_INSTRUCTIONS, acpMcpServers, APPENDED_SYSTEM_PROMPT, claudeMcpServe
 import type { BridgeCommand, HandoffDelivery, SwitchTarget, TurnOrigin } from "./protocol";
 import { INHERITED_STRIP, isProxyProfile, proxyProfileEnv } from "./proxyProfile";
 import { startServer } from "./server";
-import { loadState, saveState, type BridgeState, type PersistedTarget } from "./state";
+import { loadState, saveState, StateCorruptError, type BridgeState, type PersistedTarget } from "./state";
+import { BRIDGE_VERSION } from "./version";
 import { DeclaredWaits } from "./waits";
 
-export const BRIDGE_VERSION = "1.4.0";
+export { BRIDGE_VERSION };
 export const DEFAULT_BRIDGE_DIR = "/run/devd/bridge";
 export const CLAUDE_ACCOUNTS_ROOT = "/home/dev/.claude-accounts";
 export const CODEX_ACCOUNTS_ROOT = "/home/dev/.codex-accounts";
 export const RESTART_LOOP_ERROR = "restart loop: no automatic continuation";
 export const NO_THREAD_ERROR = "restart before the conversation started; resend your message";
+/** `run.failed` error for a message the log shows queued that the bridge's state no longer holds (state.json was
+ *  lost, or a crash came between saving the state and announcing the message's end). */
+export const LOST_QUEUED_ERROR = "the bridge lost this queued message in a restart; resend it";
 /** `run.failed` error for a resume that did not work, at a switch or at start (on a run id no `run.started`
  *  announced); the bridge then awaits devd's fresh target. */
 export const RESUME_FAILED = "resume-failed";
@@ -43,6 +47,8 @@ const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export class ConfigError extends Error {}
 const WORKSPACE = "/workspace";
 const SWEEP_MS = 30_000;
+/** How old devd's ack must be before the event log is trimmed to it (ruling S6-R19). */
+export const ACK_TRIM_DELAY_MS = 10 * 60_000;
 // Adapter work with an `until` (a ScheduleWakeup) is dropped this long after its time: the agent was meant to
 // wake by then. A wakeup that fires during a user run is folded into it and never cleared by the adapter.
 export const OVERDUE_MARGIN_MS = 60_000;
@@ -78,6 +84,8 @@ export interface ServeOptions {
   logError?: (msg: string) => void;
   /** Interval of the expiry sweep; tests shorten it. */
   sweepMs?: number;
+  /** Size below which the event log is not trimmed (eventLog.ts COMPACT_MIN_BYTES); tests lower it. */
+  logCompactMinBytes?: number;
 }
 
 export interface Bridge {
@@ -277,17 +285,31 @@ function harnessOpener(launchEnv: Env, logError: (msg: string) => void): OpenHar
   };
 }
 
-/** From the previous bridge's log: request ids opened and never resolved (it died while they were open), and the
- *  runs whose user message was already announced with `run.queued`. */
-function scanLog(log: EventLog): { unresolved: string[]; announced: Set<string> } {
-  const open = new Set<string>();
-  const announced = new Set<string>();
-  for (const { event } of log.readFrom(0)) {
-    if (event.type === "request.opened") open.add(event.requestId);
-    else if (event.type === "request.resolved") open.delete(event.requestId);
-    else if (event.type === "run.queued") announced.add(event.runId);
+/** A state.json that cannot be used, rebuilt from the event log (never a silent reset). What the log holds: the
+ *  latest thread (`thread.native`), the run that was running (the last one started without an end) and the messages
+ *  queued behind it (announced with `run.queued`, never started). What it does not: the continuation history, Claude's
+ *  usage baseline, a pending handoff, a switched target's env, a message's harness text. A thread of another harness
+ *  or account than the launch one cannot be opened with the launch env: the bridge awaits devd's target for it. */
+function recoverState(scan: LogScan, launch: { harness: Harness; account: string | null; model: string | null }): { state: BridgeState; outcome: string } {
+  const native = scan.lastNative?.event ?? null;
+  const open = [...scan.openRuns];
+  const started = open.filter(([, r]) => r.started);
+  const state: BridgeState = {
+    harness: launch.harness, nativeThreadId: null, account: launch.account, model: launch.model,
+    activeRunId: started.length ? started[started.length - 1]![0] : null,
+    queue: open.flatMap(([runId, r]) => (r.started || r.queued === null ? [] : [{ runId, text: r.queued.text, attachments: r.queued.attachments, ...(r.queued.origin ? { origin: r.queued.origin } : {}) }])),
+    continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, trimSeq: 0, ackCandidate: null, awaitingTarget: false,
+  };
+  if (native === null) return { state, outcome: "there is no thread to resume, a new one opens" };
+  if (native.harness === launch.harness && native.account === launch.account) {
+    return { state: { ...state, nativeThreadId: native.nativeThreadId, model: native.model ?? launch.model }, outcome: `it resumes thread ${native.nativeThreadId}` };
   }
-  return { unresolved: [...open], announced };
+  // Another harness, or another account's home (the thread lives there): the launch env must not open it.
+  const on = native.harness !== launch.harness ? native.harness : `account ${native.account ?? "(shared)"}, not this launch's ${launch.account ?? "(shared)"}`;
+  return {
+    state: { ...state, harness: native.harness as Harness, nativeThreadId: native.nativeThreadId, account: native.account, model: native.model, awaitingTarget: true },
+    outcome: `thread ${native.nativeThreadId} is on ${on}, it waits for devd to send that target`,
+  };
 }
 
 export async function serve(o: ServeOptions): Promise<Bridge> {
@@ -295,15 +317,26 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   const logError = o.logError ?? ((msg: string) => console.error(msg));
   mkdirSync(o.bridgeDir, { recursive: true });
   const statePath = join(o.bridgeDir, "state.json");
-  const log = new EventLog(join(o.bridgeDir, "events.jsonl"));
+  const log = new EventLog(join(o.bridgeDir, "events.jsonl"), { logError, ...(o.logCompactMinBytes === undefined ? {} : { compactMinBytes: o.logCompactMinBytes }) });
   let loaded: BridgeState | null;
+  /** Said in this start's `bridge.started` when state.json had to be rebuilt. */
+  let recoveryNotice: string | null = null;
   try {
     loaded = loadState(statePath);
   } catch (e) {
-    throw new ConfigError(`${statePath} is unreadable: ${e instanceof Error ? e.message : String(e)}`);
+    if (!(e instanceof StateCorruptError)) throw new ConfigError(`${statePath} is unreadable: ${errorText(e)}`);
+    // Kept for inspection; the rebuilt state replaces it.
+    const kept = `${statePath}.corrupt-${now()}`;
+    renameSync(statePath, kept);
+    const r = recoverState(log.scan(), { harness: o.harness, account: o.account, model: o.model });
+    loaded = r.state;
+    recoveryNotice = `state.json was unusable (${e.message}); the bridge rebuilt its state from the event log: ${r.outcome}. `
+      + `Lost with it: the automatic-continuation history, the usage baseline, an undelivered switch handoff. The damaged file is kept as ${basename(kept)}.`;
+    logError(`agent-bridge: ${recoveryNotice}`);
   }
-  // After a switch the persisted target is the session's harness, whatever the container was launched with.
-  if (loaded && loaded.target === null && loaded.harness !== o.harness) {
+  // After a switch the persisted target is the session's harness, whatever the container was launched with (or,
+  // after a recovery, devd sends it).
+  if (loaded && loaded.target === null && !loaded.awaitingTarget && loaded.harness !== o.harness) {
     throw new ConfigError(`state.json belongs to a ${loaded.harness} thread but DEVD_AGENT is ${o.harness}; refusing to mix threads`);
   }
   const state: BridgeState = loaded ?? {
@@ -318,6 +351,9 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     target: null,
     pendingHandoff: null,
     instructionsPending: false,
+    trimSeq: 0,
+    ackCandidate: null,
+    awaitingTarget: false,
   };
   // A Claude/Codex target without its own home (a setModel on the launch target) keeps only the model choice: the
   // account is the one this launch leased, which a recreated container may have changed. An ACP target has no home
@@ -328,15 +364,25 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   state.account = state.target === null ? o.account : state.target.account;
   // A persisted target whose secret env values were dropped cannot be opened until devd sends it again. Also set
   // after a failed resume, until devd sends the fresh target; every handshake reports it.
-  let awaitingTarget = state.target !== null && state.target.droppedEnvKeys.length > 0;
-  let current: SwitchTarget | null = state.target === null
-    ? { harness: o.harness, account: o.account, model: o.model, env: o.targetEnv ?? {} }
-    : awaitingTarget ? null : { harness: state.target.harness, account: state.target.account, model: state.target.model, env: state.target.env };
+  let awaitingTarget = state.awaitingTarget || (state.target !== null && state.target.droppedEnvKeys.length > 0);
+  let current: SwitchTarget | null = awaitingTarget ? null
+    : state.target === null ? { harness: o.harness, account: o.account, model: o.model, env: o.targetEnv ?? {} }
+    : { harness: state.target.harness, account: state.target.account, model: state.target.model, env: state.target.env };
   // Interrupted and queued runs of the previous bridge wait for a harness: from the start, or the next switchTarget.
   let recoveryPending = true;
   let switching = false;
   const persist = () => saveState(statePath, state);
   persist();
+  // What devd acknowledged before this start is dropped from the log (once it is big), then what is still open read.
+  // A failed trim is an explicit, logged degrade, not a silent fallback: the untrimmed log is complete and safe to run
+  // on, while exiting would put the launcher into a restart loop over a size optimisation.
+  try {
+    const dropped = log.compact(state.trimSeq);
+    if (dropped !== null) logError(`agent-bridge: trimmed ${dropped} acknowledged events from events.jsonl at start`);
+  } catch (e) {
+    logError(`agent-bridge: trimming events.jsonl at start failed, running on the untrimmed log: ${errorText(e)}`);
+  }
+  const scan = log.scan();
 
   let adapterWork: BackgroundWork[] = [];
   const notOverdue = (work: BackgroundWork[]) => work.filter((w) => w.until === undefined || w.until + OVERDUE_MARGIN_MS > now());
@@ -397,6 +443,11 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       }
     })());
   const close = () => shutdown(EXIT_STOPPED);
+  /** No usable harness is left: exit for a restart once the command's reply is written (as for `stop`). */
+  const exitAfterReply = () => {
+    harness = null;
+    setTimeout(() => void shutdown(EXIT_HARNESS_ENDED).catch((err) => logError(`agent-bridge: shutdown failed: ${errorText(err)}`)), 0);
+  };
 
   // `retired` marks a harness serve closes on purpose (restartAgent, shutdown) or, opened by a switch or at start, one
   // that failed to open in a way the caller handles (`handlesFailure`: a failed resume, devd re-plans; a switched
@@ -572,18 +623,9 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     state.nativeThreadId = cmd.resume;
     if (cmd.handoff !== null || !sameThread) state.pendingHandoff = cmd.handoff;
     persist();
-    const h = openHarness(() => true);
-    harness = h;
-    try {
-      await h.session.ready;
-    } catch (e) {
-      if (e instanceof ResumeFailedError) {
-        resumeFailed(e);
-        return;
-      }
-      // Persisting a target that cannot open would restart the bridge into it forever, while devd's DB still names
-      // the previous one: go back to that and fail the switch with the agent's error.
-      logError(`agent-bridge: opening ${target.harness} failed: ${errorText(e)}; back to ${previous.harness}`);
+    // Persisting a target that cannot open would restart the bridge into it forever, while devd's DB still names
+    // the previous one: go back to that.
+    const restorePrevious = () => {
       current = previous.current;
       state.target = previous.target;
       state.harness = previous.harness;
@@ -594,10 +636,37 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       state.usageBaseline = previous.usageBaseline;
       state.instructionsPending = previous.instructionsPending;
       persist();
+    };
+    let h: { session: HarnessSession; retired: boolean };
+    try {
+      h = openHarness(() => true);
+    } catch (e) {
+      // No harness at all now (the old one is retired): back to the previous target on disk, answer with the error,
+      // then exit so the launcher starts a fresh bridge on it (as restartAgent).
+      logError(`agent-bridge: opening ${target.harness} failed: ${errorText(e)}; back to ${previous.harness}, exiting for a restart`);
+      restorePrevious();
+      exitAfterReply();
+      throw e;
+    }
+    harness = h;
+    try {
+      await h.session.ready;
+    } catch (e) {
+      if (e instanceof ResumeFailedError) {
+        resumeFailed(e);
+        return;
+      }
+      // Fail the switch with the agent's error and reopen the previous target.
+      logError(`agent-bridge: opening ${target.harness} failed: ${errorText(e)}; back to ${previous.harness}`);
+      restorePrevious();
       if (current !== null) await openCurrent();
       throw e;
     }
     awaitingTarget = false;
+    if (state.awaitingTarget) {
+      state.awaitingTarget = false;
+      persist();
+    }
     if (recoveryPending) await recover();
   }
 
@@ -632,7 +701,15 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
         liveHarness();
         refuseWhileRunning("restart");
         await retireHarness();
-        harness = openHarness();
+        try {
+          harness = openHarness();
+        } catch (e) {
+          // The old harness is closed and no new one opened: exit so the launcher starts a fresh bridge, after the
+          // reply is written (as for `stop`).
+          logError(`agent-bridge: reopening the harness failed: ${errorText(e)}; exiting for a restart`);
+          exitAfterReply();
+          throw e;
+        }
         return;
       }
       case "setModel":
@@ -654,9 +731,80 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     }
   }
 
-  const { unresolved, announced } = scanLog(log);
-  const server = startServer({ socketPath: o.socketPath, log, onCommand: handle, handshake: () => ({ version: BRIDGE_VERSION, awaitingTarget }), logError });
+  // Runs whose `run.queued` is in the log: their user message is stored already.
+  const announced = new Set([...scan.openRuns].filter(([, r]) => r.queued !== null).map(([id]) => id));
+
+  /** A hello: devd has stored everything up to `afterSeq`. Below the trim point it is told what it can no longer get. */
+  function onHello(afterSeq: number): void {
+    if (afterSeq < state.trimSeq) {
+      // devd's store went back (restored from an older backup?): what was trimmed above its seq is gone here too.
+      const text = `devd's thread store asked for events after seq ${afterSeq}, but the agent bridge's log was trimmed `
+        + `through seq ${state.trimSeq}: events ${afterSeq + 1}-${state.trimSeq} are no longer available, except runs and `
+        + `questions still open and the latest thread announcement.`;
+      logError(`agent-bridge: ${text}`);
+      try { server.publish({ type: "bridge.notice", text }); }
+      catch (e) { logError(`agent-bridge: cannot publish the trim notice: ${errorText(e)}`); }
+    }
+    acknowledge(afterSeq);
+  }
+
+  /** devd has stored everything up to `seq` (a hello's afterSeq, or a periodic ack on a live link, S6-R21), but its
+   *  store may still lose the newest of them in a power loss (WAL, synchronous=NORMAL). So the trim lags one ack
+   *  (ruling S6-R19): an ack becomes the trim point only when a later ack comes at least ACK_TRIM_DELAY_MS after it and
+   *  is not below it (a devd that came back lower replaces the candidate and keeps everything it misses). Persisted, so
+   *  the next start trims with it too; a failure here is logged and never drops the link (the log just stays longer). */
+  /** devd re-acknowledged `state.ackCandidate` in this process (never true for a candidate loaded from disk). */
+  let candidateConfirmed = false;
+  function acknowledge(seq: number): void {
+    try {
+      const ack = Math.min(seq, log.lastSeq());
+      const t = now();
+      const c = state.ackCandidate;
+      if (c === null || ack < c.seq) {
+        // A first ack, or devd came back below the candidate (it lost events it had acknowledged): the candidate is
+        // not trimmed to; this ack starts ageing instead.
+        state.ackCandidate = { seq: ack, at: t };
+        candidateConfirmed = false;
+      } else if (t - c.at >= ACK_TRIM_DELAY_MS) {
+        state.trimSeq = c.seq;
+        state.ackCandidate = { seq: ack, at: t };
+        candidateConfirmed = false;
+      } else {
+        // devd still has the candidate: the sweep may promote it once it is old enough.
+        candidateConfirmed = true;
+      }
+      persist();
+      const n = log.compact(state.trimSeq);
+      if (n !== null) logError(`agent-bridge: trimmed ${n} events devd acknowledged from events.jsonl`);
+    } catch (e) {
+      logError(`agent-bridge: trimming events.jsonl failed: ${errorText(e)}`);
+    }
+  }
+
+  /** Promotes a candidate that devd confirmed in this process (a later hello or ack not below it) once it is
+   *  ACK_TRIM_DELAY_MS old (S6-R19), and compacts the log once it has grown past the thresholds (one fstat per sweep
+   *  otherwise; a compaction is one streamed pass, at most once per doubling of the log). Age alone never promotes: a
+   *  candidate loaded from disk may predate a power loss that devd's store did not survive whole. Failures are logged;
+   *  the log just stays longer. */
+  function maintainLog(): void {
+    try {
+      const c = state.ackCandidate;
+      if (c !== null && candidateConfirmed && now() - c.at >= ACK_TRIM_DELAY_MS) {
+        state.trimSeq = c.seq;
+        state.ackCandidate = null;
+        candidateConfirmed = false;
+        persist();
+      }
+      const n = log.compact(state.trimSeq);
+      if (n !== null) logError(`agent-bridge: trimmed ${n} events devd acknowledged from events.jsonl`);
+    } catch (e) {
+      logError(`agent-bridge: trimming events.jsonl failed: ${errorText(e)}`);
+    }
+  }
+
+  const server = startServer({ socketPath: o.socketPath, log, onCommand: handle, handshake: () => ({ version: BRIDGE_VERSION, awaitingTarget }), onHello, onAck: acknowledge, logError });
   const sweep = setInterval(() => {
+    maintainLog();
     waits.sweep();
     const live = notOverdue(adapterWork);
     if (live.length !== adapterWork.length) {
@@ -695,10 +843,20 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     version: BRIDGE_VERSION,
     resumed: awaitingTarget || state.nativeThreadId !== null,
     ...(awaitingTarget ? { awaitingTarget: true } : {}),
+    ...(recoveryNotice !== null ? { notice: recoveryNotice } : {}),
   });
   // The previous process's background work and declared waits died with it.
   server.publish({ type: "background.changed", work: [] });
-  for (const requestId of unresolved) server.publish({ type: "request.resolved", requestId, answer: null, by: "expired" });
+  for (const requestId of scan.openRequests) server.publish({ type: "request.resolved", requestId, answer: null, by: "expired" });
+  // Runs the log leaves open that state does not hold any more (a crash between saving the state and publishing their
+  // end, or a lost state.json) would stay "running" or "queued" in devd's store forever: end them now. The active run
+  // and the queue are recover()'s.
+  const held = new Set([state.activeRunId, ...state.queue.map((q) => q.runId)]);
+  for (const [runId, r] of scan.openRuns) {
+    if (held.has(runId)) continue;
+    if (r.started) server.publish({ type: "run.interrupted", runId });
+    else server.publish({ type: "run.failed", runId, error: LOST_QUEUED_ERROR });
+  }
 
   /** Continues what the previous bridge left: the interrupted run, then the queued messages in order. */
   async function recover(): Promise<void> {

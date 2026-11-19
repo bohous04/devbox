@@ -26,7 +26,7 @@ import { createReadStream, mkdtempSync, openSync, rmSync, statSync, writeFileSyn
 import { Readable } from "node:stream";
 import { liveActivitiesRoutes, type LiveActivities } from "./liveActivities";
 import { AGENT_EVENTS, type AgentEvent, type AgentEventHub, type HookMeta, type NotifyFn } from "./agentEvents";
-import { AGENT_IDS, AGENTS, chatRuntimeBlock, instaboxAgentBlock, specFor, tmuxRuntimeBlock, type Upstream } from "./agents";
+import { AGENT_IDS, AGENTS, chatRuntimeBlock, instaboxAgentBlock, runtimeForOmitted, specFor, tmuxRuntimeBlock, type Upstream } from "./agents";
 import { buildProjectLeaderboard, buildRange, buildSessionUsage, buildTotals, buildWorkHours, predictDisk, PROMPT_CHARS, PROMPT_WAIT } from "./aggregate";
 import { buildAccountViews, toCandidates } from "./accounts";
 import { currentAccount, lastSwitchAt } from "./accountLease";
@@ -36,7 +36,7 @@ import type { SwitchAgentResult } from "./agentSwitch";
 import { isValidAccountId, profileIdentity, profileVolume, provisionProfile, removeProfile, writeProfileCredentials, type ProfileDeps, type ProfileRemoval } from "./accountProfiles";
 import { credentialsInputError, normalizeCredentialsInput, parseTierWeight, withTierLabel } from "./accountTokens";
 import type { CloneQueue } from "./clone";
-import { validateConfig, type AccountPoolSettings, type DevConfig, type InstaboxSettings } from "./config";
+import { resolveDefaultRuntime, validateConfig, type AccountPoolSettings, type DevConfig, type InstaboxSettings } from "./config";
 import { AccountLogin } from "./accountLogin";
 import { remoteDockerAlias } from "./dockerTarget";
 import { IbxPreconditionError, type InstaboxSessions } from "./instabox/sessions";
@@ -1009,9 +1009,14 @@ export function createApp(d: ApiDeps): Hono {
       const blocked = instaboxAgentBlock(effective);
       if (blocked) return c.json({ error: blocked }, 400);
       if (!d.instabox) return c.json({ error: "InstaBox is not configured" }, 503);
+      // InstaBox sessions are tmux. A request that named no runtime says so when the default is chat (S6-R4).
+      let notice: string | undefined;
+      // A broken config is this request's error, the same 400 as on the VPS path below, never a silent tmux.
+      try { if (runtime === undefined && resolveDefaultRuntime(d.configRepo.read().settings) === "chat") notice = "InstaBox sessions run in tmux"; }
+      catch (e) { return c.json({ error: (e as Error).message }, 400); }
       try {
         const job = await d.instabox.sessions.startCreate({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent });
-        return c.json({ jobId: job.id, sessionId: job.sessionId }, 202);
+        return c.json({ jobId: job.id, sessionId: job.sessionId, runtime: "tmux", ...(notice ? { runtimeNotice: notice } : {}) }, 202);
       } catch (e) {
         if (e instanceof IbxPreconditionError) return c.json({ error: e.message }, e.status);
         return busy(c, e) ?? c.json({ error: (e as Error).message }, 502);
@@ -1038,9 +1043,22 @@ export function createApp(d: ApiDeps): Hono {
           if (blocked) return c.json({ error: blocked }, 400);
         }
       }
-      const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, runtime, fresh: body.fresh, sessionId: body.sessionId });
+      if (runtime !== undefined || body.sessionId !== undefined) {
+        const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, runtime, fresh: body.fresh, sessionId: body.sessionId });
+        linkOpenedChat(r);
+        return c.json(r, r.created ? 201 : 200);
+      }
+      // No runtime named: an existing session of either runtime is joined (one the agent can run in, the
+      // picked runtime first), and a new one gets the configured default — read per request, so the owner's
+      // flip applies without a restart (S6-R2, S6-R5). A switch away from the default is announced (S6-R3).
+      const effective = resolveAgent(agent, getRepoAgent(d.db, body.folder, body.project, body.repo));
+      const picked = runtimeForOmitted(resolveDefaultRuntime(d.configRepo.read().settings), effective, "session");
+      const other: SessionRuntime = picked.runtime === "chat" ? "tmux" : "chat";
+      const otherBlocked = other === "chat" ? chatRuntimeBlock(effective, "vps") : tmuxRuntimeBlock(effective);
+      const joinRuntimes = otherBlocked ? [picked.runtime] : [picked.runtime, other];
+      const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, runtime: picked.runtime, joinRuntimes, fresh: body.fresh });
       linkOpenedChat(r);
-      return c.json(r, r.created ? 201 : 200);
+      return c.json(r.created && picked.notice ? { ...r, runtimeNotice: picked.notice } : r, r.created ? 201 : 200);
     } catch (e) {
       return busy(c, e) ?? c.json({ error: (e as Error).message }, 400);
     }
@@ -2160,11 +2178,19 @@ export function createApp(d: ApiDeps): Hono {
     // `important` is OPT-IN, not opt-out: it means Pushover emergency (priority 2 =
     // a persistent alarm until acknowledged) for that session's notifications. Until the UI had a
     // toggle for it, all schedules were created with a one and the morning cron then rang.
-    const bad = scheduleRuntimeError(d.db, b.folder, b.project, b.repo, b.runtime, b.agent);
+    const invalid = scheduleRuntimeError(d.db, b.folder, b.project, b.repo, b.runtime, b.agent);
+    if (invalid) return c.json({ error: invalid }, 400);
+    // No runtime named: the schedule stores the default at creation and keeps it when the default flips (S6-R7).
+    let picked: { runtime: SessionRuntime; notice?: string };
+    try {
+      picked = b.runtime !== undefined ? { runtime: b.runtime }
+        : runtimeForOmitted(resolveDefaultRuntime(d.configRepo.read().settings), resolveAgent((b.agent ?? undefined) as AgentName | undefined, getRepoAgent(d.db, b.folder, b.project, b.repo)), "schedule");
+    } catch (e) { return c.json({ error: (e as Error).message }, 400); }
+    const bad = scheduleRuntimeError(d.db, b.folder, b.project, b.repo, picked.runtime, b.agent);
     if (bad) return c.json({ error: bad }, 400);
-    const row: ScheduleRow = { id: crypto.randomUUID(), name: b.name, cron: b.cron, folder: b.folder, project: b.project, repo: b.repo, clone_url: b.cloneUrl, prompt: b.prompt, important: b.important === 1 ? 1 : 0, enabled: 1, last_run_at: null, runtime: b.runtime ?? "tmux", agent: b.agent ?? null };
+    const row: ScheduleRow = { id: crypto.randomUUID(), name: b.name, cron: b.cron, folder: b.folder, project: b.project, repo: b.repo, clone_url: b.cloneUrl, prompt: b.prompt, important: b.important === 1 ? 1 : 0, enabled: 1, last_run_at: null, runtime: picked.runtime, agent: b.agent ?? null };
     insertSchedule(d.db, row);
-    return c.json(row, 201);
+    return c.json(picked.notice ? { ...row, runtimeNotice: picked.notice } : row, 201);
   });
   app.put("/api/schedules/:id", async (c) => {
     const id = c.req.param("id");

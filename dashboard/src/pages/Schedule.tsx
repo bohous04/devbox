@@ -9,7 +9,8 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { agoLabel } from "../format";
-import { AGENT_IDS, AGENT_PROFILES, chatRuntimeBlock, folderChoices, projectChoices, repoChoices, soleProject } from "../newSession";
+import { getDefaultRuntime, validateConfig } from "../configEdit";
+import { AGENT_IDS, AGENT_PROFILES, chatRuntimeBlock, folderChoices, projectChoices, repoChoices, runtimeAfterDefault, soleProject } from "../newSession";
 
 const selectCls = "h-11 w-full rounded-md border bg-background px-2 text-sm text-foreground disabled:cursor-not-allowed disabled:opacity-50";
 const textareaCls = "w-full min-w-0 rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50";
@@ -18,21 +19,29 @@ function NewSchedule({ open, onClose, onCreated }: { open: boolean; onClose: () 
   const [tree, setTree] = useState<TreeProject[] | null>(null);
   const [folder, setFolder] = useState(""); const [project, setProject] = useState(""); const [repo, setRepo] = useState("");
   const [name, setName] = useState(""); const [cron, setCron] = useState("0 3 * * *"); const [prompt, setPrompt] = useState("");
-  const [runtime, setRuntime] = useState<"tmux" | "chat">("tmux"); const [agent, setAgent] = useState<AgentName | "">("");
+  const [runtime, setRuntime] = useState<"tmux" | "chat" | null>(null); const [agent, setAgent] = useState<AgentName | "">("");
   const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => { if (open && tree === null) api.tree().then(setTree).catch((e) => setErr((e as Error).message)); }, [open, tree]);
+  // Preselect the configured default runtime; the form always sends the runtime it shows. Until it is known (or
+  // when the config cannot be read) the user has to pick one, and a late default never overwrites a pick (S6-R18).
+  useEffect(() => {
+    if (!open) return;
+    setRuntime(null);
+    api.config().then((c) => { const def = getDefaultRuntime(validateConfig(c)); setRuntime((picked) => runtimeAfterDefault(picked, def)); })
+      .catch((e) => setErr(`Could not read the default runtime: ${(e as Error).message}`));
+  }, [open]);
   useEffect(() => { if (tree && folder) { const sp = soleProject(tree, folder); if (sp) setProject(sp); } }, [folder, tree]);
   const folders = tree ? folderChoices(tree) : [];
   const projects = tree && folder ? projectChoices(tree, folder) : [];
   const repos = tree && folder && project ? repoChoices(tree, folder, project).filter((r) => r.cloneUrl) : [];
 
   // A chat schedule can only use agents the chat runtime runs; "" = the repository's remembered agent.
-  const agents = AGENT_IDS.filter((a) => runtime === "tmux" || chatRuntimeBlock(a, "vps") === null);
+  const agents = AGENT_IDS.filter((a) => runtime !== "chat" || chatRuntimeBlock(a, "vps") === null);
 
   async function create() {
     const choice = repos.find((r) => r.value === repo);
-    if (busy || !name.trim() || !cron.trim() || !folder || !project || !repo || !choice?.cloneUrl || !prompt.trim()) return;
+    if (busy || !runtime || !name.trim() || !cron.trim() || !folder || !project || !repo || !choice?.cloneUrl || !prompt.trim()) return;
     setBusy(true); setErr(null);
     try {
       await api.createSchedule({ name: name.trim(), cron: cron.trim(), folder, project, repo, cloneUrl: choice.cloneUrl, prompt: prompt.trim(), runtime, ...(agent ? { agent } : {}) });
@@ -51,14 +60,14 @@ function NewSchedule({ open, onClose, onCreated }: { open: boolean; onClose: () 
         </div>
         <label className="grid gap-1.5 text-sm font-medium">Repository<select className={selectCls} value={repo} required disabled={!project || busy} onChange={(e) => setRepo(e.target.value)}><option value="">Choose repository</option>{repos.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}</select></label>
         <div className="grid gap-3 sm:grid-cols-2">
-          <label className="grid gap-1.5 text-sm font-medium">Runtime<select className={selectCls} value={runtime} disabled={busy} onChange={(e) => { const r = e.target.value as "tmux" | "chat"; setRuntime(r); if (agent && r === "chat" && chatRuntimeBlock(agent, "vps")) setAgent(""); }}><option value="tmux">Terminal (tmux)</option><option value="chat">Chat</option></select></label>
+          <label className="grid gap-1.5 text-sm font-medium">Runtime<select className={selectCls} value={runtime ?? ""} required disabled={busy} onChange={(e) => { const r = e.target.value as "tmux" | "chat"; setRuntime(r); if (agent && r === "chat" && chatRuntimeBlock(agent, "vps")) setAgent(""); }}>{runtime === null && <option value="" disabled>Choose runtime</option>}<option value="tmux">Terminal (tmux)</option><option value="chat">Chat</option></select></label>
           <label className="grid gap-1.5 text-sm font-medium">Agent<select className={selectCls} value={agent} disabled={busy} onChange={(e) => setAgent(e.target.value as AgentName | "")}><option value="">Repository default</option>{agents.map((a) => <option key={a} value={a}>{AGENT_PROFILES[a].label}</option>)}</select></label>
         </div>
         <label className="grid gap-1.5 text-sm font-medium">Cron expression<Input required className="font-mono" value={cron} onChange={(e) => setCron(e.target.value)} aria-describedby="cron-help" /></label>
         <p id="cron-help" className="text-xs text-muted-foreground">Minute · hour · day · month · weekday. Example: 0 3 * * * runs daily at 03:00 (server time).</p>
         <label className="grid gap-1.5 text-sm font-medium">Prompt<textarea className={textareaCls} required rows={4} placeholder="Describe the work to complete…" value={prompt} onChange={(e) => setPrompt(e.target.value)} /></label>
         {err && <p role="alert" className="text-sm text-destructive">{err}</p>}
-        <div className="flex justify-end gap-2 border-t pt-4"><Button type="button" variant="ghost" disabled={busy} onClick={onClose}>Cancel</Button><Button type="submit" disabled={busy || !name.trim() || !repo || !prompt.trim()}>{busy ? "Saving…" : "Create schedule"}</Button></div>
+        <div className="flex justify-end gap-2 border-t pt-4"><Button type="button" variant="ghost" disabled={busy} onClick={onClose}>Cancel</Button><Button type="submit" disabled={busy || !runtime || !name.trim() || !repo || !prompt.trim()}>{busy ? "Saving…" : "Create schedule"}</Button></div>
       </form>
     </FormDialog>
   );

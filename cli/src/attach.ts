@@ -178,6 +178,14 @@ export { labelSetCmd, singleQuote };
 
 // Nickname from the API into the remote shell. A separate option keeps the tmux sessions'
 // own labels; an empty value removes the old nickname on the next attach.
+/** A chat session's tmux `main` is a plain shell; `tmux attach` switches to the alternate screen, so the link line
+ *  printed before it is hidden while attached. A timed message on the attached client shows it inside too, on every
+ *  (re)attach, without touching the session's options (tmux sessions are unchanged: callers add it for chat only). */
+export function withChatLink(command: string, line: string): string {
+  if (!/tmux attach -d -t =[^ ;]+$/.test(command)) throw new Error("withChatLink needs a command ending in tmux attach");
+  return `${command} ';' display-message -d 15000 ${singleQuote(line.replaceAll("#", "##"))}`;
+}
+
 export function withSessionName(command: string, name?: string | null): string {
   const title = (name ?? "").replace(/[\x00-\x1f\x7f-\x9f]/g, "").trim();
   return `export DEVD_SESSION_NAME=${singleQuote(title)}; ${command}`;

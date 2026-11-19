@@ -11,8 +11,8 @@ export interface NavItem {
 // the rest is reachable via "More". Nine items do not fit in the bar and trimming them
 // by width would mean the menu is in a different place on every phone.
 export const NAV: NavItem[] = [
-  { to: "/", label: "Overview", glyph: "◈", primary: true, end: true },
-  { to: "/inbox", label: "Inbox", glyph: "◉", primary: true },
+  { to: "/", label: "Inbox", glyph: "◉", primary: true, end: true },
+  { to: "/overview", label: "Overview", glyph: "◈", primary: true },
   { to: "/sessions", label: "Sessions", glyph: "▣", primary: true },
   { to: "/stats", label: "Statistics", glyph: "▦", primary: true },
   { to: "/subscriptions", label: "AI limits", glyph: "◇" },
@@ -48,18 +48,20 @@ export const LEGACY_ROUTES: Record<string, string> = {
   "/konfigurace": "/settings",
   "/plan": "/cron",
   "/prod-zapisy": "/prod-writes",
+  // The Inbox became the home page (step 6); notifications and bookmarks still point at /inbox.
+  "/inbox": "/",
 };
 
 /** Title for the item we are on — for <title> and the header on mobile. */
 export function activeLabel(pathname: string): string {
-  if (pathname === "/") return "Overview";
+  if (pathname === "/") return "Inbox";
   const hit = NAV.find((n) => n.to !== "/" && pathname.startsWith(n.to));
-  return hit?.label ?? "Overview";
+  return hit?.label ?? "Inbox";
 }
 
 /** Visual groups share the route inventory, so no page disappears from navigation. */
 export const NAV_GROUPS = [
-  { label: "Workspace", routes: ["/", "/inbox", "/sessions", "/folders", "/stats", "/subscriptions", "/unpushed"] },
+  { label: "Workspace", routes: ["/", "/overview", "/sessions", "/folders", "/stats", "/subscriptions", "/unpushed"] },
   { label: "Operations", routes: ["/cron", "/upkeep", "/prod-writes", "/operations", "/ssh-approvals"] },
   { label: "System", routes: ["/hardware", "/log", "/notifications", "/settings"] },
 ];

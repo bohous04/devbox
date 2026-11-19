@@ -20,3 +20,7 @@ export const CRITIC_MIN_BRIDGE_VERSION = "1.3.0";
 /** The first agent bridge that takes `startTurn` attachments (images). An older bridge refuses a turn that has them:
  *  devd answers 409 bridge-too-old instead of sending. */
 export const IMAGES_MIN_BRIDGE_VERSION = "1.4.0";
+
+/** The first agent bridge that takes devd's periodic `ack` (S6-R21). An older bridge refuses the unknown frame and
+ *  closes the link: devd sends acks only to a bridge that is new enough. */
+export const ACK_MIN_BRIDGE_VERSION = "1.5.0";

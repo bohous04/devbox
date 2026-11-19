@@ -1,8 +1,8 @@
 import type { NotifyExtra, NotifyTargetKind } from "./agentEvents";
 import { EMERGENCY, type PushOpts } from "./pushover";
 
-/** Target → dashboard page for Pushover (paths from dashboard/src/nav.ts). The vault
- *  is unlocked from the panel on Overview, hence "/". */
+/** Target → dashboard page for Pushover (paths from dashboard/src/nav.ts). The vault is unlocked from the
+ *  dashboard's vault gate, which covers every page while the vault is locked, so the home page "/" will do. */
 const TARGET_PATHS: Record<NotifyTargetKind, string> = {
   prodWrites: "/prod-writes",
   sshApprovals: "/ssh-approvals",

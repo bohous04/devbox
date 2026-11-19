@@ -126,7 +126,7 @@ test("exitMenuOptions: Back / End / Rename / Change agent / Just detach (no Stop
   expect(opts.map((o) => o.value)).toEqual(["back", "end", "rename", "agent", "detach"]);
   expect(opts[0].label).toContain("Back");
   expect(opts[1].label).toContain("End");
-  expect(opts[4].label).toContain("detach");
+  expect(opts[4].label).toBe("↩︎ Just detach (the session keeps running)");
 });
 
 // F9 is the fastest path in the real flow "the OR agent got stuck → switch to claude":
@@ -238,4 +238,12 @@ test("ending sessions are grouped below active sessions under a visible divider"
   expect(opts.map(row => row.value)).toEqual(["active", "__ending_heading__", "ending", MANAGER_BACK]);
   expect(opts[1].label).toContain("────────");
   expect(opts[1].label).toContain("Ukončují se (1)");
+});
+
+// devd answers 409 to an account or agent switch on a chat session, so the menu must not offer them.
+test("exitMenuOptions: a chat session hides Change agent and Change account", () => {
+  const values = exitMenuOptions(false, null, "Claude Code", "claude", "chat").map((o) => o.value);
+  expect(values).toEqual(["back", "end", "rename", "detach"]);
+  const tmux = exitMenuOptions(false, null, "Claude Code", "claude", "tmux").map((o) => o.value);
+  expect(tmux).toEqual(["back", "end", "rename", "agent", "account", "detach"]);
 });

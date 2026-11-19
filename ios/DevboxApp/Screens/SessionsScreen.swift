@@ -39,7 +39,9 @@ struct SessionsScreen: View {
             }
         }
         .sheet(isPresented: $showNewSession) {
-            NewSessionSheet(actions: actions) { await store.refreshNow() }
+            NewSessionSheet(actions: actions, onStarted: { await store.refreshNow() }, onOpenChat: { id in
+                appModel.pendingDeepLink = .thread(id: id)
+            })
                 .environmentObject(store)
         }
     }

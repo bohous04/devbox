@@ -95,7 +95,9 @@ export class ChatHub {
     st.seeded = true;
     const last = lastEndedRun(t);
     const active = t.runs.some((r) => r.endedSeq === null);
-    if (!active && last?.status === "completed" && holdingCount(t) > 0) st.heldRun = last.runId;
+    // Not when its "finished" already went out: holding work that came back without a new run must not send it twice.
+    if (!active && last?.status === "completed" && holdingCount(t) > 0
+        && !(last.endedAt !== null && this.d.hub.completionDecided(sessionId, last.endedAt))) st.heldRun = last.runId;
     const s = this.d.session(sessionId);
     if (!s) {
       this.log(`chat hub: no session ${sessionId} to restore subagents for`);
@@ -132,9 +134,16 @@ export class ChatHub {
     return st.reviewingSince === null ? st.link : { ...st.link, reviewingSince: st.reviewingSince };
   }
 
-  /** The session stopped or ended: its next link starts from the store again. */
+  /** The session stopped or ended: its next link starts from the store again. The subagents this state told the hub
+   *  about are taken back, since the next connect counts them again from the store (the hub keeps a running
+   *  session's counters until its periodic cleanup). */
   drop(sessionId: string): void {
+    const st = this.state.get(sessionId);
     this.state.delete(sessionId);
+    if (!st || st.subagents.size === 0) return;
+    const s = this.d.session(sessionId);
+    if (!s) return; // a session that is gone has no counters left to correct
+    for (let i = 0; i < st.subagents.size; i++) this.d.hub.handle(s, "subagent_stop", { correction: "drop-correction" });
   }
 
   private subagentStart(s: SessionRow, st: ChatState, id: string) {
@@ -218,6 +227,7 @@ export class ChatHub {
       case "run.queued":
       case "message.delta":
       case "bridge.started":
+      case "bridge.notice":
         return; // nothing for the hub; the thread store keeps them
       case "message.final":
         if (ev.role !== "user" || this.state.get(sessionId)?.promptRun !== ev.runId) return;

@@ -53,8 +53,12 @@ export type BridgeEvent =
   // reason: the harness was rate-limited (an ACP agent's rate-limit error code); absent for any other failure.
   | { type: "run.failed"; runId: string; error: string; reason?: "rate-limited" }
   // awaitingTarget: restarted after a switch whose secret env was not persisted; no harness until devd re-sends
-  // switchTarget.
-  | { type: "bridge.started"; version: string; resumed: boolean; awaitingTarget?: boolean };
+  // switchTarget. notice (bridge 1.5.0+): something the user must know about this start (state.json was rebuilt from
+  // the log), shown in the thread.
+  | { type: "bridge.started"; version: string; resumed: boolean; awaitingTarget?: boolean; notice?: string }
+  // (bridge 1.5.0+) Something the user must know that is not about a run, shown in the thread as a notice: e.g. devd
+  // asked for events the log no longer holds.
+  | { type: "bridge.notice"; text: string };
 
 export interface LoggedEvent {
   seq: number;

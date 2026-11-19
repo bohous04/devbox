@@ -1178,6 +1178,106 @@
       }
     },
     {
+      "name": "bridge.started with a notice (bridge 1.5.0+) shows it after the restart notice",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "bridge.started",
+              "version": "1.5.0",
+              "resumed": true,
+              "notice": "state.json was unusable; rebuilt from the log"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "bridge.started",
+              "version": "1.5.0",
+              "resumed": false,
+              "notice": "no thread to resume"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 2,
+        "seenSeq": 0,
+        "runs": [],
+        "items": [
+          {
+            "seq": 1,
+            "runId": null,
+            "itemId": null,
+            "kind": "notice",
+            "text": "Agent bridge restarted (v1.5.0)",
+            "ts": 1000,
+            "status": "done"
+          },
+          {
+            "seq": 1,
+            "runId": null,
+            "itemId": null,
+            "kind": "notice",
+            "text": "state.json was unusable; rebuilt from the log",
+            "ts": 1000,
+            "status": "done"
+          },
+          {
+            "seq": 2,
+            "runId": null,
+            "itemId": null,
+            "kind": "notice",
+            "text": "no thread to resume",
+            "ts": 1001,
+            "status": "done"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      }
+    },
+    {
+      "name": "bridge.notice (bridge 1.5.0+) is a notice in the thread",
+      "steps": [
+        {
+          "event": {
+            "seq": 4,
+            "ts": 1000,
+            "event": {
+              "type": "bridge.notice",
+              "text": "events 1-2 are no longer available"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 4,
+        "seenSeq": 0,
+        "runs": [],
+        "items": [
+          {
+            "seq": 4,
+            "runId": null,
+            "itemId": null,
+            "kind": "notice",
+            "text": "events 1-2 are no longer available",
+            "ts": 1000,
+            "status": "done"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      }
+    },
+    {
       "name": "background.changed replaces the list; active and queued runs",
       "steps": [
         {

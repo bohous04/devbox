@@ -8,7 +8,7 @@ import { sanitizeSessionName, type AgentName } from "../../devd/src/db";
 import { sh } from "./sh";
 import type { TreeProject } from "../../devd/src/tree";
 import { ApiClient, type SessionInfo, type WriteRow } from "./api";
-import { agentLabel, altCfg, buildExecArgv, probeArgv, runAttach, sessionPickerOptions, tmuxCommand, withSessionName } from "./attach";
+import { agentLabel, altCfg, buildExecArgv, probeArgv, runAttach, sessionPickerOptions, tmuxCommand, withChatLink, withSessionName } from "./attach";
 import { parseProbe } from "../../devd/src/tmux";
 import { loadCliConfig, type CliConfig } from "./config";
 import { runDoctor } from "./doctor";
@@ -604,16 +604,19 @@ async function openOnInstabox(deps: Deps, t: Target, agent?: AgentName): Promise
   const opening = `Opening ${t.project}/${t.repo} on InstaBox`;
   s.start(`${opening}…`);
   let sessionId: string;
+  let notice: string | undefined;
   try {
     const r = await deps.api.openInstabox({ folder: t.folder, project: t.project, repo: t.repo, cloneUrl: t.cloneUrl, agent });
     await waitInstaboxJob(deps.api, r.jobId, (step) => s.message(`${opening} — ${INSTABOX_STEP[step] ?? step}`));
     sessionId = r.sessionId;
+    notice = r.runtimeNotice;
   } catch (e) {
     s.stop("Open failed.");
     console.error(`Error: ${(e as Error).message}`);
     return 1;
   }
   s.stop(`Session ${sessionId} running on InstaBox.`);
+  if (notice) log.warn(notice);
   recents.touch(t);
   await deps.api.sessions(); // fills the dockerHost map (attach goes via `docker -H ssh://ibx-…`)
   return attachTo(deps, sessionId); // container == id
@@ -678,6 +681,7 @@ async function openAndAttach(deps: Deps, t: Target, opts: { ask: boolean; agent?
     log.warn(`Already running with ${agentLabel(result.session.agent)} — attaching to it. To get ${agentLabel(agent)}, run \`dev --agent ${agent} ${t.project}/${t.repo}\` again and pick "New session".`);
   }
   if (t.repo !== "claudeSolo") recents.touch(t);
+  if (result.runtimeNotice) log.warn(result.runtimeNotice);
   if (result.pull?.status === "conflict") {
     log.warn(`⚠️ Pull conflict — the agent is resolving it now (files: ${result.pull.files.join(", ")})`);
   }
@@ -801,11 +805,17 @@ function offlineStatus(): ((s: RetryStatus | null) => void) | undefined {
 
 // Runs a tmux command in a loop (reconnect after an outage) and after F9 (code 42) shows the exit menu.
 // Shared by all attach paths (interactive and notification click).
+export function chatLinkLine(sessionId: string, devdUrl: string): string {
+  return `Chat session: devbox://thread/${sessionId}  ${devdUrl.replace(/\/+$/, "")}/#/s/${sessionId}`;
+}
+
 async function runExitAware(deps: Deps, container: string, tmuxSession: string, existingOnly = false, oldPaneId?: string): Promise<number> {
   const grokSupport = await detectedWarpGrokSupport();
   let connectionAttempt = 0;
   let s = (await deps.api.sessions()).find((x) => x.container === container);
   if (s) lastAttached.touch(s.id, Date.now());
+  // The container's tmux `main` is a plain shell for a chat session; the agent lives in the chat.
+  if (s?.runtime === "chat") console.log(chatLinkLine(s.id, deps.cfg.devdUrl));
   const label = s ? sessionLabel(s) : container;
   const paneId = warpPaneId();
   const recovery = terminalRecoveryStore();
@@ -826,7 +836,11 @@ async function runExitAware(deps: Deps, container: string, tmuxSession: string, 
   let name = s?.name ?? null;
   const status = offlineStatus();
   for (;;) {
-    const namedCommand = withSessionName(tmuxCommand(tmuxSession, grokSupport, existingOnly), name);
+    const attachCommand = (existing: boolean) => {
+      const cmd = tmuxCommand(tmuxSession, grokSupport, existing);
+      return withSessionName(s?.runtime === "chat" ? withChatLink(cmd, chatLinkLine(s.id, deps.cfg.devdUrl)) : cmd, name);
+    };
+    const namedCommand = attachCommand(existingOnly);
     const code = await attachLoop({
       argv: buildExecArgv(deps.cfg, container, namedCommand),
       argvAlt: alt ? buildExecArgv(alt, container, namedCommand) : undefined,
@@ -837,7 +851,7 @@ async function runExitAware(deps: Deps, container: string, tmuxSession: string, 
         // Creating a default agent here would race server cold recovery.
         const dialCfg = alt && argv.includes(alt.sshHost!) ? alt : deps.cfg;
         return runAttach(buildExecArgv(dialCfg, container,
-          withSessionName(tmuxCommand(tmuxSession, grokSupport, existingOnly || connectionAttempt++ > 0), name)));
+          attachCommand(existingOnly || connectionAttempt++ > 0)));
       },
       status,
       retryRemoteErrors: true,
@@ -892,7 +906,7 @@ async function handleExit(deps: Deps, s: SessionInfo | undefined, name?: string 
   let current = name ?? null;
   let action: ExitAction | undefined;
   for (;;) {
-    action = await selectVal<ExitAction>("Leave session?", exitMenuOptions(worktree, current, agentLabel(sess.agent), agentNameFor(sess.agent)));
+    action = await selectVal<ExitAction>("Leave session?", exitMenuOptions(worktree, current, agentLabel(sess.agent), agentNameFor(sess.agent), sess.runtime));
     if (action === "account") {
       if (await pickAndSwitchAccount(deps, sess)) return { reattach: true, name: current };
       // Keep errors and partial results visible above the next menu.

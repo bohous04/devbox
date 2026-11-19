@@ -14,7 +14,7 @@ export interface ProjectCfg { sources?: Source[]; repos?: RepoRef[] }
 export interface FolderCfg extends ProjectCfg { projects?: Record<string, ProjectCfg> }
 // `critic` is optional and Partial — mirrors devd/src/config.ts (critic?: Partial<CriticSettings>).
 // `getCritic` below fills missing fields with defaults, the same way the server does resolveCriticCfg.
-export interface Settings { autoStopHours: number; portRangeStart: number; portsPerSession: number; diskWarnPercent: number; critic?: Partial<CriticCfgView>; accountPool?: Partial<AccountPoolCfgView> }
+export interface Settings { autoStopHours: number; portRangeStart: number; portsPerSession: number; diskWarnPercent: number; critic?: Partial<CriticCfgView>; accountPool?: Partial<AccountPoolCfgView>; defaultRuntime?: "tmux" | "chat" }
 export interface GiteaInstance { name: string; url: string }
 // A server for an SSH key (see devd/src/sshServers.ts) — an alias the operator picks
 // in the config. `key` is the title of the 1Password SSH-key item. The dashboard only
@@ -43,6 +43,8 @@ export function validateConfig(value: unknown): DevConfig {
   const s = cfg.settings;
   if (!s || [s.autoStopHours, s.portRangeStart, s.portsPerSession, s.diskWarnPercent].some((n) => typeof n !== "number"))
     throw new Error("config.settings must contain numbers autoStopHours, portRangeStart, portsPerSession, diskWarnPercent");
+  if (s.defaultRuntime !== undefined && s.defaultRuntime !== "tmux" && s.defaultRuntime !== "chat")
+    throw new Error("config.settings.defaultRuntime must be tmux or chat");
   if (!cfg.folders || typeof cfg.folders !== "object" || Array.isArray(cfg.folders))
     throw new Error("config.folders must be an object");
   return cfg;
@@ -335,6 +337,17 @@ export function visibilityLabel(v: Visibility | undefined): string {
 export function sourceLabel(s: Source): string {
   const inst = s.instance ? ` · ${s.instance}` : "";
   return `${sourceOwner(s)} · ${s.provider}${inst} · ${visibilityLabel(s.visibility)}`;
+}
+
+/* ---------- default runtime (settings.defaultRuntime — consumed by resolveDefaultRuntime on the server) ---------- */
+
+/** Mirrors resolveDefaultRuntime in devd/src/config.ts: absent = tmux. */
+export function getDefaultRuntime(cfg: DevConfig): "tmux" | "chat" {
+  return cfg.settings.defaultRuntime ?? "tmux";
+}
+
+export function setDefaultRuntime(cfg: DevConfig, runtime: "tmux" | "chat"): DevConfig {
+  return { ...cfg, settings: { ...cfg.settings, defaultRuntime: runtime } };
 }
 
 /* ---------- critic (settings.critic — consumed by resolveCriticCfg on the server) ---------- */
