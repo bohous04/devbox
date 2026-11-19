@@ -5,7 +5,7 @@ import type { Database } from "bun:sqlite";
 import { chmodSync, chownSync, existsSync, mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { liveAgentPresent, staleAccountMounts } from "./accountMountRepair";
-import { chatRuntimeBlock, specFor, usesProxy, type Upstream } from "./agents";
+import { chatRuntimeBlock, specFor, tmuxRuntimeBlock, usesProxy, type Upstream } from "./agents";
 import { parseProcTree, PS_TREE_CMD } from "./ccUpkeep";
 import { insteadOfEnv } from "./gitProxy";
 import { dindCleanupPlan, dindEnsurePlan, dindName, dindNetwork, dindNetworkCreate, dindSubnetCandidates, dockerHostFor } from "./dind";
@@ -826,6 +826,11 @@ export class SessionManager {
       const blocked = chatRuntimeBlock(agent, "vps");
       if (blocked) throw new Error(blocked);
     }
+    // Likewise a tmux session (stored or new) never gets a chat-only agent.
+    if ((existing ? storedRuntime(existing) : (t.runtime ?? "tmux")) === "tmux") {
+      const blocked = tmuxRuntimeBlock(agent);
+      if (blocked) throw new Error(blocked);
+    }
     const observed: CanonicalWorkspaceContainer = existing ? await inspectCanonicalWorkspace(id) : { state: "missing" };
     const state = observed.state === "stopped" ? "exited" : observed.state;
 
@@ -1023,6 +1028,9 @@ export class SessionManager {
   }
 
   async openSolo(folder: string, project: string, agent?: AgentName) {
+    // claudeSolo sessions are tmux sessions: refused before the workspace is created.
+    const blocked = tmuxRuntimeBlock(resolveAgent(agent, getRepoAgent(this.d.db, folder, project, "claudeSolo")));
+    if (blocked) throw new Error(blocked);
     // Same lock as open(): the repo key (here the generic "claudeSolo") while the id
     // is not known (finding a free `n` below), then also the id itself.
     return this.locked([openKey({ folder, project, repo: "claudeSolo" })], "open", async () => {

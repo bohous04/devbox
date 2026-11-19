@@ -138,7 +138,7 @@ function codexAccount(id: string, auth = '{"tokens":{}}'): void {
   writeFileSync(join(homes().sharedHome, "config.toml"), 'model = "x"\n');
 }
 
-async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string | null; claudeExecutable?: string | null } = {}) {
+async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string | null; claudeExecutable?: string | null; acpBins?: string[] } = {}) {
   const bridge = await serve({
     bridgeDir: dir,
     socketPath,
@@ -146,7 +146,12 @@ async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string
     account: over.account ?? null,
     model: null,
     openHarness: (o) => f.open(o),
-    resolveTarget: (t) => resolveTarget(t, { codexAccountsRoot: codexRoot(), homes: homes(), claudeExecutable: over.claudeExecutable === undefined ? "/usr/local/bin/claude" : over.claudeExecutable }),
+    resolveTarget: (t) => resolveTarget(t, {
+      codexAccountsRoot: codexRoot(),
+      homes: homes(),
+      claudeExecutable: over.claudeExecutable === undefined ? "/usr/local/bin/claude" : over.claudeExecutable,
+      which: (bin) => ((over.acpBins ?? ["vibe-acp"]).includes(bin) ? `/usr/local/bin/${bin}` : null),
+    }),
     now: () => NOW,
     logError: () => {},
   });
@@ -687,6 +692,27 @@ describe("switching: fix round 1", () => {
     expect(f.models).toEqual(["m"]);
   });
 
+  test("a switch to an ACP agent opens it without an account and hands the context over as a preamble", async () => {
+    const f = fakeHarness();
+    await start(f, { account: "a" });
+    await switchCmd({ harness: "vibe", account: null, model: "mistral-large-4-0", env: {} }, null, { preamble: "[user] earlier" });
+    expect(f.opens[1]).toMatchObject({ resume: null, target: { harness: "vibe", account: null, model: "mistral-large-4-0", env: {} } });
+    expect(state()).toMatchObject({ harness: "vibe", account: null, model: "mistral-large-4-0", target: { harness: "vibe" } });
+    await cmd({ kind: "startTurn", text: "hi" });
+    expect(f.turns.map((t) => t.text)).toEqual(["[user] earlier\n\nUser message:\nhi"]);
+  });
+
+  test("an ACP target with an account, or without its binary, is refused before the current harness is retired", async () => {
+    const f = fakeHarness();
+    await start(f, { acpBins: ["vibe-acp"] });
+    await expect(switchCmd({ harness: "grok", account: null, model: null, env: {} })).rejects.toThrow("grok (grok) not found");
+    await expect(switchCmd({ harness: "vibe", account: "acct-1", model: null, env: {} })).rejects.toThrow("own CLI login");
+    // History items alone cannot reach an ACP agent.
+    await expect(switchCmd({ harness: "vibe", account: null, model: null, env: {} }, null, { preamble: null, injectItems: [{}] })).rejects.toThrow("cannot inject");
+    expect(f.closes).toBe(0);
+    expect(f.opens.length).toBe(1);
+  });
+
   test("a missing claude binary refuses the switch before the current harness is retired", async () => {
     const f = fakeHarness();
     await start(f, { claudeExecutable: null });
@@ -879,7 +905,9 @@ describe("launch env", () => {
     expect(serveConfigFromEnv({ ...env, DEVD_AGENT_MODEL: "opus" }).model).toBe("opus");
     expect(() => serveConfigFromEnv({ ...env, DEVD_RUNTIME: "tmux" })).toThrow(ConfigError);
     expect(() => serveConfigFromEnv({ ...env, DEVD_RUNTIME: "tmux" })).toThrow("DEVD_RUNTIME");
-    expect(() => serveConfigFromEnv({ ...env, DEVD_AGENT: "grok" })).toThrow("DEVD_AGENT");
+    expect(() => serveConfigFromEnv({ ...env, DEVD_AGENT: "gemini" })).toThrow("DEVD_AGENT");
+    // An ACP agent runs on its own CLI login: no config home, no account.
+    expect(serveConfigFromEnv({ DEVD_RUNTIME: "chat", DEVD_AGENT: "vibe" })).toMatchObject({ harness: "vibe", configHome: null, account: null, model: null });
     expect(() => serveConfigFromEnv({ DEVD_RUNTIME: "chat", DEVD_AGENT: "codex" })).toThrow("CODEX_HOME");
     expect(serveConfigFromEnv({ DEVD_RUNTIME: "chat", DEVD_AGENT: "codex", CODEX_HOME: "/c" })).toMatchObject({
       harness: "codex",

@@ -49,8 +49,11 @@ case "${DEVD_AGENT:-}" in
       || { echo "agent-bridge-launch: Codex shadow home for the account failed" >&2; exit 1; }
     export CODEX_HOME=$codex_shadow CODEX_SQLITE_HOME=$codex_shadow/sqlite DEVD_CODEX_ACCOUNT_ID=$codex_id
     ;;
+  grok|antigravity|vibe|opencode)
+    # ACP agents (image/agent-bridge/src/acpAgents.ts) run on their own CLI login in their volume: nothing to lease.
+    ;;
   *)
-    echo "agent-bridge-launch: unknown DEVD_AGENT \"${DEVD_AGENT:-}\" (chat sessions support claude, codex and the claude proxy profiles)" >&2
+    echo "agent-bridge-launch: unknown DEVD_AGENT \"${DEVD_AGENT:-}\" (chat sessions support claude, codex, the claude proxy profiles and the ACP agents)" >&2
     exit 2
     ;;
 esac

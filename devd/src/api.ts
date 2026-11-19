@@ -26,7 +26,7 @@ import { createReadStream, mkdtempSync, openSync, rmSync, statSync, writeFileSyn
 import { Readable } from "node:stream";
 import { liveActivitiesRoutes, type LiveActivities } from "./liveActivities";
 import { AGENT_EVENTS, type AgentEvent, type AgentEventHub, type HookMeta, type NotifyFn } from "./agentEvents";
-import { AGENT_IDS, AGENTS, chatRuntimeBlock, instaboxAgentBlock, specFor, type Upstream } from "./agents";
+import { AGENT_IDS, AGENTS, chatRuntimeBlock, instaboxAgentBlock, specFor, tmuxRuntimeBlock, type Upstream } from "./agents";
 import { buildProjectLeaderboard, buildRange, buildSessionUsage, buildTotals, buildWorkHours, predictDisk, PROMPT_CHARS, PROMPT_WAIT } from "./aggregate";
 import { buildAccountViews, toCandidates } from "./accounts";
 import { currentAccount, lastSwitchAt } from "./accountLease";
@@ -2588,6 +2588,9 @@ export function createApp(d: ApiDeps): Hono {
     const body = (await c.req.json().catch(() => null)) as { agent?: string } | null;
     if (!body || !isAgentName(body.agent))
       return c.json({ error: `invalid agent (${AGENT_IDS.join("|")})` }, 400);
+    // The tmux swap launches the agent in a pane; a chat-only agent has no launcher there.
+    const tmuxBlocked = tmuxRuntimeBlock(body.agent);
+    if (tmuxBlocked) return c.json({ error: tmuxBlocked }, 400);
     // I4: swapping to a proxy agent would send proxy keys into the VM (proxyEnvFor → tmux env).
     if (getSession(d.db, c.req.param("id"))?.host === "instabox") {
       const blocked = instaboxAgentBlock(body.agent);

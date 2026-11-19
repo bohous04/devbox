@@ -19,7 +19,7 @@ import type { Capabilities, LoggedEvent } from "../../shared/thread";
 import { currentAccount, lastSwitchAt } from "./accountLease";
 import { chooseAccount, isExhausted } from "./accountPolicy";
 import { toCandidates } from "./accounts";
-import { AGENTS, agentNameFor, chatRuntimeBlock, isAgentName, specFor, type AgentName } from "./agents";
+import { AGENTS, agentNameFor, chatHarness, chatRuntimeBlock, isAgentName, specFor, type AgentName, type ChatHarness } from "./agents";
 import { codexAccountUsable, codexLimitLive, type CodexAccountView } from "./codexAccounts";
 import type { AccountPoolSettings } from "./config";
 import { AgentDisconnected, CommandTimeout, type BridgeHandshake } from "./bridgeLink";
@@ -28,7 +28,7 @@ import type { Handoff } from "./handoff";
 import { historyOmittedNotice, planAfterResumeFailure, planTransition, resumeFailedNotice, type Target, type Transition } from "./transition";
 import type { ThreadStore } from "./threadStore";
 
-type Harness = SwitchTarget["harness"];
+type Harness = ChatHarness;
 
 /** The models a chat session can be switched to (the model route refuses anything else with 400); shared with the
  *  dashboard's model menu. */
@@ -39,6 +39,11 @@ const BASE_WINDOWS: Readonly<Record<string, number>> = {
   "gpt-6-astra": 272_000, "gpt-6.1-sol": 272_000, "gpt-6-sol": 272_000, "gpt-6-luna": 272_000,
   "gpt-5.6-sol": 272_000, "gpt-5.6-terra": 272_000, "gpt-5.6-luna": 272_000, "gpt-5.5": 272_000,
   "gpt-5.4-mini": 272_000, "gpt-5.3-codex": 272_000,
+  // ACP agents, as they reported them live (step 4 Task 3): Grok's initialize `totalContextTokens`, Vibe's and
+  // Antigravity's `usage_update` size (Vibe reported 202,144 for Medium 3.5).
+  "grok-4.6": 500_000, "grok-4.5": 500_000,
+  "mistral-large-4-0": 400_000, "mistral-medium-3.5": 200_000,
+  "gemini-4-neon": 1_048_576,
 };
 const efforts = (base: string): Record<string, string> => Object.fromEntries(["low", "medium", "high"].map((l) => [`${base}-${l}`, base]));
 /** Every model id a harness reports (thread.native, run.started) → its base model. The same ids pricing.ts prices:
@@ -50,6 +55,8 @@ export const MODEL_WINDOW_ALIASES: Readonly<Record<string, string>> = {
   "gpt-5.6": "gpt-5.6-sol",
   "gpt-5.5-2026-04-23": "gpt-5.5",
   "gpt-5.4-mini-2026-03-17": "gpt-5.4-mini",
+  // Vibe's session/load reports Medium 3.5 under this id (live, step 4 Task 3).
+  "mistral-medium-latest": "mistral-medium-3.5",
 };
 /** Tokens kept free for the target model's answer when budgeting a handoff. */
 export const RESERVE_TOKENS = 32_000;
@@ -269,19 +276,20 @@ export class ChatSwitch {
     const l = this.last.get(s.id);
     if (l) return { harness: l.target.harness, account: l.target.account, model: l.target.model, nativeThreadId: l.resume };
     const profile = agentNameFor(s.agent);
+    const harness = harnessOf(profile);
     const n = store.snapshot({ limit: 0 }).native;
     // A thread of another harness is the one before a switch whose new thread was not announced yet.
-    if (n && n.harness === specFor(profile).runtime) return { harness: n.harness, account: n.account, model: n.model, nativeThreadId: n.nativeThreadId };
+    if (n && n.harness === harness) return { harness: n.harness, account: n.account, model: n.model, nativeThreadId: n.nativeThreadId };
     // Claude announces its thread with the first turn; until then the account is the one the launch leased.
     const account = specFor(profile).anthropicAccount ? currentAccount(leaseHistory(this.d.db, "devbox", s.id)) : null;
-    return { harness: specFor(profile).runtime, account, model: null, nativeThreadId: null };
+    return { harness, account, model: null, nativeThreadId: null };
   }
 
   /** The requested target with its env and window. Accounts are checked as accountSwitch.ts does; the profile is
    *  attached only once the target is known to differ (attachProfile). */
   private async resolve(s: SessionRow, profile: AgentName, current: Target, req: SwitchRequest): Promise<Resolved> {
     if (isProxyProfile(profile)) return this.proxyTarget(profile);
-    const harness = specFor(profile).runtime as Harness;
+    const harness = harnessOf(profile);
     // Leaving a proxy profile is not the same Claude: its model and (absent) account do not carry over.
     const keeps = harness === current.harness && !isProxyProfile(agentNameFor(s.agent));
     let model: string | null;
@@ -290,6 +298,8 @@ export class ChatSwitch {
       model = req.model;
     } else model = keeps ? current.model : null;
     const window = windowFor(harness, model);
+    // An ACP agent runs on its own CLI login in its volume: no account to choose.
+    if (harness !== "claude" && harness !== "codex") return { profile, target: { harness, account: null, model, env: {} }, window, exhausted: false };
     let choice: { account: string | null; exhausted: boolean };
     if (req.kind === "account") choice = harness === "claude" ? this.claudeAccount(s, req.accountId) : this.codexAccount(req.accountId);
     else if (keeps) choice = { account: current.account, exhausted: false };
@@ -544,17 +554,17 @@ export class ChatSwitch {
     if (!s) throw new Error("unknown session");
     const profile = agentNameFor(s.agent);
     const n = store.snapshot({ limit: 0 }).native;
-    const harness = specFor(profile).runtime;
+    const harness = harnessOf(profile);
     const resume = n?.harness === harness ? n.nativeThreadId : null;
     if (isProxyProfile(profile)) {
       const r = await this.proxyTarget(profile);
       return { profile, target: r.target, window: r.window, resume, handoff: null, resumeFailed: false };
     }
     const model = n?.harness === harness ? n.model : null;
-    const account = harness === "claude" ? currentAccount(leaseHistory(this.d.db, "devbox", sessionId)) : n?.harness === harness ? n.account : null;
+    const account = harness === "claude" ? currentAccount(leaseHistory(this.d.db, "devbox", sessionId)) : harness === "codex" && n?.harness === harness ? n.account : null;
     if (harness === "codex" && account === null) throw new Error("the Codex account of this session is unknown");
     const env: Record<string, string> = harness === "claude" ? { CLAUDE_CONFIG_DIR: account === null ? CLAUDE_HOME : `${CLAUDE_ACCOUNTS_ROOT}/${account}` } : {};
-    return { profile, target: { harness: harness as Harness, account, model, env }, window: windowFor(harness as Harness, model), resume, handoff: null, resumeFailed: false };
+    return { profile, target: { harness, account, model, env }, window: windowFor(harness, model), resume, handoff: null, resumeFailed: false };
   }
 }
 
@@ -587,6 +597,13 @@ function handedOver(plan: Transition): string | null {
   if (h === null) return null;
   if (h.preamble === null) return h.omitted > 0 ? "no history handed over" : null;
   return `context handed over (${h.includedItemSeqs.length} items${h.omitted > 0 ? `, ${h.omitted} omitted` : ""})`;
+}
+
+/** The chat harness of a chat session's profile; chatRuntimeBlock keeps profiles without one out of chat sessions. */
+function harnessOf(profile: AgentName): Harness {
+  const h = chatHarness(profile);
+  if (h === null) throw new Error(`${profile} has no chat harness`);
+  return h;
 }
 
 /** The window of `model` (any id a harness reports, see MODEL_WINDOW_ALIASES); a null model is the harness

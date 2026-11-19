@@ -50,6 +50,8 @@ test("P24a: while the agent waits for a target, switching is allowed despite que
 test("model menu: the models devd accepts for the current harness, the current one marked", () => {
   expect(modelOptions(CLAUDE).map((o) => o.value)).toEqual([...DEVD_CHAT_MODELS.claude]);
   expect(modelOptions(CODEX).map((o) => o.value)).toEqual([...DEVD_CHAT_MODELS.codex]);
+  const vibe: ChatTarget = { agent: "vibe", harness: "vibe", account: null, model: "mistral-large-4-0", awaitingTarget: false };
+  expect(modelOptions(vibe).map((o) => [o.value, o.current])).toEqual(DEVD_CHAT_MODELS.vibe.map((m) => [m, m === "mistral-large-4-0"]));
   expect(modelOptions(CLAUDE).filter((o) => o.current).map((o) => o.value)).toEqual(["claude-opus-5-5"]);
   // A reported variant is not one of the offered ids: nothing is marked, every model can be picked.
   expect(modelOptions({ ...CLAUDE, model: "claude-opus-5-5-high" }).some((o) => o.current || o.disabled)).toBe(false);
@@ -64,6 +66,8 @@ test("account menu: a proxy profile runs on no account pool", () => {
   expect(accountMenuBlocked(CLAUDE)).toBeNull();
   expect(accountMenuBlocked(CODEX)).toBeNull();
   expect(accountMenuBlocked({ ...CLAUDE, agent: "claude-gemini", account: null })).toMatch(/no account pool/);
+  // An ACP agent runs on its own CLI login (devd: 400 no-account-pool).
+  expect(accountMenuBlocked({ agent: "vibe", harness: "vibe", account: null, model: null, awaitingTarget: false })).toMatch(/no account pool/);
 });
 
 test("Claude accounts: quarantined, disabled and expired are disabled with the reason; over the threshold stays enabled with a warning (P15)", () => {

@@ -1,4 +1,4 @@
-import { AGENTS, AGENT_IDS, isAgentName, RUNTIME_BIN, type AgentName } from "../../devd/src/agents";
+import { AGENTS, AGENT_IDS, isAgentName, RUNTIME_BIN, tmuxRuntimeBlock, type AgentName } from "../../devd/src/agents";
 import type { SessionRow } from "../../devd/src/db";
 import type { TreeProject } from "../../devd/src/tree";
 import type { ClaudeState } from "../../devd/src/stats";
@@ -155,8 +155,9 @@ export function shouldAskAgent(query: string | undefined, forced: AgentName | un
 // hardcoded list of profiles), the remembered choice is first and marked with a hint.
 // `hint` is overridden by the agent swap on a running session ("current") — there "last used
 // here" lies: the first one is the session's CURRENT profile, not the repo's memory.
+// The CLI opens tmux sessions only: chat-only profiles (tmuxRuntimeBlock) are not offered.
 export function agentOptions(remembered: AgentName, hint = "last used here"): { value: AgentName; label: string; hint?: string }[] {
-  const all = AGENT_IDS.map((value) => {
+  const all = AGENT_IDS.filter((value) => tmuxRuntimeBlock(value) === null).map((value) => {
     const s = AGENTS[value];
     return { value, label: `${s.label} (${RUNTIME_BIN[s.runtime]}${s.yolo ? " · yolo" : ""})` };
   });

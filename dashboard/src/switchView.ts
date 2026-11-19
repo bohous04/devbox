@@ -45,14 +45,14 @@ export function modelMenuBlocked(t: ChatTarget): string | null {
 /** The models devd accepts for the harness (shared/chatModels.ts). A reported variant (an effort or dated id) marks
  *  nothing: picking its base model is a real switch for devd. */
 export function modelOptions(t: ChatTarget): SwitchOption[] {
-  const models: readonly string[] = t.harness === "claude" || t.harness === "codex" ? CHAT_MODELS[t.harness] : [];
+  const models: readonly string[] = Object.hasOwn(CHAT_MODELS, t.harness) ? CHAT_MODELS[t.harness as keyof typeof CHAT_MODELS] : [];
   return models.map((m) => option(m, m, m === t.model));
 }
 
-/** devd: 400 no-account-pool. */
+/** devd: 400 no-account-pool. Proxy profiles and ACP agents (their own CLI login) have no account pool. */
 export function accountMenuBlocked(t: ChatTarget): string | null {
   const p = profileFor(t.agent);
-  return p.proxy ? `${p.label} runs on no account pool` : null;
+  return p.proxy || (p.runtime !== "claude" && p.runtime !== "codex") ? `${p.label} runs on no account pool` : null;
 }
 
 const pctText = (pct: number | null) => (pct === null ? "—" : `${Math.round(pct)}%`);

@@ -28,6 +28,7 @@ describe("parseClientFrame", () => {
       },
       { kind: "switchTarget", target: { harness: "claude", account: null, model: "m", env: {} }, resume: null, handoff: null },
       { kind: "switchTarget", target: { harness: "claude", account: null, model: "m", env: {} }, resume: null, handoff: { preamble: null } },
+      { kind: "switchTarget", target: { harness: "vibe", account: null, model: null, env: {} }, resume: "sess-1", handoff: { preamble: "earlier" } },
     ];
     for (const cmd of cmds) {
       expect(parseClientFrame(JSON.stringify({ t: "cmd", id: "c", cmd }))).toEqual({ t: "cmd", id: "c", cmd });
@@ -50,7 +51,7 @@ describe("parseClientFrame", () => {
       "null",
       '{"t":"cmd","id":"c1","cmd":{"kind":"setModel","model":""}}',
       ...[
-        { harness: "grok", account: null, model: null, env: {} },
+        { harness: "gemini", account: null, model: null, env: {} },
         { harness: "claude", account: "", model: null, env: {} },
         { harness: "claude", account: null, model: 5, env: {} },
         { harness: "claude", account: null, model: null, env: { A: 1 } },

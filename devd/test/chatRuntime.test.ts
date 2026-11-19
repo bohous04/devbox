@@ -39,6 +39,7 @@ test("chatRuntimeBlock: vps claude/codex and proxy profiles allowed, instabox an
   for (const proxy of ["claude-gemini", "claude-openrouter"] as const) expect(chatRuntimeBlock(proxy, "vps")).toBeNull();
   expect(chatRuntimeBlock("grok", "vps")).toBe("Grok Build is not available in chat sessions yet");
   expect(chatRuntimeBlock("antigravity", "vps")).toContain("is not available in chat sessions yet");
+  expect(chatRuntimeBlock("vibe", "instabox")).toBe("Chat sessions run only on the VPS");
 });
 
 function appWith(open: (t: Record<string, unknown>) => Promise<unknown>) {
@@ -136,6 +137,18 @@ test("SessionManager.open refuses an agent chat cannot run on a stored chat sess
     .rejects.toThrow("Grok Build is not available in chat sessions yet");
   expect(getSession(db, "dev-p-r")!.agent).toBe("claude");
   expect(getRepoAgent(db, "f", "p", "r")).toBeNull();
+});
+
+test("SessionManager refuses a chat-only agent for a tmux session (new, solo) before any agent write", async () => {
+  const db = openDb(":memory:");
+  const mgr = new SessionManager({
+    db, cfg: structuredClone(DEFAULT_CONFIG), root: mkdtempSync(join(tmpdir(), "rt-root-")), image: "devbox:latest",
+    controlRoot: mkdtempSync(join(tmpdir(), "rt-ctl-")), extraMounts: [],
+  });
+  await expect(mgr.open({ folder: "f", project: "p", repo: "r", agent: "vibe" })).rejects.toThrow("Mistral Vibe runs only in chat sessions");
+  expect(getRepoAgent(db, "f", "p", "r")).toBeNull();
+  await expect(mgr.openSolo("f", "p", "vibe")).rejects.toThrow("Mistral Vibe runs only in chat sessions");
+  expect(getRepoAgent(db, "f", "p", "claudeSolo")).toBeNull();
 });
 
 test("a pull conflict is written to the prompt file for tmux only; chat gets it back to send as a message", () => {

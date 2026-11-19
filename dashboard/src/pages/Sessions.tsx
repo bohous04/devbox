@@ -16,7 +16,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { agoLabel, bytes, compactNumber, czCurrency, durationLabel, stateLabel } from "../format";
-import { AGENT_IDS, AGENT_PROFILES, SOLO, agentNameFor, chatRuntimeBlock, defaultAgentFor, folderChoices, instaboxAgentBlock, profileFor, projectChoices, repoChoices, sessionsFor, soleProject } from "../newSession";
+import { AGENT_IDS, AGENT_PROFILES, SOLO, agentNameFor, chatRuntimeBlock, defaultAgentFor, folderChoices, instaboxAgentBlock, profileFor, projectChoices, repoChoices, sessionsFor, soleProject, tmuxRuntimeBlock } from "../newSession";
 import { CC_EVENT_TYPES, fleetBadge, historyLine, rowState, type HistoryTone } from "../ccUpkeepView";
 import { agentSwitchError, openedNotice } from "../sessionsView";
 import { terminalTabUrl } from "../terminalRoute";
@@ -102,6 +102,7 @@ function NewSession({ open, onClose, onStarted }: { open: boolean; onClose: () =
   const ibxDisabled = hostDisabledReason(ibxStatus, repo === SOLO, runtime === "chat" ? chatRuntimeBlock(agent, "instabox") : instaboxAgentBlock(agent));
   const onIbx = host === "instabox" && !ibxDisabled;
   const chatDisabled = repo === SOLO ? "Chat sessions need a repo (no claudeSolo)" : chatRuntimeBlock(agent, onIbx ? "instabox" : "vps");
+  const tmuxDisabled = tmuxRuntimeBlock(agent);
 
   // A folder with a single project → we fill in the project ourselves, so the user on mobile
   // immediately sees the repo picker instead of a confusing empty middle step.
@@ -120,6 +121,10 @@ function NewSession({ open, onClose, onStarted }: { open: boolean; onClose: () =
   useEffect(() => {
     if (runtime === "chat" && chatDisabled) setRuntime("tmux");
   }, [runtime, chatDisabled]);
+  // And a chat-only agent puts it on chat, where chat can run it.
+  useEffect(() => {
+    if (runtime === "tmux" && tmuxDisabled && !chatDisabled) setRuntime("chat");
+  }, [runtime, tmuxDisabled, chatDisabled]);
 
   if (!open) return null;
 
@@ -209,11 +214,12 @@ function NewSession({ open, onClose, onStarted }: { open: boolean; onClose: () =
           <fieldset className="sm:col-span-2">
             <legend className={labelCls}>Interface</legend>
             <div className="mt-2 flex gap-2">
-              <Button type="button" variant={runtime === "tmux" ? "default" : "outline"} disabled={busy} onClick={() => setRuntime("tmux")}>Terminal (tmux)</Button>
+              <Button type="button" variant={runtime === "tmux" ? "default" : "outline"} disabled={busy || !!tmuxDisabled} title={tmuxDisabled ?? undefined} onClick={() => setRuntime("tmux")}>Terminal (tmux)</Button>
               <Button type="button" variant={runtime === "chat" ? "default" : "outline"} disabled={busy || !!chatDisabled} title={chatDisabled ?? undefined} onClick={() => setRuntime("chat")}>Chat</Button>
             </div>
             {runtime === "chat" && <p className="mt-2 text-sm text-muted-foreground">The agent runs behind the chat view; its terminal stays available as a tab.</p>}
             {repo && chatDisabled && <p className="mt-2 text-xs text-muted-foreground">{chatDisabled}</p>}
+            {repo && tmuxDisabled && <p className="mt-2 text-xs text-muted-foreground">{tmuxDisabled}</p>}
           </fieldset>
           <fieldset className="sm:col-span-2">
             <legend className={labelCls}>Where it runs</legend>
@@ -456,7 +462,8 @@ function SessionRow({ s, usage, cc, ccLatest, open, onToggle, onChanged, onShare
                     value={agentPick}
                     onChange={(e) => setPick(e.target.value as AgentName)}
                   >
-                    {AGENT_IDS.map((a) => <option key={a} value={a}>{AGENT_PROFILES[a].label}</option>)}
+                    {/* The swap restarts tmux panes: chat-only profiles have no launcher there (devd: 400). */}
+                    {AGENT_IDS.filter((a) => tmuxRuntimeBlock(a) === null || a === currentAgent).map((a) => <option key={a} value={a}>{AGENT_PROFILES[a].label}</option>)}
                   </select>
                   <ConfirmButton
                     size="sm" variant="outline" disabled={agentPick === currentAgent}

@@ -1,8 +1,12 @@
+import { isAcpAgent, type AcpAgentId } from "./acpAgents";
 import type { LoggedEvent } from "./events";
+
+/** Claude, Codex, or an ACP agent (ACP_AGENTS). */
+export type HarnessId = "claude" | "codex" | AcpAgentId;
 
 /** The harness, account and model a chat session switches to; `env` is applied to that harness process only. */
 export interface SwitchTarget {
-  harness: "claude" | "codex";
+  harness: HarnessId;
   account: string | null;
   model: string | null;
   env: Record<string, string>;
@@ -54,7 +58,9 @@ function nullableString(v: unknown, what: string): string | null {
 
 function parseTarget(v: unknown): SwitchTarget {
   if (!isRecord(v)) throw new ProtocolError("switchTarget.target must be an object");
-  if (v.harness !== "claude" && v.harness !== "codex") throw new ProtocolError('switchTarget.target.harness must be "claude" or "codex"');
+  if (v.harness !== "claude" && v.harness !== "codex" && !isAcpAgent(v.harness)) {
+    throw new ProtocolError('switchTarget.target.harness must be "claude", "codex" or an ACP agent id');
+  }
   if (!isRecord(v.env) || !Object.values(v.env).every((x) => typeof x === "string")) {
     throw new ProtocolError("switchTarget.target.env must be an object of strings");
   }

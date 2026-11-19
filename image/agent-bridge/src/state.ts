@@ -1,12 +1,12 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { UsageBaseline } from "./events";
-import type { HandoffDelivery, SwitchTarget } from "./protocol";
+import type { HandoffDelivery, HarnessId, SwitchTarget } from "./protocol";
 
 /** A switch target as persisted: secret env values are dropped, their names kept in `droppedEnvKeys`. */
 export type PersistedTarget = SwitchTarget & { droppedEnvKeys: string[] };
 
 export interface BridgeState {
-  harness: "claude" | "codex";
+  harness: HarnessId;
   nativeThreadId: string | null;
   account: string | null;
   model: string | null;

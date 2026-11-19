@@ -143,7 +143,7 @@ async function until(cond: () => boolean) {
 const SPEC: AcpAgentSpec = { id: "example", argv: ["example-agent", "acp"] };
 const MCP = [{ name: "devbox", command: "agent-bridge", args: ["mcp"], env: { DEVD_URL: "http://devd.test" } }];
 
-function open(fake: ReturnType<typeof fakeAgent>, o: { spec?: AcpAgentSpec; resume?: string | null; model?: string | null } = {}) {
+function open(fake: ReturnType<typeof fakeAgent>, o: { spec?: AcpAgentSpec; resume?: string | null; model?: string | null; instructions?: string } = {}) {
   const events: BridgeEvent[] = [];
   const logs: string[] = [];
   const session = openAcpSession(
@@ -153,6 +153,7 @@ function open(fake: ReturnType<typeof fakeAgent>, o: { spec?: AcpAgentSpec; resu
       model: o.model ?? null,
       resume: o.resume ?? null,
       mcpServers: MCP,
+      ...(o.instructions === undefined ? {} : { instructions: o.instructions }),
       emit: (e) => events.push(e),
       logError: (m) => logs.push(m),
     },
@@ -186,6 +187,10 @@ describe("negotiate", () => {
 
   test("an agent without load or resume cannot resume", () => {
     expect(negotiate(INIT["v1-no-load"]).caps.resume).toBe(false);
+  });
+
+  test("v2 session capabilities without resume or load cannot resume", () => {
+    expect(negotiate(INIT["v2-no-resume"])).toMatchObject({ version: 2, caps: { resume: false } });
   });
 
   test("a result that is no ACP initialize response is refused", () => {
@@ -381,7 +386,64 @@ describe("openAcpSession", () => {
     await session.ready;
     await session.startTurn("run-1", "go", "user");
     await until(() => events.some((e) => e.type === "run.failed"));
-    expect(events.at(-1)).toEqual({ type: "run.failed", runId: "run-1", error: "rate-limited: session/prompt: Rate limit exceeded" });
+    expect(events.at(-1)).toEqual({ type: "run.failed", runId: "run-1", error: "rate-limited: session/prompt: Rate limit exceeded", reason: "rate-limited" });
+  });
+
+  test("the instructions go ahead of the first message of a new session only", async () => {
+    const fake = fakeAgent();
+    const { session, events } = open(fake, { instructions: "<devbox-instructions>x</devbox-instructions>" });
+    await session.ready;
+    await session.startTurn("run-1", "one", "user");
+    await session.startTurn("run-2", "two", "user");
+    await until(() => events.filter((e) => e.type === "run.completed").length === 2);
+    expect(fake.requests("session/prompt").map((r) => r.params.prompt[0].text)).toEqual(["<devbox-instructions>x</devbox-instructions>\n\none", "two"]);
+
+    const reopened = fakeAgent();
+    const r = open(reopened, { resume: "sess-old", instructions: "<devbox-instructions>x</devbox-instructions>" });
+    await r.session.ready;
+    await r.session.startTurn("run-3", "three", "user");
+    await until(() => r.events.some((e) => e.type === "run.completed"));
+    expect(reopened.requests("session/prompt")[0]!.params.prompt[0].text).toBe("three");
+  });
+
+  test("an interrupt while the model is being applied never sends the prompt", async () => {
+    const fake = fakeAgent();
+    fake.responders["session/new"] = () => ({ sessionId: "sess-1", models: { currentModelId: "m1", availableModels: [] } });
+    let setModelId: number | string = -1;
+    fake.responders["session/set_model"] = (_p, id) => {
+      setModelId = id;
+      return undefined;
+    };
+    const { session, events } = open(fake);
+    await session.ready;
+    await session.setModel("m2");
+    await session.startTurn("run-1", "go", "user");
+    await until(() => setModelId !== -1);
+    await session.interrupt();
+    fake.respond(setModelId, {});
+    await until(() => events.some((e) => e.type === "run.interrupted"));
+    expect(fake.requests("session/prompt")).toHaveLength(0);
+    expect(fake.notifications("session/cancel")).toHaveLength(0);
+    expect(events.at(-1)).toEqual({ type: "run.interrupted", runId: "run-1" });
+  });
+
+  test("a v2 whole message without a content list keeps the streamed text", async () => {
+    const fake = fakeAgent(INIT.v2);
+    fake.responders["session/prompt"] = () => {
+      queueMicrotask(() => {
+        const update = (u: unknown) => fake.push({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "sess-1", update: u } });
+        update({ sessionUpdate: "agent_message_chunk", messageId: "msg-1", content: { type: "text", text: "streamed" } });
+        update({ sessionUpdate: "agent_message", messageId: "msg-1", content: "not a list" });
+        update({ sessionUpdate: "state_update", state: "idle", stopReason: "end_turn" });
+      });
+      return {};
+    };
+    const { session, events, logs } = open(fake);
+    await session.ready;
+    await session.startTurn("run-1", "go", "user");
+    await until(() => events.some((e) => e.type === "run.completed"));
+    expect(events.filter((e) => e.type === "message.final")).toEqual([{ type: "message.final", runId: "run-1", itemId: "msg-1", role: "assistant", text: "streamed" }]);
+    expect(logs.some((l) => l.includes("no content list"))).toBe(true);
   });
 
   test("turns sent during a run wait for it", async () => {
@@ -600,7 +662,8 @@ describe("acpMcpServers", () => {
     delete process.env.DEVD_AGENT_SOCK;
     delete process.env.DEVD_SESSION_ID;
     try {
-      expect(acpMcpServers()).toEqual([{ name: "devbox", command: "agent-bridge", args: ["mcp"], env: { DEVD_URL: "http://devd.test" } }]);
+      expect(acpMcpServers("/usr/local/bin/agent-bridge")).toEqual([{ name: "devbox", command: "/usr/local/bin/agent-bridge", args: ["mcp"], env: { DEVD_URL: "http://devd.test" } }]);
+      expect(() => acpMcpServers("agent-bridge")).toThrow(/absolute/);
     } finally {
       for (const [k, v] of [["DEVD_URL", saved.url], ["DEVD_AGENT_SOCK", saved.sock], ["DEVD_SESSION_ID", saved.id]] as const) {
         if (v === undefined) delete process.env[k];

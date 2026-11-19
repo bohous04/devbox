@@ -24,6 +24,8 @@ export interface AcpSessionOptions {
   resume: string | null;
   mcpServers: AcpMcpServer[];
   emit: (e: BridgeEvent) => void;
+  /** Put ahead of the first user message of a new session (ACP has no system prompt); none when omitted. */
+  instructions?: string;
   /** Environment the agent starts from; the bridge's own when omitted. */
   baseEnv?: Record<string, string | undefined>;
   logError?: (msg: string) => void;
@@ -64,7 +66,7 @@ export function negotiate(initResult: unknown): { version: 1 | 2; caps: Capabili
   if (typeof initResult.protocolVersion !== "number") throw new Error(`initialize response has no protocolVersion: ${JSON.stringify(initResult).slice(0, 200)}`);
   if ("info" in initResult) {
     const session = initResult.capabilities?.session;
-    return { version: 2, caps: { ...BASE_CAPABILITIES, resume: session != null, images: session?.prompt?.image != null } };
+    return { version: 2, caps: { ...BASE_CAPABILITIES, resume: resumeMethod(2, initResult) !== null, images: session?.prompt?.image != null } };
   }
   const agent = initResult.agentCapabilities ?? {};
   return {
@@ -73,9 +75,15 @@ export function negotiate(initResult: unknown): { version: 1 | 2; caps: Capabili
   };
 }
 
-// How the agent reopens a session: session/resume where offered (no history replay), else v1's session/load.
+// How the agent reopens a session: session/resume where offered (no history replay), else session/load. Only an
+// explicit capability counts: v1 `sessionCapabilities.resume` / `loadSession`, v2 `capabilities.session.resume` /
+// `.load`.
 function resumeMethod(version: 1 | 2, init: Json): "session/resume" | "session/load" | null {
-  if (version === 2) return init.capabilities?.session != null ? "session/resume" : null;
+  if (version === 2) {
+    const session = init.capabilities?.session ?? {};
+    if (session.resume != null) return "session/resume";
+    return session.load != null ? "session/load" : null;
+  }
   const agent = init.agentCapabilities ?? {};
   if (agent.sessionCapabilities?.resume != null) return "session/resume";
   return agent.loadSession === true ? "session/load" : null;
@@ -131,6 +139,8 @@ interface ToolState {
 interface ActiveRun {
   runId: string;
   interrupted: boolean;
+  /** session/prompt was sent; before that an interrupt has nothing to cancel at the agent. */
+  prompted: boolean;
   message: { itemId: string; text: string } | null;
   messages: number;
   tools: Map<string, ToolState>;
@@ -176,6 +186,8 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
   // While session/load replays the history: those updates belong to no run.
   let replaying = false;
   let endReason: string | null = null;
+  // Until the first prompt of a new session got through; a reopened session had its first prompt already.
+  let instructions = o.resume === null ? (o.instructions ?? null) : null;
 
   let markReady: () => void = () => {};
   let failReady: (e: Error) => void = () => {};
@@ -287,7 +299,7 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
   }
 
   function newRun(runId: string): ActiveRun {
-    return { runId, interrupted: false, message: null, messages: 0, tools: new Map(), plan: null };
+    return { runId, interrupted: false, prompted: false, message: null, messages: 0, tools: new Map(), plan: null };
   }
 
   function flushMessage(run: ActiveRun): void {
@@ -311,7 +323,12 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
     void (async () => {
       try {
         if (model !== null && model !== appliedModel) await applyModel(c, model);
-        const r = await c.peer.request<unknown>("session/prompt", { sessionId, prompt: [{ type: "text", text: t.text }] });
+        // Interrupted while the model was being applied: the prompt is never sent.
+        if (run.interrupted) return finishRun(run, "cancelled", undefined);
+        const text = instructions === null ? t.text : `${instructions}\n\n${t.text}`;
+        run.prompted = true;
+        const r = await c.peer.request<unknown>("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
+        instructions = null;
         // v2 only accepts the prompt here; its idle state update ends the turn.
         if (version === 1) finishRun(run, isObject(r) ? r.stopReason : undefined, isObject(r) ? r.usage : undefined);
       } catch (e) {
@@ -348,7 +365,9 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
     if (run.interrupted) emit({ type: "run.interrupted", runId: run.runId });
     else {
       const rateLimited = e instanceof JsonRpcError && (spec.rateLimitCodes ?? []).includes(e.code);
-      emit({ type: "run.failed", runId: run.runId, error: rateLimited ? `rate-limited: ${message(e)}` : message(e) });
+      emit(rateLimited
+        ? { type: "run.failed", runId: run.runId, error: `rate-limited: ${message(e)}`, reason: "rate-limited" }
+        : { type: "run.failed", runId: run.runId, error: message(e) });
     }
     startNext();
   }
@@ -427,7 +446,12 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
 
   // v2 sends a whole message after (or instead of) its chunks.
   function wholeMessage(run: ActiveRun, messageId: string, content: unknown): void {
-    const text = (Array.isArray(content) ? content : []).map((b) => blockText(b) ?? "").join("");
+    if (!Array.isArray(content)) {
+      // What was streamed under this id stays the message.
+      logError(`${spec.id}: agent_message ${messageId} has no content list (${typeof content}); keeping the streamed text`);
+      return flushMessage(run);
+    }
+    const text = content.map((b) => blockText(b) ?? "").join("");
     if (run.message?.itemId !== messageId) flushMessage(run);
     run.message = { itemId: messageId, text };
     flushMessage(run);
@@ -562,8 +586,8 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
     async interrupt() {
       if (active === null) throw new Error("no active run");
       active.interrupted = true;
-      // A notification: the prompt then ends with stopReason "cancelled".
-      conn!.peer.notify("session/cancel", { sessionId });
+      // A notification: the prompt then ends with stopReason "cancelled". A prompt not sent yet is never sent.
+      if (active.prompted) conn!.peer.notify("session/cancel", { sessionId });
     },
     async answer(requestId) {
       // Permission requests are answered automatically; ACP agents open no requests for the user.

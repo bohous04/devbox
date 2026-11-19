@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
 import {
-  AGENT_IDS, AGENT_PROFILES, SOLO, chatRuntimeBlock, defaultAgentFor, folderChoices, isProxyAgent, profileFor, projectChoices, repoChoices, sessionsFor, soleProject,
+  AGENT_IDS, AGENT_PROFILES, SOLO, chatRuntimeBlock, defaultAgentFor, folderChoices, instaboxAgentBlock, isProxyAgent, profileFor, projectChoices, repoChoices, sessionsFor, soleProject, tmuxRuntimeBlock,
 } from "./newSession";
 import type { TreeProject } from "./api";
 // Only this test may import devd — it ensures the manual mirror in newSession.ts
 // (AGENT_PROFILES) does not drift from the single source of truth. Tests do not go into the vite
 // bundle, so the production separation of the dashboard from devd stays intact (Ruling 3
 // v task-6 dispatchi).
-import { AGENTS as DEVD_AGENTS, AGENT_IDS as DEVD_AGENT_IDS, chatRuntimeBlock as devdChatRuntimeBlock, usesProxy } from "../../devd/src/agents";
+import { AGENTS as DEVD_AGENTS, AGENT_IDS as DEVD_AGENT_IDS, chatRuntimeBlock as devdChatRuntimeBlock, tmuxRuntimeBlock as devdTmuxRuntimeBlock, usesProxy } from "../../devd/src/agents";
 
 const tree: TreeProject[] = [
   { folder: "acme", project: "shop", repos: [
@@ -84,13 +84,18 @@ test("mirror in newSession.ts (AGENT_PROFILES) matches devd/src/agents.ts", () =
     expect(AGENT_PROFILES[id].yolo).toBe(DEVD_AGENTS[id].yolo);
     expect(AGENT_PROFILES[id].proxy).toBe(usesProxy(id));
     expect(AGENT_PROFILES[id].runtime).toBe(DEVD_AGENTS[id].runtime);
+    expect(AGENT_PROFILES[id].acp).toBe(DEVD_AGENTS[id].acp);
+    expect(AGENT_PROFILES[id].acpLive).toBe(DEVD_AGENTS[id].acpLive);
+    expect(AGENT_PROFILES[id].chatOnly).toBe(DEVD_AGENTS[id].chatOnly);
   }
 });
 
-test("chatRuntimeBlock mirrors devd: chat only for the claude and codex harnesses on the VPS", () => {
+test("chatRuntimeBlock, tmuxRuntimeBlock and instaboxAgentBlock mirror devd", () => {
   for (const id of DEVD_AGENT_IDS) {
     for (const host of ["vps", "instabox"] as const) expect(chatRuntimeBlock(id, host)).toBe(devdChatRuntimeBlock(id, host));
+    expect(tmuxRuntimeBlock(id)).toBe(devdTmuxRuntimeBlock(id));
   }
+  expect(instaboxAgentBlock("vibe")).toBe("Mistral Vibe runs only in chat sessions");
   expect(chatRuntimeBlock("claude", "vps")).toBeNull();
   expect(chatRuntimeBlock("codex", "vps")).toBeNull();
   expect(chatRuntimeBlock("claude-gemini", "vps")).toBeNull();

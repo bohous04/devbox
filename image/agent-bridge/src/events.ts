@@ -47,7 +47,8 @@ export type BridgeEvent =
   // usage is null when the harness reported no usage for this run.
   | { type: "run.completed"; runId: string; nativeThreadId: string; usage: TokenUsage | null; costUsd: number | null }
   | { type: "run.interrupted"; runId: string }
-  | { type: "run.failed"; runId: string; error: string }
+  // reason: the harness was rate-limited (an ACP agent's rate-limit error code); absent for any other failure.
+  | { type: "run.failed"; runId: string; error: string; reason?: "rate-limited" }
   // awaitingTarget: restarted after a switch whose secret env was not persisted; no harness until devd re-sends
   // switchTarget.
   | { type: "bridge.started"; version: string; resumed: boolean; awaitingTarget?: boolean };

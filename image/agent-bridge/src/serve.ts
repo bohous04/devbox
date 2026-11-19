@@ -1,5 +1,7 @@
 import { mkdirSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { ACP_AGENTS, isAcpAgent } from "./acpAgents";
+import { openAcpSession } from "./acpSession";
 import { CLAUDE_CAPABILITIES, openClaudeSession, ResumeFailedError, type HarnessSession } from "./claudeSession";
 import { prepareShadowHome, type HomesPaths } from "./codexHomes";
 import { CODEX_CAPABILITIES, openCodexSession } from "./codexSession";
@@ -7,7 +9,7 @@ import { CONTINUATION_TEXT, CONTINUATION_WINDOW_MS, mayContinue } from "./contin
 import { EventLog } from "./eventLog";
 import type { BackgroundWork, BridgeEvent, UsageBaseline } from "./events";
 import { DEFAULT_SOCKET } from "./mcp";
-import { APPENDED_SYSTEM_PROMPT, claudeMcpServers, codexMcpArgs } from "./prompts";
+import { ACP_INSTRUCTIONS, acpMcpServers, APPENDED_SYSTEM_PROMPT, claudeMcpServers, codexMcpArgs } from "./prompts";
 import type { BridgeCommand, HandoffDelivery, SwitchTarget } from "./protocol";
 import { INHERITED_STRIP, isProxyProfile, proxyProfileEnv } from "./proxyProfile";
 import { startServer } from "./server";
@@ -82,10 +84,11 @@ function accountDir(dir: string | undefined, root: string): string | null {
 }
 
 /** Account id for `thread.native`: the lease's profile dir for Claude; for Codex the explicit account,
- *  else the standalone account home codex_account_prepare selected. */
+ *  else the standalone account home codex_account_prepare selected; none for an ACP agent (its own CLI login). */
 export function accountFromEnv(harness: Harness, env: Env): string | null {
   if (harness === "claude") return accountDir(env.CLAUDE_CONFIG_DIR, CLAUDE_ACCOUNTS_ROOT);
-  return env.DEVD_CODEX_ACCOUNT_ID ? env.DEVD_CODEX_ACCOUNT_ID : accountDir(env.CODEX_HOME, CODEX_ACCOUNTS_ROOT);
+  if (harness === "codex") return env.DEVD_CODEX_ACCOUNT_ID ? env.DEVD_CODEX_ACCOUNT_ID : accountDir(env.CODEX_HOME, CODEX_ACCOUNTS_ROOT);
+  return null;
 }
 
 /** `co`'s per-account config overrides, so app-server reads the same auth and state as the TUI would. */
@@ -103,9 +106,18 @@ export interface ResolveOptions {
   homes?: Partial<HomesPaths>;
   /** The image's `claude`, or null when it is not on PATH. */
   claudeExecutable: string | null;
+  /** PATH lookup of an ACP agent's binary; Bun.which unless a test replaces it. */
+  which?: (bin: string) => string | null;
 }
 
 export function resolveTarget(t: SwitchTarget, r: ResolveOptions): SwitchTarget {
+  if (isAcpAgent(t.harness)) {
+    // An ACP agent runs on its own CLI login in its volume; devbox has no account to pick for it.
+    if (t.account !== null) throw new Error(`switch target: ${t.harness} runs on its own CLI login, not on account ${t.account}`);
+    const bin = ACP_AGENTS[t.harness].argv[0]!;
+    if ((r.which ?? Bun.which)(bin) === null) throw new Error(`switch target: ${bin} (${t.harness}) not found on PATH`);
+    return t;
+  }
   if (t.harness === "claude") {
     if (r.claudeExecutable === null) throw new Error("switch target: claude binary not found on PATH");
     const dir = t.env.CLAUDE_CONFIG_DIR;
@@ -157,8 +169,8 @@ export interface ServeConfig {
   harness: Harness;
   /** The launch harness's own env: a proxy profile's (DEVD_AGENT=claude-gemini, …), else empty. */
   targetEnv: Record<string, string>;
-  /** CLAUDE_CONFIG_DIR or CODEX_HOME. */
-  configHome: string;
+  /** CLAUDE_CONFIG_DIR or CODEX_HOME; null for an ACP agent (its login lives in its own volume). */
+  configHome: string | null;
   account: string | null;
   model: string | null;
   bridgeDir: string;
@@ -170,21 +182,21 @@ export function serveConfigFromEnv(env: Env): ServeConfig {
   const agent = env.DEVD_AGENT;
   // A proxy profile is Claude Code against another upstream: the claude harness with the profile's env.
   const harness = isProxyProfile(agent) ? "claude" : agent;
-  if (harness !== "claude" && harness !== "codex") {
-    throw new ConfigError(`DEVD_AGENT must be claude, codex or a proxy profile (got ${JSON.stringify(agent ?? null)})`);
+  if (harness !== "claude" && harness !== "codex" && !isAcpAgent(harness)) {
+    throw new ConfigError(`DEVD_AGENT must be claude, codex, an ACP agent (${Object.keys(ACP_AGENTS).join(", ")}) or a proxy profile (got ${JSON.stringify(agent ?? null)})`);
   }
   let targetEnv: Record<string, string> = {};
   if (isProxyProfile(agent)) {
     try { targetEnv = proxyProfileEnv(agent, env); }
     catch (e) { throw new ConfigError(e instanceof Error ? e.message : String(e)); }
   }
-  const homeVar = harness === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
-  const configHome = env[homeVar];
-  if (!configHome) throw new ConfigError(`${homeVar} is not set`);
+  const homeVar = harness === "claude" ? "CLAUDE_CONFIG_DIR" : harness === "codex" ? "CODEX_HOME" : null;
+  const configHome = homeVar === null ? null : env[homeVar];
+  if (homeVar !== null && !configHome) throw new ConfigError(`${homeVar} is not set`);
   return {
     harness,
     targetEnv,
-    configHome,
+    configHome: configHome ?? null,
     account: accountFromEnv(harness, env),
     model: env.DEVD_AGENT_MODEL ? env.DEVD_AGENT_MODEL : null,
     bridgeDir: env.DEVD_BRIDGE_DIR ?? DEFAULT_BRIDGE_DIR,
@@ -205,6 +217,21 @@ export function harnessEnv(launchEnv: Env, targetEnv: Record<string, string>): E
 function harnessOpener(launchEnv: Env, logError: (msg: string) => void): OpenHarness {
   return (o) => {
     const env = harnessEnv(launchEnv, o.target.env);
+    if (isAcpAgent(o.target.harness)) {
+      const mcpCommand = Bun.which("agent-bridge");
+      if (!mcpCommand) throw new Error("agent-bridge (the devbox MCP server) not found on PATH");
+      return openAcpSession({
+        spec: ACP_AGENTS[o.target.harness],
+        cwd: WORKSPACE,
+        model: o.target.model,
+        resume: o.resume,
+        mcpServers: acpMcpServers(mcpCommand),
+        instructions: ACP_INSTRUCTIONS,
+        baseEnv: env,
+        emit: o.emit,
+        logError,
+      });
+    }
     if (o.target.harness === "codex") {
       if (!env.CODEX_HOME) throw new Error("CODEX_HOME is not set for the Codex harness");
       return openCodexSession({
@@ -484,8 +511,9 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     // Runs left by the previous bridge are not active here: they start once this switch has opened the harness.
     if (!recoveryPending) refuseWhileRunning("switch");
     const target = o.resolveTarget(cmd.target);
-    const caps = target.harness === "claude" ? CLAUDE_CAPABILITIES : CODEX_CAPABILITIES;
-    if (cmd.handoff?.injectItems && cmd.handoff.preamble === null && !caps.injectItems) {
+    // ACP agents take no raw history items (acpSession.ts).
+    const injects = target.harness === "claude" ? CLAUDE_CAPABILITIES.injectItems : target.harness === "codex" ? CODEX_CAPABILITIES.injectItems : false;
+    if (cmd.handoff?.injectItems && cmd.handoff.preamble === null && !injects) {
       throw new Error(`switch refused: ${target.harness} cannot inject handoff items and the handoff has no preamble`);
     }
     await retireHarness();

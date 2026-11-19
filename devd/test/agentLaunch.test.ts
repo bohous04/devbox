@@ -27,6 +27,21 @@ test("agent-launch: argument beats env, env beats the default claude", async () 
   expect(await printAgent({ DEVD_AGENT: "antigravity" })).toBe("antigravity");
 });
 
+test("agent-launch: vibe is a known profile that runs only in chat sessions", async () => {
+  expect(await printAgent({ DEVD_AGENT: "vibe" })).toBe("vibe");
+  for (const runtime of ["chat", "tmux"]) {
+    const p = Bun.spawn(["bash", join(IMAGE, "agent-launch.sh"), "vibe"], {
+      env: { ...process.env, DEVD_AGENT: "", DEVD_RUNTIME: runtime },
+      stdin: "ignore", stdout: "ignore", stderr: "pipe",
+    });
+    const err = await new Response(p.stderr).text();
+    await p.exited;
+    expect(err).not.toContain("unknown profile");
+    if (runtime === "tmux") expect(err).toContain("runs only in chat sessions");
+    else expect(err).toBe("");
+  }
+});
+
 test("agent-launch: an unknown profile falls back to claude (the session always comes up)", async () => {
   expect(await printAgent({ DEVD_AGENT: "gpt" })).toBe("claude");
   expect(await printAgent({}, ["nonsense"])).toBe("claude");

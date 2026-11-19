@@ -1,8 +1,10 @@
 import type { Capabilities } from "./events.ts";
 
+export type AcpAgentId = "grok" | "vibe" | "antigravity" | "opencode";
+
 /** One ACP agent: how to start it and its quirks. Per-agent differences live here, never in branches on the id. */
 export interface AcpAgentSpec {
-  id: "grok" | "vibe" | "antigravity" | "opencode" | string;
+  id: AcpAgentId | (string & {});
   argv: string[];
   /** Added to the agent's environment. */
   env?: Record<string, string>;
@@ -17,7 +19,7 @@ export interface AcpAgentSpec {
 }
 
 // Quirks from the T3 Code reference (commit eebb6bcc); Task 3 verifies each agent live.
-export const ACP_AGENTS: Record<string, AcpAgentSpec> = {
+export const ACP_AGENTS: Record<AcpAgentId, AcpAgentSpec> = {
   // Full access: Grok approves its own tool calls.
   grok: { id: "grok", argv: ["grok", "agent", "--always-approve", "stdio"] },
   // -31001 is Mistral Vibe's rate-limit code, outside ACP.
@@ -28,3 +30,7 @@ export const ACP_AGENTS: Record<string, AcpAgentSpec> = {
   // Through ACP, not OpenCode's native HTTP server.
   opencode: { id: "opencode", argv: ["opencode", "acp"] },
 };
+
+export function isAcpAgent(v: unknown): v is AcpAgentId {
+  return typeof v === "string" && Object.hasOwn(ACP_AGENTS, v);
+}

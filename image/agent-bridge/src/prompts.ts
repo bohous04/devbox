@@ -18,8 +18,13 @@ export function codexMcpArgs(): string[] {
   ];
 }
 
-/** The devbox MCP server for ACP `session/new` (stdio); the agent may start it with a filtered environment too. */
-export function acpMcpServers(): { name: string; command: string; args: string[]; env: Record<string, string> }[] {
+/** The devbox MCP server for ACP `session/new` (stdio); the agent may start it with a filtered environment too.
+ *  ACP wants an absolute `command`: the caller passes the `agent-bridge` it found on PATH. */
+export function acpMcpServers(command: string): { name: string; command: string; args: string[]; env: Record<string, string> }[] {
+  if (!command.startsWith("/")) throw new Error(`the devbox MCP server command must be an absolute path (got ${JSON.stringify(command)})`);
   const env = Object.fromEntries(presentMcpEnv().map((n) => [n, process.env[n]!]));
-  return [{ name: "devbox", command: "agent-bridge", args: ["mcp"], env }];
+  return [{ name: "devbox", command, args: ["mcp"], env }];
 }
+
+/** ACP has no system-prompt field (ruling S4-P3): these go ahead of the first user message of each new ACP thread. */
+export const ACP_INSTRUCTIONS = `<devbox-instructions>\n${APPENDED_SYSTEM_PROMPT}\n</devbox-instructions>`;

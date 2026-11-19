@@ -273,7 +273,7 @@ test("account: a reported model without a known window is a visible 409 naming i
 test("every priced Claude/GPT model id has a window; every offered model too", () => {
   const reported = PRICED_MODELS.filter((m) => /^(claude-|gpt-)/.test(m) && !m.startsWith("gpt-oss"));
   for (const m of reported) expect([m, MODEL_WINDOW_ALIASES[m]]).toEqual([m, expect.any(String)]);
-  for (const m of [...CHAT_MODELS.claude, ...CHAT_MODELS.codex]) expect(MODEL_WINDOW_ALIASES[m]).toBe(m);
+  for (const m of Object.values(CHAT_MODELS).flat()) expect(MODEL_WINDOW_ALIASES[m]).toBe(m);
 });
 
 test("account: a profile that cannot be attached is 409 before anything is sent, without the internal cause", async () => {
@@ -311,7 +311,11 @@ test("account: a proxy profile has no account pool (400)", async () => {
 test("harness: an unknown agent or one chat cannot run is 400", async () => {
   const t = setup();
   expect((await t.post("harness", { agent: "nope" })).status).toBe(400);
-  expect((await t.post("harness", { agent: "grok" })).status).toBe(400);
+  for (const agent of ["grok", "antigravity"]) {
+    const r = await t.post("harness", { agent });
+    expect(r).toMatchObject({ status: 400, body: { error: "unknown-agent" } });
+    expect(String(r.body.message)).toContain("is not available in chat sessions yet");
+  }
   expect((await t.post("harness", {})).status).toBe(400);
   expect(t.sent).toEqual([]);
 });
