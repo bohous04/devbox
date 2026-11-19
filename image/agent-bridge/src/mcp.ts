@@ -78,14 +78,23 @@ export function sendCommand(
       clearTimeout(timer);
       fn();
     };
+    const startedAt = Date.now();
+    const timedOut = () => reject(new Error(`agent bridge did not answer ${cmd.kind} within ${timeoutMs} ms`));
     const timer = setTimeout(() => {
-      finish(() => reject(new Error(`agent bridge did not answer ${cmd.kind} within ${timeoutMs} ms`)));
+      finish(timedOut);
       conn?.end();
     }, timeoutMs);
     Bun.connect({
       unix: socketPath,
       socket: {
         open(socket) {
+          // Timed out while connecting (the timer may not have run yet): the agent is told the command failed, so it
+          // must not run now.
+          if (settled || Date.now() - startedAt >= timeoutMs) {
+            finish(timedOut);
+            socket.end();
+            return;
+          }
           conn = socket;
           socket.write(encodeFrame({ t: "cmd", id, cmd }));
         },

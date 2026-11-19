@@ -106,6 +106,16 @@ test("a bridge that never answers fails the command after the timeout, it does n
   expect(Date.now() - t0).toBeLessThan(2000);
 });
 
+test("a command that timed out before the connection opened is never delivered", async () => {
+  const path = join(dir, "slow.sock");
+  const got: string[] = [];
+  const l = Bun.listen({ unix: path, socket: { data(_s, d) { got.push(d.toString()); } } });
+  closers.push(() => l.stop(true));
+  await expect(sendCommand(path, { kind: "endWait" }, 0)).rejects.toThrow("did not answer");
+  await new Promise((r) => setTimeout(r, 100));
+  expect(got).toEqual([]);
+});
+
 test("a malformed frame from the bridge is an error result, not a crash", async () => {
   const path = fakeBridge("{not json\n");
   const logged: string[] = [];
