@@ -278,8 +278,6 @@ private struct AccountsSection: View {
             if let status {
                 row("Claude", status.claude)
                 row("Codex CLI", status.codex)
-                row("Proxy · ChatGPT", status.proxyCodex)
-                row("Proxy · xAI", status.proxyXai)
                 if let proxyAntigravity = status.proxyAntigravity { row("Proxy · Antigravity", proxyAntigravity) }
                 row("Grok Build", status.grok)
                 if let antigravity = status.antigravity { row("Antigravity", antigravity) }
