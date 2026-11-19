@@ -91,12 +91,13 @@ is created afterwards:
 
 - Running sessions are never migrated or restarted. A request that names no runtime and
   matches a running session of the repo (either runtime) joins it instead of starting another.
-- A schedule keeps the runtime stored with it; the setting applies only to schedules that
-  have none.
+- A schedule keeps the runtime stored with it; a schedule created without one stores the
+  default of that moment and keeps it when the default changes.
 - When the default cannot run the requested agent (a tmux-only or chat-only agent), the
   session starts in the other runtime and the response carries a `runtimeNotice` that the
-  dashboard, iOS app and CLI show. InstaBox and solo sessions are always tmux and say so the
-  same way.
+  dashboard, iOS app and CLI show. InstaBox sessions are always tmux; under a chat default an
+  InstaBox request that names no runtime carries a `runtimeNotice` saying so. Solo sessions are
+  always tmux, without a notice (chat was never offered for them).
 - An explicit runtime in the request always wins.
 
 **Agents in chat.** Claude, Codex, Mistral Vibe and Grok. The proxy profiles
