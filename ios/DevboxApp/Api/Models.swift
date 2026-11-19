@@ -1211,3 +1211,9 @@ enum SnoozeReset: Decodable, Equatable {
         else { self = .reason(try c.decode(String.self, forKey: .reason)) }
     }
 }
+
+/// `POST /api/sessions/:id/inbox?for=thread`: the image's container path, sent with the message.
+struct ThreadUpload: Decodable {
+    let path: String
+    let size: Int
+}

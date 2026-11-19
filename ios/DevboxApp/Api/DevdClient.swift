@@ -21,11 +21,15 @@ struct DevdEndpoints {
 struct DevdHTTPError: Error, CustomStringConvertible {
     let statusCode: Int
     let serverMessage: String?
+    /// The body's `message` next to the `error` code (chat routes: `command-failed`, `bridge-too-old`,
+    /// `request-open`…, devd/src/threadApi.ts). Read by `chatErrorText`; `errorText` keeps showing the code.
+    let serverDetail: String?
     var description: String { "HTTP \(statusCode)" }
 
-    init(statusCode: Int, serverMessage: String? = nil) {
+    init(statusCode: Int, serverMessage: String? = nil, serverDetail: String? = nil) {
         self.statusCode = statusCode
         self.serverMessage = serverMessage
+        self.serverDetail = serverDetail
     }
 }
 
@@ -194,7 +198,69 @@ actor DevdClient {
         return request
     }
 
+    // MARK: - Chat (devd/src/threadApi.ts)
+
+    /// devd's SSE stream as lines, blank ones included (`EventStream` parses them). On the active path only: a
+    /// long-lived stream gets no fallback; `EventStream` reconnects, and by then a REST call may have moved the
+    /// active path. Returns once devd answered 2xx; a non-2xx answer throws `DevdHTTPError` with its `{error}`.
+    func streamLines(_ path: String, lastEventId: String?) async throws -> AsyncThrowingStream<String, Error> {
+        guard let base = baseURL(for: active) else {
+            // User-visible — must be in English.
+            throw DevdClientError(description: "No network path configured")
+        }
+        var request = URLRequest(url: try Self.resolve(path, against: base))
+        // The session's 8 s request timeout is the longest gap between bytes; devd pings every 25 s.
+        request.timeoutInterval = 60
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        if let lastEventId { request.setValue(lastEventId, forHTTPHeaderField: "Last-Event-ID") }
+        try addCfHeaders(&request, on: active)
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw DevdClientError(description: "invalid response (\(label(active)))")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            var body = Data()
+            for try await b in bytes {
+                body.append(b)
+                if body.count > 4096 { break }
+            }
+            let parsed = try? JSONDecoder().decode(ErrorBody.self, from: body)
+            throw DevdHTTPError(statusCode: http.statusCode, serverMessage: parsed?.error, serverDetail: parsed?.message)
+        }
+        return AsyncThrowingStream { continuation in
+            let reader = Task {
+                var splitter = LineSplitter()
+                do {
+                    for try await b in bytes {
+                        if let line = splitter.feed(b) { continuation.yield(line) }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in reader.cancel() }
+        }
+    }
+
+    /// A raw upload (`POST /api/sessions/:id/inbox?for=thread`: a chat image as octet-stream). Same path fallback
+    /// as `post`.
+    func upload<T: Decodable>(_ path: String, data: Data) async throws -> T {
+        let raw = try await request(path: path, method: "POST", body: nil, rawBody: data)
+        return try JSONDecoder().decode(T.self, from: raw)
+    }
+
     // MARK: - Private
+
+    private func addCfHeaders(_ request: inout URLRequest, on path: Path) throws {
+        guard path == .cf else { return }
+        guard let cfId = endpoints.cfId, let cfSecret = endpoints.cfSecret else {
+            // User-visible — must be in English.
+            throw DevdClientError(description: "CF path missing service token")
+        }
+        request.setValue(cfId, forHTTPHeaderField: "CF-Access-Client-Id")
+        request.setValue(cfSecret, forHTTPHeaderField: "CF-Access-Client-Secret")
+    }
 
     private func baseURL(for path: Path) -> URL? {
         switch path {
@@ -236,16 +302,16 @@ actor DevdClient {
         }
     }
 
-    private func request(path: String, method: String, body: (any Encodable)?) async throws -> Data {
+    private func request(path: String, method: String, body: (any Encodable)?, rawBody: Data? = nil) async throws -> Data {
         do {
-            return try await perform(on: active, urlPath: path, method: method, body: body)
+            return try await perform(on: active, urlPath: path, method: method, body: body, rawBody: rawBody)
         } catch let firstError {
             let fallback = otherPath(than: active)
             guard shouldFallback(firstError, method: method), baseURL(for: fallback) != nil else {
                 throw firstError
             }
             do {
-                let data = try await perform(on: fallback, urlPath: path, method: method, body: body)
+                let data = try await perform(on: fallback, urlPath: path, method: method, body: body, rawBody: rawBody)
                 active = fallback
                 return data
             } catch let secondError {
@@ -257,7 +323,7 @@ actor DevdClient {
         }
     }
 
-    private func perform(on path: Path, urlPath: String, method: String, body: (any Encodable)?) async throws -> Data {
+    private func perform(on path: Path, urlPath: String, method: String, body: (any Encodable)?, rawBody: Data? = nil) async throws -> Data {
         guard let base = baseURL(for: path) else {
             // User-visible (Settings renders it) — must be in English.
             throw DevdClientError(description: "\(label(path)) not configured", underlying: [])
@@ -287,6 +353,9 @@ actor DevdClient {
         if let body {
             urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
             urlRequest.httpBody = try JSONEncoder().encode(AnyEncodable(body))
+        } else if let rawBody {
+            urlRequest.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+            urlRequest.httpBody = rawBody
         }
         let (data, response) = try await session.data(for: urlRequest)
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -296,8 +365,8 @@ actor DevdClient {
         guard (200..<300).contains(httpResponse.statusCode) else {
             // `try?` — the body may not be JSON at all (empty 404 from CF Access, an HTML error page
             // etc.); a silent `nil` in that case, not a failed request because of an undecodable error.
-            let serverMessage = (try? JSONDecoder().decode(ErrorBody.self, from: data))?.error
-            throw DevdHTTPError(statusCode: httpResponse.statusCode, serverMessage: serverMessage)
+            let parsed = try? JSONDecoder().decode(ErrorBody.self, from: data)
+            throw DevdHTTPError(statusCode: httpResponse.statusCode, serverMessage: parsed?.error, serverDetail: parsed?.message)
         }
         return data
     }
@@ -307,4 +376,14 @@ actor DevdClient {
 /// see `devd/src/api.ts`) — `perform` tries to decode it on every non-2xx response.
 private struct ErrorBody: Decodable {
     let error: String?
+    let message: String?
+
+    private enum CodingKeys: String, CodingKey { case error, message }
+
+    /// Each field on its own: a `message` of another shape must not cost the `error` code.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        error = try? c.decodeIfPresent(String.self, forKey: .error)
+        message = try? c.decodeIfPresent(String.self, forKey: .message)
+    }
 }
