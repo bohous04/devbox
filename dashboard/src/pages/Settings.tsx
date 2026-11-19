@@ -286,13 +286,7 @@ function CodeLoginRow({ label, loginLabel, status, start, submitCode, pollStatus
 const NOT_LOGGED_IN: AuthProvider = { loggedIn: false, detail: "…" };
 
 /** Accounts for AI subs. One table, a row per account, the same controls for all — it used to
- *  be three cards with three different shapes and one had to guess why ChatGPT
- *  needs logging in twice.
- *
- *  ChatGPT is in the list twice ON PURPOSE: native Codex and the proxy each have their own
- *  login storage and the proxy cannot import foreign credentials (it only has an import for
- *  Vertex, verified in its flags). The "Proxy ·" prefix is the only thing that shows the difference
- *  at first glance — without it it looks like a duplicate or a bug. */
+ *  be three cards with three different shapes. */
 export function Accounts() {
   const [status, setStatus] = useState<AuthStatus | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -325,14 +319,6 @@ export function Accounts() {
             start={api.agyLoginStart} submitCode={api.agyLoginCode} pollStatus={api.agyLoginStatus}
             onDone={refresh} onError={setErr} onLogout={api.agyLogout} />
         )}
-
-        <UrlLoginRow label="Proxy · ChatGPT" loginLabel="Log in with ChatGPT" status={status?.proxyCodex ?? NOT_LOGGED_IN}
-          start={() => api.proxyLoginStart("codex")} pollStatus={() => api.proxyLoginStatus("codex")}
-          onDone={refresh} onError={setErr} />
-
-        <UrlLoginRow label="Proxy · xAI" loginLabel="Log in with xAI" status={status?.proxyXai ?? NOT_LOGGED_IN}
-          start={() => api.proxyLoginStart("xai")} pollStatus={() => api.proxyLoginStatus("xai")}
-          onDone={refresh} onError={setErr} />
 
         {/* Older devd lacks `proxyAntigravity` in /api/auth — the button would end in a 404,
             hidden until the state arrives (same pattern as showAgyRow above). */}
