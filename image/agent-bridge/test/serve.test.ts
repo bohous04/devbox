@@ -145,7 +145,7 @@ function codexAccount(id: string, auth = '{"tokens":{}}'): void {
   writeFileSync(join(homes().sharedHome, "config.toml"), 'model = "x"\n');
 }
 
-async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string | null; claudeExecutable?: string | null; acpBins?: string[]; logError?: (msg: string) => void; logCompactMinBytes?: number; now?: () => number } = {}) {
+async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string | null; claudeExecutable?: string | null; acpBins?: string[]; logError?: (msg: string) => void; logCompactMinBytes?: number; now?: () => number; sweepMs?: number } = {}) {
   const bridge = await serve({
     bridgeDir: dir,
     socketPath,
@@ -162,6 +162,7 @@ async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string
     now: over.now ?? (() => NOW),
     logError: over.logError ?? (() => {}),
     ...(over.logCompactMinBytes === undefined ? {} : { logCompactMinBytes: over.logCompactMinBytes }),
+    ...(over.sweepMs === undefined ? {} : { sweepMs: over.sweepMs }),
   });
   closers.push(() => bridge.close());
   return bridge;
@@ -1304,6 +1305,18 @@ describe("step 6 hardening", () => {
     await handshake(last);
     expect(state().trimSeq).toBe(2);
     expect(keptSeqs().filter((s) => s > 2)).toEqual(Array.from({ length: last - 2 }, (_, i) => i + 3));
+  });
+
+  test("a long-lived connection still trims: the periodic sweep promotes an ack once it is 10 minutes old", async () => {
+    let clock = NOW;
+    const last = await finishedThenOpen({ now: () => clock, sweepMs: 5 });
+    await handshake(3);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(state().trimSeq).toBe(0);
+    clock += 10 * MIN;
+    await new Promise((r) => setTimeout(r, 30));
+    expect(state()).toMatchObject({ trimSeq: 3, ackCandidate: null });
+    expect(keptSeqs()).toEqual([1, ...Array.from({ length: last - 3 }, (_, i) => i + 4)]);
   });
 
   test("S6-R19: hellos in quick succession do not reset the candidate's age", async () => {

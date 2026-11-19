@@ -767,8 +767,28 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     }
   }
 
+  /** A connection that lives for weeks says one hello: its ack is promoted here once it is ACK_TRIM_DELAY_MS old (the
+   *  same lag as on a later hello, S6-R19), and the log is compacted when it has grown past the thresholds (one fstat
+   *  per sweep otherwise; a compaction is one streamed pass, at most once per doubling of the log). Events after the
+   *  connection's hello are not acknowledged until devd's next hello. Failures are logged; the log just stays longer. */
+  function maintainLog(): void {
+    try {
+      const c = state.ackCandidate;
+      if (c !== null && now() - c.at >= ACK_TRIM_DELAY_MS) {
+        state.trimSeq = c.seq;
+        state.ackCandidate = null;
+        persist();
+      }
+      const n = log.compact(state.trimSeq);
+      if (n !== null) logError(`agent-bridge: trimmed ${n} events devd acknowledged from events.jsonl`);
+    } catch (e) {
+      logError(`agent-bridge: trimming events.jsonl failed: ${errorText(e)}`);
+    }
+  }
+
   const server = startServer({ socketPath: o.socketPath, log, onCommand: handle, handshake: () => ({ version: BRIDGE_VERSION, awaitingTarget }), onHello, logError });
   const sweep = setInterval(() => {
+    maintainLog();
     waits.sweep();
     const live = notOverdue(adapterWork);
     if (live.length !== adapterWork.length) {
