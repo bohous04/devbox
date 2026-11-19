@@ -1325,6 +1325,10 @@ test("browser inbox upload: owner can upload while the vault/listener is unavail
   expect(await first.json()).toEqual({ path: "/inbox/photo_one.png", size: 11 });
   expect(readFileSync(join(root, "_inbox", "photo_one.png"), "utf8")).toBe("photo bytes");
   expect(((await (await upload("photo one.png")).json()) as { path: string }).path).toBe("/inbox/photo_one-1.png");
+  // `_inbox/<session id>` is that session's chat-image directory: a shared file may not take the name.
+  const clash = await upload("dev-acme-web");
+  expect(clash.status).toBe(400);
+  expect(((await clash.json()) as { error: string }).error).toContain("is the id of a session");
 });
 
 test("browser inbox upload rejects foreign origins, container callers, bad media types, absent sessions, and oversized files", async () => {

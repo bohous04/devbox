@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { imageSize, MAX_THREAD_IMAGE_BYTES, removeThreadImages, sniffImage, stageThreadImage, ThreadImageError, threadImageFile } from "../src/threadImages";
@@ -100,4 +100,18 @@ test("removeThreadImages deletes only the session's own dir; the shared inbox an
   expect(existsSync(join(root, "_inbox", "shared.png"))).toBe(true);
   removeThreadImages(root, "dev-never-had-images");
   for (const bad of ["", ".", "..", "a/b"]) expect(() => removeThreadImages(root, bad)).toThrow("not a session id");
+});
+
+test("removeThreadImages leaves `_inbox/<id>` alone unless it is a directory (a shared file or a symlink of that name)", () => {
+  const root = tmp();
+  mkdirSync(join(root, "_inbox"), { recursive: true });
+  writeFileSync(join(root, "_inbox", "dev-file"), "shared upload");
+  removeThreadImages(root, "dev-file");
+  expect(existsSync(join(root, "_inbox", "dev-file"))).toBe(true);
+  const target = tmp();
+  writeFileSync(join(target, "keep.png"), "x");
+  symlinkSync(target, join(root, "_inbox", "dev-link"));
+  removeThreadImages(root, "dev-link");
+  expect(lstatSync(join(root, "_inbox", "dev-link")).isSymbolicLink()).toBe(true);
+  expect(existsSync(join(target, "keep.png"))).toBe(true);
 });

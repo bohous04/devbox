@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, rmSync, writeFileSync, type Stats } from "node:fs";
 import { join } from "node:path";
 
 /** Images a chat message may carry, by the extension they are stored under, with their media type. */
@@ -112,5 +112,11 @@ export function threadImageFile(root: string, sessionId: string, containerPath: 
 /** Deletes the session's chat images (S5-R23); sessions.ts calls it once the container is gone and the thread archived. */
 export function removeThreadImages(root: string, sessionId: string): void {
   if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(sessionId) || sessionId === "." || sessionId === "..") throw new Error(`not a session id: ${sessionId}`);
-  rmSync(sessionDir(root, sessionId), { recursive: true, force: true });
+  const dir = sessionDir(root, sessionId);
+  let st: Stats;
+  try { st = lstatSync(dir); }
+  catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return; throw e; }
+  // `_inbox` is shared: a file or a symlink of that name is someone's upload, not this session's images.
+  if (!st.isDirectory()) return;
+  rmSync(dir, { recursive: true, force: true });
 }

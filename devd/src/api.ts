@@ -52,7 +52,7 @@ import { GiteaAuthError, GiteaError, GiteaUnknownInstanceError, type GiteaApi } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readUpload, UploadError } from "./uploads";
-import { stageFile, stageShared } from "./inbox";
+import { InboxNameError, stageFile, stageShared } from "./inbox";
 import { registerThreadRoutes, type ThreadApiDeps } from "./threadApi";
 import { stageThreadImage, ThreadImageError } from "./threadImages";
 import type { SshKeyRef } from "./op";
@@ -341,6 +341,8 @@ export function createApp(d: ApiDeps): Hono {
   // Hono applies middleware only to routes registered after it.
   const identity = d.containerIdentity ?? defaultContainerIdentity;
   const sharedSessions = new SharedSessions(d.db, Date.now, identity);
+  // A shared-inbox file may not take a session's id: `_inbox/<id>` is that session's chat images.
+  const isSessionId = (name: string) => getSession(d.db, name) !== null;
   app.use("*", sharedContainerGuard({ db: d.db, remoteAddr: d.remoteAddr, identity, shared: sharedSessions, approvalAllowExtra: d.sshApprovalAllowExtra }));
   /** Shared or tainted (shareTaint.ts) session — same restrictions. */
   const restricted = (sessionId: string) => sharedSessions.current().has(sessionId);
@@ -1501,11 +1503,12 @@ export function createApp(d: ApiDeps): Hono {
     if (!name || name.length > 240) return c.json({ error: "A file name of at most 240 characters is required" }, 400);
     try {
       const bytes = await readUpload(c.req.raw);
-      const path = stageShared(join(d.root, "_inbox"), name, bytes);
+      const path = stageShared(join(d.root, "_inbox"), name, bytes, isSessionId);
       logEvent(d.db, session.id, "file_inbox", { name: path.split("/").pop(), size: bytes.length, source: "browser", shared: true });
       return c.json({ path, size: bytes.length }, 201);
     } catch (e) {
       if (e instanceof UploadError) return c.json({ error: e.message }, e.status);
+      if (e instanceof InboxNameError) return c.json({ error: e.message }, 400);
       return c.json({ error: "Could not save the file in the inbox" }, 400);
     }
   });
@@ -2370,7 +2373,7 @@ export function createApp(d: ApiDeps): Hono {
       // guess the target session on the mac. Returns /inbox/<name>.
       if (c.req.query("target") === "shared") {
         let sp: string;
-        try { sp = stageShared(join(d.root, "_inbox"), r.filename ?? "file", r.body); }
+        try { sp = stageShared(join(d.root, "_inbox"), r.filename ?? "file", r.body, isSessionId); }
         catch (e) { return c.json({ error: (e as Error).message }, 400); }
         logEvent(d.db, null, "file_inbox", { name: sp.split("/").pop(), size: r.body.length, shared: true });
         return c.text(sp, 200);
@@ -2401,7 +2404,7 @@ export function createApp(d: ApiDeps): Hono {
       const p = (n: number) => String(n).padStart(2, "0");
       const stamp = `${t.getFullYear()}${p(t.getMonth() + 1)}${p(t.getDate())}-${p(t.getHours())}${p(t.getMinutes())}${p(t.getSeconds())}`;
       let sp: string;
-      try { sp = stageShared(join(d.root, "_inbox"), `img-${stamp}.png`, r.body); }
+      try { sp = stageShared(join(d.root, "_inbox"), `img-${stamp}.png`, r.body, isSessionId); }
       catch (e) { return c.json({ error: (e as Error).message }, 400); }
       logEvent(d.db, validSeg(session) ? session : null, "clipboard_access", { kind: "image", target: "shared", name: sp.split("/").pop(), size: r.body.length });
       return c.text(sp, 200);

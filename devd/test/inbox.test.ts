@@ -2,16 +2,16 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { sanitizeName, uniquePath, ensureInbox, stageFile, stageShared } from "../src/inbox";
+import { sanitizeName, uniquePath, ensureInbox, stageFile, stageShared, InboxNameError } from "../src/inbox";
 
 test("stageShared: writes to the shared dir, returns the /inbox path; collision → suffix; creates the dir; invalid throws", () => {
   const shared = join(mkdtempSync(join(tmpdir(), "shared-inbox-")), "_inbox"); // does not exist yet
-  const p1 = stageShared(shared, "data.bin", new Uint8Array([1, 2, 3]));
+  const p1 = stageShared(shared, "data.bin", new Uint8Array([1, 2, 3]), () => false);
   expect(p1).toBe("/inbox/data.bin");
   expect(existsSync(shared)).toBe(true);
   expect(readFileSync(join(shared, "data.bin"))).toEqual(Buffer.from([1, 2, 3]));
-  expect(stageShared(shared, "data.bin", new Uint8Array([9]))).toBe("/inbox/data-1.bin");
-  expect(() => stageShared(shared, "..", new Uint8Array([1]))).toThrow();
+  expect(stageShared(shared, "data.bin", new Uint8Array([9]), () => false)).toBe("/inbox/data-1.bin");
+  expect(() => stageShared(shared, "..", new Uint8Array([1]), () => false)).toThrow();
 });
 
 test("sanitizeName: basename, safe characters, rejects traversal and empty", () => {
@@ -59,4 +59,13 @@ test("ensureInbox: without .git does not write .git/info/exclude", () => {
   const dir = ensureInbox(ws);
   expect(existsSync(dir)).toBe(true);
   expect(existsSync(join(ws, ".git", "info", "exclude"))).toBe(false);
+});
+
+test("stageShared refuses a name equal to an existing session id (its image dir would collide)", () => {
+  const shared = join(mkdtempSync(join(tmpdir(), "shared-inbox-")), "_inbox");
+  const isSession = (n: string) => n === "dev-shop-cms";
+  expect(() => stageShared(shared, "dev-shop-cms", new Uint8Array([1]), isSession)).toThrow(InboxNameError);
+  expect(() => stageShared(shared, "dev-shop-cms", new Uint8Array([1]), isSession)).toThrow("session");
+  expect(existsSync(join(shared, "dev-shop-cms"))).toBe(false);
+  expect(stageShared(shared, "dev-shop-cms.txt", new Uint8Array([1]), isSession)).toBe("/inbox/dev-shop-cms.txt");
 });
