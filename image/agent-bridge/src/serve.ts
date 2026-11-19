@@ -632,7 +632,16 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
         liveHarness();
         refuseWhileRunning("restart");
         await retireHarness();
-        harness = openHarness();
+        try {
+          harness = openHarness();
+        } catch (e) {
+          // The old harness is closed and no new one opened: exit so the launcher starts a fresh bridge, after the
+          // reply is written (as for `stop`).
+          logError(`agent-bridge: reopening the harness failed: ${errorText(e)}; exiting for a restart`);
+          harness = null;
+          setTimeout(() => void shutdown(EXIT_HARNESS_ENDED).catch((err) => logError(`agent-bridge: shutdown failed: ${errorText(err)}`)), 0);
+          throw e;
+        }
         return;
       }
       case "setModel":

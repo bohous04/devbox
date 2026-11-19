@@ -48,7 +48,8 @@ afterEach(async () => {
 // `deferStart` holds every turn, as Codex does before its thread is ready.
 // `readyErrors[i]` makes the i-th open fail to become ready (the session then ends, as the adapters do);
 // `readyGates[i]` holds the i-th open's readiness until it resolves.
-function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities | (() => Capabilities); readyErrors?: (Error | undefined)[]; readyGates?: (Promise<void> | undefined)[] } = {}) {
+// `openThrows[i]` makes the i-th open throw synchronously (a missing binary or env in harnessOpener).
+function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities | (() => Capabilities); readyErrors?: (Error | undefined)[]; readyGates?: (Promise<void> | undefined)[]; openThrows?: (Error | undefined)[] } = {}) {
   const ends: ((r: { error?: string }) => void)[] = [];
   const f = {
     opens: [] as HarnessOpenOptions[],
@@ -79,7 +80,9 @@ function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities | (() => 
       if (next) f.start(next.runId, next.origin);
     },
     open(o: HarnessOpenOptions): HarnessSession {
+      const thrown = opts.openThrows?.[f.opens.length];
       f.opens.push(o);
+      if (thrown) throw thrown;
       let end: (r: { error?: string }) => void = () => {};
       const ended = new Promise<{ error?: string }>((r) => (end = r));
       ends.push(end);
@@ -533,6 +536,13 @@ describe("serve", () => {
     expect(status).toBe("open");
     await cmd({ kind: "startTurn", text: "still here" });
     expect(f.turns.map((t) => t.text)).toEqual(["still here"]);
+  });
+
+  test("restartAgent whose reopen throws answers with the error and exits serve for a restart", async () => {
+    const f = fakeHarness({ openThrows: [undefined, new Error("claude binary not found on PATH")] });
+    const bridge = await start(f);
+    await expect(cmd({ kind: "restartAgent" })).rejects.toThrow("claude binary not found on PATH");
+    expect(await bridge.closed).toBe(EXIT_HARNESS_ENDED);
   });
 
   test("a corrupt state.json is a configuration error", async () => {
