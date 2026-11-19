@@ -149,28 +149,40 @@ test("fireSchedule: a skipped run does not set auto_end", async () => {
 });
 
 // Chat schedules: no prompt file; the prompt is the session's first turn, sent through the bridge once it connects.
-function fakeLinks(statuses: string[]) {
+// `mode`: how the bridge reacts to the first turn.
+function fakeLinks(mode: "accept" | "refuse" | "never" | "late" = "accept") {
   const calls: string[] = []; const turns: Record<string, string> = {};
+  let done: ((e: Error | null) => void) | null = null;
   return {
     calls, turns,
+    /** For "late": the turn went out right at the deadline and the bridge answers now. */
+    answer: (e: Error | null) => done?.(e),
     links: {
       ensure: (id: string) => { calls.push(`ensure ${id}`); },
-      status: () => statuses.length > 1 ? statuses.shift()! : statuses[0],
-      startTurnWhenConnected: (id: string, text: string) => { calls.push(`start ${id}`); turns[id] = text; },
-      discardFirstTurn: (id: string) => { calls.push(`discard ${id}`); return delete turns[id]; },
+      startTurnWhenConnected: (id: string, text: string, onDone: (e: Error | null) => void) => {
+        calls.push(`start ${id}`); turns[id] = text; done = onDone;
+        if (mode === "accept") onDone(null);
+        if (mode === "refuse") onDone(new Error("bridge refused the turn"));
+      },
+      discardFirstTurn: (id: string) => { calls.push(`discard ${id}`); delete turns[id]; return mode === "never"; },
     },
   };
 }
+const chatDeps = (f: ReturnType<typeof fakeLinks>, ended: string[], over: Record<string, unknown> = {}) => ({
+  links: f.links, end: async (id: string) => { ended.push(id); }, repoAgent: () => null, bridgeWaitMs: 30,
+  containerRunning: async () => false, ...over,
+});
+const row = () => ({ id: "dev-shop-cms", folder: "acme", project: "shop", repo: "cms", container: "dev-shop-cms", port_base: 1, status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0, runtime: "chat" } as SessionRow);
 
 test("fireSchedule (chat): opens a chat session without a prompt and sends the scheduled prompt as the first turn", async () => {
   const db = openDb(":memory:");
-  const opened: Record<string, unknown>[] = []; const notes: string[] = [];
-  const f = fakeLinks(["connecting", "connected"]);
+  const opened: Record<string, unknown>[] = []; const notes: string[] = []; const ended: string[] = [];
+  const f = fakeLinks();
   const s = createScheduler({
     db, open: async (t) => { opened.push(t); return { session: { id: "dev-shop-cms" } }; },
-    containerRunning: async () => false, notify: (_t, m) => { notes.push(m); }, now: () => at3.getTime(), links: f.links, pollMs: 1,
+    notify: (_t, m) => { notes.push(m); }, now: () => at3.getTime(), ...chatDeps(f, ended),
   });
-  insertSession(db, { id: "dev-shop-cms", folder: "acme", project: "shop", repo: "cms", container: "dev-shop-cms", port_base: 1, status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0, runtime: "chat" } as SessionRow);
+  insertSession(db, row());
   await s.fireSchedule(sched({ runtime: "chat", agent: "codex" }));
   expect(opened[0]).toMatchObject({ runtime: "chat", agent: "codex" });
   expect(opened[0].prompt).toBeUndefined();
@@ -178,46 +190,101 @@ test("fireSchedule (chat): opens a chat session without a prompt and sends the s
   expect(f.turns["dev-shop-cms"]).toBe(scheduledPrompt(sched(), "auto/nightly-bump-20260709-0300"));
   expect(getSession(db, "dev-shop-cms")!.auto_end).toBe(1);
   expect(notes).toEqual(['Scheduled run "Nightly bump" started']);
+  expect(ended).toEqual([]);
 });
 
 test("fireSchedule (chat): a devd conflict prompt goes in front of the scheduled prompt", async () => {
   const db = openDb(":memory:");
-  const f = fakeLinks(["connected"]);
+  const f = fakeLinks();
   const s = createScheduler({
     db, open: async () => ({ session: { id: "dev-shop-cms" }, claudePrompt: "resolve the conflict" }),
-    containerRunning: async () => false, notify: () => {}, links: f.links, pollMs: 1,
+    notify: () => {}, ...chatDeps(f, []),
   });
   await s.fireSchedule(sched({ runtime: "chat" }));
   expect(f.turns["dev-shop-cms"]).toStartWith("resolve the conflict\n\nAutomated scheduled run");
 });
 
-test("fireSchedule (chat): a bridge that never connects fails visibly and drops the pending first turn", async () => {
+test("fireSchedule (chat): a bridge that never connects fails visibly, drops the first turn and ends the session", async () => {
   const db = openDb(":memory:");
-  const notes: string[] = []; const extras: unknown[] = [];
-  const f = fakeLinks(["connecting"]);
+  const notes: string[] = []; const extras: unknown[] = []; const ended: string[] = [];
+  const f = fakeLinks("never");
   const s = createScheduler({
     db, open: async () => ({ session: { id: "dev-shop-cms" } }),
-    containerRunning: async () => false, notify: (_t, m, e) => { notes.push(m); extras.push(e); },
-    links: f.links, bridgeWaitMs: 30, pollMs: 5,
+    notify: (_t, m, e) => { notes.push(m); extras.push(e); }, ...chatDeps(f, ended),
   });
   await s.fireSchedule(sched({ runtime: "chat" }));
   expect(f.calls).toContain("discard dev-shop-cms");
-  expect(f.turns["dev-shop-cms"]).toBeUndefined();
-  const types = (db.query("SELECT type, data FROM events").all() as { type: string; data: string }[]);
-  expect(types.map((e) => e.type)).toEqual(["schedule_error"]);
-  expect(types[0].data).toContain("did not connect");
+  expect(ended).toEqual(["dev-shop-cms"]);
+  const ev = db.query("SELECT type, data FROM events").all() as { type: string; data: string }[];
+  expect(ev.map((e) => e.type)).toEqual(["schedule_error"]);
+  expect(ev[0].data).toContain("did not connect");
+  expect(ev[0].data).toContain("dev-shop-cms ended");
   expect(notes).toHaveLength(1);
   expect(notes[0]).toContain("failed");
+  expect(notes[0]).toContain("ended");
   expect(extras).toEqual([{ target: { kind: "schedules" } }]);
+});
+
+test("fireSchedule (chat): a bridge refusal of the first turn is a failure and ends the session", async () => {
+  const db = openDb(":memory:");
+  const notes: string[] = []; const ended: string[] = [];
+  const s = createScheduler({
+    db, open: async () => ({ session: { id: "dev-shop-cms" } }),
+    notify: (_t, m) => { notes.push(m); }, ...chatDeps(fakeLinks("refuse"), ended),
+  });
+  await s.fireSchedule(sched({ runtime: "chat" }));
+  expect(notes).toHaveLength(1);
+  expect(notes[0]).toContain("bridge refused the turn");
+  expect(ended).toEqual(["dev-shop-cms"]);
+  expect((db.query("SELECT type FROM events").all() as { type: string }[]).map((e) => e.type)).toEqual(["schedule_error"]);
+});
+
+test("fireSchedule (chat): a turn sent right at the deadline counts as started, not failed", async () => {
+  const db = openDb(":memory:");
+  const notes: string[] = []; const ended: string[] = [];
+  const f = fakeLinks("late");
+  const s = createScheduler({
+    db, open: async () => ({ session: { id: "dev-shop-cms" } }),
+    notify: (_t, m) => { notes.push(m); }, ...chatDeps(f, ended),
+  });
+  const run = s.fireSchedule(sched({ runtime: "chat" }));
+  await Bun.sleep(60);   // past the 30 ms wait: discardFirstTurn said "already sent"
+  f.answer(null);
+  await run;
+  expect(notes).toEqual(['Scheduled run "Nightly bump" started']);
+  expect(ended).toEqual([]);
+});
+
+test("fireSchedule (chat): an agent chat cannot run fails before open, creating no session", async () => {
+  const db = openDb(":memory:");
+  const opened: unknown[] = []; const notes: string[] = []; const ended: string[] = [];
+  const f = fakeLinks();
+  const s = createScheduler({
+    db, open: async (t) => { opened.push(t); return { session: { id: "x" } }; },
+    notify: (_t, m) => { notes.push(m); }, ...chatDeps(f, ended),
+  });
+  await s.fireSchedule(sched({ runtime: "chat", agent: "grok" }));
+  // NULL agent: the repo's remembered one counts
+  const s2 = createScheduler({
+    db, open: async (t) => { opened.push(t); return { session: { id: "x" } }; },
+    notify: (_t, m) => { notes.push(m); }, ...chatDeps(f, ended, { repoAgent: () => "antigravity" }),
+  });
+  await s2.fireSchedule(sched({ runtime: "chat", agent: null }));
+  expect(opened).toEqual([]);
+  expect(f.calls).toEqual([]);
+  expect(ended).toEqual([]);
+  expect(notes).toHaveLength(2);
+  expect(notes.every((n) => n.includes("failed") && n.includes("not available in chat"))).toBe(true);
+  expect((db.query("SELECT type FROM events").all() as { type: string }[]).map((e) => e.type)).toEqual(["schedule_error", "schedule_error"]);
 });
 
 test("fireSchedule (chat): skip-if-running is unchanged", async () => {
   const db = openDb(":memory:");
   const opened: unknown[] = []; const notes: string[] = [];
-  const f = fakeLinks(["connected"]);
+  const f = fakeLinks();
   const s = createScheduler({
     db, open: async (t) => { opened.push(t); return { session: { id: "x" } }; },
-    containerRunning: async () => true, notify: (_t, m) => { notes.push(m); }, links: f.links,
+    containerRunning: async () => true, notify: (_t, m) => { notes.push(m); }, links: f.links, end: async () => {}, repoAgent: () => null,
   });
   await s.fireSchedule(sched({ runtime: "chat" }));
   expect(opened).toEqual([]);

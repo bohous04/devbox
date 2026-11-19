@@ -3,6 +3,8 @@ import { cronMatch } from "./cron";
 import { getSchedule, listSchedules, listSessions, logEvent, setAutoEnd, setImportant, setScheduleLastRun, type ScheduleRow } from "./db";
 import type { NotifyFn } from "./agentEvents";
 import type { AgentName, SessionRuntime } from "./db";
+import { chatRuntimeBlock } from "./agents";
+import { resolveAgent } from "./sessions";
 
 /** How long a chat schedule waits for the new session's bridge before it fails visibly. */
 export const BRIDGE_WAIT_MS = 120_000;
@@ -13,12 +15,14 @@ export interface SchedulerDeps {
   /** The bridge links of chat sessions; required for a chat schedule. */
   links?: {
     ensure: (id: string) => void;
-    status: (id: string) => string;
-    startTurnWhenConnected: (id: string, text: string) => void;
+    startTurnWhenConnected: (id: string, text: string, onDone: (err: Error | null) => void) => void;
     discardFirstTurn: (id: string) => boolean;
   };
+  /** Ends a session this schedule opened but could not start. */
+  end?: (id: string) => Promise<void>;
+  /** The repo's remembered agent, used when a chat schedule names none. */
+  repoAgent?: (t: { folder: string; project: string; repo: string }) => AgentName | null;
   bridgeWaitMs?: number;
-  pollMs?: number;
   containerRunning: (id: string) => Promise<boolean>;
   notify: NotifyFn;
   now?: () => number;
@@ -50,15 +54,6 @@ export function dueSchedules(db: Database, now: Date): ScheduleRow[] {
 export function createScheduler(d: SchedulerDeps) {
   const now = () => d.now?.() ?? Date.now();
 
-  async function waitConnected(id: string): Promise<boolean> {
-    const deadline = Date.now() + (d.bridgeWaitMs ?? BRIDGE_WAIT_MS);
-    while (d.links!.status(id) !== "connected") {
-      if (Date.now() >= deadline) return false;
-      await Bun.sleep(d.pollMs ?? 250);
-    }
-    return true;
-  }
-
   async function fireSchedule(sch: ScheduleRow): Promise<void> {
     const id = `dev-${sch.project}-${sch.repo}`;
     const at = now();
@@ -81,16 +76,24 @@ export function createScheduler(d: SchedulerDeps) {
       d.notify(`${sch.project}/${sch.repo}`, `Scheduled run "${sch.name}" skipped — session is running`, { session });
       return;
     }
+    let openedId: string | null = null;
     const branch = `auto/${slug(sch.name)}-${stamp(new Date(at))}`;
     try {
       const chat = sch.runtime === "chat";
-      if (chat && !d.links) throw new Error("chat schedules need the bridge links, which are not available");
+      if (chat && (!d.links || !d.end || !d.repoAgent)) throw new Error("chat schedules need the bridge links, which are not available");
+      if (chat) {
+        // The agent open() will use: the schedule's own, else the repo's remembered one. Checked before open() so a
+        // schedule that cannot run in chat creates no container.
+        const blocked = chatRuntimeBlock(resolveAgent(sch.agent ?? undefined, d.repoAgent!(sch)), "vps");
+        if (blocked) throw new Error(blocked);
+      }
       // A chat session has no prompt file: the prompt is the first turn, sent through the bridge below.
       const r = await d.open({
         folder: sch.folder, project: sch.project, repo: sch.repo, cloneUrl: sch.clone_url,
         ...(chat ? { runtime: "chat" as const } : { prompt: scheduledPrompt(sch, branch) }),
         ...(sch.agent ? { agent: sch.agent } : {}),
       });
+      openedId = chat ? r.session.id : null;
       setImportant(d.db, r.session.id, sch.important);
       // A scheduled run is one-off work: once the agent finishes its turn, autoEnd.ts ends the
       // session. Set only AFTER open() — for a restarted session open() actually
@@ -102,11 +105,19 @@ export function createScheduler(d: SchedulerDeps) {
         const links = d.links!;
         links.ensure(r.session.id);
         // Persisted until the bridge confirms, so a devd restart while waiting still delivers it.
-        links.startTurnWhenConnected(r.session.id, r.claudePrompt ? `${r.claudePrompt}\n\n${text}` : text);
-        if (!(await waitConnected(r.session.id))) {
-          links.discardFirstTurn(r.session.id);
-          throw new Error(`the agent bridge of ${r.session.id} did not connect within ${Math.round((d.bridgeWaitMs ?? BRIDGE_WAIT_MS) / 1000)} s`);
-        }
+        const accepted = new Promise<Error | null>((resolve) =>
+          links.startTurnWhenConnected(r.session.id, r.claudePrompt ? `${r.claudePrompt}\n\n${text}` : text, resolve));
+        const waitMs = d.bridgeWaitMs ?? BRIDGE_WAIT_MS;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const outcome = await Promise.race([accepted, new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), waitMs); })]);
+        clearTimeout(timer);
+        let failure: Error | null;
+        if (outcome !== "timeout") failure = outcome;
+        // discardFirstTurn is false when the turn went out meanwhile: then its own outcome decides, not the clock.
+        else failure = links.discardFirstTurn(r.session.id)
+          ? new Error(`the agent bridge of ${r.session.id} did not connect within ${Math.round(waitMs / 1000)} s`)
+          : await accepted;
+        if (failure) throw failure;
       }
       logEvent(d.db, r.session.id, "schedule_run", { schedule: sch.name, branch, at });
       // DELIBERATELY without `important`: emergency (Pushover priority 2) is an alarm that rings
@@ -115,8 +126,15 @@ export function createScheduler(d: SchedulerDeps) {
       // is carried over to the session above, so only the block/completion of that work stays loud.
       d.notify(`${sch.project}/${sch.repo}`, `Scheduled run "${sch.name}" started`, { session: { id: r.session.id, project: sch.project, repo: sch.repo } });
     } catch (e) {
-      logEvent(d.db, id, "schedule_error", { schedule: sch.name, error: (e as Error).message, at });
-      d.notify(`${sch.project}/${sch.repo}`, `Scheduled run "${sch.name}" failed: ${(e as Error).message}`, { target: { kind: "schedules" } });
+      // A chat session this run opened has no prompt and is marked auto_end: left running it would make every later
+      // run of the repo skip. End it, and say whether that worked.
+      let error = (e as Error).message;
+      if (openedId) {
+        try { await d.end!(openedId); error += `; session ${openedId} ended`; }
+        catch (endErr) { error += `; ending session ${openedId} failed: ${(endErr as Error).message}`; }
+      }
+      logEvent(d.db, openedId ?? id, "schedule_error", { schedule: sch.name, error, at });
+      d.notify(`${sch.project}/${sch.repo}`, `Scheduled run "${sch.name}" failed: ${error}`, { target: { kind: "schedules" } });
     }
   }
 

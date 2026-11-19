@@ -163,7 +163,11 @@ test("schedules: runtime and agent are validated; a chat schedule needs a chat-c
   const ok = await post({ runtime: "chat", agent: "codex" });
   expect(ok.status).toBe(201);
   expect(await ok.json()).toMatchObject({ runtime: "chat", agent: "codex" });
-  expect(await (await post({})).json()).toMatchObject({ runtime: "tmux", agent: null });
+  const made = await (await post({})).json() as { id: string };
+  expect(made).toMatchObject({ runtime: "tmux", agent: null });
+  const put = (body: object) => a.request(`/api/schedules/${made.id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  expect((await put({ runtime: null })).status).toBe(400);
+  expect((await put({ runtime: "chat", agent: "claude" })).status).toBe(200);
 });
 
 test("schedules CRUD via the API + cron validation", async () => {

@@ -353,3 +353,38 @@ test("devd's first message is persisted, survives a restart and is deleted once 
   expect(b.cmds).toEqual([{ kind: "startTurn", text: "scheduled prompt" }]);
   await waitFor(() => !saved.has(ID), "persisted row deleted after the bridge answered");
 });
+
+test("a persisted first turn is dropped on ensure when the thread already has a run", async () => {
+  const saved = new Map<string, string>([[ID, "scheduled prompt"]]);
+  const pendingTurns = { save: () => {}, load: (id: string) => saved.get(id) ?? null, remove: (id: string) => { saved.delete(id); } };
+  const root = mkdtempSync(join(tmpdir(), "bl-"));
+  mkdirSync(join(root, ID));
+  const store = ThreadStore.open(root, ID);
+  store.apply({ seq: 1, ts: 1, event: { type: "run.started", runId: "r1", origin: "user", nativeThreadId: null, model: null } });
+  const logs: string[] = [];
+  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); }, pendingTurns });
+  const b = fakeBridge(join(root, ID, "agent.sock"));
+  cleanups.push(() => { links.drop(ID); b.close(); store.close(); rmSync(root, { recursive: true, force: true }); });
+  links.ensure(ID);
+  await waitFor(() => links.status(ID) === "connected", "connected");
+  await Bun.sleep(30);
+  expect(b.cmds).toEqual([]);
+  expect(saved.has(ID)).toBe(false);
+  expect(logs.some((l) => l.includes("already has a run"))).toBe(true);
+});
+
+test("startTurnWhenConnected reports the bridge's answer to onDone", async () => {
+  const { links, serve } = setup();
+  const b = serve();
+  b.setReply({ ok: false, error: "refused" });
+  links.ensure(ID);
+  await waitFor(() => links.status(ID) === "connected", "connected");
+  const got: (Error | null)[] = [];
+  links.startTurnWhenConnected(ID, "x", (e) => got.push(e));
+  await waitFor(() => got.length === 1, "answer");
+  expect(got[0]?.message).toContain("refused");
+  b.setReply({ ok: true });
+  links.startTurnWhenConnected(ID, "y", (e) => got.push(e));
+  await waitFor(() => got.length === 2, "ok answer");
+  expect(got[1]).toBeNull();
+});

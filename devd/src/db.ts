@@ -1095,6 +1095,10 @@ export function getPendingFirstTurn(db: Database, sessionId: string): string | n
   const r = db.query(`SELECT text FROM pending_first_turns WHERE session_id=?`).get(sessionId) as { text: string } | null;
   return r?.text ?? null;
 }
+/** On devd start: a pending first message of a session that is gone or not running will never be delivered. */
+export function prunePendingFirstTurns(db: Database): number {
+  return db.query(`DELETE FROM pending_first_turns WHERE session_id NOT IN (SELECT id FROM sessions WHERE status='running')`).run().changes;
+}
 export function deletePendingFirstTurn(db: Database, sessionId: string): void {
   db.query(`DELETE FROM pending_first_turns WHERE session_id=?`).run(sessionId);
 }

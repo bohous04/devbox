@@ -40,7 +40,7 @@ import { createGiteaApi } from "./gitea";
 import { giteaAuthEnv } from "./git";
 import {
   activeLeases, diskHistoryEnds, failRunningCloneJobs, getSession, type SessionRow, insertDiskTotal, lastMetricTs, listAccounts, listSessions, logEvent,
-  applyPendingRestore, checkpointFully, savePendingFirstTurn, getPendingFirstTurn, deletePendingFirstTurn, openDb, startCheckpointer, pruneAccountLeases, pruneCriticReviews, pruneDiskStats, pruneEvents, pruneNotifyLog, prunePushAlerts,
+  getRepoAgent, applyPendingRestore, checkpointFully, savePendingFirstTurn, prunePendingFirstTurns, getPendingFirstTurn, deletePendingFirstTurn, openDb, startCheckpointer, pruneAccountLeases, pruneCriticReviews, pruneDiskStats, pruneEvents, pruneNotifyLog, prunePushAlerts,
 } from "./db";
 import { createSshAgents } from "./sshAgent";
 import { pendingSshLabel, reapExpiredGrants } from "./sshApprovals";
@@ -139,6 +139,7 @@ const useVault = !!vaultPath && existsSync(vaultPath);
 const secrets: Secrets = useVault ? {} : loadSecrets(secretsPath);
 if (applyPendingRestore(env("DEVD_DB", "/var/lib/devd/devd.sqlite"))) console.log("devd: restored database swapped in");
 const db = openDb(env("DEVD_DB", "/var/lib/devd/devd.sqlite"));
+prunePendingFirstTurns(db);
 startCheckpointer(env("DEVD_DB", "/var/lib/devd/devd.sqlite"));
 initCodexAccounts(db);
 
@@ -689,6 +690,8 @@ const scheduler = createScheduler({
   db, notify,
   open: (t) => mgr.open(t),
   links: bridgeLinks,
+  end: (id) => mgr.end(id),
+  repoAgent: (t) => getRepoAgent(db, t.folder, t.project, t.repo),
   containerRunning: async (id) => (await containerState(id)) === "running",
 });
 

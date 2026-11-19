@@ -2153,7 +2153,7 @@ export function createApp(d: ApiDeps): Hono {
     const b = (await c.req.json().catch(() => ({}))) as Partial<ScheduleRow>;
     if (b.cron !== undefined && !validCron(b.cron)) return c.json({ error: "invalid cron expression" }, 400);
     const cur = getSchedule(d.db, id)!;
-    const bad = scheduleRuntimeError(d.db, cur.folder, cur.project, cur.repo, b.runtime ?? cur.runtime, b.agent === undefined ? cur.agent : b.agent);
+    const bad = scheduleRuntimeError(d.db, cur.folder, cur.project, cur.repo, b.runtime === undefined ? cur.runtime : b.runtime, b.agent === undefined ? cur.agent : b.agent);
     if (bad) return c.json({ error: bad }, 400);
     const patch: Partial<ScheduleRow> = {};
     for (const k of ["name", "cron", "prompt", "enabled", "important", "runtime", "agent"] as const) if (b[k] !== undefined) (patch as Record<string, unknown>)[k] = b[k];
