@@ -2,7 +2,7 @@
 // harnesses can be picked and why not. devd decides (devd/src/chatSwitch.ts); these mirror its rules so the
 // menus do not offer what it would refuse, and say why.
 import type { RunRow } from "../../shared/thread";
-import { CHAT_MODELS } from "../../shared/chatModels";
+import { CHAT_MODELS, SAME_MODEL_ALIASES } from "../../shared/chatModels";
 import type { AccountView, ChatSwitchResult, ChatTarget, CodexAccountView } from "./api";
 import { AGENT_IDS, AGENT_PROFILES, chatRuntimeBlock, profileFor } from "./newSession";
 import { codexWindowLabel } from "./subscriptionsView";
@@ -42,11 +42,13 @@ export function modelMenuBlocked(t: ChatTarget): string | null {
   return p.proxy ? `The model of ${p.label} is set in settings` : null;
 }
 
-/** The models devd accepts for the harness (shared/chatModels.ts). A reported variant (an effort or dated id) marks
- *  nothing: picking its base model is a real switch for devd. */
+/** The models devd accepts for the harness (shared/chatModels.ts). A reported id in SAME_MODEL_ALIASES marks the
+ *  model it runs; a reported variant (an effort or dated id) marks nothing: picking its base model is a real switch
+ *  for devd. */
 export function modelOptions(t: ChatTarget): SwitchOption[] {
   const models: readonly string[] = Object.hasOwn(CHAT_MODELS, t.harness) ? CHAT_MODELS[t.harness as keyof typeof CHAT_MODELS] : [];
-  return models.map((m) => option(m, m, m === t.model));
+  const current = t.model !== null && Object.hasOwn(SAME_MODEL_ALIASES, t.model) ? SAME_MODEL_ALIASES[t.model] : t.model;
+  return models.map((m) => option(m, m, m === current));
 }
 
 /** devd: 400 no-account-pool. Proxy profiles and ACP agents (their own CLI login) have no account pool. */

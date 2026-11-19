@@ -30,6 +30,7 @@ export function inboxHref(i: InboxItem): string {
 const REASON: Record<NonNullable<Attention["reason"]>, string> = {
   request: "waiting for your answer",
   failed: "run failed",
+  "rate-limited": "rate limit reached — wait or switch model",
   completed: "finished",
   disconnected: "agent not connected",
   "bridge-behind": "bridge log behind — events may be missing",

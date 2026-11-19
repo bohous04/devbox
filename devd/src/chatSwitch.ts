@@ -14,7 +14,7 @@
 import type { Database } from "bun:sqlite";
 import type { BridgeCommand, HandoffDelivery, SwitchTarget } from "../../image/agent-bridge/src/protocol";
 import { isProxyProfile, proxyProfileEnv, type ProxyProfile } from "../../image/agent-bridge/src/proxyProfile";
-import { CHAT_MODELS as SHARED_CHAT_MODELS } from "../../shared/chatModels";
+import { MODEL_ALIASES, CHAT_MODELS as SHARED_CHAT_MODELS } from "../../shared/chatModels";
 import type { Capabilities, LoggedEvent } from "../../shared/thread";
 import { currentAccount, lastSwitchAt } from "./accountLease";
 import { chooseAccount, isExhausted } from "./accountPolicy";
@@ -45,18 +45,12 @@ const BASE_WINDOWS: Readonly<Record<string, number>> = {
   "mistral-large-4-0": 400_000, "mistral-medium-3.5": 200_000,
   "gemini-4-neon": 1_048_576,
 };
-const efforts = (base: string): Record<string, string> => Object.fromEntries(["low", "medium", "high"].map((l) => [`${base}-${l}`, base]));
-/** Every model id a harness reports (thread.native, run.started) → its base model. The same ids pricing.ts prices:
- *  effort variants (`claude-opus-5-5-high`), dated snapshots and official aliases. An id outside this table has no
- *  known window and is refused (409 `unknown-model-window`), never given a default. */
+/** Every model id a harness reports (thread.native, run.started) → its base model: the base models themselves and
+ *  the shared MODEL_ALIASES (the same ids pricing.ts prices). An id outside this table has no known window and is
+ *  refused (409 `unknown-model-window`), never given a default. */
 export const MODEL_WINDOW_ALIASES: Readonly<Record<string, string>> = {
   ...Object.fromEntries(Object.keys(BASE_WINDOWS).map((m) => [m, m])),
-  ...efforts("claude-opus-5-5"), ...efforts("claude-sonnet-5-5"),
-  "gpt-5.6": "gpt-5.6-sol",
-  "gpt-5.5-2026-04-23": "gpt-5.5",
-  "gpt-5.4-mini-2026-03-17": "gpt-5.4-mini",
-  // Vibe's session/load reports Medium 3.5 under this id (live, step 4 Task 3).
-  "mistral-medium-latest": "mistral-medium-3.5",
+  ...MODEL_ALIASES,
 };
 /** Tokens kept free for the target model's answer when budgeting a handoff. */
 export const RESERVE_TOKENS = 32_000;

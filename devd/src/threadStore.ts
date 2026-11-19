@@ -59,6 +59,10 @@ export class ThreadStore {
       harness TEXT NOT NULL, account TEXT, native_thread_id TEXT NOT NULL, covered_through_run TEXT,
       last_used_at INTEGER NOT NULL, caps TEXT, resume_failed INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (harness, native_thread_id))`);
+    // Stores created before run.failed carried a reason lack the column.
+    if (!(db.query("PRAGMA table_info(runs)").all() as { name: string }[]).some((c) => c.name === "failure_reason")) {
+      db.run("ALTER TABLE runs ADD COLUMN failure_reason TEXT");
+    }
     return new ThreadStore(db, opts.onNotice ?? (() => {}));
   }
 
@@ -186,7 +190,7 @@ export class ThreadStore {
         // resume-failed comes for a switch, not a run: its run id was never announced (contract with the bridge).
         // devd says it in one notice of its own (chatSwitch), so the event adds none.
         if (ev.error === "resume-failed" && !db.query("SELECT 1 FROM runs WHERE run_id=?").get(ev.runId)) return;
-        this.terminal(seq, ts, ev.runId, "failed", { error: ev.error });
+        this.terminal(seq, ts, ev.runId, "failed", { error: ev.error, failureReason: ev.reason ?? null });
         this.insertItem(seq, ts, { runId: ev.runId, itemId: null, kind: "notice", text: ev.error, status: "done" });
         return;
       case "bridge.started":
@@ -209,7 +213,7 @@ export class ThreadStore {
   }
 
   private terminal(seq: number, ts: number, runId: string, status: RunRow["status"],
-    f: { nativeThreadId?: string; usage?: unknown; error: string | null }, setUsage = false) {
+    f: { nativeThreadId?: string; usage?: unknown; error: string | null; failureReason?: string | null }, setUsage = false) {
     const row = this.db.query("SELECT 1 FROM runs WHERE run_id=?").get(runId);
     if (!row) {
       this.insertItem(seq, ts, { runId, itemId: null, kind: "notice", text: `${status} event for unknown run ${runId}`, status: "done" });
@@ -217,9 +221,9 @@ export class ThreadStore {
     }
     // The later terminal event wins, also over an earlier terminal status.
     // Only run.completed reports usage; a later interrupted/failed keeps it.
-    this.db.query(`UPDATE runs SET status=?, ended_at=?, ended_seq=?, error=?,
+    this.db.query(`UPDATE runs SET status=?, ended_at=?, ended_seq=?, error=?, failure_reason=?,
       native_thread_id=COALESCE(?, native_thread_id), usage=CASE WHEN ? THEN ? ELSE usage END, updated_seq=? WHERE run_id=?`)
-      .run(status, ts, seq, f.error, f.nativeThreadId ?? null, setUsage ? 1 : 0, f.usage ? JSON.stringify(f.usage) : null, seq, runId);
+      .run(status, ts, seq, f.error, f.failureReason ?? null, f.nativeThreadId ?? null, setUsage ? 1 : 0, f.usage ? JSON.stringify(f.usage) : null, seq, runId);
     this.db.query(`UPDATE items SET status='done', updated_seq=? WHERE run_id=? AND status='streaming'`).run(seq, runId);
     this.touchProviderThread(runId, ts);
   }
@@ -287,10 +291,14 @@ export class ThreadStore {
       return it;
     });
     const runs = (this.db.query(`SELECT * FROM runs WHERE updated_seq > ? ORDER BY rowid`).all(after) as Record<string, any>[])
-      .map((r): RunRow => ({
-        runId: r.run_id, origin: r.origin, status: r.status, harness: r.harness, nativeThreadId: r.native_thread_id,
-        model: r.model, queuedAt: r.queued_at, startedAt: r.started_at, endedAt: r.ended_at, endedSeq: r.ended_seq, usage: r.usage === null ? null : JSON.parse(r.usage), error: r.error,
-      }));
+      .map((r): RunRow => {
+        const run: RunRow = {
+          runId: r.run_id, origin: r.origin, status: r.status, harness: r.harness, nativeThreadId: r.native_thread_id,
+          model: r.model, queuedAt: r.queued_at, startedAt: r.started_at, endedAt: r.ended_at, endedSeq: r.ended_seq, usage: r.usage === null ? null : JSON.parse(r.usage), error: r.error,
+        };
+        if (r.failure_reason !== null) run.failureReason = r.failure_reason;
+        return run;
+      });
     const pending = (this.db.query(`SELECT * FROM requests WHERE status='open' ORDER BY opened_at, rowid`).all() as Record<string, any>[])
       .map((r): PendingRequest => {
         const p: PendingRequest = { requestId: r.request_id, runId: r.run_id, kind: r.kind, prompt: r.prompt, openedAt: r.opened_at };

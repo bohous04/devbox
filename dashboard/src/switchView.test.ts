@@ -52,6 +52,9 @@ test("model menu: the models devd accepts for the current harness, the current o
   expect(modelOptions(CODEX).map((o) => o.value)).toEqual([...DEVD_CHAT_MODELS.codex]);
   const vibe: ChatTarget = { agent: "vibe", harness: "vibe", account: null, model: "mistral-large-4-0", awaitingTarget: false };
   expect(modelOptions(vibe).map((o) => [o.value, o.current])).toEqual(DEVD_CHAT_MODELS.vibe.map((m) => [m, m === "mistral-large-4-0"]));
+  // After session/load Vibe reports Medium 3.5 as mistral-medium-latest: the alias table marks it, nothing fuzzier.
+  expect(modelOptions({ ...vibe, model: "mistral-medium-latest" }).filter((o) => o.current).map((o) => o.value)).toEqual(["mistral-medium-3.5"]);
+  expect(modelOptions({ ...vibe, model: "mistral-medium" }).some((o) => o.current)).toBe(false);
   expect(modelOptions(CLAUDE).filter((o) => o.current).map((o) => o.value)).toEqual(["claude-opus-5-5"]);
   // A reported variant is not one of the offered ids: nothing is marked, every model can be picked.
   expect(modelOptions({ ...CLAUDE, model: "claude-opus-5-5-high" }).some((o) => o.current || o.disabled)).toBe(false);

@@ -38,6 +38,7 @@ test("reasonLabel names every reason", () => {
   expect(reasonLabel(null)).toBe("");
   expect(reasonLabel("request")).toBe("waiting for your answer");
   expect(reasonLabel("disconnected")).toBe("agent not connected");
+  expect(reasonLabel("rate-limited")).toBe("rate limit reached — wait or switch model");
 });
 
 test("upsertInbox drops a removed session", () => {

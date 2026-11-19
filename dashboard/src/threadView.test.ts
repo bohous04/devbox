@@ -91,6 +91,11 @@ test("terminal events close streaming items; usage only from run.completed; fail
   t = run(t, [{ type: "run.failed", runId: "r1", error: "late" }]);
   expect(t.runs[0]).toMatchObject({ status: "failed", error: "late", usage: { input: 1 }, nativeThreadId: "n2" });
   expect(t.items.at(-1)).toMatchObject({ kind: "notice", runId: "r1", itemId: null, text: "late" });
+  expect(t.runs[0].failureReason).toBeUndefined();
+  t = run(t, [{ type: "run.failed", runId: "r1", error: "rate-limited: x", reason: "rate-limited" }]);
+  expect(t.runs[0]).toMatchObject({ status: "failed", failureReason: "rate-limited" });
+  t = run(t, [{ type: "run.failed", runId: "r1", error: "later" }]);
+  expect(t.runs[0].failureReason).toBeUndefined();
   t = run(t, [{ type: "run.interrupted", runId: "nope" }]);
   expect(t.items.at(-1)).toMatchObject({ kind: "notice", text: "interrupted event for unknown run nope" });
 });

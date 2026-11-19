@@ -30,6 +30,8 @@ export const ACP_AGENTS: Record<AcpAgentId, AcpAgentSpec> = {
   // models under either name). In "default" it asks before acting and devbox allows every request. 1.5.9 (live): ACP
   // v1 shape with protocolVersion 1, session/resume, image prompts, model as a config option. Not offered in chat yet:
   // the account behind antigravity-home must be verified with Google first (403 "Verify your account to continue").
+  // Before devd sets `acpLive` for it, the adapter must detect that state: agy answers it as an ordinary `end_turn`
+  // message ("⚠ Verification Required"), so today such a turn would read as a completed run, not a failure.
   antigravity: { id: "antigravity", argv: ["agy", "acp"], clientName: "zed", modes: { allowed: ["default"] } },
   // Through ACP, not OpenCode's native HTTP server.
   opencode: { id: "opencode", argv: ["opencode", "acp"] },

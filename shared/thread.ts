@@ -32,6 +32,8 @@ export interface RunRow {
   endedSeq: number | null;
   usage: TokenUsage | null;
   error: string | null;
+  /** Why a failed run failed, when the bridge says so (`run.failed.reason`); absent otherwise. */
+  failureReason?: "rate-limited";
 }
 
 /** What `request.opened` carries, plus when it opened. */
@@ -62,7 +64,7 @@ export type InboxSection = "needs_you" | "working" | "idle";
 /** Where a session belongs in the inbox and why; `since` is when that state began (0 = nothing happened yet). */
 export interface Attention {
   section: InboxSection;
-  reason: "request" | "failed" | "completed" | "disconnected" | "bridge-behind" | "running" | "background" | "queued" | null;
+  reason: "request" | "failed" | "rate-limited" | "completed" | "disconnected" | "bridge-behind" | "running" | "background" | "queued" | null;
   since: number;
 }
 
