@@ -160,7 +160,7 @@ test("schedules: runtime and agent are validated; a chat schedule needs a chat-c
   const post = (extra: object) => a.request("/api/schedules", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "n", cron: "0 3 * * *", folder: "acme", project: "shop", repo: "cms", cloneUrl: "https://x/cms.git", prompt: "p", ...extra }) });
   expect((await post({ runtime: "docker" })).status).toBe(400);
   expect((await post({ agent: "nope" })).status).toBe(400);
-  expect((await post({ runtime: "chat", agent: "grok" })).status).toBe(400);
+  expect((await post({ runtime: "chat", agent: "antigravity" })).status).toBe(400);
   const ok = await post({ runtime: "chat", agent: "codex" });
   expect(ok.status).toBe(201);
   expect(await ok.json()).toMatchObject({ runtime: "chat", agent: "codex" });

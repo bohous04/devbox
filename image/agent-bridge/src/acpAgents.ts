@@ -21,7 +21,8 @@ export interface AcpAgentSpec {
 // Quirks from the T3 Code reference (commit eebb6bcc), checked live in step 4 Task 3 (see each entry).
 export const ACP_AGENTS: Record<AcpAgentId, AcpAgentSpec> = {
   // Full access: Grok approves its own tool calls. grok 1.0.13 (live): ACP v1, session/resume, no image prompts, models
-  // in initialize `_meta.modelState`. Not offered in chat yet: no login in grok-home to record a turn with.
+  // in session/new `models` (switched with session/set_model), message chunks without a messageId, usage only in the
+  // prompt result's `_meta`; besides ACP it sends many `_x.ai/` extension notifications, which are ignored.
   grok: { id: "grok", argv: ["grok", "agent", "--always-approve", "stdio"] },
   // -31001 is Mistral Vibe's rate-limit code, outside ACP. mistral-vibe 3.1.3 (live): ACP v1, session/load only, image
   // prompts, model as a config option; sessions open in "accept-edits", devbox runs them in "auto-approve".

@@ -25,7 +25,7 @@ export const AGENT_PROFILES: Record<AgentName, AgentProfile> = {
   "claude-gemini": { label: "Claude Code + Gemini", short: "Claude+Gemini", yolo: true, proxy: true, runtime: "claude" },
   "claude-openrouter": { label: "Claude Code + OpenRouter", short: "Claude+OR", yolo: true, proxy: true, runtime: "claude" },
   codex:         { label: "Codex",              short: "Codex",       yolo: true, proxy: false, runtime: "codex" },
-  grok:          { label: "Grok Build",         short: "Grok",        yolo: true, proxy: false, runtime: "grok", acp: "grok" },
+  grok:          { label: "Grok Build",         short: "Grok",        yolo: true, proxy: false, runtime: "grok", acp: "grok", acpLive: true },
   antigravity:   { label: "Antigravity",        short: "Antigravity", yolo: true, proxy: false, runtime: "agy", acp: "antigravity" },
   vibe:          { label: "Mistral Vibe",       short: "Vibe",        yolo: true, proxy: false, runtime: "vibe", acp: "vibe", acpLive: true, chatOnly: true },
 };

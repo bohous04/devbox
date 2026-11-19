@@ -1,11 +1,11 @@
 /** The models a chat session can be switched to, per harness. devd refuses any other model (chatSwitch.ts, 400
  *  `unknown-model`); the dashboard's model menu offers exactly these. ACP agents list the ids their session offers
- *  (live, step 4 Task 3): Grok's from initialize `_meta.modelState` (switching them with `session/set_model` is not
- *  verified live: the probe had no Grok login), Vibe's and Antigravity's model config option values. */
+ *  (live): Grok's session/new `models` (grok 1.0.13, switched with `session/set_model`), Vibe's and Antigravity's
+ *  model config option values (step 4 Task 3). */
 export const CHAT_MODELS = {
   claude: ["claude-opus-5-5", "claude-sonnet-5-5"],
   codex: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini", "gpt-5.3-codex"],
-  grok: ["grok-4.6", "grok-4.5"],
+  grok: ["grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"],
   vibe: ["mistral-large-4-0", "mistral-medium-3.5"],
   antigravity: ["gemini-4-neon"],
 } as const satisfies Record<"claude" | "codex" | "grok" | "vibe" | "antigravity", readonly string[]>;

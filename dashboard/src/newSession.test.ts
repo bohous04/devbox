@@ -99,7 +99,8 @@ test("chatRuntimeBlock, tmuxRuntimeBlock and instaboxAgentBlock mirror devd", ()
   expect(chatRuntimeBlock("claude", "vps")).toBeNull();
   expect(chatRuntimeBlock("codex", "vps")).toBeNull();
   expect(chatRuntimeBlock("claude-gemini", "vps")).toBeNull();
-  expect(chatRuntimeBlock("grok", "vps")).not.toBeNull();
+  expect(chatRuntimeBlock("grok", "vps")).toBeNull();
+  expect(chatRuntimeBlock("antigravity", "vps")).not.toBeNull();
   expect(chatRuntimeBlock("vibe", "vps")).toBeNull();
   expect(tmuxRuntimeBlock("vibe")).toBe("Mistral Vibe runs only in chat sessions");
 });

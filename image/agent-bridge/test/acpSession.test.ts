@@ -739,8 +739,8 @@ describe("acpMcpServers", () => {
   });
 });
 
-describe("Grok (live)", () => {
-  const [init, mcpUpdate, authError] = recording("acp-grok-live.jsonl").map((l) => l.recv);
+describe("Grok (live, no login)", () => {
+  const [init, mcpUpdate, authError] = recording("acp-grok-no-login.jsonl").map((l) => l.recv);
 
   test("Grok launch args: the ACP agent over stdio with every tool call approved", async () => {
     expect(ACP_AGENTS.grok.argv).toEqual(["grok", "agent", "--always-approve", "stdio"]);
@@ -858,6 +858,68 @@ describe("Mistral Vibe (live)", () => {
     expect(events.at(-1)).toMatchObject({ type: "run.failed", runId: "run-1", reason: "rate-limited" });
     // No retry loop: the prompt was sent once.
     expect(fake.requests("session/prompt")).toHaveLength(1);
+  });
+});
+
+describe("Grok Build (live)", () => {
+  const lines = recording("acp-grok-live.jsonl");
+  const GROK_CAPS = { resume: true, injectItems: false, liveModelSwitch: true, questions: false, images: false, backgroundVisibility: false };
+
+  test("a turn with a shell tool call, then a restart with session/resume and a second turn", async () => {
+    const fake = fakeAgent();
+    replay(fake, lines);
+    const { session, events, logs } = open(fake, { spec: ACP_AGENTS.grok, instructions: "<devbox-instructions>x</devbox-instructions>" });
+    await session.ready;
+    expect(fake.spawns[0]!.argv).toEqual(["grok", "agent", "--always-approve", "stdio"]);
+    // Grok runs its own default model (announced in session/new `models`); nothing is selected and no mode is set.
+    expect(fake.requests("session/set_model")).toEqual([]);
+    expect(fake.requests("session/set_mode")).toEqual([]);
+    expect(events[0]).toEqual({ type: "thread.native", harness: "grok", nativeThreadId: "sess-1", account: null, model: "grok-4.7", caps: GROK_CAPS });
+
+    await session.startTurn("run-1", "list the files", "user");
+    await until(() => events.some((e) => e.type === "run.completed"));
+    expect(fake.requests("session/prompt")[0]!.params.prompt[0].text).toStartWith("<devbox-instructions>");
+    // Grok's tool_call has no kind (it is only in `_meta`), so the item is "other"; the later update's kind is not
+    // applied to a started item.
+    expect(events.find((e) => e.type === "tool.started")).toMatchObject({ itemId: "call-1", tool: "other", input: { title: "run_terminal_command", rawInput: { command: "echo hi > note.txt && ls" } } });
+    expect(events.find((e) => e.type === "tool.finished")).toMatchObject({ itemId: "call-1", isError: false, output: "README.md\nnote.txt\n" });
+    // Grok's chunks carry no messageId: the text before and after the tool call are two messages.
+    expect(events.filter((e) => e.type === "message.final").map((e) => (e as { text: string }).text)).toEqual(["Spustím příkaz a vypíšu soubory.", "The files are README.md and note.txt."]);
+    // Grok reports usage only in the prompt result's `_meta`, which ACP does not define: no usage is read.
+    expect(events.at(-1)).toEqual({ type: "run.completed", runId: "run-1", nativeThreadId: "sess-1", usage: null, costUsd: null });
+
+    // The process dies between turns: the next message resumes the session (no history replay).
+    fake.exit(137);
+    await until(() => logs.some((l) => l.includes("restarting it with the next message")));
+    const before = events.length;
+    await session.startTurn("run-2", "which file?", "user");
+    await until(() => events.filter((e) => e.type === "run.completed").length === 2);
+    expect(fake.requests("session/resume")[0]!.params).toMatchObject({ sessionId: "sess-1", cwd: "/workspace" });
+    expect(fake.requests("session/load")).toEqual([]);
+    expect(fake.requests("session/prompt")[1]!.params.prompt[0].text).toBe("which file?");
+    const second = events.slice(before);
+    expect(second.filter((e) => e.type === "tool.started")).toEqual([]);
+    expect(second.filter((e) => e.type === "message.final").map((e) => (e as { text: string }).text)).toEqual(["note.txt"]);
+    expect(second.at(-1)).toMatchObject({ type: "run.completed", runId: "run-2" });
+    // Everything else Grok sent is its own `_x.ai/` extension notifications, logged and not applied.
+    const other = logs.filter((l) => !l.includes("restarting it with the next message"));
+    expect(other.length).toBeGreaterThan(0);
+    expect(other.every((l) => /^grok: notification _x\.ai\/\S+ ignored$/.test(l))).toBe(true);
+  });
+
+  test("models are switched with session/set_model; no image prompts (serve.ts sends attachments as paths)", async () => {
+    const fake = fakeAgent();
+    replay(fake, lines);
+    // As grok 1.0.13 answered session/set_model live (grok-4.7 → grok-4.6).
+    fake.responders["session/set_model"] = () => ({ _meta: { model: { Ok: "grok-4.6" } } });
+    const { session, events } = open(fake, { spec: ACP_AGENTS.grok });
+    await session.ready;
+    expect(session.capabilities()).toEqual(GROK_CAPS);
+    await session.setModel("grok-4.6");
+    await session.startTurn("run-1", "list the files", "user");
+    await until(() => events.some((e) => e.type === "run.completed"));
+    expect(fake.requests("session/set_model").map((r) => r.params)).toEqual([{ sessionId: "sess-1", modelId: "grok-4.6" }]);
+    expect(events.find((e) => e.type === "run.started")).toMatchObject({ model: "grok-4.6" });
   });
 });
 
