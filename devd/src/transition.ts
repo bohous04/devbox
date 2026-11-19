@@ -20,8 +20,9 @@ export interface PlanOptions {
 /** A native thread last used this long ago is not resumed. */
 export const STALE_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** Start of the one notice a failed resume gets (chatSwitch adds what was handed over). */
 export function resumeFailedNotice(harness: string): string {
-  return `Could not resume the earlier ${harness} thread; started a fresh one with the conversation handed over.`;
+  return `Could not resume the earlier ${harness} thread; started a fresh one`;
 }
 
 /** For a handoff whose request left no room for any history (`preamble === null && omitted > 0`). */
@@ -69,13 +70,8 @@ export function planTransition(current: Target & { nativeThreadId: string | null
 }
 
 /** The bridge reported `run.failed{error:"resume-failed"}` for a planned resume of `failedThreadId`: mark that
- *  thread dead, start a fresh native thread with the full handoff and tell the user in the thread. */
+ *  thread dead and start a fresh native thread with the full handoff. The caller says it in one notice. */
 export function planAfterResumeFailure(target: Target, failedThreadId: string, store: ThreadStore, request: string, o: PlanOptions): Transition {
   store.markResumeFailed(target.harness, failedThreadId, o.now);
-  store.addNotice(resumeFailedNotice(target.harness), o.now);
-  const t = fresh(target, store, request, o);
-  if (t.handoff.preamble === null && t.handoff.omitted > 0) {
-    store.addNotice(historyOmittedNotice(t.handoff.omitted), o.now);
-  }
-  return t;
+  return fresh(target, store, request, o);
 }

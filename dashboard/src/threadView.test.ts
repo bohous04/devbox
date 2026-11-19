@@ -216,3 +216,10 @@ test("a devd notice from the stream is added once, after what is there, and leav
   expect(applyNotice(once, notice).items).toHaveLength(2);
   expect(mergeSnapshot(once, { afterSeq: 1, snapshot: { ...emptyThread(), lastSeq: 1, items: [notice] } }).items).toHaveLength(2);
 });
+
+test("resume-failed for a run id never announced adds no item (devd's notice says it), like the store", () => {
+  const t = run(emptyThread(), [{ type: "run.failed", runId: "never-started", error: "resume-failed" }]);
+  expect(t.items).toEqual([]);
+  expect(t.lastSeq).toBeGreaterThan(0);
+});
+

@@ -4,6 +4,10 @@ import type { BridgeCommand, ClientFrame, ServerFrame } from "../../image/agent-
 import type { LinkStatus, LoggedEvent } from "../../shared/thread";
 import type { ThreadStore } from "./threadStore";
 
+/** What a bridge says in each handshake (`ready`). `version` is null for a bridge older than switching (1.0.0 sent
+ *  none); `awaitingTarget`: it holds no harness until devd sends switchTarget. */
+export interface BridgeHandshake { version: string | null; awaitingTarget: boolean }
+
 /** The bridge is not reachable (no socket, connection lost, link dropped). devd does not queue: the bridge owns the queue. */
 export class AgentDisconnected extends Error {}
 /** The bridge did not answer in time. A subclass because the caller cannot tell whether the command ran. */
@@ -55,6 +59,8 @@ function parseServerFrame(line: string): ServerFrame {
       return f as ServerFrame;
     case "ready":
       if (!Number.isInteger(f.lastSeq)) throw new MalformedFrame("ready without lastSeq");
+      if (f.version !== undefined && typeof f.version !== "string") throw new MalformedFrame("ready with a non-string version");
+      if (f.awaitingTarget !== undefined && typeof f.awaitingTarget !== "boolean") throw new MalformedFrame("ready with a non-boolean awaitingTarget");
       return f as ServerFrame;
     default:
       throw new MalformedFrame(`unknown frame type ${String(f.t)}`);
@@ -78,6 +84,8 @@ export class BridgeLinks {
     onStatus: (sessionId: string, s: LinkStatus) => void;
     /** `behind(sessionId)` changed. */
     onBehind: (sessionId: string) => void;
+    /** Every handshake, after the replayed events were applied. */
+    onHandshake?: (sessionId: string, h: BridgeHandshake) => void;
     retryMs?: number;
     log?: (msg: string) => void;
   }) {
@@ -294,6 +302,8 @@ export class BridgeLinks {
       }
       case "ready":
         this.checkBehind(sessionId, link, f.lastSeq);
+        try { this.d.onHandshake?.(sessionId, { version: f.version ?? null, awaitingTarget: f.awaitingTarget === true }); }
+        catch (err) { this.log(`bridge link ${sessionId}: onHandshake failed: ${err instanceof Error ? err.message : String(err)}`); }
         return;
     }
   }

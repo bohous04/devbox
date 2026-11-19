@@ -425,6 +425,7 @@ const bridgeLinks = new BridgeLinks({
     inbox.changed(id);
   },
   onBehind: (id) => inbox.changed(id),
+  onHandshake: (id, h) => chatSwitch.onHandshake(id, h),
 });
 const releaseThread = (id: string) => {
   bridgeLinks.drop(id);

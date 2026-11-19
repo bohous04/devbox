@@ -252,3 +252,10 @@ test("a devd notice is announced to the listener, keeps the bridge's seq and is 
   expect(s.snapshot({ afterSeq: 1 }).items.map((i) => i.text)).toEqual(["switched", ]);
   expect(s.snapshot({ afterSeq: 2 }).items.map((i) => i.text)).toEqual([]);
 });
+
+test("resume-failed for a run id never announced adds no item: devd's own notice says it", () => {
+  const s = store(); n = 0;
+  expect(s.apply(ev({ type: "run.failed", runId: "never-started", error: "resume-failed" }))).toBe(true);
+  expect(s.snapshot().items).toEqual([]);
+  expect(s.lastSeq()).toBe(1);
+});

@@ -180,10 +180,8 @@ export class ThreadStore {
         return;
       case "run.failed":
         // resume-failed comes for a switch, not a run: its run id was never announced (contract with the bridge).
-        if (ev.error === "resume-failed" && !db.query("SELECT 1 FROM runs WHERE run_id=?").get(ev.runId)) {
-          this.insertItem(seq, ts, { runId: ev.runId, itemId: null, kind: "notice", text: ev.error, status: "done" });
-          return;
-        }
+        // devd says it in one notice of its own (chatSwitch), so the event adds none.
+        if (ev.error === "resume-failed" && !db.query("SELECT 1 FROM runs WHERE run_id=?").get(ev.runId)) return;
         this.terminal(seq, ts, ev.runId, "failed", { error: ev.error });
         this.insertItem(seq, ts, { runId: ev.runId, itemId: null, kind: "notice", text: ev.error, status: "done" });
         return;

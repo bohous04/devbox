@@ -22,9 +22,10 @@ import { toCandidates } from "./accounts";
 import { AGENTS, agentNameFor, chatRuntimeBlock, isAgentName, specFor, type AgentName } from "./agents";
 import { codexAccountUsable, codexLimitLive, type CodexAccountView } from "./codexAccounts";
 import type { AccountPoolSettings } from "./config";
+import { AgentDisconnected, CommandTimeout, type BridgeHandshake } from "./bridgeLink";
 import { getSession, insertLease, leaseHistory, logEvent, releaseLeasesForSession, setRepoAgent, setSessionAgent, type SessionRow } from "./db";
 import type { Handoff } from "./handoff";
-import { historyOmittedNotice, planAfterResumeFailure, planTransition, type Target, type Transition } from "./transition";
+import { historyOmittedNotice, planAfterResumeFailure, planTransition, resumeFailedNotice, type Target, type Transition } from "./transition";
 import type { ThreadStore } from "./threadStore";
 
 type Harness = SwitchTarget["harness"];
@@ -54,6 +55,8 @@ export const MODEL_WINDOW_ALIASES: Readonly<Record<string, string>> = {
 export const RESERVE_TOKENS = 32_000;
 /** A switch closes one harness and opens another (CLI start, resume check, app-server start). */
 export const SWITCH_TIMEOUT_MS = 90_000;
+/** Pauses between re-sends of the target to a bridge that awaits it, while its link is up; the last one repeats. */
+export const RESEND_DELAYS_MS: readonly number[] = [5_000, 15_000, 60_000, 300_000];
 const CLAUDE_HOME = "/home/dev/.claude";
 const CLAUDE_ACCOUNTS_ROOT = "/home/dev/.claude-accounts";
 /** Plan input when the target harness never announced its capabilities in this session: nothing is assumed, so
@@ -85,17 +88,30 @@ export interface ChatSwitchDeps {
   proxyInputs: (agent: AgentName) => Promise<Record<string, string>>;
   now: () => number;
   log?: (msg: string) => void;
+  /** RESEND_DELAYS_MS; tests shorten them. */
+  resendDelaysMs?: readonly number[];
+}
+
+/** Re-sending the target to a bridge that awaits it (ruling P24): one notice per episode, however many attempts. */
+interface Resend {
+  attempt: number;
+  noticed: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
+  running: boolean;
+  /** The bridge reported a failed resume and no switch was being sent: the next attempt re-plans a fresh thread. */
+  replan: boolean;
 }
 
 /** A switch the bridge confirmed (or one being sent), kept in memory (the env may hold a proxy token): the session's
- *  current target, sent again after a bridge restart (`bridge.started{awaitingTarget}`) or re-planned after a
- *  failed resume. */
+ *  current target, sent again while the bridge awaits it (handshake `awaitingTarget`) or re-planned after a failed
+ *  resume. */
 interface LastSwitch {
   profile: AgentName;
   target: SwitchTarget;
   /** The native thread the target is on: the one asked to resume, then whatever the bridge announced for it. */
   resume: string | null;
-  /** Undelivered handoff; cleared once a user message took it. */
+  /** Undelivered handoff; cleared once a user message took it. The bridge owns it once confirmed: a re-send without
+   *  one (devd lost it, e.g. a restart) keeps the bridge's. */
   handoff: HandoffDelivery | null;
   window: number;
   /** Set by the bridge's `resume-failed` while this switch is being sent. */
@@ -112,6 +128,11 @@ export class ChatSwitch {
   /** Being sent; becomes `last` once the bridge confirmed it. */
   private pending = new Map<string, LastSwitch>();
   private last = new Map<string, LastSwitch>();
+  /** The bridge version of the session's latest handshake. */
+  private bridgeVersions = new Map<string, string | null>();
+  /** Sessions whose bridge holds no harness until devd sends its target (handshake, or a reported failed resume). */
+  private awaiting = new Set<string>();
+  private resends = new Map<string, Resend>();
   private log: (msg: string) => void;
 
   constructor(private d: ChatSwitchDeps) {
@@ -121,6 +142,20 @@ export class ChatSwitch {
   /** The session ended or stopped: what was sent to its bridge no longer applies (session ids are reused). */
   drop(sessionId: string): void {
     this.last.delete(sessionId);
+    this.bridgeVersions.delete(sessionId);
+    this.settled(sessionId);
+  }
+
+  /** Every handshake of the session's bridge (BridgeLinks.onHandshake): a bridge awaiting its target gets it now and,
+   *  while that fails, again with backoff (ruling P24). */
+  onHandshake(sessionId: string, h: BridgeHandshake): void {
+    this.bridgeVersions.set(sessionId, h.version);
+    if (!h.awaitingTarget) {
+      this.settled(sessionId);
+      return;
+    }
+    this.awaiting.add(sessionId);
+    this.resend(sessionId);
   }
 
   /** The target the next switch is planned from (see `current`), for the dashboard's switchers. */
@@ -147,16 +182,22 @@ export class ChatSwitch {
     const store = this.d.threads(s.id);
     const from = agentNameFor(s.agent);
     const profile = this.requestedProfile(from, req);
-    // A run or a queued message would be overtaken by the switch: the user stops first.
-    if (store.snapshot({ limit: 0 }).runs.some((r) => r.endedSeq === null)) throw new SwitchRefused(409, "run-active");
+    // A 1.0.0 bridge (no version in its handshake) does not know setModel/switchTarget and would drop the link.
+    if (this.bridgeVersions.get(s.id) === null) {
+      throw new SwitchRefused(409, "bridge-too-old", "the agent bridge in this container predates switching; recreate the session's container first");
+    }
+    // A run or a queued message would be overtaken by the switch: the user stops first. Not while the bridge awaits
+    // its target: its queued messages wait for exactly that, and picking a target is how the user gets them going.
+    const awaiting = this.awaiting.has(s.id);
+    if (!awaiting && store.snapshot({ limit: 0 }).runs.some((r) => r.endedSeq === null)) throw new SwitchRefused(409, "run-active");
     const current = this.current(s, store);
-    // The current target again: nothing to check or send.
-    if (req.kind === "harness" && profile === from) return UNCHANGED;
-    if (req.kind === "account" && req.accountId !== undefined && req.accountId === current.account) return UNCHANGED;
-    if (req.kind === "model" && req.model === current.model) return UNCHANGED;
+    // The current target again: nothing to check or send, unless the bridge awaits it.
+    if (!awaiting && req.kind === "harness" && profile === from) return UNCHANGED;
+    if (!awaiting && req.kind === "account" && req.accountId !== undefined && req.accountId === current.account) return UNCHANGED;
+    if (!awaiting && req.kind === "model" && req.model === current.model) return UNCHANGED;
     const r = await this.resolve(s, profile, current, req);
     const same = profile === from && r.target.harness === current.harness && r.target.account === current.account && r.target.model === current.model;
-    if (same) return r.exhausted ? { ...UNCHANGED, exhausted: true } : UNCHANGED;
+    if (same && !awaiting) return r.exhausted ? { ...UNCHANGED, exhausted: true } : UNCHANGED;
     if (r.target.account !== null && r.target.account !== current.account) await this.attachProfile(s, r.target);
     const opts = { window: r.window, reserve: RESERVE_TOKENS, now: this.d.now() };
     const caps = store.providerThread(r.target.harness)?.caps ?? NO_CAPS;
@@ -172,29 +213,34 @@ export class ChatSwitch {
     };
     this.pending.set(s.id, next);
     try {
-      if (plan.kind === "set-model") await this.d.links.send(s.id, { kind: "setModel", model: plan.model }, SWITCH_TIMEOUT_MS);
+      // A bridge awaiting its target has no harness to set a model on: it gets the target.
+      if (plan.kind === "set-model" && !awaiting) await this.d.links.send(s.id, { kind: "setModel", model: plan.model }, SWITCH_TIMEOUT_MS);
       else await this.sendTarget(s.id, next);
     } finally {
       this.pending.delete(s.id);
     }
-    // The bridge is on the target now (also after a failed resume: it then holds no thread and no handoff), so the
-    // DB follows before the re-plan, which may fail on its own.
-    const failedResume = next.resumeFailed ? next.resume : null;
-    if (failedResume !== null) {
-      next.resume = null;
-      next.handoff = null;
-      next.resumeFailed = false;
-    }
+    // The bridge is on the target now (also after a failed resume: it then holds no thread and no handoff and awaits
+    // the fresh target), so the DB follows before the re-plan, which may fail on its own.
+    const done = next.resumeFailed ? this.replan(store, next) : null;
     this.last.set(s.id, next);
     this.confirmed(s, from, profile, current, r.target, plan.kind);
     const exhausted = r.exhausted ? { exhausted: true as const } : {};
-    if (failedResume === null) {
+    if (done === null) {
+      this.settled(s.id);
       store.addNotice(switchNotice(req, profile, r.target, plan), this.d.now());
       this.noticeOmitted(store, plan);
       return { kind: plan.kind, ...exhausted };
     }
-    const done = await this.replanAfterResumeFailure(s.id, store, next, failedResume);
     store.addNotice(switchNotice(req, profile, r.target, done, true), this.d.now());
+    try {
+      await this.sendTarget(s.id, next);
+    } catch (e) {
+      // The bridge awaits the fresh target: devd keeps sending it.
+      this.awaiting.add(s.id);
+      this.retryLater(s.id, store, e);
+      throw e;
+    }
+    this.settled(s.id);
     return { kind: done.kind, ...exhausted };
   }
 
@@ -314,19 +360,14 @@ export class ChatSwitch {
     return this.d.links.send(sessionId, { kind: "switchTarget", target: l.target, resume: l.resume, handoff: l.handoff }, SWITCH_TIMEOUT_MS);
   }
 
-  /** The bridge could not resume `failed`: a fresh thread with the full handoff on the same target. A failed send is
-   *  said in the thread too (the bridge then holds the target without a thread) and rethrown. */
-  private async replanAfterResumeFailure(sessionId: string, store: ThreadStore, l: LastSwitch, failed: string): Promise<Transition> {
-    const t = planAfterResumeFailure(l.target, failed, store, "", { window: l.window, reserve: RESERVE_TOKENS, now: this.d.now() });
+  /** The bridge could not resume the thread `l` asked for: a fresh thread with the full handoff on the same target. */
+  private replan(store: ThreadStore, l: LastSwitch): Transition {
+    if (l.resume === null) throw new Error("the bridge reported a failed resume, but no thread was being resumed");
+    const t = planAfterResumeFailure(l.target, l.resume, store, "", { window: l.window, reserve: RESERVE_TOKENS, now: this.d.now() });
     const h = handoffOf(t);
     l.resume = null;
     l.handoff = h ? handoffDelivery(h) : null;
-    try {
-      await this.sendTarget(sessionId, l);
-    } catch (e) {
-      store.addNotice(`Could not start the fresh ${l.target.harness} thread after the failed resume (${e instanceof Error ? e.message : String(e)}); send your message again or switch once more.`, this.d.now());
-      throw e;
-    }
+    l.resumeFailed = false;
     return t;
   }
 
@@ -372,38 +413,118 @@ export class ChatSwitch {
         // The bridge hands the pending handoff to the next user message.
         if (l) l.handoff = null;
         return;
-      case "run.failed":
-        if (ev.error !== "resume-failed") return;
-        if (p) { p.resumeFailed = true; return; }
-        // No switch of this devd is waiting for it (devd restarted, or a re-sent target failed): re-plan here.
-        void this.recover(sessionId, async (store, last) => {
-          if (last.resume === null) throw new Error("the bridge reported a failed resume, but no thread was being resumed");
-          const t = await this.replanAfterResumeFailure(sessionId, store, last, last.resume);
-          store.addNotice([`Started a fresh ${last.target.harness} thread after the failed resume`, handedOver(t)].filter((p) => p !== null).join(" · "), this.d.now());
-        }, "resume failure");
+      case "run.started":
+        // A user message that started at once took it without a run.queued.
+        if (l && ev.origin === "user") l.handoff = null;
         return;
+      case "run.failed": {
+        if (ev.error !== "resume-failed") return;
+        // The bridge now awaits a fresh target (also at its start, e.g. a thread from before the shared Codex home).
+        this.awaiting.add(sessionId);
+        if (p) { p.resumeFailed = true; return; }
+        // No target is being sent: the next attempt re-plans.
+        this.resendState(sessionId).replan = true;
+        this.resend(sessionId);
+        return;
+      }
       case "bridge.started":
-        if (!ev.awaitingTarget) return;
-        void this.recover(sessionId, (_store, last) => this.sendTarget(sessionId, last), "target re-send");
+        // The bridge opened its own persisted or launch target (a recreated container may have leased another
+        // account): devd plans from what it announces, not from its memory. An awaiting bridge says so in the handshake.
+        if (!ev.awaitingTarget) this.last.delete(sessionId);
         return;
     }
   }
 
-  private async recover(sessionId: string, act: (store: ThreadStore, l: LastSwitch) => Promise<void>, what: string): Promise<void> {
-    try {
-      const store = this.d.threads(sessionId);
-      // A switch being sent is what the bridge was told last (a restart mid-switch); it becomes `last` when confirmed.
-      const pending = this.pending.get(sessionId);
-      const l = pending ?? this.last.get(sessionId) ?? await this.rebuild(sessionId, store);
-      if (!pending) this.last.set(sessionId, l);
-      await act(store, l);
-    } catch (e) {
-      this.log(`chat switch ${sessionId}: ${what} failed: ${e instanceof Error ? e.message : String(e)}`);
+  private resendState(sessionId: string): Resend {
+    let r = this.resends.get(sessionId);
+    if (!r) {
+      r = { attempt: 0, noticed: false, timer: null, running: false, replan: false };
+      this.resends.set(sessionId, r);
     }
+    return r;
+  }
+
+  /** Sends the awaited target now, unless an attempt is already under way (it decides what follows). */
+  private resend(sessionId: string): void {
+    const r = this.resendState(sessionId);
+    if (r.running) return;
+    if (r.timer !== null) clearTimeout(r.timer);
+    r.timer = null;
+    void this.attempt(sessionId, r);
+  }
+
+  /** The bridge has a target: no more re-sends, and the next failure episode gets its own notice. */
+  private settled(sessionId: string): void {
+    this.awaiting.delete(sessionId);
+    const r = this.resends.get(sessionId);
+    if (r?.timer) clearTimeout(r.timer);
+    this.resends.delete(sessionId);
+  }
+
+  private async attempt(sessionId: string, r: Resend): Promise<void> {
+    // A user switch being sent sets the target itself; if it fails, this tries again later.
+    if (this.inFlight.has(sessionId)) {
+      this.schedule(sessionId, r);
+      return;
+    }
+    r.running = true;
+    this.inFlight.add(sessionId);
+    let store: ThreadStore | null = null;
+    try {
+      store = this.d.threads(sessionId);
+      const l = this.last.get(sessionId) ?? await this.rebuild(sessionId, store);
+      this.last.set(sessionId, l);
+      if (r.replan) {
+        r.replan = false;
+        l.resumeFailed = true;
+      }
+      if (l.resumeFailed) store.addNotice(freshThreadNotice(l.target.harness, this.replan(store, l)), this.d.now());
+      this.pending.set(sessionId, l);
+      try {
+        await this.sendTarget(sessionId, l);
+      } finally {
+        this.pending.delete(sessionId);
+      }
+      // The thread the target named could not be resumed either.
+      if (l.resumeFailed) {
+        store.addNotice(freshThreadNotice(l.target.harness, this.replan(store, l)), this.d.now());
+        await this.sendTarget(sessionId, l);
+      }
+      if (this.resends.get(sessionId) === r) this.settled(sessionId);
+    } catch (e) {
+      if (this.resends.get(sessionId) === r) this.retryLater(sessionId, store, e, r);
+    } finally {
+      this.inFlight.delete(sessionId);
+      r.running = false;
+    }
+  }
+
+  /** A failed send of the awaited target: said once in the thread per episode, tried again with backoff while the
+   *  link is up; a link that is down tries again on its next handshake. */
+  private retryLater(sessionId: string, store: ThreadStore | null, e: unknown, r = this.resendState(sessionId)): void {
+    const msg = e instanceof Error ? e.message : String(e);
+    this.log(`chat switch ${sessionId}: sending the awaited target failed: ${msg}`);
+    if (!r.noticed && store !== null) {
+      r.noticed = true;
+      store.addNotice(`The agent waits for its target (model, account, agent) and devd could not send it (${msg}); devd keeps trying. Picking a model, account or agent also sets it.`, this.d.now());
+    }
+    if (e instanceof AgentDisconnected && !(e instanceof CommandTimeout)) return;
+    this.schedule(sessionId, r);
+  }
+
+  private schedule(sessionId: string, r: Resend): void {
+    const delays = this.d.resendDelaysMs ?? RESEND_DELAYS_MS;
+    const ms = delays[Math.min(r.attempt, delays.length - 1)]!;
+    r.attempt++;
+    if (r.timer !== null) clearTimeout(r.timer);
+    r.timer = setTimeout(() => {
+      r.timer = null;
+      if (this.resends.get(sessionId) === r) this.resend(sessionId);
+    }, ms);
   }
 
   /** The target from the DB and the store, for a bridge that waits for it after devd lost its memory (restart). An
-   *  undelivered handoff is not known any more: messages queued before the bridge restart already carry theirs. */
+   *  undelivered handoff is not known any more: the re-send carries none and the bridge keeps its own. */
   private async rebuild(sessionId: string, store: ThreadStore): Promise<LastSwitch> {
     const s = getSession(this.d.db, sessionId);
     if (!s) throw new Error("unknown session");
@@ -429,8 +550,22 @@ export class ChatSwitch {
 function switchNotice(req: SwitchRequest, profile: AgentName, t: SwitchTarget, plan: Transition, resumeFailed = false): string {
   const what = req.kind === "harness" ? `Switched to ${AGENTS[profile].label}`
     : req.kind === "account" ? `Switched account to ${t.account}` : `Switched model to ${t.model}`;
-  const resumed = resumeFailed ? "resume failed" : plan.kind === "restart-resume" || plan.kind === "resume-with-delta" ? "resumed" : null;
+  if (resumeFailed) return [what, "resume failed, started a fresh thread", freshHandoffText(plan)].filter((p) => p !== null).join(" · ");
+  const resumed = plan.kind === "restart-resume" || plan.kind === "resume-with-delta" ? "resumed" : null;
   return [what, resumed, handedOver(plan)].filter((p) => p !== null).join(" · ");
+}
+
+/** The one notice of a failed resume devd re-planned without a switch of its own. */
+function freshThreadNotice(harness: string, plan: Transition): string {
+  return [resumeFailedNotice(harness), freshHandoffText(plan)].filter((p) => p !== null).join(" · ");
+}
+
+/** What a fresh thread after a failed resume got: the handoff, or (no room for any history) the P5 sentence, so the
+ *  failed resume stays one notice. */
+function freshHandoffText(plan: Transition): string | null {
+  const h = handoffOf(plan);
+  if (h && h.preamble === null && h.omitted > 0) return historyOmittedNotice(h.omitted);
+  return handedOver(plan);
 }
 
 function handedOver(plan: Transition): string | null {

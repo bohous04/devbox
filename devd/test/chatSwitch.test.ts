@@ -90,11 +90,13 @@ function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; pro
       },
     },
     ensureClaudeProfile: o.ensureProfile,
+    resendDelaysMs: [10, 20, 40],
     proxyInputs: async () => o.proxyInputs ?? PROXY_INPUTS,
     now: () => NOW,
     log: () => {},
   };
   const sw = new ChatSwitch(deps);
+  cleanups.push(() => sw.drop(CHAT.id));
   const app = new Hono();
   registerThreadRoutes(app, {
     db, mgr: { isEnding: () => false }, threads: () => store, bus: new EventBus(), inbox: { changedSafe: () => {} } as never,
@@ -106,7 +108,9 @@ function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; pro
     }));
     return { status: r.status, body: (await r.json()) as Record<string, unknown> };
   };
-  return { db, store, sent, feed, post, sw, app, published, setOnSend: (f: (cmd: BridgeCommand) => void) => { onSend = f; } };
+  /** A handshake of the session's bridge (BridgeLinks.onHandshake). */
+  const handshake = (awaitingTarget: boolean, version: string | null = "1.1.0") => sw.onHandshake(CHAT.id, { version, awaitingTarget });
+  return { db, store, sent, feed, post, sw, app, published, handshake, setOnSend: (f: (cmd: BridgeCommand) => void) => { onSend = f; } };
 }
 
 /** A Claude conversation of one completed turn on the `primary` account. */
@@ -436,7 +440,8 @@ test("after a failed resume the switch notice says so", async () => {
     if (cmd.kind === "switchTarget" && cmd.resume !== null) t.feed([{ type: "run.failed", runId: "never-started", error: "resume-failed" }]);
   });
   await t.post("account", { accountId: "backup" });
-  expect(notices(t).at(-1)).toBe("Switched account to backup · resume failed · context handed over (2 items)");
+  // M4: one notice for the switch and its failed resume.
+  expect(notices(t)).toEqual(["Switched account to backup · resume failed, started a fresh thread · context handed over (2 items)"]);
 });
 
 test("a resume failure re-planned out of band is published like every notice", async () => {
@@ -448,10 +453,8 @@ test("a resume failure re-planned out of band is published like every notice", a
     { type: "run.failed", runId: "never-started", error: "resume-failed" },
   ]);
   await Bun.sleep(0);
-  expect(t.published).toEqual([
-    expect.stringMatching(/^Could not resume the earlier codex thread/),
-    "Started a fresh codex thread after the failed resume · context handed over (1 items)",
-  ]);
+  // M4: one notice.
+  expect(t.published).toEqual(["Could not resume the earlier codex thread; started a fresh one · context handed over (1 items)"]);
 });
 
 // --- bridge events ---
@@ -469,7 +472,7 @@ test("a failed resume is re-planned into a fresh thread with the full handoff", 
   expect(retry.resume).toBeNull();
   expect(retry.handoff!.preamble).toContain("[user] Fix the login bug");
   expect(t.store.providerThread("claude")!.resumeFailed).toBe(true);
-  expect(t.store.snapshot().items.some((i) => i.text.startsWith("Could not resume the earlier claude thread"))).toBe(true);
+  expect(notices(t)).toEqual(["Switched account to backup · resume failed, started a fresh thread · context handed over (2 items)"]);
   expect(activeLeases(t)).toEqual(["backup"]);
 });
 
@@ -483,12 +486,14 @@ test("a failed re-plan after a failed resume stays visible, but the DB follows t
   });
   expect(await t.post("account", { accountId: "backup" })).toEqual({ status: 409, body: { error: "agent-disconnected" } });
   expect(activeLeases(t)).toEqual(["backup"]);
-  expect(t.store.snapshot().items.some((i) => i.text.startsWith("Could not start the fresh claude thread"))).toBe(true);
-  // What devd sends next is the target the bridge holds: backup, no thread to resume.
+  expect(notices(t).at(-1)).toStartWith("The agent waits for its target");
+  // What devd sends on the next handshake is the target the bridge holds: backup, a fresh thread, the full handoff.
   t.setOnSend(() => {});
-  t.feed([{ type: "bridge.started", version: "1", resumed: true, awaitingTarget: true }]);
+  t.handshake(true);
   await Bun.sleep(0);
-  expect((t.sent.at(-1) as Extract<BridgeCommand, { kind: "switchTarget" }>).target.account).toBe("backup");
+  const resent = t.sent.at(-1) as Extract<BridgeCommand, { kind: "switchTarget" }>;
+  expect(resent).toMatchObject({ target: { account: "backup" }, resume: null });
+  expect(resent.handoff!.preamble).toContain("[user] Fix the login bug");
 });
 
 test("a resume failure with no switch in flight is re-planned from the reported (dated) model", async () => {
@@ -509,19 +514,19 @@ test("a resume failure with no switch in flight is re-planned from the reported 
   expect(t.store.providerThread("codex")!.resumeFailed).toBe(true);
 });
 
-test("a bridge restart during an in-flight switch gets the switch being sent", async () => {
+test("a handshake awaiting the target during an in-flight switch leaves it to that switch, which settles it", async () => {
   const t = setup();
   claudeThread(t);
   let restarted = false;
   t.setOnSend((cmd) => {
     if (cmd.kind === "switchTarget" && !restarted) {
       restarted = true;
-      t.feed([{ type: "bridge.started", version: "1", resumed: true, awaitingTarget: true }]);
+      t.handshake(true);
     }
   });
   expect((await t.post("account", { accountId: "backup" })).status).toBe(202);
-  expect(t.sent).toHaveLength(2);
-  expect(t.sent[1]).toEqual(t.sent[0]);
+  await Bun.sleep(60);
+  expect(t.sent).toHaveLength(1);
 });
 
 test("a bridge restarted after a proxy switch gets the target again, with env and the undelivered handoff", async () => {
@@ -535,15 +540,17 @@ test("a bridge restarted after a proxy switch gets the target again, with env an
   await t.post("harness", { agent: "claude-gpt" });
   const first = t.sent[0] as Extract<BridgeCommand, { kind: "switchTarget" }>;
   expect(first.handoff!.preamble).toContain("[user] hello");
-  t.feed([{ type: "bridge.started", version: "1", resumed: true, awaitingTarget: true }]);
+  t.feed([{ type: "bridge.started", version: "1.1.0", resumed: true, awaitingTarget: true }]);
+  t.handshake(true);
   await Bun.sleep(0);
   expect(t.sent[1]).toEqual(first);
   // Once the next message took the handoff, a later re-send carries none, and resumes the announced thread.
   t.feed([
     { type: "run.queued", runId: "r2", text: "go on", attachments: [] },
     { type: "thread.native", harness: "claude", nativeThreadId: "t-new", account: null, model: "gpt-x", caps: CLAUDE_CAPS },
-    { type: "bridge.started", version: "1", resumed: true, awaitingTarget: true },
+    { type: "bridge.started", version: "1.1.0", resumed: true, awaitingTarget: true },
   ]);
+  t.handshake(true);
   await Bun.sleep(0);
   expect(t.sent[2]).toEqual({ ...first, resume: "t-new", handoff: null });
 });
@@ -552,13 +559,161 @@ test("after a devd restart the awaited target is rebuilt from the session's prof
   const t = setup({ agent: "claude-gpt" });
   t.feed([
     { type: "thread.native", harness: "claude", nativeThreadId: "t-claude", account: null, model: "gpt-x", caps: CLAUDE_CAPS },
-    { type: "bridge.started", version: "1", resumed: true, awaitingTarget: true },
+    { type: "bridge.started", version: "1.1.0", resumed: true, awaitingTarget: true },
   ]);
+  t.handshake(true);
   await Bun.sleep(0);
   expect(t.sent).toEqual([{
     kind: "switchTarget", target: { harness: "claude", account: null, model: "gpt-x", env: { ...proxyProfileEnv("claude-gpt", PROXY_INPUTS), CLAUDE_CONFIG_DIR: "/home/dev/.claude" } },
     resume: "t-claude", handoff: null,
   }]);
+});
+
+// --- final review fixes ---
+
+const waitUntil = async (cond: () => boolean, what: string, ms = 1000) => {
+  const end = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+    await Bun.sleep(5);
+  }
+};
+const targets = (t: ReturnType<typeof setup>) => t.sent.filter((c): c is Extract<BridgeCommand, { kind: "switchTarget" }> => c.kind === "switchTarget");
+
+test("C1: a resume failure reported at the bridge's start (no switch in flight, devd memory gone) is re-planned into the same target, fresh, with the handoff", async () => {
+  const t = setup({ agent: "codex" });
+  t.feed([
+    { type: "thread.native", harness: "codex", nativeThreadId: "t-step2", account: "c-two", model: "gpt-5.5", caps: CODEX_CAPS },
+    { type: "run.queued", runId: "r1", text: "hello", attachments: [] },
+    { type: "run.completed", runId: "r1", nativeThreadId: "t-step2", usage: null, costUsd: null },
+    { type: "bridge.started", version: "1.1.0", resumed: true },
+    { type: "run.failed", runId: "never-started", error: "resume-failed" },
+  ]);
+  // The bridge's handshake after the failure says it awaits the target: still one re-plan, one send.
+  t.handshake(true);
+  await waitUntil(() => t.sent.length > 0, "re-plan");
+  await Bun.sleep(30);
+  expect(targets(t)).toHaveLength(1);
+  expect(targets(t)[0]).toMatchObject({ target: { harness: "codex", account: "c-two", model: "gpt-5.5" }, resume: null });
+  expect(targets(t)[0].handoff!.preamble).toContain("[user] hello");
+  expect(t.store.providerThread("codex")).toMatchObject({ nativeThreadId: "t-step2", resumeFailed: true });
+  expect(notices(t)).toEqual(["Agent bridge restarted (v1.1.0)", "Could not resume the earlier codex thread; started a fresh one · context handed over (1 items)"]);
+});
+
+test("I1: a re-send after a devd restart carries no handoff, so the bridge keeps its own; a message that started at once clears devd's copy", async () => {
+  const t = setup({ agent: "codex" });
+  t.feed([
+    { type: "thread.native", harness: "codex", nativeThreadId: "t-codex", account: "default", model: "gpt-5.6-sol", caps: CODEX_CAPS },
+    { type: "run.queued", runId: "r1", text: "hello", attachments: [] },
+    { type: "run.completed", runId: "r1", nativeThreadId: "t-codex", usage: null, costUsd: null },
+  ]);
+  await t.post("harness", { agent: "claude-gpt" });
+  expect(targets(t)[0].handoff).not.toBeNull();
+  // The next user message starts at once (no run.queued): the bridge delivered the handoff with it.
+  t.feed([
+    { type: "run.started", runId: "r2", origin: "user", nativeThreadId: null, model: null },
+    { type: "thread.native", harness: "claude", nativeThreadId: "t-gpt", account: null, model: "gpt-x", caps: CLAUDE_CAPS },
+    { type: "run.completed", runId: "r2", nativeThreadId: "t-gpt", usage: null, costUsd: null },
+  ]);
+  t.handshake(true);
+  await waitUntil(() => targets(t).length === 2, "re-send");
+  expect(targets(t)[1]).toMatchObject({ resume: "t-gpt", handoff: null });
+});
+
+test("I2: a bridge awaiting its target gets it again with backoff while sends fail, with one notice, and on every handshake", async () => {
+  const t = setup({ agent: "claude-gpt" });
+  t.feed([{ type: "thread.native", harness: "claude", nativeThreadId: "t-claude", account: null, model: "gpt-x", caps: CLAUDE_CAPS }]);
+  let fail = true;
+  t.setOnSend((cmd) => { if (cmd.kind === "switchTarget" && fail) throw new CommandFailed("unknown-model-window"); });
+  t.handshake(true);
+  await waitUntil(() => t.sent.length >= 4, "retries");
+  expect(notices(t)).toHaveLength(1);
+  expect(notices(t)[0]).toStartWith("The agent waits for its target");
+  expect(notices(t)[0]).toContain("unknown-model-window");
+  fail = false;
+  await waitUntil(() => t.sent.length >= 5, "the successful retry");
+  const settled = t.sent.length;
+  await Bun.sleep(100);
+  expect(t.sent.length).toBe(settled);
+  expect(notices(t)).toHaveLength(1);
+
+  // A link that drops waits for its next handshake instead of a timer; that handshake sends at once.
+  t.setOnSend((cmd) => { if (cmd.kind === "switchTarget") throw new AgentDisconnected("connection closed"); });
+  t.handshake(true);
+  await Bun.sleep(100);
+  const afterDrop = t.sent.length;
+  expect(afterDrop).toBe(settled + 1);
+  t.setOnSend(() => {});
+  t.handshake(true);
+  await waitUntil(() => t.sent.length === afterDrop + 1, "the send on reconnect");
+  // A new failure episode got its own notice; a handshake that does not await stops everything.
+  expect(notices(t)).toHaveLength(2);
+});
+
+test("I2: a handshake that no longer awaits stops the retries", async () => {
+  const t = setup({ agent: "claude-gpt" });
+  t.feed([{ type: "thread.native", harness: "claude", nativeThreadId: "t-claude", account: null, model: "gpt-x", caps: CLAUDE_CAPS }]);
+  t.setOnSend((cmd) => { if (cmd.kind === "switchTarget") throw new CommandFailed("nope"); });
+  t.handshake(true);
+  await waitUntil(() => t.sent.length >= 2, "a retry");
+  t.handshake(false);
+  const stopped = t.sent.length;
+  await Bun.sleep(100);
+  expect(t.sent.length).toBe(stopped);
+});
+
+test("I2: while the bridge awaits its target the user can switch despite queued messages, and a model pick is sent as the target", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.feed([{ type: "run.queued", runId: "r2", text: "waiting for a target", attachments: [] }]);
+  expect(await t.post("model", { model: "claude-sonnet-5-5" })).toEqual({ status: 409, body: { error: "run-active" } });
+  let refuse = true;
+  t.setOnSend((cmd) => { if (cmd.kind === "switchTarget" && refuse) throw new CommandFailed("not yet"); });
+  t.handshake(true);
+  await waitUntil(() => t.sent.length >= 1, "first re-send");
+  refuse = false;
+  expect(await t.post("model", { model: "claude-sonnet-5-5" })).toEqual({ status: 202, body: { kind: "set-model" } });
+  const last = t.sent.at(-1)!;
+  expect(last).toMatchObject({ kind: "switchTarget", target: { harness: "claude", account: "primary", model: "claude-sonnet-5-5" }, resume: "t-claude" });
+  // Settled: no more re-sends, and the next switch is refused while the message is queued again.
+  const n = t.sent.length;
+  await Bun.sleep(80);
+  expect(t.sent.length).toBe(n);
+  expect((await t.post("model", { model: "claude-opus-5-5" })).status).toBe(409);
+});
+
+test("I2: picking the current target while the bridge awaits it sends it instead of answering unchanged", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.setOnSend((cmd) => { if (cmd.kind === "switchTarget") throw new CommandFailed("not yet"); });
+  t.handshake(true);
+  await waitUntil(() => t.sent.length >= 1, "first re-send");
+  t.setOnSend(() => {});
+  const r = await t.post("model", { model: "claude-opus-5-5" });
+  expect(r.status).toBe(202);
+  expect(r.body.unchanged).toBeUndefined();
+  expect(t.sent.at(-1)).toMatchObject({ kind: "switchTarget", target: { model: "claude-opus-5-5" } });
+});
+
+test("I3: a bridge that restarted on its own target is what devd plans from (another account leased after a recreate)", async () => {
+  const t = setup();
+  claudeThread(t);
+  await t.post("model", { model: "claude-sonnet-5-5" });
+  t.feed([
+    { type: "bridge.started", version: "1.1.0", resumed: true },
+    { type: "thread.native", harness: "claude", nativeThreadId: "t-claude", account: "backup", model: null, caps: CLAUDE_CAPS },
+  ]);
+  expect(t.sw.target(CHAT.id)).toMatchObject({ harness: "claude", account: "backup" });
+});
+
+test("M1: a bridge older than switching is refused with 409 bridge-too-old before anything is sent", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.handshake(false, null);
+  expect(await t.post("model", { model: "claude-sonnet-5-5" })).toEqual({ status: 409, body: { error: "bridge-too-old", message: expect.stringContaining("recreate") } });
+  expect(t.sent).toEqual([]);
+  t.handshake(false, "1.1.0");
+  expect((await t.post("model", { model: "claude-sonnet-5-5" })).status).toBe(202);
 });
 
 // --- proxy profile env ---

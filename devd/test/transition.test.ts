@@ -174,7 +174,8 @@ test("resume failure falls back to a full handoff", () => {
   expect(t.handoff.preamble).toContain("[user] first question");
   expect(t.handoff.preamble).toContain("[assistant] fourth answer");
   const notices = s.snapshot().items.filter((i) => i.kind === "notice").map((i) => i.text);
-  expect(notices).toEqual(["resume-failed", resumeFailedNotice("claude")]); // no "unknown run" notice
+  // Neither the event nor the plan adds a notice (M4: chatSwitch says it in one notice).
+  expect(notices).toEqual([]);
 
   // The dead thread is not tried again.
   expect(s.providerThread("claude")).toMatchObject({ nativeThreadId: "c1", resumeFailed: true });
@@ -185,7 +186,7 @@ test("resume failure falls back to a full handoff", () => {
   expect(s.providerThread("claude")!.resumeFailed).toBe(false);
 });
 
-test("resume failure with a request too big for any history says the history was omitted", () => {
+test("resume failure with a request too big for any history plans no history (the caller says so)", () => {
   const s = store();
   claudeThenCodex(s);
   const target = { harness: "claude", account: "acc-a", model: "opus" };
@@ -193,9 +194,10 @@ test("resume failure with a request too big for any history says the history was
   expect(t.kind).toBe("fresh-with-handoff");
   if (t.kind !== "fresh-with-handoff") return;
   expect(t.handoff.preamble).toBeNull();
-  const notices = s.snapshot().items.filter((i) => i.kind === "notice").map((i) => i.text);
-  expect(notices).toEqual([resumeFailedNotice("claude"), historyOmittedNotice(t.handoff.omitted)]);
+  expect(t.handoff.omitted).toBeGreaterThan(0);
+  expect(s.snapshot().items.filter((i) => i.kind === "notice")).toEqual([]);
   expect(historyOmittedNotice(8)).toContain("devbox_thread_read");
+  expect(resumeFailedNotice("claude")).toBe("Could not resume the earlier claude thread; started a fresh one");
 });
 
 test("a run that starts before its new thread is announced is credited to that thread, not the previous one", () => {
