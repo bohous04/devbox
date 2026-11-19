@@ -58,6 +58,15 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.pendingDeepLink?.sessionId, "dev-x")
     }
 
+    /// Links come from outside the app (the listener, any web page): a session id must be one devd could have made.
+    func testThreadAndSessionLinksRejectIdsOutsideDevdsCharset() {
+        XCTAssertEqual(AppModel.deepLink(from: URL(string: "devbox://thread/dev-shop_cms.2")!), .thread(id: "dev-shop_cms.2"))
+        for bad in ["devbox://thread/..", "devbox://thread/.hidden", "devbox://thread/a%2Fb", "devbox://session/a%20b",
+                    "devbox://thread/%2E%2E", "devbox://session/x%3Fy"] {
+            XCTAssertNil(AppModel.deepLink(from: URL(string: bad)!), bad)
+        }
+    }
+
     func testMoreAndVaultURLs() {
         XCTAssertEqual(AppModel.deepLink(from: URL(string: "devbox://more/prodWrites")!), .more(.prodWrites))
         XCTAssertEqual(AppModel.deepLink(from: URL(string: "devbox://more/sshKeys")!), .more(.sshKeys))

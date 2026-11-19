@@ -130,9 +130,10 @@ final class LiveStoreTests: XCTestCase {
 
         store.start()
         try await Task.sleep(for: .milliseconds(70))
+        let polling = store.pollTask
         store.stop()
-        // A request the last tick sent just before stop() can reach the mock a moment later (seen on macOS).
-        try await Task.sleep(for: .milliseconds(30))
+        // The tick in flight at stop() may still send its request (it reached the mock late on macOS): wait it out.
+        await polling?.value
         let countAfterStop = MockURLProtocol.capturedRequests.filter { $0.url?.path == "/api/stats/live" }.count
         XCTAssertGreaterThan(countAfterStop, 0)
 

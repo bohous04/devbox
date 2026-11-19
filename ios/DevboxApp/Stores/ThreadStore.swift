@@ -258,6 +258,8 @@ final class ThreadStore: ObservableObject {
     /// The last frame that could not be read (also logged); the thread may miss that update until a reload.
     @Published private(set) var badFrame: String?
     @Published private(set) var seenError: String?
+    /// devd refused the stream with 404/409: the session is gone or ending. Final: no reconnect, no restart.
+    @Published private(set) var ended = false
     /// Derived from `thread` once per update (set before it, so a render sees them together), not on every render.
     private(set) var rows: [ChatRow] = []
     private(set) var switchKey = ""
@@ -284,6 +286,7 @@ final class ThreadStore: ObservableObject {
 
     /// Loads the thread (once) and opens the stream from its seq.
     func start() async {
+        guard !ended else { return }
         wantsStream = true
         if thread == nil { await load() }
         guard thread != nil, wantsStream else { return }
@@ -300,6 +303,7 @@ final class ThreadStore: ObservableObject {
 
     /// Back from the background: what changed after our seq, then the stream again from the new seq.
     func resume() async {
+        guard !ended else { return }
         stop()
         guard let t = thread else { return await start() }
         wantsStream = true
@@ -337,7 +341,14 @@ final class ThreadStore: ObservableObject {
                 guard let self else { throw CancellationError() }
                 // Each (re)connect asks from the seq the store holds now; devd prefers Last-Event-ID when sent.
                 let after = self.thread?.lastSeq ?? 0
-                return try await connect("/api/stream?session=\(session)&afterSeq=\(after)", id)
+                do {
+                    return try await connect("/api/stream?session=\(session)&afterSeq=\(after)", id)
+                } catch let e as DevdHTTPError where e.statusCode == 404 || e.statusCode == 409 {
+                    Self.logger.notice("thread stream refused (HTTP \(e.statusCode) \(e.serverMessage ?? "", privacy: .public)): session ended")
+                    self.ended = true
+                    // Ends EventStream's loop: there is nothing to reconnect to.
+                    throw CancellationError()
+                }
             },
             onOpen: { [weak self] in self?.paused = false },
             onEvent: { [weak self] e in self?.handle(e) },

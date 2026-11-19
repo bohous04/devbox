@@ -173,12 +173,12 @@ final class AppModel: ObservableObject {
         let first = url.pathComponents.dropFirst().first
         switch url.host {
         case "session":
-            guard let sessionId = first, !sessionId.isEmpty else { return nil }
+            guard let sessionId = first, isSessionId(sessionId) else { return nil }
             let terminal = URLComponents(url: url, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "terminal" })?.value == "1"
             return .session(id: sessionId, terminal: terminal)
         case "thread":
-            guard let sessionId = first, !sessionId.isEmpty else { return nil }
+            guard let sessionId = first, isSessionId(sessionId) else { return nil }
             return .thread(id: sessionId)
         case "more":
             guard let target = first, target != "vault" else { return nil }
@@ -188,6 +188,12 @@ final class AppModel: ObservableObject {
         default:
             return nil
         }
+    }
+
+    /// devd's session id charset (`^[A-Za-z0-9_-][A-Za-z0-9._-]*$`): a link from outside the app cannot smuggle a
+    /// path (`..`, `/`) into the requests built from it.
+    static func isSessionId(_ s: String) -> Bool {
+        s.wholeMatch(of: #/[A-Za-z0-9_-][A-Za-z0-9._-]*/#) != nil
     }
 
     /// Saves the configuration to Keychain and rebuilds the client. An empty (after trimming whitespace) field

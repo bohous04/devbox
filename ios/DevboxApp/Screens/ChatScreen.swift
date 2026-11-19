@@ -18,19 +18,23 @@ struct ChatScreen: View {
     /// The Mac shows the terminal in a tab of the thread's window; it passes how to switch to it. nil: a full-screen
     /// terminal from the toolbar (iPhone).
     private let openTerminal: (() -> Void)?
+    /// The Mac closes the thread's window when its session ended; nil on iPhone (back navigation does it).
+    private let closeWindow: (() -> Void)?
 
     init(sessionId: String, client: DevdClient) {
         self.sessionId = sessionId
         self.client = client
         openTerminal = nil
+        closeWindow = nil
         _store = StateObject(wrappedValue: ThreadStore(sessionId: sessionId, client: client))
     }
 
     /// The Mac keeps the store outside the screen: its window restores it and saves its seq at quit.
-    init(store: ThreadStore, client: DevdClient, openTerminal: (() -> Void)?) {
+    init(store: ThreadStore, client: DevdClient, openTerminal: (() -> Void)?, closeWindow: (() -> Void)?) {
         self.sessionId = store.sessionId
         self.client = client
         self.openTerminal = openTerminal
+        self.closeWindow = closeWindow
         _store = StateObject(wrappedValue: store)
     }
 
@@ -42,7 +46,15 @@ struct ChatScreen: View {
 
     var body: some View {
         Group {
-            if store.isTmux {
+            if store.ended {
+                ContentUnavailableView {
+                    Label("Session ended", systemImage: "checkmark.circle")
+                } description: {
+                    Text("devd no longer has this session.")
+                } actions: {
+                    if let closeWindow { Button("Close window", action: closeWindow) }
+                }
+            } else if store.isTmux {
                 ContentUnavailableView {
                     Label("This is a tmux session", systemImage: "terminal")
                 } description: {

@@ -128,6 +128,25 @@ final class ThreadStoreLiveTests: XCTestCase {
         store.stop()
     }
 
+    /// A session that ended (or was removed) while the Mac app was closed: devd answers the stream with 404/409. That
+    /// is final: the store says ended and does not reconnect every 5 s.
+    func testStreamRefusedWith404EndsTheThreadWithoutReconnecting() async throws {
+        for status in [404, 409] {
+            let saved = try JSONDecoder().decode(ThreadSnapshot.self, from: snapshot(lastSeq: 10, seenSeq: 10))
+            var connects = 0
+            let store = ThreadStore(sessionId: "s1", client: client(), restored: saved, connect: { _, _ in
+                connects += 1
+                throw DevdHTTPError(statusCode: status, serverMessage: status == 404 ? "unknown session" : "session-ending")
+            })
+            await store.start()
+            try await waitUntil { store.ended }
+            try await Task.sleep(for: .milliseconds(50))
+            XCTAssertEqual(connects, 1, "HTTP \(status)")
+            XCTAssertFalse(store.paused, "HTTP \(status)")
+            store.stop()
+        }
+    }
+
     /// The Mac reopens a window's thread from its saved copy: no full reload, the stream asks from the saved seq
     /// (devd answers with a thread-snapshot of what changed after it).
     func testRestoredThreadStreamsFromItsSeqWithoutAReload() async throws {
