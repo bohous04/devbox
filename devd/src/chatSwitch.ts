@@ -14,11 +14,12 @@
 import type { Database } from "bun:sqlite";
 import type { BridgeCommand, HandoffDelivery, SwitchTarget } from "../../image/agent-bridge/src/protocol";
 import { isProxyProfile, proxyProfileEnv, type ProxyProfile } from "../../image/agent-bridge/src/proxyProfile";
+import { CHAT_MODELS as SHARED_CHAT_MODELS } from "../../shared/chatModels";
 import type { Capabilities, LoggedEvent } from "../../shared/thread";
 import { currentAccount, lastSwitchAt } from "./accountLease";
 import { chooseAccount, isExhausted } from "./accountPolicy";
 import { toCandidates } from "./accounts";
-import { agentNameFor, chatRuntimeBlock, isAgentName, specFor, type AgentName } from "./agents";
+import { AGENTS, agentNameFor, chatRuntimeBlock, isAgentName, specFor, type AgentName } from "./agents";
 import { codexAccountUsable, codexLimitLive, type CodexAccountView } from "./codexAccounts";
 import type { AccountPoolSettings } from "./config";
 import { getSession, insertLease, leaseHistory, logEvent, releaseLeasesForSession, setRepoAgent, setSessionAgent, type SessionRow } from "./db";
@@ -28,11 +29,9 @@ import type { ThreadStore } from "./threadStore";
 
 type Harness = SwitchTarget["harness"];
 
-/** The models a chat session can be switched to (the model route refuses anything else with 400). */
-export const CHAT_MODELS: Record<Harness, readonly string[]> = {
-  claude: ["claude-opus-5-5", "claude-sonnet-5-5"],
-  codex: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini", "gpt-5.3-codex"],
-};
+/** The models a chat session can be switched to (the model route refuses anything else with 400); shared with the
+ *  dashboard's model menu. */
+export const CHAT_MODELS: Record<Harness, readonly string[]> = SHARED_CHAT_MODELS;
 /** Context windows (tokens) of the base models. Conservative values: a smaller window only shrinks a handoff. */
 const BASE_WINDOWS: Readonly<Record<string, number>> = {
   "claude-opus-5-5": 200_000, "claude-sonnet-5-5": 200_000,
@@ -71,6 +70,8 @@ export type SwitchRequest = { kind: "model"; model: string } | { kind: "account"
  *  transition.ts). `exhausted`: the target account is over its usage threshold (allowed, as for `dev switch`). */
 export interface SwitchResult { kind: Transition["kind"]; unchanged?: true; exhausted?: true }
 const UNCHANGED: SwitchResult = { kind: "set-model", unchanged: true };
+/** GET .../thread/target: the profile and the target devd plans the next switch from. */
+export interface CurrentTarget extends Target { agent: AgentName }
 
 export interface ChatSwitchDeps {
   db: Database;
@@ -120,6 +121,14 @@ export class ChatSwitch {
   /** The session ended or stopped: what was sent to its bridge no longer applies (session ids are reused). */
   drop(sessionId: string): void {
     this.last.delete(sessionId);
+  }
+
+  /** The target the next switch is planned from (see `current`), for the dashboard's switchers. */
+  target(sessionId: string): CurrentTarget {
+    const s = getSession(this.d.db, sessionId);
+    if (!s) throw new Error(`unknown session ${sessionId}`);
+    const { harness, account, model } = this.current(s, this.d.threads(sessionId));
+    return { agent: agentNameFor(s.agent), harness, account, model };
   }
 
   async switch(sessionId: string, req: SwitchRequest): Promise<SwitchResult> {
@@ -180,10 +189,12 @@ export class ChatSwitch {
     this.confirmed(s, from, profile, current, r.target, plan.kind);
     const exhausted = r.exhausted ? { exhausted: true as const } : {};
     if (failedResume === null) {
+      store.addNotice(switchNotice(req, profile, r.target, plan), this.d.now());
       this.noticeOmitted(store, plan);
       return { kind: plan.kind, ...exhausted };
     }
     const done = await this.replanAfterResumeFailure(s.id, store, next, failedResume);
+    store.addNotice(switchNotice(req, profile, r.target, done), this.d.now());
     return { kind: done.kind, ...exhausted };
   }
 
@@ -409,6 +420,20 @@ export class ChatSwitch {
     const env: Record<string, string> = harness === "claude" ? { CLAUDE_CONFIG_DIR: account === null ? CLAUDE_HOME : `${CLAUDE_ACCOUNTS_ROOT}/${account}` } : {};
     return { profile, target: { harness: harness as Harness, account, model, env }, window: windowFor(harness as Harness, model), resume, handoff: null, resumeFailed: false };
   }
+}
+
+/** The thread's record of a confirmed switch: what it switched to and how the conversation came along. Counts are
+ *  handoff items (messages, commands, file changes, plans); a handoff with no room for history says so here and in
+ *  the P5 notice that follows. */
+function switchNotice(req: SwitchRequest, profile: AgentName, t: SwitchTarget, plan: Transition): string {
+  const what = req.kind === "harness" ? `Switched to ${AGENTS[profile].label}`
+    : req.kind === "account" ? `Switched account to ${t.account}` : `Switched model to ${t.model}`;
+  const h = handoffOf(plan);
+  const handed = h === null ? null : h.preamble === null
+    ? (h.omitted > 0 ? "no history handed over" : null)
+    : `context handed over (${h.includedItemSeqs.length} items${h.omitted > 0 ? `, ${h.omitted} omitted` : ""})`;
+  const resumed = plan.kind === "restart-resume" || plan.kind === "resume-with-delta" ? "resumed" : null;
+  return [what, resumed, handed].filter((p) => p !== null).join(" · ");
 }
 
 /** The window of `model` (any id a harness reports, see MODEL_WINDOW_ALIASES); a null model is the harness

@@ -105,7 +105,7 @@ function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; pro
     }));
     return { status: r.status, body: (await r.json()) as Record<string, unknown> };
   };
-  return { db, store, sent, feed, post, sw, setOnSend: (f: (cmd: BridgeCommand) => void) => { onSend = f; } };
+  return { db, store, sent, feed, post, sw, app, setOnSend: (f: (cmd: BridgeCommand) => void) => { onSend = f; } };
 }
 
 /** A Claude conversation of one completed turn on the `primary` account. */
@@ -364,6 +364,68 @@ test("harness: no room for any history keeps the request path and says so in a n
   expect(await t.post("harness", { agent: "claude-gpt" })).toEqual({ status: 202, body: { kind: "fresh-with-handoff" } });
   expect((t.sent[0] as Extract<BridgeCommand, { kind: "switchTarget" }>).handoff).toBeNull();
   expect(t.store.snapshot().items.map((i) => i.text)).toContain(historyOmittedNotice(1));
+});
+
+// --- the switch notice and the current target ---
+
+const notices = (t: ReturnType<typeof setup>) => t.store.snapshot().items.filter((i) => i.kind === "notice").map((i) => i.text);
+
+test("a confirmed switch says in the thread what it switched to and what was handed over", async () => {
+  const t = setup();
+  claudeThread(t);
+  await t.post("model", { model: "claude-sonnet-5-5" });
+  await t.post("account", { accountId: "backup" });
+  await t.post("harness", { agent: "codex" });
+  expect(notices(t)).toEqual([
+    "Switched model to claude-sonnet-5-5",
+    "Switched account to backup · resumed",
+    "Switched to Codex · context handed over (2 items)",
+  ]);
+});
+
+test("the switch notice counts omitted items; a refused or unchanged switch adds none", async () => {
+  const t = setup({ agent: "codex", proxyInputs: { ...PROXY_INPUTS, DEVD_AGENT_CTX: "1000" } });
+  t.feed([
+    { type: "thread.native", harness: "codex", nativeThreadId: "t-codex", account: "default", model: "gpt-5.6-sol", caps: CODEX_CAPS },
+    { type: "run.queued", runId: "r1", text: "hello", attachments: [] },
+    { type: "run.completed", runId: "r1", nativeThreadId: "t-codex", usage: null, costUsd: null },
+  ]);
+  expect((await t.post("harness", { agent: "codex" })).status).toBe(202);
+  expect((await t.post("account", { accountId: "nope" })).status).toBe(400);
+  expect(notices(t)).toEqual([]);
+  await t.post("harness", { agent: "claude-gpt" });
+  expect(notices(t)).toEqual(["Switched to Claude Code + GPT · no history handed over", historyOmittedNotice(1)]);
+});
+
+test("a resumed thread with a delta says how much of it was handed over", async () => {
+  const t = setup({ agent: "codex" });
+  t.feed([
+    { type: "thread.native", harness: "codex", nativeThreadId: "t-codex", account: "default", model: "gpt-5.6-sol", caps: CODEX_CAPS },
+    { type: "run.queued", runId: "r1", text: "hello", attachments: [] },
+    { type: "run.completed", runId: "r1", nativeThreadId: "t-codex", usage: null, costUsd: null },
+  ]);
+  await t.post("harness", { agent: "claude" });
+  t.feed([
+    { type: "thread.native", harness: "claude", nativeThreadId: "t-claude", account: "backup", model: "claude-opus-5-5", caps: CLAUDE_CAPS },
+    { type: "run.queued", runId: "r2", text: "on claude", attachments: [] },
+    { type: "run.completed", runId: "r2", nativeThreadId: "t-claude", usage: null, costUsd: null },
+  ]);
+  expect(await t.post("harness", { agent: "codex" })).toEqual({ status: 202, body: { kind: "resume-with-delta" } });
+  expect(notices(t).at(-1)).toBe("Switched to Codex · resumed · context handed over (1 items)");
+});
+
+test("GET thread/target is the target devd plans the next switch from", async () => {
+  const t = setup();
+  const get = async () => {
+    const r = await t.app.fetch(new Request(`http://x/api/sessions/${CHAT.id}/thread/target`));
+    return { status: r.status, body: await r.json() };
+  };
+  expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "primary", model: null } });
+  claudeThread(t);
+  await t.post("account", { accountId: "backup" });
+  expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "backup", model: "claude-opus-5-5" } });
+  await t.post("harness", { agent: "codex" });
+  expect(await get()).toEqual({ status: 200, body: { agent: "codex", harness: "codex", account: "default", model: null } });
 });
 
 // --- bridge events ---

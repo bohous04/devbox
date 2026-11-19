@@ -20,7 +20,7 @@ export interface ThreadApiDeps {
   bus: EventBus;
   inbox: Inbox;
   /** Model, account and harness switching (chatSwitch.ts); without it those routes answer 503. */
-  switcher?: Pick<ChatSwitch, "switch">;
+  switcher?: Pick<ChatSwitch, "switch" | "target">;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -128,6 +128,13 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
         return commandError(c, e);
       }
     });
+  app.get("/api/sessions/:id/thread/target", (c) => {
+    const id = c.req.param("id");
+    const r = chat(c, id);
+    if ("res" in r) return r.res;
+    if (!d.switcher) return c.json({ error: "switching is not configured" }, 503);
+    return c.json(d.switcher.target(id));
+  });
   const nonEmpty = (v: unknown): v is string => typeof v === "string" && v !== "";
   switchRoute("model", (b) => (nonEmpty(b.model) ? { kind: "model", model: b.model } : "model must be a non-empty string"));
   // No accountId: the pool's choice.
