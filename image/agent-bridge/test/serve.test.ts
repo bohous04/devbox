@@ -1236,6 +1236,18 @@ describe("step 6 hardening", () => {
     expect(await handshake(0)).toMatchObject({ awaitingTarget: false });
   });
 
+  test("T2: a corrupt state.json of a thread on another account waits for devd's target instead of resuming under this home", async () => {
+    priorLog({ type: "thread.native", harness: "claude", nativeThreadId: "thread-a", account: "acct-a", model: "m" });
+    writeFileSync(join(dir, "state.json"), "");
+    const f = fakeHarness();
+    await start(f, { account: "acct-b" });
+    expect(f.opens).toEqual([]);
+    expect(await handshake(0)).toMatchObject({ awaitingTarget: true });
+    expect(state()).toMatchObject({ harness: "claude", nativeThreadId: "thread-a", awaitingTarget: true });
+    const started = events()[1] as Extract<BridgeEvent, { type: "bridge.started" }>;
+    expect(started.notice).toContain("account acct-a");
+  });
+
   test("T2: a malformed state.json with no thread in the log starts fresh and says so", async () => {
     writeFileSync(join(dir, "state.json"), JSON.stringify({ harness: "claude", queue: "x" }));
     const f = fakeHarness();

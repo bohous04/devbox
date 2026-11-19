@@ -288,7 +288,7 @@ function harnessOpener(launchEnv: Env, logError: (msg: string) => void): OpenHar
  *  latest thread (`thread.native`), the run that was running (the last one started without an end) and the messages
  *  queued behind it (announced with `run.queued`, never started). What it does not: the continuation history, Claude's
  *  usage baseline, a pending handoff, a switched target's env, a message's harness text. A thread of another harness
- *  than the launch one cannot be opened with the launch env: the bridge awaits devd's target for it. */
+ *  or account than the launch one cannot be opened with the launch env: the bridge awaits devd's target for it. */
 function recoverState(scan: LogScan, launch: { harness: Harness; account: string | null; model: string | null }): { state: BridgeState; outcome: string } {
   const native = scan.lastNative?.event ?? null;
   const open = [...scan.openRuns];
@@ -300,12 +300,14 @@ function recoverState(scan: LogScan, launch: { harness: Harness; account: string
     continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, trimSeq: 0, ackCandidate: null, awaitingTarget: false,
   };
   if (native === null) return { state, outcome: "there is no thread to resume, a new one opens" };
-  if (native.harness === launch.harness) {
+  if (native.harness === launch.harness && native.account === launch.account) {
     return { state: { ...state, nativeThreadId: native.nativeThreadId, model: native.model ?? launch.model }, outcome: `it resumes thread ${native.nativeThreadId}` };
   }
+  // Another harness, or another account's home (the thread lives there): the launch env must not open it.
+  const on = native.harness !== launch.harness ? native.harness : `account ${native.account ?? "(shared)"}, not this launch's ${launch.account ?? "(shared)"}`;
   return {
     state: { ...state, harness: native.harness as Harness, nativeThreadId: native.nativeThreadId, account: native.account, model: native.model, awaitingTarget: true },
-    outcome: `thread ${native.nativeThreadId} is on ${native.harness}, it waits for devd to send that target`,
+    outcome: `thread ${native.nativeThreadId} is on ${on}, it waits for devd to send that target`,
   };
 }
 
