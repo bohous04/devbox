@@ -1,7 +1,7 @@
 // Terminal page addresses. The dashboard runs on HashRouter — routes live behind `/#/…`,
 // so a link to the terminal MUST have the path in the hash. The path form (`/terminal/x`) is
 // served by the server (the SPA fallback returns index.html), but the router without a hash falls to
-// the catch-all and the tab lands on Overview — exactly how the Terminal button
+// the catch-all and the tab lands on the home page (Inbox) — exactly how the Terminal button
 // broke after PR #53.
 
 /** URL for window.open from the Terminal button. */
