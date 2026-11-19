@@ -617,6 +617,13 @@ export class AgentEventHub {
     return last?.decision === "deferred" && last.reason === reason;
   }
 
+  /** The "finished" for a run that ended at `endedAt` already went out or was silenced (the newest `sweep_done` row
+   *  since then says so). */
+  completionDecided(sessionId: string, endedAt: number): boolean {
+    const last = lastSweepDone(this.d.db, sessionId, endedAt);
+    return last?.decision === "sent" || last?.decision === "suppressed";
+  }
+
   /** ChatHub: the critic reviews run `runId`, so its `stop` comes only after the verdict. Recorded so a devd restart
    *  in the meantime re-sends the completion (heldFor `critic-review`). */
   holdForCritic(s: SessionRow, runId: string): void {

@@ -475,3 +475,29 @@ test("a critic follow-up the bridge refuses (run-active) is logged and the run f
   expect(f.notified.map((n) => n.message)).toEqual(["Claude finished working"]);
   expect(f.logs.some((l) => l.includes("run-active"))).toBe(true);
 });
+
+test("T10: a completion already sent is not re-sent after a restart that finds holding work again", () => {
+  const f = fixture();
+  f.feed(started("r1"), completed("r1"));
+  f.settle();
+  expect(f.notified).toHaveLength(1);
+  // Holding work came back without a new run (a background subagent started its own task), then devd restarted.
+  f.feed(background(wakeup));
+  f.restart();
+  f.feed(background());
+  f.settle();
+  expect(f.notified).toHaveLength(1);
+});
+
+test("T10: a session stopped and started again before the hub forgot it does not count its subagents twice", () => {
+  const f = fixture();
+  f.chat.onStatus(f.row.id, "connected", () => f.store.snapshot({ limit: 0 }));
+  f.feed(started("r1"), background(subagent));
+  expect(f.hub.counters(f.row.id).inflight).toBe(1);
+  // stop (releaseThread drops the chat state), start: the link connects again and seeds from the store.
+  f.chat.drop(f.row.id);
+  f.chat.onStatus(f.row.id, "connected", () => f.store.snapshot({ limit: 0 }));
+  expect(f.hub.counters(f.row.id).inflight).toBe(1);
+  f.feed(background());
+  expect(f.hub.counters(f.row.id).inflight).toBe(0);
+});
