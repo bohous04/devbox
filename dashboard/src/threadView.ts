@@ -58,7 +58,7 @@ function dispatch(n: ThreadSnapshot, { seq, ts, event: ev }: LoggedEvent) {
       n.native = { harness: ev.harness, nativeThreadId: ev.nativeThreadId, account: ev.account, model: ev.model ?? (n.native?.harness === ev.harness ? n.native.model : null) };
       return;
     case "run.queued":
-      insertRun(n, ev.runId, { origin: "user", status: "queued", nativeThreadId: null, model: null, queuedAt: ts, startedAt: null });
+      insertRun(n, ev.runId, { origin: ev.origin ?? "user", status: "queued", nativeThreadId: null, model: null, queuedAt: ts, startedAt: null });
       insertItem(n, seq, ts, { runId: ev.runId, itemId: `user:${ev.runId}`, kind: "user", text: ev.text, status: "done" });
       return;
     case "run.started": {

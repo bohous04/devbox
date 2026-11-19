@@ -114,7 +114,7 @@ export class ThreadStore {
         }
         return;
       case "run.queued":
-        this.insertRun(seq, ev.runId, "user", "queued", null, null, ts, null);
+        this.insertRun(seq, ev.runId, ev.origin ?? "user", "queued", null, null, ts, null);
         this.insertItem(seq, ts, { runId: ev.runId, itemId: `user:${ev.runId}`, kind: "user", text: ev.text, status: "done" });
         return;
       case "run.started": {

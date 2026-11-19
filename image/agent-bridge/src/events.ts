@@ -36,7 +36,8 @@ export interface BackgroundWork {
 export type BridgeEvent =
   // harness: "claude", "codex" or an ACP agent's id (ACP_AGENTS).
   | { type: "thread.native"; harness: "claude" | "codex" | (string & {}); nativeThreadId: string; account: string | null; model: string | null; caps?: Capabilities }
-  | { type: "run.queued"; runId: string; text: string; attachments: string[] }
+  // `origin` (bridge 1.3.0+) only for a critic follow-up; absent = the user's message.
+  | { type: "run.queued"; runId: string; text: string; attachments: string[]; origin?: "critic" }
   | { type: "run.started"; runId: string; origin: RunOrigin; nativeThreadId: string | null; model: string | null }
   | { type: "message.delta"; runId: string; itemId: string; text: string }
   | { type: "message.final"; runId: string; itemId: string; role: "assistant" | "user"; text: string }

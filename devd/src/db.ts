@@ -829,10 +829,12 @@ export function insertNotifyLog(db: Database, r: NotifyLogInput): void {
     .run(r.ts, r.session_id, r.event, r.decision, r.reason, r.inflight, r.teammates, r.agent_session_id, r.detail);
 }
 
-/** The newest `sweep_done` decision of a session at or after `since`: a "finished" the hub held for CI (deferred,
- *  pr-checks) and never sent or silenced ends on that row. */
+/** The newest `sweep_done` decision of a session at or after `since`, or a critic block (`stop` suppressed
+ *  critic-block: the run was not finished, its follow-up carries on): a "finished" the hub held (deferred, pr-checks
+ *  or critic-review) and never sent, silenced or blocked ends on that row. */
 export function lastSweepDone(db: Database, sessionId: string, since: number): { decision: NotifyDecision; reason: string | null } | null {
-  return (db.query(`SELECT decision, reason FROM notify_log WHERE session_id=? AND event='sweep_done' AND ts>=? ORDER BY id DESC LIMIT 1`)
+  return (db.query(`SELECT decision, reason FROM notify_log WHERE session_id=? AND ts>=?
+      AND (event='sweep_done' OR (event='stop' AND reason='critic-block')) ORDER BY id DESC LIMIT 1`)
     .get(sessionId, since) as { decision: NotifyDecision; reason: string | null } | null) ?? null;
 }
 

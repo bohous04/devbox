@@ -607,11 +607,32 @@ export class AgentEventHub {
     }
   }
 
-  /** The session's "finished" for a run that ended at `endedAt` was held for CI and never sent or silenced (the
-   *  newest `sweep_done` row since then is the hold's deferral). Survives a devd restart and a session stop/start. */
-  heldForPr(sessionId: string, endedAt: number): boolean {
+  /** The session's "finished" for a run that ended at `endedAt` was held (for CI: `pr-checks`; for the critic's
+   *  verdict: `critic-review`) and never sent, silenced or blocked (the newest `sweep_done` row since then is the
+   *  hold's deferral). Survives a devd restart and a session stop/start. */
+  heldFor(sessionId: string, endedAt: number, reason: "pr-checks" | "critic-review"): boolean {
     const last = lastSweepDone(this.d.db, sessionId, endedAt);
-    return last?.decision === "deferred" && last.reason === "pr-checks";
+    return last?.decision === "deferred" && last.reason === reason;
+  }
+
+  /** ChatHub: the critic reviews run `runId`, so its `stop` comes only after the verdict. Recorded so a devd restart
+   *  in the meantime re-sends the completion (heldFor `critic-review`). */
+  holdForCritic(s: SessionRow, runId: string): void {
+    const c = this.counters(s.id);
+    insertNotifyLog(this.d.db, {
+      ts: this.now(), session_id: s.id, event: "sweep_done", decision: "deferred", reason: "critic-review",
+      inflight: c.inflight, teammates: c.teammates, agent_session_id: null, detail: JSON.stringify({ promptId: runId }),
+    });
+  }
+
+  /** ChatHub: the critic blocked run `runId`; its `stop` never comes, the follow-up run carries the turn on. The same
+   *  row the tmux Stop hook writes on a block. */
+  criticBlocked(s: SessionRow, runId: string): void {
+    const c = this.counters(s.id);
+    insertNotifyLog(this.d.db, {
+      ts: this.now(), session_id: s.id, event: "stop", decision: "suppressed", reason: "critic-block",
+      inflight: c.inflight, teammates: c.teammates, agent_session_id: null, detail: JSON.stringify({ promptId: runId }),
+    });
   }
 
   /** ChatHub after a devd restart: the completion it just re-sent was held for CI before the restart, so it counts as

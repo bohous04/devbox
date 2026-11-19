@@ -250,3 +250,11 @@ test("criticRunIds: the runs devd's critic started, so their message is labelled
   ]);
   expect([...criticRunIds(t)]).toEqual(["r2"]);
 });
+
+test("criticRunIds: a queued critic run is the critic's before it starts", () => {
+  seq = 0;
+  const t = run(emptyThread(), [
+    { type: "run.queued", runId: "r2", text: "fix the migration", attachments: [], origin: "critic" },
+  ]);
+  expect([...criticRunIds(t)]).toEqual(["r2"]);
+});

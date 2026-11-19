@@ -98,12 +98,19 @@ export class ChatHub {
       return;
     }
     for (const id of subagentIds(t)) this.subagentStart(s, st, id);
+    if (active || last?.status !== "completed" || holdingCount(t) > 0
+        || last.endedSeq === null || last.endedAt === null || t.seenSeq >= last.endedSeq) return;
+    // A completion whose critic verdict the old devd was still waiting for (notify_log: deferred for critic-review,
+    // never sent, silenced or blocked since): send it now. The restarted gate has no turn for it, so it is not
+    // reviewed (fail-open); the PR hold applies as for any completion.
+    if (this.d.hub.heldFor(sessionId, last.endedAt, "critic-review")) {
+      this.d.hub.handle(s, "stop", { promptId: last.runId, backgroundTasks: 0 });
+      return;
+    }
     // A "finished" the hub held for CI died with the old devd (its quiet window is in memory). Unseen, still held by
     // notify_log's record (deferred for pr-checks, never sent or silenced since) and its PR still pending or changed
     // since the run ended: send the completion again, marked as held, so the sweep holds, releases or silences it.
-    if (!active && last?.status === "completed" && holdingCount(t) === 0 && this.d.prRow
-        && last.endedSeq !== null && last.endedAt !== null && t.seenSeq < last.endedSeq
-        && this.d.hub.heldForPr(sessionId, last.endedAt)) {
+    if (this.d.prRow && this.d.hub.heldFor(sessionId, last.endedAt, "pr-checks")) {
       const row = this.d.prRow(sessionId);
       if (row && (row.checks === "pending" || row.since >= last.endedAt)) {
         this.d.hub.handle(s, "stop", { promptId: last.runId, backgroundTasks: 0 });
@@ -171,6 +178,7 @@ export class ChatHub {
       if (decision.block) {
         try {
           await c.followUp(sessionId, decision.reason);
+          this.d.hub.criticBlocked(s, runId);
           return; // the follow-up run carries the turn on; its run.started ends the review
         } catch (err) {
           this.log(`chat hub: critic follow-up for ${sessionId} not sent, run ${runId} finishes: ${(err as Error).message}`);
@@ -283,7 +291,10 @@ export class ChatHub {
         if (!review && !this.d.prCheck) { this.complete(s, st, ev.runId, snapshot); return; }
         // The hub gets no `stop` until the critic and the PR read are through: no early done, no early autoEnd.
         st.completing = ev.runId;
-        if (review) st.reviewingSince = this.now();
+        if (review) {
+          st.reviewingSince = this.now();
+          hub.holdForCritic(s, ev.runId);
+        }
         this.finish(sessionId, s, st, ev.runId, review, snapshot)
           .catch((err: Error) => this.log(`chat hub: completion of ${sessionId} run ${ev.runId} failed: ${err.message}`));
         return;
@@ -297,6 +308,9 @@ export class ChatHub {
           st.subagents.delete(id);
           hub.handle(s, "subagent_stop");
         }
+        // The critic reviews only a completion with nothing holding: a held run released here (its work ended
+        // without a new run) goes out unreviewed. By design (fail-open): the run that ends holding work, e.g. a
+        // wakeup's agent run, is the one reviewed.
         if (st.heldRun !== null && holdingCount(t) === 0) {
           const runId = st.heldRun;
           st.heldRun = null;

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 let n = 0;
@@ -277,4 +277,14 @@ test("resume-failed for a run id never announced adds no item: devd's own notice
   expect(s.apply(ev({ type: "run.failed", runId: "never-started", error: "resume-failed" }))).toBe(true);
   expect(s.snapshot().items).toEqual([]);
   expect(s.lastSeq()).toBe(1);
+});
+
+test("a queued critic run keeps its origin", () => {
+  const dir = mkdtempSync(join(tmpdir(), "threadstore-critic-"));
+  const store = ThreadStore.open(dir, "dev-a-b-1");
+  try {
+    store.apply({ seq: 1, ts: 1, event: { type: "run.queued", runId: "r1", text: "fix it", attachments: [], origin: "critic" } });
+    expect(store.snapshot().runs[0]).toMatchObject({ runId: "r1", origin: "critic", status: "queued" });
+    expect(store.userText("r1")).toBe("fix it");
+  } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });

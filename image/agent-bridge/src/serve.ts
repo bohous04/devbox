@@ -442,7 +442,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
    *  (devd's deliverInline format); the user's own text stays what the thread shows. It is cleared on disk before
    *  an injection, so a crash never injects it twice; `putBack` is what to restore if the turn does not start
    *  (null once injected). */
-  async function consumeHandoff(h: HarnessSession, text: string): Promise<{ harnessText: string; putBack: HandoffDelivery | null }> {
+  async function consumeHandoff(h: HarnessSession, text: string, origin: TurnOrigin): Promise<{ harnessText: string; putBack: HandoffDelivery | null }> {
     const handoff = state.pendingHandoff;
     if (handoff === null) return { harnessText: text, putBack: null };
     state.pendingHandoff = null;
@@ -457,21 +457,24 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       }
       return { harnessText: text, putBack: null };
     }
-    return { harnessText: handoff.preamble === null ? text : `${handoff.preamble}\n\nUser message:\n${text}`, putBack: handoff };
+    const label = origin === "critic" ? "Critic review" : "User message";
+    return { harnessText: handoff.preamble === null ? text : `${handoff.preamble}\n\n${label}:\n${text}`, putBack: handoff };
   }
 
   async function startTurn(text: string, origin: TurnOrigin): Promise<{ runId: string }> {
+    // The critic reviews the run that just ended; behind another run its follow-up would review stale work.
+    if (origin === "critic" && (state.activeRunId !== null || state.queue.length > 0)) throw new Error("run-active");
     const runId = crypto.randomUUID();
     const queuedOrigin = origin === "critic" ? { origin } : {};
     if (recoveryPending) {
       // No usable harness yet: the message waits in the queue and starts with the recovered ones.
       state.queue.push({ runId, text, attachments: [], ...queuedOrigin });
       persist();
-      announceQueued(runId, text);
+      announceQueued(runId, text, origin);
       return { runId };
     }
     const session = harness!.session;
-    const { harnessText, putBack } = await consumeHandoff(session, text);
+    const { harnessText, putBack } = await consumeHandoff(session, text, origin);
     // Persisted before the harness sees it: a crash from here on still runs the message after the restart.
     // `run.started` removes it again.
     state.queue.push({ runId, text, attachments: [], ...(harnessText !== text ? { harnessText } : {}), ...queuedOrigin });
@@ -485,13 +488,13 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       throw e;
     }
     // The harness holds the turn (a run is active, or Codex has no thread yet).
-    if (state.queue.some((q) => q.runId === runId)) announceQueued(runId, text);
+    if (state.queue.some((q) => q.runId === runId)) announceQueued(runId, text, origin);
     return { runId };
   }
 
-  function announceQueued(runId: string, text: string): void {
+  function announceQueued(runId: string, text: string, origin: TurnOrigin): void {
     announced.add(runId);
-    server.publish({ type: "run.queued", runId, text, attachments: [] });
+    server.publish({ type: "run.queued", runId, text, attachments: [], ...(origin === "critic" ? { origin } : {}) });
   }
 
   function refuseWhileRunning(what: string): void {
@@ -716,7 +719,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       let sent = q.harnessText;
       if (sent === undefined) {
         // Queued while no harness was open: a pending handoff goes with the first of them.
-        sent = (await consumeHandoff(session, q.text)).harnessText;
+        sent = (await consumeHandoff(session, q.text, q.origin ?? "user")).harnessText;
         const entry = state.queue.find((x) => x.runId === q.runId);
         if (entry && sent !== q.text) {
           entry.harnessText = sent;
@@ -725,7 +728,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       }
       await session.startTurn(q.runId, sent, q.origin ?? "user");
       // A crash between persist() and the run.queued publish left the message unannounced.
-      if (!announced.has(q.runId) && state.queue.some((x) => x.runId === q.runId)) announceQueued(q.runId, q.text);
+      if (!announced.has(q.runId) && state.queue.some((x) => x.runId === q.runId)) announceQueued(q.runId, q.text, q.origin ?? "user");
     }
   }
 

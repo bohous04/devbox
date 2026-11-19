@@ -268,6 +268,25 @@ describe("serve", () => {
     expect(g.turns).toEqual([{ runId: r.runId, text: "fix it", origin: "critic" }]);
   });
 
+  test("a critic startTurn is refused while a run is active or queued", async () => {
+    const f = fakeHarness();
+    await start(f);
+    await cmd({ kind: "startTurn", text: "one" });
+    await expect(cmd({ kind: "startTurn", text: "fix it", origin: "critic" })).rejects.toThrow("run-active");
+    await cmd({ kind: "startTurn", text: "two" });
+    f.complete();
+    await expect(cmd({ kind: "startTurn", text: "fix it", origin: "critic" })).rejects.toThrow("run-active");
+    expect(f.turns.map((t) => t.origin)).toEqual(["user", "user"]);
+    expect(state().queue).toEqual([]);
+  });
+
+  test("a critic turn the harness holds is announced as queued with its origin", async () => {
+    const f = fakeHarness({ deferStart: true });
+    await start(f);
+    const r = (await cmd({ kind: "startTurn", text: "fix it", origin: "critic" })) as { runId: string };
+    expect(events()).toContainEqual({ type: "run.queued", runId: r.runId, text: "fix it", attachments: [], origin: "critic" });
+  });
+
   test("startTurn with attachments is refused explicitly", async () => {
     const f = fakeHarness();
     await start(f);
@@ -568,6 +587,15 @@ describe("switching", () => {
     expect(f.turns.map((t) => t.text)).toEqual(["[user] earlier\n\nUser message:\nhi", "again"]);
     // The thread shows what the user wrote, not the handoff.
     expect(events()).toContainEqual({ type: "message.final", runId: first.runId, itemId: `user:${first.runId}`, role: "user", text: "hi" });
+    expect(state().pendingHandoff).toBeNull();
+  });
+
+  test("a critic follow-up takes the handoff, labelled as the critic's review", async () => {
+    const f = fakeHarness();
+    await start(f);
+    await switchCmd({ harness: "claude", account: "b", model: null, env: { CLAUDE_CONFIG_DIR: claudeProfile("b") } }, null, { preamble: "[user] earlier" });
+    await cmd({ kind: "startTurn", text: "fix the migration", origin: "critic" });
+    expect(f.turns.map((t) => t.text)).toEqual(["[user] earlier\n\nCritic review:\nfix the migration"]);
     expect(state().pendingHandoff).toBeNull();
   });
 
