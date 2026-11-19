@@ -117,6 +117,9 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - path: DevboxAppTests
+      # The thread view cases the dashboard's threadView.test.ts runs too (ThreadStoreTests).
+      - path: ../shared/fixtures/thread-events.json
+        buildPhase: resources
     dependencies:
       - target: DevboxApp
     settings:

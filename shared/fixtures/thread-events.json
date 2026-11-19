@@ -1,0 +1,2515 @@
+{
+  "//": "Thread view cases shared by dashboard/src/threadView.test.ts and ios/DevboxAppTests/ThreadStoreTests.swift. Each case starts from an empty thread and applies its steps in order: `event` (applyThreadEvent), `snapshot` (mergeSnapshot) or `notice` (applyNotice); `expect` is the resulting thread, `derived` the active, queued and critic runs.",
+  "cases": [
+    {
+      "name": "deltas then final: one assistant item, streaming until the final text replaces it",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "run.queued",
+              "runId": "r1",
+              "text": "hi",
+              "attachments": []
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "user",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 3,
+            "ts": 1002,
+            "event": {
+              "type": "message.delta",
+              "runId": "r1",
+              "itemId": "m1",
+              "text": "Hel"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 4,
+            "ts": 1003,
+            "event": {
+              "type": "message.delta",
+              "runId": "r1",
+              "itemId": "m1",
+              "text": "lo"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 5,
+            "ts": 1004,
+            "event": {
+              "type": "message.final",
+              "runId": "r1",
+              "itemId": "m1",
+              "role": "assistant",
+              "text": "Hello!"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 5,
+        "seenSeq": 0,
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "running",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": 1000,
+            "startedAt": 1001,
+            "harness": null,
+            "endedAt": null,
+            "endedSeq": null,
+            "usage": null,
+            "error": null
+          }
+        ],
+        "items": [
+          {
+            "seq": 1,
+            "runId": "r1",
+            "itemId": "user:r1",
+            "kind": "user",
+            "text": "hi",
+            "ts": 1000,
+            "status": "done"
+          },
+          {
+            "seq": 3,
+            "runId": "r1",
+            "itemId": "m1",
+            "kind": "assistant",
+            "text": "Hello!",
+            "ts": 1002,
+            "status": "done"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      }
+    },
+    {
+      "name": "deltas only: the assistant item keeps streaming",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "run.queued",
+              "runId": "r1",
+              "text": "hi",
+              "attachments": []
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "user",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 3,
+            "ts": 1002,
+            "event": {
+              "type": "message.delta",
+              "runId": "r1",
+              "itemId": "m1",
+              "text": "Hel"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 4,
+            "ts": 1003,
+            "event": {
+              "type": "message.delta",
+              "runId": "r1",
+              "itemId": "m1",
+              "text": "lo"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 4,
+        "seenSeq": 0,
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "running",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": 1000,
+            "startedAt": 1001,
+            "harness": null,
+            "endedAt": null,
+            "endedSeq": null,
+            "usage": null,
+            "error": null
+          }
+        ],
+        "items": [
+          {
+            "seq": 1,
+            "runId": "r1",
+            "itemId": "user:r1",
+            "kind": "user",
+            "text": "hi",
+            "ts": 1000,
+            "status": "done"
+          },
+          {
+            "seq": 3,
+            "runId": "r1",
+            "itemId": "m1",
+            "kind": "assistant",
+            "text": "Hello",
+            "ts": 1002,
+            "status": "streaming"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      }
+    },
+    {
+      "name": "duplicate seq ignored: the same event again changes nothing",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "agent",
+              "nativeThreadId": "n",
+              "model": "m"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "message.delta",
+              "runId": "r1",
+              "itemId": "m1",
+              "text": "a"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 5,
+            "event": {
+              "type": "message.delta",
+              "runId": "r1",
+              "itemId": "m1",
+              "text": "a"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 1,
+            "ts": 5,
+            "event": {
+              "type": "run.interrupted",
+              "runId": "r1"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 2,
+        "seenSeq": 0,
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "agent",
+            "status": "running",
+            "nativeThreadId": "n",
+            "model": "m",
+            "queuedAt": null,
+            "startedAt": 1000,
+            "harness": null,
+            "endedAt": null,
+            "endedSeq": null,
+            "usage": null,
+            "error": null
+          }
+        ],
+        "items": [
+          {
+            "seq": 2,
+            "runId": "r1",
+            "itemId": "m1",
+            "kind": "assistant",
+            "text": "a",
+            "ts": 1001,
+            "status": "streaming"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      }
+    },
+    {
+      "name": "request opened stays pending; a re-announcement is a no-op",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "user",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "request.opened",
+              "runId": "r1",
+              "requestId": "q1",
+              "kind": "question",
+              "prompt": "Which?",
+              "options": [
+                {
+                  "label": "A"
+                },
+                {
+                  "label": "B",
+                  "description": "the second"
+                }
+              ],
+              "multiSelect": true
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 3,
+            "ts": 1002,
+            "event": {
+              "type": "request.opened",
+              "runId": "r1",
+              "requestId": "q1",
+              "kind": "question",
+              "prompt": "Which?"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 3,
+        "seenSeq": 0,
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "running",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": null,
+            "startedAt": 1000,
+            "harness": null,
+            "endedAt": null,
+            "endedSeq": null,
+            "usage": null,
+            "error": null
+          }
+        ],
+        "items": [
+          {
+            "seq": 2,
+            "runId": "r1",
+            "itemId": "q1",
+            "kind": "request",
+            "text": "Which?",
+            "ts": 1001,
+            "status": "open"
+          }
+        ],
+        "pending": [
+          {
+            "requestId": "q1",
+            "runId": "r1",
+            "kind": "question",
+            "prompt": "Which?",
+            "openedAt": 1001,
+            "options": [
+              {
+                "label": "A"
+              },
+              {
+                "label": "B",
+                "description": "the second"
+              }
+            ],
+            "multiSelect": true
+          }
+        ],
+        "background": [],
+        "native": null
+      }
+    },
+    {
+      "name": "request resolved updates the item and drops the pending request; expired has no output",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "user",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "request.opened",
+              "runId": "r1",
+              "requestId": "q1",
+              "kind": "question",
+              "prompt": "Which?",
+              "options": [
+                {
+                  "label": "A"
+                },
+                {
+                  "label": "B"
+                }
+              ],
+              "multiSelect": true
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 3,
+            "ts": 1002,
+            "event": {
+              "type": "request.resolved",
+              "requestId": "q1",
+              "answer": "A, B",
+              "by": "user"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 4,
+            "ts": 1003,
+            "event": {
+              "type": "request.opened",
+              "runId": "r1",
+              "requestId": "q2",
+              "kind": "plan",
+              "prompt": "Plan",
+              "options": [
+                {
+                  "label": "Approve"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 5,
+            "ts": 1004,
+            "event": {
+              "type": "request.resolved",
+              "requestId": "q2",
+              "answer": null,
+              "by": "expired"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 5,
+        "seenSeq": 0,
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "running",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": null,
+            "startedAt": 1000,
+            "harness": null,
+            "endedAt": null,
+            "endedSeq": null,
+            "usage": null,
+            "error": null
+          }
+        ],
+        "items": [
+          {
+            "seq": 2,
+            "runId": "r1",
+            "itemId": "q1",
+            "kind": "request",
+            "text": "Which?",
+            "ts": 1001,
+            "status": "answered",
+            "output": "A, B"
+          },
+          {
+            "seq": 4,
+            "runId": "r1",
+            "itemId": "q2",
+            "kind": "request",
+            "text": "Plan",
+            "ts": 1003,
+            "status": "expired"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      }
+    },
+    {
+      "name": "tools: re-announced start is a no-op, finish fills output, a finish without start is an unknown tool",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "user",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "tool.started",
+              "runId": "r1",
+              "itemId": "t1",
+              "tool": "Bash",
+              "input": {
+                "command": "ls",
+                "nested": {
+                  "n": 1,
+                  "list": [
+                    true,
+                    null,
+                    "x"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 3,
+            "ts": 1002,
+            "event": {
+              "type": "tool.started",
+              "runId": "r1",
+              "itemId": "t1",
+              "tool": "Bash",
+              "input": {
+                "command": "other"
+              }
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 4,
+            "ts": 1003,
+            "event": {
+              "type": "tool.finished",
+              "runId": "r1",
+              "itemId": "t1",
+              "isError": false,
+              "output": "a\nb"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 5,
+            "ts": 1004,
+            "event": {
+              "type": "tool.finished",
+              "runId": "r1",
+              "itemId": "t2",
+              "isError": true,
+              "output": "boom"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 5,
+        "seenSeq": 0,
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "running",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": null,
+            "startedAt": 1000,
+            "harness": null,
+            "endedAt": null,
+            "endedSeq": null,
+            "usage": null,
+            "error": null
+          }
+        ],
+        "items": [
+          {
+            "seq": 2,
+            "runId": "r1",
+            "itemId": "t1",
+            "kind": "tool",
+            "text": "",
+            "ts": 1001,
+            "tool": "Bash",
+            "input": {
+              "command": "ls",
+              "nested": {
+                "n": 1,
+                "list": [
+                  true,
+                  null,
+                  "x"
+                ]
+              }
+            },
+            "status": "done",
+            "output": "a\nb",
+            "isError": false
+          },
+          {
+            "seq": 5,
+            "runId": "r1",
+            "itemId": "t2",
+            "kind": "tool",
+            "text": "",
+            "ts": 1004,
+            "tool": "(unknown)",
+            "output": "boom",
+            "isError": true,
+            "status": "done"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      }
+    },
+    {
+      "name": "terminal events close streaming items; usage only from run.completed",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "thread.native",
+              "harness": "claude",
+              "nativeThreadId": "n1",
+              "account": null,
+              "model": "m"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "user",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 3,
+            "ts": 1002,
+            "event": {
+              "type": "message.delta",
+              "runId": "r1",
+              "itemId": "m1",
+              "text": "x"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 4,
+            "ts": 1003,
+            "event": {
+              "type": "tool.started",
+              "runId": "r1",
+              "itemId": "t1",
+              "tool": "Bash",
+              "input": {}
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 5,
+            "ts": 1004,
+            "event": {
+              "type": "run.completed",
+              "runId": "r1",
+              "nativeThreadId": "n2",
+              "usage": {
+                "input": 1,
+                "output": 2,
+                "cacheCreation": 0,
+                "cacheRead": 0
+              },
+              "costUsd": null
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 5,
+        "seenSeq": 0,
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "completed",
+            "nativeThreadId": "n2",
+            "model": null,
+            "queuedAt": null,
+            "startedAt": 1001,
+            "harness": "claude",
+            "endedAt": 1004,
+            "endedSeq": 5,
+            "usage": {
+              "input": 1,
+              "output": 2,
+              "cacheCreation": 0,
+              "cacheRead": 0
+            },
+            "error": null
+          }
+        ],
+        "items": [
+          {
+            "seq": 3,
+            "runId": "r1",
+            "itemId": "m1",
+            "kind": "assistant",
+            "text": "x",
+            "ts": 1002,
+            "status": "done"
+          },
+          {
+            "seq": 4,
+            "runId": "r1",
+            "itemId": "t1",
+            "kind": "tool",
+            "text": "",
+            "ts": 1003,
+            "tool": "Bash",
+            "input": {},
+            "status": "done"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": {
+          "harness": "claude",
+          "nativeThreadId": "n1",
+          "account": null,
+          "model": "m"
+        }
+      }
+    },
+    {
+      "name": "run.failed keeps the usage, adds a notice and keeps a known failure reason",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "thread.native",
+              "harness": "claude",
+              "nativeThreadId": "n1",
+              "account": null,
+              "model": "m"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "user",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 3,
+            "ts": 1002,
+            "event": {
+              "type": "run.completed",
+              "runId": "r1",
+              "nativeThreadId": "n2",
+              "usage": {
+                "input": 1,
+                "output": 2,
+                "cacheCreation": 0,
+                "cacheRead": 0
+              },
+              "costUsd": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 4,
+            "ts": 1003,
+            "event": {
+              "type": "run.failed",
+              "runId": "r1",
+              "error": "rate-limited: x",
+              "reason": "rate-limited"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 4,
+        "seenSeq": 0,
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "failed",
+            "nativeThreadId": "n2",
+            "model": null,
+            "queuedAt": null,
+            "startedAt": 1001,
+            "harness": "claude",
+            "endedAt": 1003,
+            "endedSeq": 4,
+            "usage": {
+              "input": 1,
+              "output": 2,
+              "cacheCreation": 0,
+              "cacheRead": 0
+            },
+            "error": "rate-limited: x",
+            "failureReason": "rate-limited"
+          }
+        ],
+        "items": [
+          {
+            "seq": 4,
+            "runId": "r1",
+            "itemId": null,
+            "kind": "notice",
+            "text": "rate-limited: x",
+            "ts": 1003,
+            "status": "done"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": {
+          "harness": "claude",
+          "nativeThreadId": "n1",
+          "account": null,
+          "model": "m"
+        }
+      }
+    },
+    {
+      "name": "a later run.failed without a reason drops the old reason, an unknown reason is dropped, an unknown run is a notice",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "user",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "run.failed",
+              "runId": "r1",
+              "error": "rate-limited: x",
+              "reason": "rate-limited"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 3,
+            "ts": 1002,
+            "event": {
+              "type": "run.failed",
+              "runId": "r1",
+              "error": "later"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 4,
+            "ts": 1003,
+            "event": {
+              "type": "run.failed",
+              "runId": "r1",
+              "error": "x",
+              "reason": "quota-exceeded"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 5,
+            "ts": 1004,
+            "event": {
+              "type": "run.interrupted",
+              "runId": "nope"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 5,
+        "seenSeq": 0,
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "failed",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": null,
+            "startedAt": 1000,
+            "harness": null,
+            "endedAt": 1003,
+            "endedSeq": 4,
+            "usage": null,
+            "error": "x"
+          }
+        ],
+        "items": [
+          {
+            "seq": 2,
+            "runId": "r1",
+            "itemId": null,
+            "kind": "notice",
+            "text": "rate-limited: x",
+            "ts": 1001,
+            "status": "done"
+          },
+          {
+            "seq": 3,
+            "runId": "r1",
+            "itemId": null,
+            "kind": "notice",
+            "text": "later",
+            "ts": 1002,
+            "status": "done"
+          },
+          {
+            "seq": 4,
+            "runId": "r1",
+            "itemId": null,
+            "kind": "notice",
+            "text": "x",
+            "ts": 1003,
+            "status": "done"
+          },
+          {
+            "seq": 5,
+            "runId": "nope",
+            "itemId": null,
+            "kind": "notice",
+            "text": "interrupted event for unknown run nope",
+            "ts": 1004,
+            "status": "done"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      }
+    },
+    {
+      "name": "message.final from the user does not duplicate the queued text",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "run.queued",
+              "runId": "r1",
+              "text": "hi",
+              "attachments": []
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "message.final",
+              "runId": "r1",
+              "itemId": "u1",
+              "role": "user",
+              "text": "hi"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 3,
+            "ts": 1002,
+            "event": {
+              "type": "message.final",
+              "runId": "r2",
+              "itemId": "u2",
+              "role": "user",
+              "text": "agent-started"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 3,
+        "seenSeq": 0,
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "queued",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": 1000,
+            "startedAt": null,
+            "harness": null,
+            "endedAt": null,
+            "endedSeq": null,
+            "usage": null,
+            "error": null
+          }
+        ],
+        "items": [
+          {
+            "seq": 1,
+            "runId": "r1",
+            "itemId": "user:r1",
+            "kind": "user",
+            "text": "hi",
+            "ts": 1000,
+            "status": "done"
+          },
+          {
+            "seq": 3,
+            "runId": "r2",
+            "itemId": "u2",
+            "kind": "user",
+            "text": "agent-started",
+            "ts": 1002,
+            "status": "done"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      }
+    },
+    {
+      "name": "unknown event type becomes a visible notice; bridge restart only when resumed",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "bridge.started",
+              "version": "1",
+              "resumed": false
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "bridge.started",
+              "version": "2",
+              "resumed": true
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 3,
+            "ts": 1002,
+            "event": {
+              "type": "something.new"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 3,
+        "seenSeq": 0,
+        "runs": [],
+        "items": [
+          {
+            "seq": 2,
+            "runId": null,
+            "itemId": null,
+            "kind": "notice",
+            "text": "Agent bridge restarted (v2)",
+            "ts": 1001,
+            "status": "done"
+          },
+          {
+            "seq": 3,
+            "runId": null,
+            "itemId": null,
+            "kind": "notice",
+            "text": "unknown event something.new",
+            "ts": 1002,
+            "status": "done"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      }
+    },
+    {
+      "name": "background.changed replaces the list; active and queued runs",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "background.changed",
+              "work": [
+                {
+                  "id": "w",
+                  "kind": "monitor",
+                  "label": "watch",
+                  "holding": true
+                },
+                {
+                  "id": "w2",
+                  "kind": "wakeup",
+                  "label": "later",
+                  "holding": false,
+                  "until": 5000
+                }
+              ]
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "user",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 3,
+            "ts": 1002,
+            "event": {
+              "type": "run.queued",
+              "runId": "r2",
+              "text": "next",
+              "attachments": []
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 3,
+        "seenSeq": 0,
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "running",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": null,
+            "startedAt": 1001,
+            "harness": null,
+            "endedAt": null,
+            "endedSeq": null,
+            "usage": null,
+            "error": null
+          },
+          {
+            "runId": "r2",
+            "origin": "user",
+            "status": "queued",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": 1002,
+            "startedAt": null,
+            "harness": null,
+            "endedAt": null,
+            "endedSeq": null,
+            "usage": null,
+            "error": null
+          }
+        ],
+        "items": [
+          {
+            "seq": 3,
+            "runId": "r2",
+            "itemId": "user:r2",
+            "kind": "user",
+            "text": "next",
+            "ts": 1002,
+            "status": "done"
+          }
+        ],
+        "pending": [],
+        "background": [
+          {
+            "id": "w",
+            "kind": "monitor",
+            "label": "watch",
+            "holding": true
+          },
+          {
+            "id": "w2",
+            "kind": "wakeup",
+            "label": "later",
+            "holding": false,
+            "until": 5000
+          }
+        ],
+        "native": null
+      },
+      "derived": {
+        "activeRun": "r1",
+        "queued": [
+          "r2"
+        ],
+        "critic": []
+      }
+    },
+    {
+      "name": "mergeSnapshot: changed rows replace the client's copies, new ones append, the rest is wholesale",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "user",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "message.delta",
+              "runId": "r1",
+              "itemId": "m1",
+              "text": "par"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 3,
+            "ts": 1002,
+            "event": {
+              "type": "request.opened",
+              "runId": "r1",
+              "requestId": "q1",
+              "kind": "question",
+              "prompt": "?"
+            }
+          }
+        },
+        {
+          "snapshot": {
+            "afterSeq": 3,
+            "snapshot": {
+              "lastSeq": 6,
+              "seenSeq": 2,
+              "runs": [
+                {
+                  "runId": "r1",
+                  "origin": "user",
+                  "status": "completed",
+                  "nativeThreadId": null,
+                  "model": null,
+                  "queuedAt": null,
+                  "startedAt": 1000,
+                  "harness": null,
+                  "endedAt": 9,
+                  "endedSeq": 6,
+                  "usage": null,
+                  "error": null
+                }
+              ],
+              "items": [
+                {
+                  "seq": 2,
+                  "runId": "r1",
+                  "itemId": "m1",
+                  "kind": "assistant",
+                  "text": "partial",
+                  "status": "done",
+                  "ts": 1001
+                },
+                {
+                  "seq": 6,
+                  "runId": "r1",
+                  "itemId": null,
+                  "kind": "notice",
+                  "text": "n",
+                  "status": "done",
+                  "ts": 9
+                }
+              ],
+              "pending": [],
+              "background": [],
+              "native": {
+                "harness": "codex",
+                "nativeThreadId": "x",
+                "account": "a",
+                "model": null
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 6,
+        "seenSeq": 2,
+        "items": [
+          {
+            "seq": 2,
+            "runId": "r1",
+            "itemId": "m1",
+            "kind": "assistant",
+            "text": "partial",
+            "status": "done",
+            "ts": 1001
+          },
+          {
+            "seq": 3,
+            "runId": "r1",
+            "itemId": "q1",
+            "kind": "request",
+            "text": "?",
+            "ts": 1002,
+            "status": "open"
+          },
+          {
+            "seq": 6,
+            "runId": "r1",
+            "itemId": null,
+            "kind": "notice",
+            "text": "n",
+            "status": "done",
+            "ts": 9
+          }
+        ],
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "completed",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": null,
+            "startedAt": 1000,
+            "harness": null,
+            "endedAt": 9,
+            "endedSeq": 6,
+            "usage": null,
+            "error": null
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": {
+          "harness": "codex",
+          "nativeThreadId": "x",
+          "account": "a",
+          "model": null
+        }
+      }
+    },
+    {
+      "name": "mergeSnapshot: a notice already applied from a live frame is not added twice",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "user",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "run.failed",
+              "runId": "r1",
+              "error": "boom"
+            }
+          }
+        },
+        {
+          "snapshot": {
+            "afterSeq": 1,
+            "snapshot": {
+              "lastSeq": 2,
+              "seenSeq": 0,
+              "runs": [
+                {
+                  "runId": "r1",
+                  "origin": "user",
+                  "status": "failed",
+                  "nativeThreadId": null,
+                  "model": null,
+                  "queuedAt": null,
+                  "startedAt": 1000,
+                  "harness": null,
+                  "endedAt": 1001,
+                  "endedSeq": 2,
+                  "usage": null,
+                  "error": "boom"
+                }
+              ],
+              "items": [
+                {
+                  "seq": 2,
+                  "runId": "r1",
+                  "itemId": null,
+                  "kind": "notice",
+                  "text": "boom",
+                  "ts": 1001,
+                  "status": "done"
+                }
+              ],
+              "pending": [],
+              "background": [],
+              "native": null
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 2,
+        "seenSeq": 0,
+        "items": [
+          {
+            "seq": 2,
+            "runId": "r1",
+            "itemId": null,
+            "kind": "notice",
+            "text": "boom",
+            "ts": 1001,
+            "status": "done"
+          }
+        ],
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "failed",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": null,
+            "startedAt": 1000,
+            "harness": null,
+            "endedAt": 1001,
+            "endedSeq": 2,
+            "usage": null,
+            "error": "boom"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      }
+    },
+    {
+      "name": "mergeSnapshot: lastSeq never goes back",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "user",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "run.failed",
+              "runId": "r1",
+              "error": "boom"
+            }
+          }
+        },
+        {
+          "snapshot": {
+            "afterSeq": 0,
+            "snapshot": {
+              "lastSeq": 1,
+              "seenSeq": 0,
+              "runs": [],
+              "items": [],
+              "pending": [],
+              "background": [],
+              "native": null
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 2,
+        "seenSeq": 0,
+        "items": [
+          {
+            "seq": 2,
+            "runId": "r1",
+            "itemId": null,
+            "kind": "notice",
+            "text": "boom",
+            "ts": 1001,
+            "status": "done"
+          }
+        ],
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "failed",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": null,
+            "startedAt": 1000,
+            "harness": null,
+            "endedAt": 1001,
+            "endedSeq": 2,
+            "usage": null,
+            "error": "boom"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      }
+    },
+    {
+      "name": "the user item keeps its attachments, from run.queued or from the start echo",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "run.queued",
+              "runId": "r1",
+              "text": "look",
+              "attachments": [
+                "/inbox/s/a.png"
+              ]
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "run.started",
+              "runId": "r2",
+              "origin": "user",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 3,
+            "ts": 1002,
+            "event": {
+              "type": "message.final",
+              "runId": "r2",
+              "itemId": "user:r2",
+              "role": "user",
+              "text": "and this",
+              "attachments": [
+                "/inbox/s/b.gif"
+              ]
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 4,
+            "ts": 1003,
+            "event": {
+              "type": "run.queued",
+              "runId": "r3",
+              "text": "plain",
+              "attachments": []
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 4,
+        "seenSeq": 0,
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "queued",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": 1000,
+            "startedAt": null,
+            "harness": null,
+            "endedAt": null,
+            "endedSeq": null,
+            "usage": null,
+            "error": null
+          },
+          {
+            "runId": "r2",
+            "origin": "user",
+            "status": "running",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": null,
+            "startedAt": 1001,
+            "harness": null,
+            "endedAt": null,
+            "endedSeq": null,
+            "usage": null,
+            "error": null
+          },
+          {
+            "runId": "r3",
+            "origin": "user",
+            "status": "queued",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": 1003,
+            "startedAt": null,
+            "harness": null,
+            "endedAt": null,
+            "endedSeq": null,
+            "usage": null,
+            "error": null
+          }
+        ],
+        "items": [
+          {
+            "seq": 1,
+            "runId": "r1",
+            "itemId": "user:r1",
+            "kind": "user",
+            "text": "look",
+            "ts": 1000,
+            "status": "done",
+            "attachments": [
+              "/inbox/s/a.png"
+            ]
+          },
+          {
+            "seq": 3,
+            "runId": "r2",
+            "itemId": "user:r2",
+            "kind": "user",
+            "text": "and this",
+            "ts": 1002,
+            "status": "done",
+            "attachments": [
+              "/inbox/s/b.gif"
+            ]
+          },
+          {
+            "seq": 4,
+            "runId": "r3",
+            "itemId": "user:r3",
+            "kind": "user",
+            "text": "plain",
+            "ts": 1003,
+            "status": "done"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      }
+    },
+    {
+      "name": "a run that starts at once has its user item",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "user",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "message.final",
+              "runId": "r1",
+              "itemId": "user:r1",
+              "role": "user",
+              "text": "hello"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 3,
+            "ts": 1002,
+            "event": {
+              "type": "message.final",
+              "runId": "r1",
+              "itemId": "m1",
+              "role": "assistant",
+              "text": "hi"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 4,
+            "ts": 1003,
+            "event": {
+              "type": "run.completed",
+              "runId": "r1",
+              "nativeThreadId": "nt",
+              "usage": null,
+              "costUsd": null
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 4,
+        "seenSeq": 0,
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "completed",
+            "nativeThreadId": "nt",
+            "model": null,
+            "queuedAt": null,
+            "startedAt": 1000,
+            "harness": null,
+            "endedAt": 1003,
+            "endedSeq": 4,
+            "usage": null,
+            "error": null
+          }
+        ],
+        "items": [
+          {
+            "seq": 2,
+            "runId": "r1",
+            "itemId": "user:r1",
+            "kind": "user",
+            "text": "hello",
+            "ts": 1001,
+            "status": "done"
+          },
+          {
+            "seq": 3,
+            "runId": "r1",
+            "itemId": "m1",
+            "kind": "assistant",
+            "text": "hi",
+            "ts": 1002,
+            "status": "done"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      }
+    },
+    {
+      "name": "deltas after a run's terminal event are ignored: the item stays done",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "user",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "message.delta",
+              "runId": "r1",
+              "itemId": "m1",
+              "text": "Hel"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 3,
+            "ts": 1002,
+            "event": {
+              "type": "run.interrupted",
+              "runId": "r1"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 4,
+            "ts": 1003,
+            "event": {
+              "type": "message.delta",
+              "runId": "r1",
+              "itemId": "m1",
+              "text": "lo"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 5,
+            "ts": 1004,
+            "event": {
+              "type": "message.delta",
+              "runId": "r1",
+              "itemId": "m2",
+              "text": "late"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 5,
+        "seenSeq": 0,
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "interrupted",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": null,
+            "startedAt": 1000,
+            "harness": null,
+            "endedAt": 1002,
+            "endedSeq": 3,
+            "usage": null,
+            "error": null
+          }
+        ],
+        "items": [
+          {
+            "seq": 2,
+            "runId": "r1",
+            "itemId": "m1",
+            "kind": "assistant",
+            "text": "Hel",
+            "ts": 1001,
+            "status": "done"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      }
+    },
+    {
+      "name": "a devd notice is added once, after what is there, and leaves lastSeq alone; a snapshot carrying it adds nothing",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "run.queued",
+              "runId": "r1",
+              "text": "hi",
+              "attachments": []
+            }
+          }
+        },
+        {
+          "notice": {
+            "seq": 1,
+            "runId": null,
+            "itemId": "notice:1",
+            "kind": "notice",
+            "text": "Switched to Codex",
+            "status": "done",
+            "ts": 9
+          }
+        },
+        {
+          "notice": {
+            "seq": 1,
+            "runId": null,
+            "itemId": "notice:1",
+            "kind": "notice",
+            "text": "Switched to Codex",
+            "status": "done",
+            "ts": 9
+          }
+        },
+        {
+          "snapshot": {
+            "afterSeq": 1,
+            "snapshot": {
+              "lastSeq": 1,
+              "seenSeq": 0,
+              "runs": [],
+              "items": [
+                {
+                  "seq": 1,
+                  "runId": null,
+                  "itemId": "notice:1",
+                  "kind": "notice",
+                  "text": "Switched to Codex",
+                  "status": "done",
+                  "ts": 9
+                }
+              ],
+              "pending": [],
+              "background": [],
+              "native": null
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 1,
+        "seenSeq": 0,
+        "items": [
+          {
+            "seq": 1,
+            "runId": "r1",
+            "itemId": "user:r1",
+            "kind": "user",
+            "text": "hi",
+            "ts": 1000,
+            "status": "done"
+          },
+          {
+            "seq": 1,
+            "runId": null,
+            "itemId": "notice:1",
+            "kind": "notice",
+            "text": "Switched to Codex",
+            "status": "done",
+            "ts": 9
+          }
+        ],
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "queued",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": 1000,
+            "startedAt": null,
+            "harness": null,
+            "endedAt": null,
+            "endedSeq": null,
+            "usage": null,
+            "error": null
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      }
+    },
+    {
+      "name": "resume-failed or open-failed for a run id never announced adds no item",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "run.failed",
+              "runId": "never-started",
+              "error": "resume-failed"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "run.failed",
+              "runId": "never-started-2",
+              "error": "open-failed"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 2,
+        "seenSeq": 0,
+        "runs": [],
+        "items": [],
+        "pending": [],
+        "background": [],
+        "native": null
+      }
+    },
+    {
+      "name": "a thread.native without a model keeps the harness's known model",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "thread.native",
+              "harness": "claude",
+              "nativeThreadId": "t1",
+              "account": "a",
+              "model": "claude-opus-5-5"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "thread.native",
+              "harness": "claude",
+              "nativeThreadId": "t1",
+              "account": "b",
+              "model": null,
+              "caps": {
+                "resume": true,
+                "injectItems": false,
+                "liveModelSwitch": true,
+                "questions": true,
+                "images": true,
+                "backgroundVisibility": true
+              }
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 2,
+        "seenSeq": 0,
+        "runs": [],
+        "items": [],
+        "pending": [],
+        "background": [],
+        "native": {
+          "harness": "claude",
+          "nativeThreadId": "t1",
+          "account": "b",
+          "model": "claude-opus-5-5"
+        }
+      }
+    },
+    {
+      "name": "a thread.native of another harness without a model has none",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "thread.native",
+              "harness": "claude",
+              "nativeThreadId": "t1",
+              "account": "a",
+              "model": "claude-opus-5-5"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "thread.native",
+              "harness": "codex",
+              "nativeThreadId": "x1",
+              "account": "c",
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 3,
+            "ts": 1002,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "user",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 3,
+        "seenSeq": 0,
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "running",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": null,
+            "startedAt": 1002,
+            "harness": "codex",
+            "endedAt": null,
+            "endedSeq": null,
+            "usage": null,
+            "error": null
+          }
+        ],
+        "items": [],
+        "pending": [],
+        "background": [],
+        "native": {
+          "harness": "codex",
+          "nativeThreadId": "x1",
+          "account": "c",
+          "model": null
+        }
+      }
+    },
+    {
+      "name": "critic runs: started by the critic, or queued with origin critic",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "run.queued",
+              "runId": "r1",
+              "text": "add the table",
+              "attachments": []
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "user",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 3,
+            "ts": 1002,
+            "event": {
+              "type": "run.completed",
+              "runId": "r1",
+              "nativeThreadId": "n",
+              "usage": null,
+              "costUsd": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 4,
+            "ts": 1003,
+            "event": {
+              "type": "run.started",
+              "runId": "r2",
+              "origin": "critic",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 5,
+            "ts": 1004,
+            "event": {
+              "type": "message.final",
+              "runId": "r2",
+              "itemId": "user:r2",
+              "role": "user",
+              "text": "fix the migration"
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 6,
+            "ts": 1005,
+            "event": {
+              "type": "run.queued",
+              "runId": "r3",
+              "text": "and again",
+              "attachments": [],
+              "origin": "critic"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 6,
+        "seenSeq": 0,
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "completed",
+            "nativeThreadId": "n",
+            "model": null,
+            "queuedAt": 1000,
+            "startedAt": 1001,
+            "harness": null,
+            "endedAt": 1002,
+            "endedSeq": 3,
+            "usage": null,
+            "error": null
+          },
+          {
+            "runId": "r2",
+            "origin": "critic",
+            "status": "running",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": null,
+            "startedAt": 1003,
+            "harness": null,
+            "endedAt": null,
+            "endedSeq": null,
+            "usage": null,
+            "error": null
+          },
+          {
+            "runId": "r3",
+            "origin": "critic",
+            "status": "queued",
+            "nativeThreadId": null,
+            "model": null,
+            "queuedAt": 1005,
+            "startedAt": null,
+            "harness": null,
+            "endedAt": null,
+            "endedSeq": null,
+            "usage": null,
+            "error": null
+          }
+        ],
+        "items": [
+          {
+            "seq": 1,
+            "runId": "r1",
+            "itemId": "user:r1",
+            "kind": "user",
+            "text": "add the table",
+            "ts": 1000,
+            "status": "done"
+          },
+          {
+            "seq": 5,
+            "runId": "r2",
+            "itemId": "user:r2",
+            "kind": "user",
+            "text": "fix the migration",
+            "ts": 1004,
+            "status": "done"
+          },
+          {
+            "seq": 6,
+            "runId": "r3",
+            "itemId": "user:r3",
+            "kind": "user",
+            "text": "and again",
+            "ts": 1005,
+            "status": "done"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      },
+      "derived": {
+        "activeRun": "r2",
+        "queued": [
+          "r3"
+        ],
+        "critic": [
+          "r2",
+          "r3"
+        ]
+      }
+    },
+    {
+      "name": "a start for a run that already ended is not a regression",
+      "steps": [
+        {
+          "event": {
+            "seq": 1,
+            "ts": 1000,
+            "event": {
+              "type": "run.queued",
+              "runId": "r1",
+              "text": "go",
+              "attachments": []
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 2,
+            "ts": 1001,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "user",
+              "nativeThreadId": null,
+              "model": null
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 3,
+            "ts": 1002,
+            "event": {
+              "type": "run.completed",
+              "runId": "r1",
+              "nativeThreadId": "n",
+              "usage": null,
+              "costUsd": 0.5
+            }
+          }
+        },
+        {
+          "event": {
+            "seq": 4,
+            "ts": 1003,
+            "event": {
+              "type": "run.started",
+              "runId": "r1",
+              "origin": "continuation",
+              "nativeThreadId": "z",
+              "model": "q"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "lastSeq": 4,
+        "seenSeq": 0,
+        "runs": [
+          {
+            "runId": "r1",
+            "origin": "user",
+            "status": "completed",
+            "nativeThreadId": "n",
+            "model": null,
+            "queuedAt": 1000,
+            "startedAt": 1001,
+            "harness": null,
+            "endedAt": 1002,
+            "endedSeq": 3,
+            "usage": null,
+            "error": null
+          }
+        ],
+        "items": [
+          {
+            "seq": 1,
+            "runId": "r1",
+            "itemId": "user:r1",
+            "kind": "user",
+            "text": "go",
+            "ts": 1000,
+            "status": "done"
+          }
+        ],
+        "pending": [],
+        "background": [],
+        "native": null
+      },
+      "derived": {
+        "activeRun": null,
+        "queued": [],
+        "critic": []
+      }
+    }
+  ]
+}
