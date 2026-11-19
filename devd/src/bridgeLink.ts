@@ -44,13 +44,22 @@ interface Link {
   outageLogged: boolean;
   /** Since when the bridge's log is behind the store (its `ready.lastSeq` was below `store.lastSeq()`). */
   behindSince: number | null;
-  /** The frame failure this link keeps hitting: the store's seq when it failed, and how often it failed there. */
-  failure: { atSeq: number; what: string; count: number } | null;
+  /** The frame failure this link keeps hitting: the store's seq when it failed, the failure's key (failureKey), and
+   *  how often it failed there. */
+  failure: { atSeq: number; key: string; count: number } | null;
   /** The periodic ack of this connection; only for a bridge that takes it. */
   ackTimer: ReturnType<typeof setInterval> | null;
 }
 
 class MalformedFrame extends Error {}
+
+/** What makes two frame failures "the same" for the poison count: the error's class and SQLite code and the frame's
+ *  seq, not the message — a message embedding varying text (a time, a counter) must still reach POISON_LIMIT. */
+function failureKey(err: unknown, seq: number | null): string {
+  const cls = err instanceof Error ? err.constructor.name : typeof err;
+  const code = err instanceof SQLiteError ? err.code ?? "" : "";
+  return `${cls}:${code}:${seq ?? "-"}`;
+}
 
 /** The integer `e.seq` of an event frame, also of one devd cannot use; null when the line has none. */
 function eventSeq(line: string): number | null {
@@ -374,7 +383,8 @@ export class BridgeLinks {
     let atSeq: number;
     try { atSeq = this.d.store(sessionId).lastSeq(); }
     catch { return 1; } // no store to count against: plain drop and reconnect, logged by down()
-    const f = link.failure?.atSeq === atSeq && link.failure.what === what ? link.failure : { atSeq, what, count: 0 };
+    const key = failureKey(err, seq);
+    const f = link.failure?.atSeq === atSeq && link.failure.key === key ? link.failure : { atSeq, key, count: 0 };
     link.failure = f;
     f.count++;
     if (f.count < POISON_LIMIT) return f.count;

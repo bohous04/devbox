@@ -464,6 +464,28 @@ test("T9: an event that fails the same way on every replay is skipped after POIS
   expect(s.hellos).toHaveLength(POISON_LIMIT);
 });
 
+test("T9: an event whose error message varies on every try is still skipped at POISON_LIMIT (keyed on error class + seq)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "bl-"));
+  mkdirSync(join(root, ID));
+  const real = ThreadStore.open(root, ID);
+  let tries = 0;
+  const store = new Proxy(real, {
+    get: (t, k) => k === "apply"
+      ? (e: LoggedEvent) => { if (e.seq === 2) throw new Error(`cannot store event at ${Date.now()}.${++tries}`); return t.apply(e); }
+      : (t as any)[k].bind(t),
+  });
+  const logs: string[] = [];
+  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
+  const s = fakeBridge(join(root, ID, "agent.sock"), { events: [ev(1), ev(2), ev(3)] });
+  cleanups.push(() => { links.drop(ID); s.close(); real.close(); rmSync(root, { recursive: true, force: true }); });
+  links.ensure(ID);
+  await waitFor(() => real.lastSeq() === 3, "skip past the event");
+  expect(tries).toBe(POISON_LIMIT);
+  expect(s.hellos).toHaveLength(POISON_LIMIT);
+  // The notice names the last attempt's message.
+  expect(real.snapshot().items.filter((i) => i.kind === "notice").map((i) => i.text)[0]).toContain(`.${POISON_LIMIT}`);
+});
+
 test("T9: a store that cannot write at all is never skipped past: the event waits and the link keeps retrying", async () => {
   const root = mkdtempSync(join(tmpdir(), "bl-"));
   mkdirSync(join(root, ID));
