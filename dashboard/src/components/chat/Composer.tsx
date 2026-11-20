@@ -27,8 +27,12 @@ function textWidth(text: string, css: CSSStyleDeclaration): number {
  *  Images pasted, dropped or picked (at most 10) are scaled down (imageView.ts), previewed and go with the next message.
  *  While a run is active and nothing is typed, the round primary button stops the run; with text typed it sends
  *  (queues) and a separate stop button sits next to it. */
-export function Composer({ running, onSend, onStop, controls, notices }: {
+export function Composer({ running, onSend, onStop, controls, notices, placeholder: placeholderText, start }: {
   running: boolean;
+  /** Replaces the default placeholder (e.g. the new-session page's). */
+  placeholder?: string;
+  /** The new-session page: the primary button starts a session, also with nothing typed, once `ready`. */
+  start?: { label: string; ready: boolean };
   /** Inside the box, bottom right: the session's agent, model and account switchers. */
   controls?: ReactNode;
   /** Above the box: the switchers' status and error lines. */
@@ -138,7 +142,7 @@ export function Composer({ running, onSend, onStop, controls, notices }: {
   }
 
   async function send() {
-    if (busy || text.trim() === "") return;
+    if (busy || !canSend) return;
     setBusy(true); setErr(null);
     const sent = text;
     const sentImages = images;
@@ -156,9 +160,10 @@ export function Composer({ running, onSend, onStop, controls, notices }: {
   }
 
   const empty = text.trim() === "";
+  const canSend = start ? start.ready : !empty;
   // Enter sends only with a mouse or trackpad (see onKeyDown), so only then is the keyboard hint shown.
   const finePointer = window.matchMedia("(pointer: fine)").matches;
-  const placeholder = running ? "Queue a message for after this run" : "Ask anything";
+  const placeholder = placeholderText ?? (running ? "Queue a message for after this run" : "Ask anything");
   const full = images.length >= MAX_IMAGES_PER_MESSAGE;
   // Round buttons: below sm the hit area is 44px (size-11, the same minimum index.css sets for buttons there), the
   // visible circle stays 32px so it matches the icons.
@@ -270,16 +275,16 @@ export function Composer({ running, onSend, onStop, controls, notices }: {
                 </button>
               )}
               <button
-                type={stopPrimary ? "button" : "submit"} disabled={stopPrimary ? stopping : busy || empty}
+                type={stopPrimary ? "button" : "submit"} disabled={stopPrimary ? stopping : busy || !canSend}
                 onClick={stopPrimary ? () => void stop() : undefined}
-                aria-label={stopPrimary ? "Stop the run" : "Send"} title={stopPrimary ? "Stop the run" : finePointer ? "Send (Enter)" : "Send"}
+                aria-label={stopPrimary ? "Stop the run" : start?.label ?? "Send"} title={stopPrimary ? "Stop the run" : `${start?.label ?? "Send"}${finePointer ? " (Enter)" : ""}`}
                 className={round}
               >
                 {/* A muted filled circle while empty (its arrow keeps 3:1 against the circle and the card), the primary
                     one once there is something to send or a run to stop. */}
                 <span className={cn(dot, stopPrimary
                   ? "bg-primary text-primary-foreground shadow-sm group-hover:bg-primary/85 group-disabled:opacity-50"
-                  : empty ? "bg-foreground/[0.08] text-foreground/55 dark:text-foreground/65"
+                  : !canSend ? "bg-foreground/[0.08] text-foreground/55 dark:text-foreground/65"
                   : "bg-primary text-primary-foreground shadow-sm group-hover:bg-primary/85")}>
                   {stopPrimary ? stopIcon : busy ? <LoaderCircle className="size-4 animate-spin" aria-hidden="true" /> : <ArrowUp className="size-4" strokeWidth={2.5} aria-hidden="true" />}
                 </span>

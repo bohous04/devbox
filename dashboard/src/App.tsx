@@ -17,6 +17,7 @@ import { useStore } from "./store";
 const Overview = lazy(() => import("./pages/Overview").then((m) => ({ default: m.Overview })));
 const AgentUpkeep = lazy(() => import("./pages/AgentUpkeep").then((m) => ({ default: m.AgentUpkeep })));
 const Sessions = lazy(() => import("./pages/Sessions").then((m) => ({ default: m.Sessions })));
+const NewSession = lazy(() => import("./pages/NewSession").then((m) => ({ default: m.NewSession })));
 const Stats = lazy(() => import("./pages/Stats").then((m) => ({ default: m.Stats })));
 const Subscriptions = lazy(() => import("./pages/Subscriptions").then((m) => ({ default: m.Subscriptions })));
 const Hardware = lazy(() => import("./pages/Hardware").then((m) => ({ default: m.Hardware })));
@@ -84,6 +85,7 @@ export function App() {
           <Route path="/s/:id" element={<SessionPage />} />
           <Route path="/upkeep" element={<AgentUpkeep />} />
           <Route path="/sessions" element={<Sessions />} />
+          <Route path="/new" element={<NewSession />} />
           <Route path="/stats" element={<Stats />} />
           <Route path="/subscriptions" element={<Subscriptions />} />
           <Route path="/hardware" element={<Hardware />} />

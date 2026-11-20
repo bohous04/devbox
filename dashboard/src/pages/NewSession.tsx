@@ -1,0 +1,408 @@
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Check, ChevronDown, FolderGit2, Search } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { api, type AgentName, type SessionLive, type SessionRuntime, type TreeProject } from "../api";
+import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { cn } from "@/lib/utils";
+import {
+  AGENT_IDS, AGENT_PROFILES, SOLO, chatRuntimeBlock, defaultAgentFor, instaboxAgentBlock, repoChoices, runningInOtherRuntime,
+  runtimeAfterDefault, runtimeChoice, sessionsFor, tmuxRuntimeBlock,
+} from "../newSession";
+import { getDefaultRuntime, validateConfig } from "../configEdit";
+import { openedNotice } from "../sessionsView";
+import { useStore } from "../store";
+import { Composer } from "../components/chat/Composer";
+import { AgentGlyph } from "../components/chat/Switchers";
+import { hostDisabledReason, jobErrorText, JOB_STEP_LABEL, type IbxStatusDto, type PlacementDto } from "../instaboxView";
+
+/** The repo's sessions listed before "Show all": the list sits under the composer and must not push it away. */
+const SESSIONS_SHOWN = 4;
+
+/** One option of the repo picker: the tree's folder/project/repo cascade flattened, grouped by project. */
+const pickKey = (folder: string, project: string, repo: string) => JSON.stringify([folder, project, repo]);
+
+/** Route /new — start a session: pick the repo, type the first message in the chat composer, go. The interface
+ *  (chat/terminal) and the host (VPS/InstaBox) sit under the box; every guard is the one in newSession.ts. */
+export function NewSession() {
+  const { live, refresh } = useStore();
+  const navigate = useNavigate();
+  const [tree, setTree] = useState<TreeProject[] | null>(null);
+  const [folder, setFolder] = useState("");
+  const [project, setProject] = useState("");
+  const [repo, setRepo] = useState("");
+  const [agent, setAgent] = useState<AgentName>("claude");
+  const [host, setHost] = useState<"vps" | "instabox">("vps");
+  // The runtime the user wants: null until they pick or the configured default arrives (start waits for it, so
+  // nothing starts in a guessed runtime); `choice` below is what actually starts.
+  const [runtime, setRuntime] = useState<SessionRuntime | null>(null);
+  const [ibxStatus, setIbxStatus] = useState<IbxStatusDto>({ enabled: false });
+  const [placement, setPlacement] = useState<PlacementDto | null>(null);
+  const [step, setStep] = useState<string | null>(null);
+  const [ibxFailed, setIbxFailed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
+  // Flipped to false on unmount — polling the InstaBox job must not keep calling the API or touch the state of a
+  // disposed page after the user navigated away (see startInstabox below).
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => { aliveRef.current = false; };
+  }, []);
+
+  useEffect(() => { document.title = "devbox · New session"; }, []);
+
+  useEffect(() => {
+    api.tree().then(setTree).catch((e) => setErr((e as Error).message));
+  }, []);
+
+  // VPS capacity and load change between visits → read on every visit, with the default runtime.
+  // An InstaBox API outage must not break the page: status is then "not configured", host VPS.
+  useEffect(() => {
+    let alive = true;
+    void Promise.allSettled([api.instaboxStatus(), api.placement(), api.config()]).then(([st, pl, cfg]) => {
+      if (!alive) return;
+      const status: IbxStatusDto = st.status === "fulfilled" ? st.value : { enabled: false };
+      const p = pl.status === "fulfilled" ? pl.value : null;
+      let def: SessionRuntime | null = null;
+      try {
+        if (cfg.status === "rejected") throw cfg.reason;
+        const loaded = getDefaultRuntime(validateConfig(cfg.value));
+        def = loaded;
+        setRuntime((picked) => runtimeAfterDefault(picked, loaded));
+      } catch (e) { setErr(`Could not read the default runtime: ${(e as Error).message}`); }
+      setIbxStatus(status);
+      setPlacement(p);
+      // Under a chat default the suggestion stays a hint: InstaBox is tmux-only, picking it would switch the runtime.
+      setHost(p?.suggest === "instabox" && def === "tmux" && hostDisabledReason(status, false, instaboxAgentBlock(agent)) === null ? "instabox" : "vps");
+    });
+    return () => { alive = false; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- once per visit, with the agent at that moment
+
+  const repos = tree && folder && project ? repoChoices(tree, folder, project) : [];
+  const selected = repos.find((r) => r.value === repo);
+  // Solo has no repo of its own (see SOLO) and the server does not accept `fresh` for it (openSolo),
+  // so "Create another" makes sense only for a real repo.
+  const ibxDisabled = hostDisabledReason(ibxStatus, repo === SOLO, runtime === "chat" ? chatRuntimeBlock(agent, "instabox") : instaboxAgentBlock(agent));
+  const onIbx = host === "instabox" && !ibxDisabled;
+  const chatDisabled = repo === SOLO ? "Chat sessions need a repo (no claudeSolo)" : chatRuntimeBlock(agent, onIbx ? "instabox" : "vps");
+  const tmuxDisabled = tmuxRuntimeBlock(agent);
+  // An agent/host the wanted runtime cannot run starts in the other one, said under the toggle, never silently.
+  const choice = runtime === null ? null : runtimeChoice(runtime, chatDisabled, tmuxDisabled);
+  // The repo's sessions of both runtimes. The page names its runtime, so devd attaches only to a session of that
+  // runtime (`existing`); a running one of the other runtime is offered to open instead of a second container.
+  const repoSessions = repo && repo !== SOLO ? sessionsFor(live?.sessions ?? [], project, repo) : [];
+  const existing = choice ? repoSessions.filter((s) => (s.runtime ?? "tmux") === choice.runtime) : [];
+  const runningOther = choice ? runningInOtherRuntime(repoSessions, choice.runtime) : [];
+  // The ones that can be opened from here first, so the cap never hides them.
+  const listed = [...runningOther, ...repoSessions.filter((s) => !runningOther.includes(s))];
+
+  // Switching to a proxy profile (or another reason for a block) clears an earlier InstaBox choice —
+  // otherwise the page would submit host:"instabox" with a blocked agent and hit a 400.
+  useEffect(() => {
+    if (host === "instabox" && ibxDisabled) setHost("vps");
+  }, [host, ibxDisabled]);
+
+  function pickRepo(key: string) {
+    if (key === "") { setFolder(""); setProject(""); setRepo(""); return; }
+    const [f, p, r] = JSON.parse(key) as [string, string, string];
+    setFolder(f); setProject(p); setRepo(r);
+    setAgent(defaultAgentFor(tree ?? [], f, p, r));
+  }
+
+  // A terminal session opens in the Sessions list (its row expanded), a chat session on its own page.
+  // The list reads the live store, so it is refreshed first: the new row is there to expand.
+  async function opened(id: string, rt: SessionRuntime, message: string | null) {
+    if (rt === "chat") { navigate(`/s/${encodeURIComponent(id)}`, { state: { notice: message } }); return; }
+    await refresh();
+    if (aliveRef.current) navigate(`/sessions?open=${encodeURIComponent(id)}`, { state: { notice: message } });
+  }
+
+  async function startVps(fresh?: boolean) {
+    if (!folder || !project || !repo || busy || !choice) return;
+    setErr(null); setIbxFailed(false); setBusy(true);
+    try {
+      const r = repo === SOLO
+        ? await api.openSolo({ folder, project, agent })
+        : await api.openSession({ folder, project, repo, cloneUrl: selected?.cloneUrl, agent, fresh, runtime: choice.runtime });
+      if (!aliveRef.current) return;
+      await opened(r.session.id, choice.runtime, openedNotice(r.pull, choice.runtime));
+    } catch (e) { if (aliveRef.current) setErr((e as Error).message); } finally { if (aliveRef.current) setBusy(false); }
+  }
+
+  // InstaBox always creates a NEW session (R3) and runs as a job: the page stays and shows the step until the
+  // machine, clone and container are ready.
+  async function startInstabox() {
+    if (!folder || !project || !repo || busy) return;
+    if (!selected?.cloneUrl) { setErr("This repo has no clone URL."); return; }
+    setErr(null); setIbxFailed(false); setBusy(true); setStep("preflight");
+    try {
+      // The page names the runtime (InstaBox is tmux-only), so devd has no runtime to pick and sends no runtimeNotice.
+      const { jobId, sessionId } = await api.openInstabox({ folder, project, repo, cloneUrl: selected.cloneUrl, agent, runtime: "tmux" });
+      for (;;) {
+        if (!aliveRef.current) return;
+        const job = await api.instaboxJob(jobId);
+        if (!aliveRef.current) return;
+        setStep(job.step);
+        if (job.status === "error") throw new Error(jobErrorText(job.step, job.error));
+        if (job.status === "done") break;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      await opened(sessionId, "tmux", "Session is ready on InstaBox.");
+    } catch (e) { if (aliveRef.current) { setErr((e as Error).message); setIbxFailed(true); } }
+    finally { if (aliveRef.current) { setBusy(false); setStep(null); } }
+  }
+
+  // A running session of the other runtime is already up: show it, no devd open.
+  function openRunning(s: SessionLive) {
+    void opened(s.id, s.runtime ?? "tmux", "Session is running.");
+  }
+
+  const start = (fresh?: boolean) => (onIbx ? startInstabox() : startVps(fresh));
+  const startLabel = ibxFailed && onIbx ? "Try again" : onIbx ? "Start on InstaBox" : existing.length > 0 ? "Open existing" : "Start session";
+  const canStart = !!repo && !busy && !!choice;
+
+  const where = onIbx ? "on InstaBox" : "on the VPS";
+  const what = choice?.runtime === "chat" ? "chat" : "terminal";
+  const summary = !repo ? null
+    : !choice ? "Pick an interface: the default runtime is not loaded."
+    : !onIbx && existing.length > 0 ? `Opens ${existing[0].id} (${what}, ${existing[0].status}).`
+    : `Starts a new ${what} session ${where}.`;
+
+  return (
+    <div className="mx-auto flex w-full max-w-[42rem] flex-col gap-4 pt-2 sm:min-h-[calc(100dvh-14rem)] sm:justify-center sm:pt-0">
+      <h1 className="text-2xl font-semibold tracking-tight sm:text-center">What should we work on?</h1>
+
+      <RepoPicker tree={tree} value={repo ? pickKey(folder, project, repo) : ""} disabled={busy} onPick={pickRepo} />
+
+      <Composer
+        running={false} onStop={async () => {}}
+        placeholder={repo ? "Describe the task, or leave empty to just open the session" : "Pick a repo above, then describe the task"}
+        start={{ label: startLabel, ready: canStart }}
+        onSend={async (text, images) => {
+          // Waits for the owner's call on how a first prompt reaches the agent (see the PR); never dropped silently.
+          if (text.trim() !== "" || images.length > 0) throw new Error("A first message is not supported yet: clear it to start the session.");
+          await start();
+        }}
+        controls={<AgentMenu agent={agent} disabled={!repo || busy} onPick={setAgent} />}
+      />
+
+      <div className="flex flex-col gap-3 px-1">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <Segmented label="Interface" options={[
+            { value: "chat", label: "Chat", disabled: chatDisabled },
+            { value: "tmux", label: "Terminal", disabled: tmuxDisabled },
+          ]} value={choice?.runtime ?? null} busy={busy} onPick={(v) => setRuntime(v as SessionRuntime)} />
+          <Segmented label="Where it runs" options={[
+            { value: "vps", label: "VPS", disabled: null },
+            { value: "instabox", label: "InstaBox", disabled: ibxDisabled },
+          ]} value={onIbx ? "instabox" : "vps"} busy={busy} onPick={(v) => setHost(v as "vps" | "instabox")} />
+        </div>
+
+        <div className="flex flex-col gap-1.5 text-sm">
+          {busy && step && <p role="status" className="text-muted-foreground">{JOB_STEP_LABEL[step] ?? step}…</p>}
+          {!busy && summary && <p className="text-foreground/80">{summary}</p>}
+          {choice?.runtime === "chat" && <Hint>The agent runs behind the chat view; its terminal stays available as a tab.</Hint>}
+          {repo && choice?.notice && <p role="status" className="text-amber-700 dark:text-amber-300">{choice.notice}</p>}
+          {repo && !choice?.notice && chatDisabled && <Hint>{chatDisabled}</Hint>}
+          {repo && !choice?.notice && tmuxDisabled && <Hint>{tmuxDisabled}</Hint>}
+          {placement?.reason && <Hint>VPS is busy ({placement.reason}) — InstaBox recommended.</Hint>}
+          {onIbx && <Hint>Starts a new session on its own machine with a fresh clone. No review, prod-db, Finder or previews; the agent's browser is visible under Desktop.</Hint>}
+          {ibxDisabled && <Hint>{ibxDisabled}</Hint>}
+          {/* A repo in the old layout (shared working directory) cannot give another session its own worktree or
+              branch — only its own container. Two agents on one git index must be announced up front, not discovered
+              from the behavior. */}
+          {!onIbx && existing.length > 0 && selected && selected.cloned && !selected.bare && (
+            <Hint>Create another shares this repo's working directory and branch (own container, same files).</Hint>
+          )}
+          {!tree && !err && <p role="status" className="text-muted-foreground">Loading workspaces…</p>}
+          {err && <p role="alert" className="text-destructive">{err}</p>}
+        </div>
+
+        {(ibxFailed || (!onIbx && existing.length > 0)) && (
+          <div className="flex flex-wrap gap-2">
+            {!onIbx && existing.length > 0 && <Button type="button" variant="outline" size="sm" disabled={!repo || busy} onClick={() => void startVps(true)}>Create another</Button>}
+            {ibxFailed && <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => { setHost("vps"); void startVps(); }}>Open on VPS</Button>}
+          </div>
+        )}
+
+        {repoSessions.length > 0 && (
+          <section aria-label="Sessions of this repo" className="flex flex-col gap-1 border-t pt-3">
+            <h2 className="text-xs font-medium text-muted-foreground">Sessions of this repo</h2>
+            <ul className="flex flex-col">
+              {(showAll ? listed : listed.slice(0, SESSIONS_SHOWN)).map((s) => (
+                <li key={s.id} className="flex min-h-9 flex-wrap items-center gap-x-2 text-sm">
+                  <span className={cn("size-1.5 rounded-full", s.status === "running" ? "bg-emerald-500" : "bg-muted-foreground/40")} aria-hidden="true" />
+                  <span className="font-mono text-[13px]">{s.id}</span>
+                  <span className="text-muted-foreground">{s.runtime === "chat" ? "chat" : "terminal"} · {s.status}</span>
+                  {runningOther.includes(s) && <Button type="button" size="sm" variant="ghost" className="ml-auto" disabled={busy} onClick={() => openRunning(s)}>Open</Button>}
+                </li>
+              ))}
+            </ul>
+            {repoSessions.length > SESSIONS_SHOWN && (
+              <Button type="button" variant="ghost" size="sm" className="-ml-2 self-start px-2 text-muted-foreground" aria-expanded={showAll} onClick={() => setShowAll((v) => !v)}>
+                {showAll ? "Show fewer" : `Show all ${repoSessions.length}`}
+              </Button>
+            )}
+            {runningOther.length > 0 && <Hint>Starting here creates a {what} session next to the running {runningOther[0].runtime === "chat" ? "chat" : "terminal"} one.</Hint>}
+          </section>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Hint({ children }: { children: ReactNode }) {
+  return <p className="text-xs leading-5 text-muted-foreground">{children}</p>;
+}
+
+/** The repo: one searchable list over the tree's folder/project/repo cascade, grouped by project (a combobox: type to
+ *  filter, arrows to move, Enter to pick). The chip shows the whole path. */
+function RepoPicker({ tree, value, disabled, onPick }: { tree: TreeProject[] | null; value: string; disabled: boolean; onPick: (key: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const listRef = useRef<HTMLDivElement>(null);
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const groups = (tree ?? []).slice()
+    .sort((a, b) => a.folder.localeCompare(b.folder) || a.project.localeCompare(b.project))
+    .map((g) => ({
+      label: g.project === g.folder ? g.folder : `${g.folder} / ${g.project}`,
+      items: repoChoices(tree ?? [], g.folder, g.project)
+        .filter((r) => terms.every((t) => `${g.folder}/${g.project}/${r.value}`.toLowerCase().includes(t)))
+        .map((r) => ({ key: pickKey(g.folder, g.project, r.value), repo: r })),
+    }))
+    .filter((g) => g.items.length > 0);
+  const flat = groups.flatMap((g) => g.items);
+  const at = Math.min(active, Math.max(flat.length - 1, 0));
+  useEffect(() => {
+    listRef.current?.querySelector(`[data-index="${at}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [at, open]);
+
+  const [folder, project, repo] = value ? JSON.parse(value) as [string, string, string] : ["", "", ""];
+  const path = value ? [folder, ...(project === folder ? [] : [project])].join(" / ") : null;
+  const pick = (key: string) => { onPick(key); setOpen(false); };
+  let index = -1;
+  return (
+    <Popover open={open} onOpenChange={(next) => { setOpen(next); if (next) { setQuery(""); setActive(Math.max(flat.findIndex((o) => o.key === value), 0)); } }}>
+      <PopoverTrigger asChild disabled={!tree || disabled}>
+        <button
+          type="button" aria-label={value ? `Repo: ${path} / ${repo}` : "Choose a repo"}
+          className={cn(
+            "flex h-11 min-w-0 max-w-full items-center gap-2 self-start rounded-full border bg-background px-3.5 text-sm transition-colors motion-reduce:transition-none dark:bg-card",
+            "hover:bg-accent focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60 data-[state=open]:bg-accent",
+            !value && "border-dashed",
+          )}
+        >
+          <FolderGit2 className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          <span className="min-w-0 truncate">
+            {value
+              ? <>{path && <span className="text-muted-foreground">{path} / </span>}<span className="font-medium">{repo}</span></>
+              : <span className="text-muted-foreground">{tree ? "Choose a repo" : "Loading repos…"}</span>}
+          </span>
+          <ChevronDown className="size-3.5 shrink-0 opacity-50" aria-hidden="true" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" sideOffset={6} collisionPadding={16} className="w-[min(26rem,calc(100vw-2rem))] p-0">
+        <div className="flex items-center gap-2 border-b px-3">
+          <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          <input
+            autoFocus role="combobox" aria-expanded="true" aria-controls="repo-list" aria-label="Search repos"
+            aria-activedescendant={flat.length > 0 ? `repo-opt-${at}` : undefined}
+            placeholder="Search repos" value={query}
+            className="h-11 min-w-0 flex-1 bg-transparent text-base outline-none placeholder:text-muted-foreground sm:text-sm"
+            onChange={(e) => { setQuery(e.target.value); setActive(0); }}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown") { e.preventDefault(); setActive(Math.min(at + 1, flat.length - 1)); }
+              else if (e.key === "ArrowUp") { e.preventDefault(); setActive(Math.max(at - 1, 0)); }
+              else if (e.key === "Enter" && flat[at]) { e.preventDefault(); pick(flat[at].key); }
+            }}
+          />
+        </div>
+        <div ref={listRef} id="repo-list" role="listbox" aria-label="Repos" className="max-h-[min(22rem,50dvh)] overflow-y-auto p-1">
+          {flat.length === 0 && <p className="px-2 py-3 text-sm text-muted-foreground">No repo matches “{query}”.</p>}
+          {groups.map((g) => (
+            <div key={g.label} role="group" aria-label={g.label}>
+              <p aria-hidden="true" className="px-2 pb-1 pt-2 text-xs font-medium text-muted-foreground">{g.label}</p>
+              {g.items.map((o) => {
+                index += 1;
+                const i = index;
+                return (
+                  <div
+                    key={o.key} id={`repo-opt-${i}`} data-index={i} role="option" aria-selected={o.key === value}
+                    onMouseMove={() => { if (i !== at) setActive(i); }} onClick={() => pick(o.key)}
+                    className={cn("flex min-h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm", i === at && "bg-accent")}
+                  >
+                    <Check className={cn("size-4 shrink-0", o.key === value ? "" : "invisible")} aria-hidden="true" />
+                    <span className="min-w-0 flex-1 truncate">{o.repo.value === SOLO ? "No repo (claudeSolo)" : o.repo.value}</span>
+                    {o.repo.cloned && <span className="text-xs text-muted-foreground">cloned</span>}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/** The agent, as the composer's chip (the same place the chat page has its agent/model chip). */
+function AgentMenu({ agent, disabled, onPick }: { agent: AgentName; disabled: boolean; onPick: (a: AgentName) => void }) {
+  const profile = AGENT_PROFILES[agent];
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild disabled={disabled}>
+        <Button
+          type="button" variant="ghost" size="sm" aria-label={`Agent: ${profile.label}`} title={`Agent: ${profile.label}`}
+          className="h-8 min-w-0 max-w-56 shrink gap-1.5 rounded-full px-2.5 font-medium text-foreground/90 hover:bg-accent hover:text-foreground has-[>svg]:px-2.5 data-[state=open]:bg-accent data-[state=open]:text-foreground"
+        >
+          <AgentGlyph agent={agent} />
+          <span className="truncate max-sm:group-data-[chip=mark]/box:hidden">{profile.label}</span>
+          <ChevronDown aria-hidden="true" className="size-3.5 opacity-50" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" side="top" sideOffset={8} collisionPadding={16} className="w-72 max-w-[calc(100vw-2rem)]">
+        <DropdownMenuLabel className="text-xs font-medium text-muted-foreground">Agent</DropdownMenuLabel>
+        {AGENT_IDS.map((id) => (
+          <DropdownMenuItem key={id} onSelect={() => onPick(id)}>
+            <Check className={id === agent ? "" : "invisible"} aria-hidden="true" />
+            <AgentGlyph agent={id} />
+            <span className="flex-1 truncate">{AGENT_PROFILES[id].label}</span>
+            {AGENT_PROFILES[id].yolo && <span className="text-xs text-muted-foreground">yolo</span>}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** Two quiet choices side by side; a blocked one stays visible, disabled, with its reason as the tooltip. */
+function Segmented({ label, options, value, busy, onPick }: {
+  label: string; options: { value: string; label: string; disabled: string | null }[]; value: string | null; busy: boolean; onPick: (v: string) => void;
+}) {
+  return (
+    <div role="group" aria-label={label} className="inline-flex items-center gap-2">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <div className="inline-flex rounded-full border p-0.5">
+        {options.map((o) => (
+          <button
+            key={o.value} type="button" aria-pressed={value === o.value} disabled={busy || o.disabled !== null}
+            title={o.disabled ?? undefined} onClick={() => onPick(o.value)}
+            className={cn(
+              "h-8 rounded-full px-3 text-sm transition-colors motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-45",
+              "focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50",
+              value === o.value ? "bg-foreground/[0.08] font-medium text-foreground dark:bg-foreground/[0.12]" : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
