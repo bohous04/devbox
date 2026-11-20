@@ -256,6 +256,12 @@ final class ChangesStore: ObservableObject {
         }
     }
 
+    /// Back to loading, for a result that no longer holds (a new run started).
+    func reset() {
+        cancelDiffs()
+        state = .loading
+    }
+
     /// The file's diff, fetched once per changes result and parsed off the main thread.
     func diff(_ path: String) async throws -> DiffView.Prepared {
         if let t = cache[path] { return try await t.value }

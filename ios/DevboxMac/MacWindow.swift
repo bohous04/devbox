@@ -17,7 +17,7 @@ struct MacWindow: View {
     @State private var findRequest = 0
 
     var body: some View {
-        content
+        MacWindowContent(thread: $thread, newSession: $newSession, findRequest: findRequest)
             .safeAreaInset(edge: .top) {
                 if let problem = state.restoreNotice {
                     HStack {
@@ -49,13 +49,10 @@ struct MacWindow: View {
                 for id in plan.open { openWindow(value: id) }
             }
             .onChange(of: thread) { _, id in state.windows.show(window: windowId, thread: id) }
-            // ⌘N and ⌘F (DevboxMacApp's commands) act on the key window.
-            .focusedSceneValue(\.macWindowActions, MacWindowActions(newSession: { newSession = true }, find: { findRequest += 1 }))
+            // ⌘N and ⌘F (DevboxMacApp's commands) act on the key window; without a configured devd they are disabled.
+            .focusedSceneValue(\.macWindowActions, appModel.client == nil ? nil
+                               : MacWindowActions(newSession: { newSession = true }, find: { findRequest += 1 }))
             .onDisappear { state.windows.close(window: windowId) }
-    }
-
-    private var content: some View {
-        MacWindowContent(thread: $thread, newSession: $newSession, findRequest: findRequest)
     }
 }
 
@@ -407,6 +404,7 @@ struct MacInboxRow: View {
         let message = item.lastText.flatMap { title.fromMessage ? nil : InboxView.plainPreview($0) } ?? ""
         let detail = preview ? (message.isEmpty ? InboxView.reasonLabel(item.attention.reason) : message) : ""
         let spoken = InboxRow.spokenLabel(item, now: now, title: title.text, detail: detail)
+            + (item.branch.map { $0.isEmpty ? "" : ", branch \($0)" } ?? "")
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 // Hierarchical styles: on the focused list's accent selection they turn light, as the system's rows do.
@@ -597,7 +595,7 @@ private struct MacChangesChip: View {
 
     var body: some View {
         Group {
-            if case .loaded(let c) = changes.state {
+            if thread.changesAnchor != nil, case .loaded(let c) = changes.state {
                 Button(action: show) {
                     HStack(spacing: 6) {
                         Image(systemName: "doc.badge.plus").foregroundStyle(Theme.C.mutedForeground)
@@ -620,7 +618,11 @@ private struct MacChangesChip: View {
                 Color.clear.frame(width: 0, height: 0).accessibilityHidden(true)
             }
         }
-        .task(id: thread.changesAnchor?.endedSeq) { await changes.load() }
+        // A run that starts takes the anchor away: the chip goes, without a fetch, until the run ends.
+        .task(id: thread.changesAnchor) {
+            guard thread.changesAnchor != nil else { return changes.reset() }
+            await changes.load()
+        }
     }
 }
 

@@ -84,6 +84,7 @@ struct ChatMarkdown: View {
     }
     #endif
 
+    #if !os(macOS)
     /// A phone has no room for columns: each row stacks its cells (the first, the check, above the result) inside one
     /// bordered group headed by the column names, rows apart by hairlines, so it reads as a table, not as a list of
     /// buttons. A table of more than two columns labels the later cells with their header.
@@ -123,6 +124,7 @@ struct ChatMarkdown: View {
         .clipShape(RoundedRectangle(cornerRadius: Theme.R.lg))
         .overlay(RoundedRectangle(cornerRadius: Theme.R.lg).strokeBorder(Theme.C.border))
     }
+    #endif
 }
 
 /// One line or paragraph of inline markdown as a single `Text`, so it wraps and selects as one.
@@ -281,7 +283,8 @@ struct TableColumns: Layout {
         for row in cells {
             for (j, i) in row.enumerated() { natural[j] = max(natural[j], subviews[i].sizeThatFits(.unspecified).width) }
         }
-        let available = proposal.width ?? natural.reduce(0, +)
+        // An unbounded proposal (.infinity, as when measuring the ideal size) means: as wide as the content.
+        let available = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? natural.reduce(0, +)
         let widths = Self.widths(natural: natural, available: available)
         let heights = cells.map { row in
             row.enumerated().map { j, i in subviews[i].sizeThatFits(ProposedViewSize(width: widths[j], height: nil)).height }.max() ?? 0

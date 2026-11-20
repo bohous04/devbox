@@ -169,12 +169,12 @@ enum InboxView {
         ("`+", ""), (#"\*\*(.+?)\*\*"#, "$1"), (#"(?<=^|\s)__(\S(?:.*?\S)?)__(?=$|\s|[,;:!?)])"#, "$1"), (#"^#+\s+"#, ""), (#"\s+"#, " "),
     ].map { (try! NSRegularExpression(pattern: $0.0), $0.1) }
 
-    /// The Mac sidebar's search: every word of `query` in the row's title, project, repo or last message, ignoring
+    /// The Mac sidebar's search: every word of `query` in the row's title, project, repo, branch or last message, ignoring
     /// case and diacritics. An empty query matches every row.
     static func matches(_ i: InboxItem, _ query: String) -> Bool {
         let words = query.split(whereSeparator: \.isWhitespace)
         guard !words.isEmpty else { return true }
-        let hay = [i.title, i.project, i.repo, i.lastText ?? ""].joined(separator: " ")
+        let hay = [i.title, i.project, i.repo, i.branch ?? "", i.lastText ?? ""].joined(separator: " ")
         return words.allSatisfy { hay.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
     }
 

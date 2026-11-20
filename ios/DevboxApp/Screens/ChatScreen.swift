@@ -183,10 +183,17 @@ struct ChatScreen: View {
             .onChange(of: [t.lastSeq, t.items.count]) { _, _ in
                 if atEnd { proxy.scrollTo("end", anchor: .bottom) }
             }
-            .onChange(of: revealChanges) { _, _ in withAnimation(.snappy) { proxy.scrollTo(Self.changesId, anchor: .top) } }
+            .onChange(of: revealChanges) { _, _ in
+                // The card sits in its answer's ForEach row: a lazy stack scrolls to that row's identity even when it
+                // is not built yet, and to the card itself only once it is.
+                guard let anchor = store.changesAnchor else { return }
+                proxy.scrollTo(ThreadDisplayRow.itemId(anchor.rowId), anchor: .top)
+                DispatchQueue.main.async { withAnimation(.snappy) { proxy.scrollTo(Self.changesId, anchor: .top) } }
+            }
             // Once the thread settles at its end, push a cut row's sliver up past the edge.
             .task(id: [t.lastSeq, t.items.count, contentHeight]) {
-                guard ChatLayout.trimTopEdge else { return }
+                // Only at the end: resetting the pad while the user reads further up would shift what they read.
+                guard ChatLayout.trimTopEdge, atEnd else { return }
                 edgePad = 0
                 try? await Task.sleep(for: .milliseconds(400))
                 guard !Task.isCancelled, atEnd, let pad = ThreadEdge.pad(Array(rowFrames.rows.values), top: viewportTop) else { return }
@@ -224,7 +231,9 @@ struct ChatScreen: View {
             .overlay(alignment: .top) {
                 Rectangle().fill(Theme.C.border).frame(height: 1 / 3).accessibilityHidden(true)
                     // The header's edge, where a row would show cut (ThreadEdge), in the rows' space.
-                    .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { viewportTop = $0 }
+                    .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: {
+                        if ChatLayout.trimTopEdge { viewportTop = $0 }
+                    }
             }
         }
     }
