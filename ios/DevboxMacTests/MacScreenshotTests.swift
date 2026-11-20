@@ -19,10 +19,12 @@ final class MacScreenshotTests: XCTestCase {
         dir = URL(fileURLWithPath: path)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         FixtureMode.requested = "demo"
+        MacInboxRow.flatStyles = true // the render has no vibrancy for the rows' hierarchical styles
     }
 
     override func tearDown() {
         FixtureMode.requested = nil
+        MacInboxRow.flatStyles = false
     }
 
     func testInbox() throws {

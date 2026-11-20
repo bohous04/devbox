@@ -367,6 +367,31 @@ struct MacInboxRow: View {
         return detail.isEmpty ? place : "\(place)  ·  \(detail)"
     }
 
+    /// The text's hierarchical style. The offscreen screenshot test draws without the window server's vibrancy, which
+    /// these styles need there, so it sets `flatStyles` for the flat colours they show unselected. The app never does.
+    enum Tier { case primary, secondary, tertiary }
+
+    static func style(_ tier: Tier) -> AnyShapeStyle {
+        #if DEBUG
+        if flatStyles {
+            switch tier {
+            case .primary: return AnyShapeStyle(Theme.C.foreground)
+            case .secondary: return AnyShapeStyle(Theme.C.mutedForeground)
+            case .tertiary: return AnyShapeStyle(Theme.C.mutedForeground.opacity(0.75))
+            }
+        }
+        #endif
+        switch tier {
+        case .primary: return AnyShapeStyle(.primary)
+        case .secondary: return AnyShapeStyle(.secondary)
+        case .tertiary: return AnyShapeStyle(.tertiary)
+        }
+    }
+
+    #if DEBUG
+    nonisolated(unsafe) static var flatStyles = false
+    #endif
+
     /// Age, or for a snoozed row when it comes back.
     static func when(_ i: InboxItem, now: Int) -> String {
         if let until = i.attention.until { return InboxRow.untilLabel(until) }
@@ -380,9 +405,10 @@ struct MacInboxRow: View {
         let spoken = InboxRow.spokenLabel(item, now: now, title: title.text, detail: detail)
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
+                // Hierarchical styles: on the focused list's accent selection they turn light, as the system's rows do.
                 Text(title.text)
                     .font(.system(size: 13))
-                    .foregroundStyle(Theme.C.foreground)
+                    .foregroundStyle(Self.style(.primary))
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 if let word = Self.word(item) {
@@ -391,18 +417,18 @@ struct MacInboxRow: View {
                     HStack(spacing: 5) {
                         if item.attention.section == .working { LiveDot() }
                         Text(Self.when(item, now: now)).font(.system(size: 11)).monospacedDigit()
-                            .foregroundStyle(item.attention.section == .working ? InboxTone.busy : Theme.C.mutedForeground)
+                            .foregroundStyle(item.attention.section == .working ? AnyShapeStyle(InboxTone.busy) : Self.style(.secondary))
                     }
                 }
             }
             HStack(spacing: 6) {
                 Text(Self.secondLine(item, detail: detail))
                     .font(.system(size: 11.5))
-                    .foregroundStyle(Theme.C.mutedForeground)
+                    .foregroundStyle(Self.style(.secondary))
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 Image(systemName: Self.agentGlyph(item.agent)).font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Theme.C.mutedForeground.opacity(0.75))
+                    .foregroundStyle(Self.style(.tertiary))
                     .accessibilityHidden(true)
             }
         }
