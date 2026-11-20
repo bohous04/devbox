@@ -30,8 +30,11 @@ test("session CRUD", () => {
   expect(getSession(db, "dev-shop-cms")).toMatchObject({ status: "stopped", last_active_at: 9 });
   expect(listSessions(db)).toHaveLength(1);
   logEvent(db, "dev-shop-cms", "stop");
+  savePendingFirstTurn(db, "dev-shop-cms", "the user's prompt", 0, null);
   deleteSession(db, "dev-shop-cms");
   expect(getSession(db, "dev-shop-cms")).toBeNull();
+  // A later session with the same id must not inherit an undelivered first message.
+  expect(getPendingFirstTurn(db, "dev-shop-cms")).toBeNull();
 });
 
 test("setSessionName persists the display name and clears it with null", () => {

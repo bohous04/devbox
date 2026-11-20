@@ -106,6 +106,15 @@ function parseServerFrame(line: string): ServerFrame {
 /** devd's side of each chat session's `<controlDir>/agent.sock` (mounted as /run/devd in the container).
  *  Every event is applied to the session's thread store before `onEvent` sees it; a reconnect says
  *  `hello{afterSeq: store.lastSeq()}`, so the bridge replays only what the store is missing. */
+/** startTurnWhenConnected refused: the session already has a first message waiting (it is never replaced). */
+export class FirstTurnPending extends Error {
+  constructor(message: string) { super(message); this.name = "FirstTurnPending"; }
+}
+
+/** The persisted tag of a user's first prompt (POST /api/sessions), so its outcome is reported after a devd restart
+ *  too. Other tags are schedule names; the control character keeps a schedule's name from ever being taken for it. */
+export const USER_FIRST_PROMPT_TAG = "\u0001user-first-prompt";
+
 export class BridgeLinks {
   private links = new Map<string, Link>();
   /** devd's own first message per session (startTurnWhenConnected), until the bridge took it. */
@@ -223,6 +232,8 @@ export class BridgeLinks {
    *  the turn, an Error = it was refused, timed out, discarded or dropped. It is memory only; `tag` is persisted
    *  and reaches `onRestoredTurnDone` instead after a restart. */
   startTurnWhenConnected(sessionId: string, text: string, onDone?: (err: Error | null) => void, tag: string | null = null): void {
+    // One first message per session: a second (a scheduled run's) must not replace one still waiting (the user's).
+    if (this.hasFirstTurn(sessionId)) throw new FirstTurnPending(`${sessionId} already has a first message waiting to be sent`);
     this.d.pendingTurns?.save(sessionId, text, this.d.store(sessionId).lastSeq(), tag);
     this.firstTurns.set(sessionId, text);
     if (onDone) this.firstTurnDone.set(sessionId, onDone);

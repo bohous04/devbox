@@ -716,6 +716,8 @@ export function deleteSession(db: Database, id: string): void {
   // A later session may get the same id: it must not start settled or snoozed.
   db.query(`DELETE FROM session_attention WHERE session_id=?`).run(id);
   db.query(`DELETE FROM session_prs WHERE session_id=?`).run(id);
+  // An undelivered first message must not reach a later session that reuses the id.
+  db.query(`DELETE FROM pending_first_turns WHERE session_id=?`).run(id);
 }
 
 export function getSession(db: Database, id: string): SessionRow | null {

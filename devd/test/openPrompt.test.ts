@@ -4,9 +4,10 @@ import { expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createApp } from "../src/api";
+import { createApp, reportFirstPromptFailed } from "../src/api";
+import { USER_FIRST_PROMPT_TAG } from "../src/bridgeLink";
 import { DEFAULT_CONFIG } from "../src/config";
-import { openDb } from "../src/db";
+import { openDb, setRepoAgent } from "../src/db";
 import { MAX_FIRST_PROMPT_BYTES, SessionManager } from "../src/sessions";
 
 const IMAGE = join(import.meta.dir, "..", "..", "image");
@@ -24,16 +25,16 @@ interface Harness {
   queueFails?: boolean;
 }
 function appWith(open: (t: Record<string, unknown>) => Promise<Opened>, h: Harness = {}) {
-  const turns: { id: string; text: string; onDone?: (err: Error | null) => void }[] = [];
+  const turns: { id: string; text: string; onDone?: (err: Error | null) => void; tag: string | null }[] = [];
   const notices: string[] = [];
   const notified: string[] = [];
   const db = openDb(":memory:");
   const ensured: string[] = [];
   const links = h.noLinks ? undefined : {
     ensure: (id: string) => { ensured.push(id); }, send: async () => {}, hasFirstTurn: () => h.queued ?? false,
-    startTurnWhenConnected: (id: string, text: string, onDone?: (err: Error | null) => void) => {
+    startTurnWhenConnected: (id: string, text: string, onDone?: (err: Error | null) => void, tag: string | null = null) => {
       if (h.queueFails) throw new Error("disk full");
-      turns.push({ id, text, onDone });
+      turns.push({ id, text, onDone, tag });
     },
   };
   const threads = () => ({ snapshot: () => ({ runs: h.runs ?? [] }), addNotice: (text: string) => { notices.push(text); } });
@@ -73,6 +74,8 @@ test("chat: a session that is not running yet still gets the prompt once its bri
   const a = appWith(async () => ({ created: false, session: { id: "dev-p-r", status: "stopped", runtime: "chat" } }));
   expect((await post(a, { ...BASE, runtime: "chat", prompt: "fix the login bug" })).status).toBe(200);
   expect(a.turns.map((t) => t.text)).toEqual(["fix the login bug"]);
+  // Tagged, so a devd restart before delivery still reports its outcome (index.ts onRestoredTurnDone).
+  expect(a.turns[0]!.tag).toBe(USER_FIRST_PROMPT_TAG);
   expect(a.ensured).toEqual([]); // the link sync connects it when the session runs
 });
 
@@ -86,6 +89,20 @@ test("chat: without bridge links the prompt is refused before anything opens; a 
   expect((await post(failing, { ...BASE, runtime: "chat", prompt: "fix the login bug" })).status).toBe(201);
   expect(failing.notices.join()).toContain("Your first message was not delivered (disk full)");
   expect(failing.notified.join()).toContain("disk full");
+});
+
+test("tmux: a leading '-' is refused for Antigravity only (agy reads the -i value as flags), before anything opens", async () => {
+  let calls = 0;
+  const a = appWith(async () => { calls++; return tmuxOpened; });
+  const r = await post(a, { ...BASE, runtime: "tmux", agent: "antigravity", prompt: "-v fix it" });
+  expect(r.status).toBe(400);
+  expect((await r.json() as { error: string }).error).toContain("Antigravity");
+  expect(calls).toBe(0);
+  // The repo's remembered agent counts too.
+  setRepoAgent(a.db, "f", "p", "r", "antigravity", 0);
+  expect((await post(a, { ...BASE, runtime: "tmux", prompt: "-v fix it" })).status).toBe(400);
+  expect((await post(a, { ...BASE, runtime: "tmux", prompt: "fix it -v" })).status).toBe(201);
+  expect((await post(a, { ...BASE, runtime: "tmux", agent: "codex", prompt: "-v fix it" })).status).toBe(201);
 });
 
 test("chat: a prompt starting with '-' is plain text there", async () => {
@@ -280,4 +297,14 @@ test("a prompt for a named session of the other runtime is refused, not lost", a
   expect(r.status).toBe(400);
   expect((await r.json() as { error: string }).error).toBe("dev-p-r is a tmux session; the prompt was sent for chat");
   expect(calls).toBe(0);
+});
+
+test("reportFirstPromptFailed (also used after a devd restart) says it in the thread, the event log and a notification", () => {
+  const db = openDb(":memory:");
+  const notices: string[] = []; const notified: string[] = [];
+  reportFirstPromptFailed({ db, threads: () => ({ addNotice: (t: string) => { notices.push(t); } }), notify: (_t: string, b: string) => { notified.push(b); } },
+    { id: "dev-p-r", project: "p", repo: "r" }, new Error("first message discarded before it was sent"));
+  expect(notices[0]).toContain("Your first message was not delivered (first message discarded before it was sent)");
+  expect(notified[0]).toContain("dev-p-r");
+  expect((db.query("SELECT type FROM events").all() as { type: string }[]).map((e) => e.type)).toEqual(["first_prompt_failed"]);
 });

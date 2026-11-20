@@ -170,10 +170,11 @@ export function NewSession() {
     : onIbx ? "InstaBox starts without a message: clear it, or run on the VPS."
     : repo === SOLO ? "claudeSolo starts without a message: clear it, or pick a repo."
     : choice?.runtime === "tmux" && !/\s/.test(prompt) ? "A terminal session's message needs more than one word."
+    : choice?.runtime === "tmux" && agent === "antigravity" && prompt.startsWith("-") ? "Antigravity's terminal message can't start with '-'."
     : null;
-  // Typed text is new work: it always starts a new session with it. Empty keeps today's default, joining the repo's
-  // session of this runtime when there is one. The other choice is the secondary action next to the summary.
-  // The one devd joins: a running session first (joinableSessionId), so the summary names the right one.
+  // Typed text is new work: it always starts a new session with it. Empty opens the repo's session of this runtime
+  // when there is one, as before. The other choice is the secondary action next to the summary.
+  // The session an empty box opens, named in the summary and sent by id: a running one first.
   const reusable = onIbx ? null : existing.find((s) => s.status === "running") ?? existing[0] ?? null;
   // Typed text always asks for a fresh session: devd's join could otherwise hand it to a session this page does not
   // know about (another tab, a stale store). Empty opens exactly the session the summary names.

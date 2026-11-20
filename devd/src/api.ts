@@ -25,6 +25,7 @@ import { execInContainer } from "./docker";
 import { createReadStream, mkdtempSync, openSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { Readable } from "node:stream";
 import { liveActivitiesRoutes, type LiveActivities } from "./liveActivities";
+import { USER_FIRST_PROMPT_TAG } from "./bridgeLink";
 import { AGENT_EVENTS, type AgentEvent, type AgentEventHub, type HookMeta, type NotifyFn } from "./agentEvents";
 import { AGENT_IDS, AGENTS, chatRuntimeBlock, instaboxAgentBlock, runtimeForOmitted, specFor, tmuxRuntimeBlock, type Upstream } from "./agents";
 import { buildProjectLeaderboard, buildRange, buildSessionUsage, buildTotals, buildWorkHours, predictDisk, PROMPT_CHARS, PROMPT_WAIT } from "./aggregate";
@@ -113,6 +114,16 @@ export interface ShareLockdown {
 }
 
 const endSyncWaitMs = () => Number(process.env.DEVD_END_SYNC_WAIT_MS ?? 20_000);
+
+/** A user's first prompt (POST /api/sessions) that never reached the agent: said in the thread, the event log and a
+ *  notification. Also used after a devd restart (index.ts onRestoredTurnDone). */
+export function reportFirstPromptFailed(d: { db: Database; threads?: (id: string) => { addNotice: (text: string, at: number) => void }; notify: NotifyFn }, s: Pick<SessionRow, "id" | "project" | "repo">, err: Error): void {
+  try {
+    logEvent(d.db, s.id, "first_prompt_failed", { error: err.message });
+    d.threads?.(s.id).addNotice(`Your first message was not delivered (${err.message}). Send it again.`, Date.now());
+    d.notify(`${s.project}/${s.repo}`, `First message to ${s.id} was not delivered: ${err.message}`, { session: { id: s.id, project: s.project, repo: s.repo, runtime: "chat" } });
+  } catch (e) { console.error(`reporting the failed first message of ${s.id} failed:`, e); }
+}
 
 export interface ApiDeps { mgr: SessionManager; db: Database; cfg: DevConfig; root: string; tree: () => Promise<TreeProject[]>; listener: ListenerClient; notify: NotifyFn; stats: () => unknown; resources?: () => unknown; cloneQueue: CloneQueue; configRepo: ConfigRepo; dashboardDir?: string; previewHost?: string; backup: { build: () => Promise<string>; restore: (tarPath: string) => Promise<void> }; github?: { owners: () => GithubOwner[] | Promise<GithubOwner[]>; repos: (owner: string) => GithubRepo[] | Promise<GithubRepo[]>; sharedRepos?: () => GithubRepo[] | Promise<GithubRepo[]> }; gitea?: GiteaApi; opToken?: string; vault?: Vault; gitProxy?: Hono; prodCatalogPath?: string; prodAccessPath?: string; sshKeyTitles?: () => Promise<string[]>; coolifyInstances?: () => Record<string, CoolifyInstance>; execOperation?: (op: string, params: Record<string, string>) => Promise<string>; dbTargets?: DbTargets; dbProxyHost?: string; agentEvents?: AgentEventHub; spawnPty?: SpawnPty; scheduler?: { fireNow: (id: string) => Promise<boolean> }; prodCatalog?: Catalog; prodDbAccess?: Record<string, Access>; readProdSecret?: (opItem: string) => string | Promise<string>; execProdWrite?: (opts: { entry: DbEntry; server: ServerRef; sql: string; preview: boolean; scope?: WriteScope }) => Promise<{ rows: number; note: string }>; tmuxProbe?: (containers: string[], now?: number) => Promise<Record<string, TmuxSession[]>>; onConfigWritten?: () => void;
   liveActivities?: LiveActivities;
@@ -978,21 +989,15 @@ export function createApp(d: ApiDeps): Hono {
   // Its outcome is not lost: a refusal or timeout lands in the thread, the event log and a notification.
   const linkOpenedChat = (r: { session: SessionRow; claudePrompt?: string }, prompt?: string) => {
     const s = r.session;
-    const onDone = prompt === undefined ? undefined : (err: Error | null) => {
-      if (!err) return;
-      try {
-        logEvent(d.db, s.id, "first_prompt_failed", { error: err.message });
-        d.threads?.(s.id).addNotice(`Your first message was not delivered (${err.message}). Send it again.`, Date.now());
-        d.notify(`${s.project}/${s.repo}`, `First message to ${s.id} was not delivered: ${err.message}`, { session: { id: s.id, project: s.project, repo: s.repo, runtime: "chat" } });
-      } catch (e) { console.error(`reporting the failed first message of ${s.id} failed:`, e); }
-    };
+    const onDone = prompt === undefined ? undefined : (err: Error | null) => { if (err) reportFirstPromptFailed(d, s, err); };
     try {
       if (storedRuntime(s) === "chat" && s.status === "running") d.links?.ensure(s.id);
       // The user's prompt is queued even when the session is not running yet: the persisted first turn goes out once
       // its bridge connects. devd's own conflict message keeps its old rule (a running session only).
       if (storedRuntime(s) === "chat" && (s.status === "running" || prompt !== undefined)) {
         const first = r.claudePrompt !== undefined && prompt !== undefined ? `${r.claudePrompt}\n\n${prompt}` : r.claudePrompt ?? prompt;
-        if (first !== undefined) d.links?.startTurnWhenConnected(s.id, first, onDone);
+        // Tagged only when it carries the user's prompt, so a devd restart still reports its outcome (index.ts).
+        if (first !== undefined) d.links?.startTurnWhenConnected(s.id, first, onDone, prompt !== undefined ? USER_FIRST_PROMPT_TAG : null);
       }
     }
     catch (e) { console.error(`bridge link of opened session ${s.id} failed:`, e); onDone?.(e as Error); }
@@ -1029,6 +1034,11 @@ export function createApp(d: ApiDeps): Hono {
     if (body.agent !== undefined && !isAgentName(body.agent))
       return c.json({ error: `invalid agent (${AGENT_IDS.join("|")})` }, 400);
     const agent = body.agent as AgentName | undefined;
+    // agy takes the prompt as the value of `-i`, and its flag parser reads a value starting with '-' as flags
+    // (`agy -i --version` → "flags provided but not defined"); the other CLIs get it after `--`.
+    if (prompt !== undefined && body.runtime === "tmux" && prompt.startsWith("-") && body.folder && body.project && body.repo
+      && resolveAgent(agent, getRepoAgent(d.db, body.folder, body.project, body.repo)) === "antigravity")
+      return c.json({ error: "an Antigravity terminal session's first prompt cannot start with '-' (agy would read it as a flag)" }, 400);
     if (body.host !== undefined && body.host !== "vps" && body.host !== "instabox") return c.json({ error: "invalid host (vps|instabox)" }, 400);
     if (body.runtime !== undefined && body.runtime !== "tmux" && body.runtime !== "chat") return c.json({ error: "invalid runtime (tmux|chat)" }, 400);
     const runtime = body.runtime as SessionRuntime | undefined;

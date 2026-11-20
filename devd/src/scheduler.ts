@@ -6,7 +6,7 @@ import type { AgentName, SessionRuntime } from "./db";
 import { chatRuntimeBlock } from "./agents";
 import { resolveAgent, storedRuntime } from "./sessions";
 import { endSessionKeepingWork, type AutoEndDeps } from "./autoEnd";
-import { CommandTimeout } from "./bridgeLink";
+import { CommandTimeout, FirstTurnPending } from "./bridgeLink";
 
 /** How long a chat schedule waits for the new session's bridge before it fails visibly. */
 export const BRIDGE_WAIT_MS = 120_000;
@@ -136,6 +136,8 @@ export function createScheduler(d: SchedulerDeps) {
       // Not when the first turn's outcome is unknown (the bridge did not answer): the agent may be working.
       let error = (e as Error).message;
       if (openedId && e instanceof CommandTimeout) error = `first turn outcome unknown (${error}); check the session ${openedId}`;
+      // The session holds someone else's first message (a user's prompt): it is theirs, so it is not ended.
+      else if (openedId && e instanceof FirstTurnPending) error += "; the session is left as it is";
       else if (openedId) {
         try {
           const s = getSession(d.db, openedId);
