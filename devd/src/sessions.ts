@@ -544,27 +544,24 @@ export class SessionManager {
   // A bind mount to a nonexistent target would be created by docker as ROOT-owned and cc (uid 1000)
   // would silently not write transcripts — the same trap as a root-owned .git in a fresh
   // clone. That is why it is created (and chowned) here, right before `docker run`.
-  /** Writes a file with the DUMMY into the session's control dir and returns its path. When dummies
-   *  are not configured, returns the shared file with the real tokens (the state before phase 2). */
+  /** Writes a file with the DUMMY into the session's control dir and returns its path. Without
+   *  placeholders configured there is no token mount at all — the shared file with the REAL tokens
+   *  never goes into a container (there is no config switch that would want it). */
   private gitTokensFor(id: string, devdUrl?: string): string | undefined {
-    if (!this.d.issuePlaceholder || !this.d.giteaInstances) return this.d.giteaTokensPath;
+    if (!this.d.issuePlaceholder || !this.d.giteaInstances) return undefined;
     const tokens = sessionGitTokens(
       this.d.giteaInstances(), id, this.d.issuePlaceholder, devdUrl ?? this.d.devdUrl ?? DEFAULT_DEVD_URL,
     );
     const dir = this.controlDir(id);
-    const path = join(dir, "gitea-tokens.json");
-    try {
-      this.ensureControlDir(id);
-      // Read by uid 1000 in the container via a :ro mount; devd runs as root. The control dir is
-      // agent-writable (/run/devd): never follow a planted symlink (noFollowFs.ts).
-      const asRoot = process.getuid?.() === 0;
-      withDir(dir, [], false, (d) => writeFileAt(d, "gitea-tokens.json", JSON.stringify(tokens),
-        asRoot ? { mode: 0o600, owner: { uid: 1000, gid: 1000 }, replace: true } : { mode: 0o644, replace: true }));
-    } catch (e) {
-      console.error(`writing placeholders for ${id} failed:`, (e as Error).message);
-      return this.d.giteaTokensPath;   // better the state before phase 2 than a session without git
-    }
-    return path;
+    this.ensureControlDir(id);
+    // Read by uid 1000 in the container via a :ro mount; devd runs as root. The control dir is
+    // agent-writable (/run/devd): never follow a planted symlink (noFollowFs.ts). A failure is the
+    // open's failure — falling back to the real tokens file would hand them to the agent (it can
+    // force the failure with `mkdir /run/devd/gitea-tokens.json`).
+    const asRoot = process.getuid?.() === 0;
+    withDir(dir, [], false, (d) => writeFileAt(d, "gitea-tokens.json", JSON.stringify(tokens),
+      asRoot ? { mode: 0o600, owner: { uid: 1000, gid: 1000 }, replace: true } : { mode: 0o644, replace: true }));
+    return join(dir, "gitea-tokens.json");
   }
 
   /** Builds the sidecar when dind is enabled. An "already exists" error is fine —

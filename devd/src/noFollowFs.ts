@@ -8,7 +8,7 @@
 //    machines) it falls back to the plain path — each component is still checked, but racily;
 //  - a file is created with O_CREAT|O_EXCL|O_NOFOLLOW (never follows a link, never writes into an
 //    existing file) and its mode/owner are set on the fd, not on the path.
-import { closeSync, constants as C, existsSync, fchmodSync, fchownSync, mkdirSync, openSync, rmSync, writeSync } from "node:fs";
+import { closeSync, constants as C, existsSync, fchmodSync, fchownSync, lstatSync, mkdirSync, openSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
 const HAS_PROC = existsSync("/proc/self/fd");
@@ -56,7 +56,13 @@ export interface WriteOpts {
 /** Writes `name` in `dir` as a new file; never follows a symlink at the name. */
 export function writeFileAt(dir: DirHandle, name: string, data: string | Uint8Array, o: WriteOpts): void {
   const p = join(dir.path, name);
-  if (o.replace) rmSync(p, { force: true });
+  if (o.replace) {
+    // A planted directory is not "a file to replace": refuse explicitly instead of an EISDIR surprise.
+    let isDir = false;
+    try { isDir = lstatSync(p).isDirectory(); } catch { /* nothing there */ }
+    if (isDir) throw new Error(`${name} is a directory, refusing to replace it`);
+    rmSync(p, { force: true });
+  }
   const fd = openSync(p, C.O_WRONLY | C.O_CREAT | C.O_EXCL | C.O_NOFOLLOW, o.mode);
   try {
     const buf = Buffer.from(data);

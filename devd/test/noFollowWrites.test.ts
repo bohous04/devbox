@@ -71,6 +71,19 @@ test("gitea placeholder tokens: a planted symlink is replaced, its target untouc
   expect(JSON.parse(readFileSync(path, "utf8"))).toBeTruthy();
 });
 
+test("gitea placeholder tokens: a planted directory fails the open explicitly; the real tokens file is never returned", () => {
+  const real = "/etc/devd/gitea-tokens.json";
+  const { mgr, ctl } = manager({ giteaTokensPath: real, issuePlaceholder: (sid: string) => `ph-${sid}`, giteaInstances: () => [{ name: "infra", url: "https://git.example/" }] });
+  const id = "dev-harbor-api";
+  mkdirSync(join(ctl, id, "gitea-tokens.json"), { recursive: true });
+  expect(() => mgr.gitTokensFor!.call(mgr, id)).toThrow(/gitea-tokens.json is a directory/);
+});
+
+test("gitea tokens without placeholders configured: no mount at all, never the shared real file", () => {
+  const { mgr } = manager({ giteaTokensPath: "/etc/devd/gitea-tokens.json" });
+  expect(mgr.gitTokensFor!.call(mgr, "dev-harbor-api")).toBeUndefined();
+});
+
 test("manual-stop marker: a symlinked recovery dir is replaced by a real one, a symlinked marker too", () => {
   const { mgr, ctl } = manager();
   const s = sentinel();
