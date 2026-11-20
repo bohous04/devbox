@@ -91,11 +91,13 @@ export function setAgentGitRoots(fn: (() => string[]) | null): void {
 }
 
 let trustedRoots: () => string[] = () => [];
+let rootsConfigured = false;
 /** The only repos host git may touch as root: devd's own (config repo, its checkout). When devd is
  *  root, EVERY other git runs as AGENT_UID (layer 4) — the default is the agent, not root, so a
  *  path that only looks like ours (a symlink out of the agent root) cannot get root's git. */
 export function setTrustedGitRoots(fn: (() => string[]) | null): void {
   trustedRoots = fn ?? (() => []);
+  rootsConfigured = fn !== null;
 }
 
 let agentIdentity: { name: string; email: string } | null = null;
@@ -233,6 +235,9 @@ export async function hardenGit(cmd: string[], opts: RunOpts, raw: Raw, uid: num
   // Directory git will run in: cwd + an optional -C.
   let dir = resolve(opts.cwd ?? process.cwd());
   for (let i = 0; i < globals.length; i++) if (globals[i] === "-C" && globals[i + 1] !== undefined) dir = resolve(dir, globals[++i]!);
+  // As root, git before index.ts configured the roots would be classified against empty lists:
+  // a startup-order bug, refused loudly instead of guessed at.
+  if (uid === 0 && !rootsConfigured) return { result: refused("host git roots are not configured yet (devd startup order)") };
   const roots = untrustedRoots().filter(Boolean).map(canon);
   const target = canon(dir);
   if (roots.some((r) => within(target, r))) return { result: refused("repo belongs to a restricted (shared/tainted) session") };

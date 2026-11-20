@@ -680,7 +680,6 @@ const tree = () => treeCache.get();
 // background: the API serves the last report at once (the first scan after a restart answers
 // "scanning"), so a slow repo never holds a request.
 const unpushedCache = backgroundSnapshot(() => buildUnpushedReport(root, { giteaHosts: getGiteaInstances().map((i) => i.url) }), 60_000);
-unpushedCache.peek();   // start the first scan at boot, not on the first page open
 // Push / Create PR from the page: git auth for Gitea same as for clone (credentialsForUrl),
 // GitHub goes through the gh helper on the host; PRs on Gitea via the API with a token from the vault.
 const unpushed = {
@@ -1044,6 +1043,9 @@ setAgentGitRoots(() => [root]);
 setTrustedGitRoots(() => [configDir, join(import.meta.dir, "..", "..")]);
 setAgentGitIdentity(cfg.settings.hostGitIdentity ?? null);
 if (!cfg.settings.hostGitIdentity) console.error("config.settings.hostGitIdentity is not set: host git (pull --rebase/--autostash) has no committer identity and fails where it needs one");
+// Start the first unpushed scan at boot (not on the first page open) — only now that the git roots
+// above are configured: hardenGit refuses git as root before that.
+unpushedCache.peek();
 // Repos root's git wrote into before that switch can hold root-owned files git as the agent uid
 // cannot rewrite (fetch/pull then fail). Say which; the fix is tools/own-agent-repos.ts.
 if (process.getuid?.() === 0) {

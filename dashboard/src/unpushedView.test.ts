@@ -108,6 +108,8 @@ test("withoutPushed hides a pushed branch until the report is newer than the pus
   // A repo and a folder left with nothing disappear.
   const all = withoutPushed(report, [...pushedA, { path: "/srv/dev/acme/portal/web", branch: "b", at: 2000 }, { path: "/srv/dev/acme/x", branch: "a", at: 2000 }]);
   expect(all).toMatchObject({ total: 0, folders: [] });
+  // A push in the same millisecond the scan started may be missing from it: still hidden.
+  expect(withoutPushed({ ...report, at: 2000 }, pushedA).total).toBe(4);
   // A report scanned after the push is shown as is.
   expect(withoutPushed({ ...report, at: 2500 }, pushedA)).toEqual({ ...report, at: 2500 });
 });

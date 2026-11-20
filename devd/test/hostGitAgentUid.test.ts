@@ -2,7 +2,7 @@
 // (config probe, then run) is best-effort, the repo can change in between. These tests pin the
 // argv/env that hardenGit produces when devd is root (injected uid 0; this machine is not root),
 // plus one end-to-end run that only works as root on Linux (skipped elsewhere, with the reason).
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,8 @@ import { asAgent, hardenGit, setAgentGitIdentity, setAgentGitRoots, setTrustedGi
 import type { RunOpts, RunResult } from "../src/proc";
 import { sh } from "./helpers/sh";
 
+// index.ts configures the roots before any git; tests that act as root do the same.
+beforeEach(() => setTrustedGitRoots(() => []));
 afterEach(() => { setAgentGitRoots(null); setTrustedGitRoots(null); setAgentGitIdentity(null); });
 
 const ok: RunResult = { code: 0, stdout: "", stderr: "", timedOut: false };
@@ -246,4 +248,14 @@ test.skipIf(!asRootOnLinux)("as root on Linux: the dropped process has no capabi
   expect(field("Groups")).toBe("");
   expect(field("NoNewPrivs")).toBe("1");
   for (const c of ["CapInh", "CapPrm", "CapEff", "CapAmb"]) expect(field(c)).toBe("0000000000000000");
+});
+
+test("as root, git before the roots are configured is refused (startup order), not classified against empty lists", async () => {
+  setTrustedGitRoots(null);
+  const { seen, raw } = recorder();
+  const h = await hardenGit(["git", "-C", "/srv/dev/harbor/api", "status"], { timeoutMs: 1000 }, raw, 0);
+  expect("result" in h && h.result.stderr).toContain("not configured yet");
+  expect(seen).toEqual([]);                                   // not even the config probe ran
+  const n = await hardenGit(["git", "-C", "/tmp", "status"], { timeoutMs: 1000 }, raw, 501);
+  expect("cmd" in n).toBe(true);                              // not root: nothing to configure
 });

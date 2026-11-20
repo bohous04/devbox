@@ -78,10 +78,10 @@ export function commitsLabel(count: number, shown?: number): string {
 export interface PushedBranch { path: string; branch: string; at: number }
 
 /** The report without branches pushed from this page after it was scanned: the server rescans in
- *  the background, and until a newer report arrives the pushed branch would still show. Counts of
+ *  the background, and until a report that STARTED after the push arrives the pushed branch would still show. Counts of
  *  repos, folders and the total are reduced to match; emptied repos and folders disappear. */
 export function withoutPushed(report: UnpushedReport, pushed: readonly PushedBranch[]): UnpushedReport {
-  const hide = pushed.filter((p) => p.at > report.at);
+  const hide = pushed.filter((p) => p.at >= report.at);
   if (!hide.length) return report;
   const hidden = (path: string, branch: string) => hide.some((p) => p.path === path && p.branch === branch);
   const folders = report.folders.map((f) => {
