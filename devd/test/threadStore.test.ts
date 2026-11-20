@@ -474,3 +474,18 @@ test("effort: a stored state of another shape (written before the parser, or by 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("effort: dropped values are logged once per field per session, however many distinct ones a bridge sends", () => {
+  const errors = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const s = store();
+    for (let i = 0; i < 50; i++) {
+      s.apply(ev({ type: "effort.state", model: "m".repeat(200 + i), supported: [`bad${i}`], effective: `odd${i}`, chosen: `x${i}` }));
+    }
+    const logged = errors.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("thread store: effort"));
+    expect(logged.map((l) => l.split(" ")[3])).toEqual(["model", "supported", "effective", "chosen"]);
+    s.close();
+  } finally {
+    errors.mockRestore();
+  }
+});
