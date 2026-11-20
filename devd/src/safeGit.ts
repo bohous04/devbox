@@ -85,9 +85,25 @@ export const AGENT_UID = 1000;
 
 let agentRoots: () => string[] = () => [];
 /** Roots that hold agent-writable repos (devd's workspace root: workspaces, bare clones, session
- *  worktrees). Git whose target is inside runs as AGENT_UID when devd is root (layer 4). */
+ *  worktrees). Used to refuse git in devd's own `_`-dirs there (see classifyGitTarget). */
 export function setAgentGitRoots(fn: (() => string[]) | null): void {
   agentRoots = fn ?? (() => []);
+}
+
+let trustedRoots: () => string[] = () => [];
+/** The only repos host git may touch as root: devd's own (config repo, its checkout). When devd is
+ *  root, EVERY other git runs as AGENT_UID (layer 4) — the default is the agent, not root, so a
+ *  path that only looks like ours (a symlink out of the agent root) cannot get root's git. */
+export function setTrustedGitRoots(fn: (() => string[]) | null): void {
+  trustedRoots = fn ?? (() => []);
+}
+
+let agentIdentity: { name: string; email: string } | null = null;
+/** Identity for commits host git makes as the agent uid (pull --rebase rewrites committers,
+ *  --autostash commits). It has no global config there; null = none configured, and such a
+ *  command fails with git's own "empty ident" error. */
+export function setAgentGitIdentity(id: { name: string; email: string } | null): void {
+  agentIdentity = id;
 }
 
 /** Where a git target (canonical path) sits relative to an agent root: "agent" = a repo or a
@@ -106,7 +122,17 @@ const AGENT_GIT_ENV: Readonly<Record<string, string>> = {
   HOME: "/nonexistent",
   GIT_CONFIG_GLOBAL: "/dev/null",
 };
-const asAgent = (cmd: string[]): string[] => ["setpriv", `--reuid=${AGENT_UID}`, `--regid=${AGENT_UID}`, "--clear-groups", ...cmd];
+export const asAgent = (cmd: string[]): string[] =>
+  ["setpriv", `--reuid=${AGENT_UID}`, `--regid=${AGENT_UID}`, "--clear-groups", "--no-new-privs", "--inh-caps=-all", ...cmd];
+const identityEnv = (): Record<string, string> => agentIdentity ? {
+  GIT_AUTHOR_NAME: agentIdentity.name, GIT_AUTHOR_EMAIL: agentIdentity.email,
+  GIT_COMMITTER_NAME: agentIdentity.name, GIT_COMMITTER_EMAIL: agentIdentity.email,
+} : {};
+
+/** Repo-scoped keys that redirect or weaken the transport (proxy, TLS checks, resolve, extra
+ *  headers that would carry devd's auth elsewhere). Refused for network commands only. */
+const NET_KEY = /^(http\.(.+\.)?(proxy|proxyauthmethod|proxysslcert|proxysslkey|proxysslcainfo|sslverify|sslcainfo|sslcapath|sslcert|sslkey|sslbackend|pinnedpubkey|curloptresolve|extraheader|cookiefile|followredirects)|remote\..+\.proxy)$/;
+const NET_CMDS = new Set(["clone", "fetch", "pull", "push", "ls-remote"]);
 
 export const isGitArgv = (cmd: readonly string[]): boolean => cmd.length > 0 && basename(cmd[0]!) === "git";
 
@@ -211,9 +237,9 @@ export async function hardenGit(cmd: string[], opts: RunOpts, raw: Raw, uid: num
   const target = canon(dir);
   if (roots.some((r) => within(target, r))) return { result: refused("repo belongs to a restricted (shared/tainted) session") };
 
-  // Layer 4: a repo under an agent root runs as the agent uid when devd is root — whatever the repo
-  // manages to run despite layers 1-3 then runs with the agent's own rights, not root's. Any of
-  // cwd/-C, --git-dir or --work-tree inside an agent root counts.
+  // Layer 4: when devd is root, git runs as the agent uid unless EVERY target (cwd/-C, --git-dir,
+  // --work-tree) is in a trusted root — whatever a repo manages to run despite layers 1-3 then runs
+  // with the agent's own rights, not root's.
   const targets = [target];
   for (let i = 0; i < globals.length; i++) {
     const a = globals[i]!;
@@ -226,8 +252,9 @@ export async function hardenGit(cmd: string[], opts: RunOpts, raw: Raw, uid: num
   const agent = agentRoots().filter(Boolean).map(canon);
   const classes = targets.flatMap((t) => agent.map((r) => classifyGitTarget(t, r)));
   if (classes.includes("own")) return { result: refused("target is devd's own directory, not a repo") };
-  const dropToAgent = uid === 0 && classes.includes("agent");
-  const env = dropToAgent ? { ...(opts.env ?? {}), ...AGENT_GIT_ENV, ...SAFE_GIT_ENV } : { ...(opts.env ?? {}), ...SAFE_GIT_ENV };
+  const trusted = trustedRoots().filter(Boolean).map(canon);
+  const dropToAgent = uid === 0 && !targets.every((t) => trusted.some((r) => within(t, r)));
+  const env = dropToAgent ? { ...identityEnv(), ...(opts.env ?? {}), ...AGENT_GIT_ENV, ...SAFE_GIT_ENV } : { ...(opts.env ?? {}), ...SAFE_GIT_ENV };
   const unsetEnv = [...(opts.unsetEnv ?? []), ...UNSAFE_GIT_ENV];
   const envOpts = dropToAgent ? { env, unsetEnv, inheritEnv: false as const } : { env, unsetEnv };
   const wrap = dropToAgent ? asAgent : (c: string[]) => c;
@@ -243,6 +270,10 @@ export async function hardenGit(cmd: string[], opts: RunOpts, raw: Raw, uid: num
     const f = e.origin.slice(5);
     const file = canon(isAbsolute(f) ? f : resolve(dir, f));
     if (roots.some((r) => within(file, r))) return { result: refused("repo config lives in a restricted (shared/tainted) session") };
+  }
+  if (rest.length && NET_CMDS.has(rest[0]!)) {
+    const net = entries.find((e) => REPO_SCOPES.has(e.scope) && NET_KEY.test(e.key.toLowerCase()));
+    if (net) return { result: refused(`repo config sets ${net.key} for a network command`) };
   }
   const dyn = repoOverrides(entries);
   if ("refuse" in dyn) return { result: refused(`config repa nastavuje ${dyn.refuse}`) };

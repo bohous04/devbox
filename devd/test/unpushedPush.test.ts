@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sh } from "../src/git";
-import { baseBranch, buildUnpushedReport, createPr, parseRemote, pushBranch, remoteInfo, unpushedInRepo, unpushedOps } from "../src/unpushed";
+import { baseBranch, buildUnpushedReport, createPr, findPr, parseRemote, pushBranch, remoteInfo, unpushedInRepo, unpushedOps } from "../src/unpushed";
 
 async function fixture(defaultBranch = "main") {
   const root = mkdtempSync(join(tmpdir(), "devd-unpushed-push-"));
@@ -210,4 +210,12 @@ test("unpushedOps.createPr works out the remote and base and passes them to the 
   const r = await ops.createPr({ path: web, branch: "main", title: "T", body: "B" });
   expect(r).toEqual({ url: "https://github.com/o/n/pull/1", number: 1 });
   expect(argv.slice(0, 9)).toEqual(["gh", "pr", "create", "--repo", "o/n", "--head", "main", "--base", "main"]);
+});
+
+test("gh pr create / pr list never run in the agent's repo (gh runs its own git there as root): cwd is /", async () => {
+  const cwds: string[] = [];
+  const ghRun = async (cwd: string) => { cwds.push(cwd); return { code: 0, stdout: "[]", stderr: "" }; };
+  await createPr({ dir: "/srv/dev/harbor/api", branch: "f", base: "main", title: "T", body: "", remote: gh, giteaToken: undefined, ghRun }).catch(() => {});
+  await findPr({ dir: "/srv/dev/harbor/api", branch: "f", remote: gh, giteaToken: undefined, ghRun } as Parameters<typeof findPr>[0]).catch(() => {});
+  expect(cwds).toEqual(["/", "/"]);
 });

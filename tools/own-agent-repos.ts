@@ -1,7 +1,7 @@
 // One-time fix before host git runs as the agent uid: root's git left root-owned files in the
 // agent repos. Dry run by default (prints counts); --apply chowns exactly those repo dirs.
 //   bun tools/own-agent-repos.ts [ROOT] [--apply]      ROOT defaults to $DEVD_ROOT or /srv/dev
-import { ownAgentRepos } from "../devd/src/agentRepos";
+import { ownAgentRepos, untraversableForAgent } from "../devd/src/agentRepos";
 import { run } from "../devd/src/proc";
 
 const args = process.argv.slice(2);
@@ -11,6 +11,8 @@ if (rest.length > 1 || rest.some((a) => a.startsWith("-"))) throw new Error("Usa
 const root = rest[0] ?? process.env.DEVD_ROOT ?? "/srv/dev";
 if (apply && process.getuid?.() !== 0) throw new Error("--apply needs root (chown)");
 
+const blocked = untraversableForAgent(root);
+if (blocked.length) console.log(`NOT traversable by the agent uid (fix by hand, host git fails below): ${blocked.join(", ")}`);
 const report = await ownAgentRepos(root, {
   apply,
   chown: async (argv) => {

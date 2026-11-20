@@ -2,7 +2,7 @@
 // that came with running host git as the agent uid (safeGit.ts layer 4). Before that, root's git
 // wrote FETCH_HEAD, packs, ORIG_HEAD… into these repos; git as the agent uid cannot rewrite them.
 import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { AGENT_UID, classifyGitTarget } from "./safeGit";
 import { discoverRepos } from "./unpushed";
 
@@ -61,4 +61,17 @@ export function ownershipHints(root: string, uid: number = AGENT_UID): string[] 
     return [dir, ...["", "HEAD", "config", "FETCH_HEAD", "ORIG_HEAD", "index", "packed-refs"].map((f) => join(gitDir, f))]
       .some((p) => { try { return lstatSync(p).uid !== uid; } catch { return false; } });
   });
+}
+
+/** The root and each of its parents that the agent uid cannot enter (no search permission for
+ *  it): host git as that uid fails in every repo below them. */
+export function untraversableForAgent(root: string, uid: number = AGENT_UID, gid: number = AGENT_UID): string[] {
+  const out: string[] = [];
+  for (let p = realpathSync(root); ; p = dirname(p)) {
+    const st = lstatSync(p);
+    const bit = st.uid === uid ? 0o100 : st.gid === gid ? 0o010 : 0o001;
+    if (!(st.mode & bit)) out.push(p);
+    if (p === dirname(p)) break;
+  }
+  return out;
 }

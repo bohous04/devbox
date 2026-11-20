@@ -1,5 +1,5 @@
-import { chownSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { withDir, writeFileAt } from "./noFollowFs";
+import { chownSync, existsSync, fchownSync, lstatSync, rmdirSync, type Stats, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { type DirHandle, withDir, writeFileAt } from "./noFollowFs";
 import { basename, dirname, join } from "node:path";
 import { redactArgv, run, timeoutFor, type RunResult } from "./proc";
 import { AGENT_UID } from "./safeGit";
@@ -126,7 +126,8 @@ async function gitClone(args: string[], url: string, dest: string, authEnv: Reco
   const cmd = ["git", "clone", ...args, ...(onProgress ? ["--progress"] : []), "--", url, partial];
   const ms = timeoutFor("GIT_CLONE");
   const r = await run(cmd, {
-    cwd: process.cwd(),
+    // The clone's own parent, not devd's cwd (its checkout, a trusted root for safeGit).
+    cwd: dirname(partial),
     env: Object.keys(authEnv).length ? authEnv : undefined,
     timeoutMs: ms,
     onStderr: onProgress ? cloneProgressSink(onProgress) : undefined,
@@ -366,9 +367,15 @@ export async function reregisterWorktree(bare: string, dest: string, head: strin
   const admin = join(bare, "worktrees", basename(dest));
   // Both the bare clone and the worktree are agent-writable and devd runs as root: written without
   // following any symlink, a planted link is replaced (noFollowFs.ts).
-  const file = { mode: 0o644, replace: true };
+  // As root, everything written here belongs to the agent uid: host git runs as that uid (safeGit.ts
+  // layer 4) and the `git reset` below must be able to write the index next to these files.
+  const owner = process.getuid?.() === 0 ? { uid: AGENT_UID, gid: AGENT_UID } : undefined;
+  const file = { mode: 0o644, replace: true, owner };
+  const own = (d: DirHandle) => { if (owner) fchownSync(d.fd, owner.uid, owner.gid); };
   try {
+    withDir(bare, ["worktrees"], true, own);
     withDir(bare, ["worktrees", basename(dest)], true, (d) => {
+      own(d);
       writeFileAt(d, "commondir", "../..\n", file);
       writeFileAt(d, "gitdir", `${join(dest, ".git")}\n`, file);
       writeFileAt(d, "HEAD", `${head}\n`, file);
@@ -380,7 +387,10 @@ export async function reregisterWorktree(bare: string, dest: string, head: strin
   }
   if (!await worktreeHealthy(dest)) return false;
   const r = await sh(dest, "git", "-c", `safe.directory=${dest}`, "reset", "-q");
-  if (r.code !== 0) console.error(`could not rebuild the index of worktree ${dest}: ${r.stderr.trim()}`);
+  if (r.code !== 0) {
+    console.error(`could not rebuild the index of worktree ${dest}: ${r.stderr.trim()}`);
+    return false;
+  }
   return true;
 }
 
@@ -561,6 +571,13 @@ export async function removeWorktree(bare: string, dest: string): Promise<void> 
     // Non-critical: the container is already gone, an orphaned directory must not prevent deleting the row.
     console.error(`git worktree remove ${dest} failed: ${r.stderr.trim()}`);
   }
+  // Git runs as the agent uid (safeGit.ts layer 4) and cannot remove `dest` itself from the
+  // root-owned `_sessions`; the emptied dir is removed here. rmdir only: never recursive, and a
+  // symlink or a non-empty dir stays (and is logged).
+  let st: Stats;
+  try { st = lstatSync(dest); } catch { return; }
+  if (!st.isDirectory()) { console.error(`worktree ${dest} is not a directory after remove, left alone`); return; }
+  try { rmdirSync(dest); } catch (e) { console.error(`removing the emptied worktree dir ${dest} failed: ${(e as Error).message}`); }
 }
 
 // The prompt reaches a terminal agent as one argv word (Linux caps one at 128 KiB) together with a first prompt of up

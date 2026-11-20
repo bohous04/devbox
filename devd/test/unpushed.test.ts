@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sh } from "../src/git";
@@ -50,6 +50,18 @@ test("discoverRepos finds a flat repo, a repo in a project and a bare clone; ski
     { folder: "acme", project: "portal", repo: "web", path: join(root, "acme", "portal", "web.git"), bare: true },
     { folder: "apps", project: "apps", repo: "web", path: join(root, "apps", "web"), bare: false },
   ]);
+});
+
+test("discoverRepos never follows a symlink: an agent-made x.git link (repo dir turned into a folder) is not a repo", () => {
+  const root = mkdtempSync(join(tmpdir(), "devd-unpushed-link-"));
+  const outside = mkdtempSync(join(tmpdir(), "devd-unpushed-outside-"));
+  writeFileSync(join(outside, "HEAD"), "ref: refs/heads/main\n");
+  // apps/web had its .git removed by the agent, so it reads as a project; inside, a link out of the root.
+  mkdirSync(join(root, "apps", "web"), { recursive: true });
+  symlinkSync(outside, join(root, "apps", "web", "x.git"));
+  symlinkSync(outside, join(root, "apps", "y.git"));
+  symlinkSync(join(root, "apps"), join(root, "linked"));
+  expect(discoverRepos(root)).toEqual([]);
 });
 
 test("discoverRepos on a nonexistent root returns empty instead of throwing", () => {

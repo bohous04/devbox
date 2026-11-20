@@ -3,14 +3,14 @@
 // argv/env that hardenGit produces when devd is root (injected uid 0; this machine is not root),
 // plus one end-to-end run that only works as root on Linux (skipped elsewhere, with the reason).
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hardenGit, setAgentGitRoots, AGENT_UID } from "../src/safeGit";
+import { asAgent, hardenGit, setAgentGitIdentity, setAgentGitRoots, setTrustedGitRoots, AGENT_UID } from "../src/safeGit";
 import type { RunOpts, RunResult } from "../src/proc";
 import { sh } from "./helpers/sh";
 
-afterEach(() => setAgentGitRoots(null));
+afterEach(() => { setAgentGitRoots(null); setTrustedGitRoots(null); setAgentGitIdentity(null); });
 
 const ok: RunResult = { code: 0, stdout: "", stderr: "", timedOut: false };
 function recorder() {
@@ -28,9 +28,10 @@ test("as root, git whose target is under an agent root runs via setpriv as the a
   try {
     const h = await hardenGit(["git", "-C", join(r, "acme", "api"), "fetch", "origin"], { timeoutMs: 1000, env: { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.https://git.example/.extraHeader", GIT_CONFIG_VALUE_0: "Authorization: x" } }, raw, 0);
     if (!("cmd" in h)) throw new Error("refused");
-    const wrap = ["setpriv", `--reuid=${AGENT_UID}`, `--regid=${AGENT_UID}`, "--clear-groups"];
-    expect(h.cmd.slice(0, 5)).toEqual([...wrap, "git"]);
-    expect(seen[0]!.cmd.slice(0, 5)).toEqual([...wrap, "git"]);       // the config probe as well
+    const wrap = ["setpriv", `--reuid=${AGENT_UID}`, `--regid=${AGENT_UID}`, "--clear-groups", "--no-new-privs", "--inh-caps=-all"];
+    expect(asAgent(["git"])).toEqual([...wrap, "git"]);
+    expect(h.cmd.slice(0, 7)).toEqual([...wrap, "git"]);
+    expect(seen[0]!.cmd.slice(0, 7)).toEqual([...wrap, "git"]);       // the config probe as well
     for (const o of [h.opts, seen[0]!.opts]) {
       expect(o.inheritEnv).toBe(false);
       expect(o.env).toMatchObject({ HOME: "/nonexistent", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" });
@@ -69,14 +70,61 @@ test("classification under the agent root: repos and _sessions run as the agent 
   expect("result" in g).toBe(true);
 });
 
-test("git outside the agent roots (devd's own checkout, config repo) stays as is", async () => {
+test("as root, only the trusted roots (devd's own checkout, config repo) keep root's git; anything else runs as the agent uid", async () => {
   const r = root();
   setAgentGitRoots(() => [r]);
+  setTrustedGitRoots(() => ["/opt/devd", "/etc/devd/config"]);
   const { raw } = recorder();
   const h = await hardenGit(["git", "-C", "/opt/devd", "pull"], { timeoutMs: 1000 }, raw, 0);
   if (!("cmd" in h)) throw new Error("refused");
   expect(h.cmd[0]).toBe("git");
   expect(h.opts.inheritEnv).toBeUndefined();
+  // Not trusted and not under the agent root: still the agent uid (the default), not root.
+  for (const c of [["git", "-C", "/var/tmp/x", "status"], ["git", "ls-remote", "https://git.example/x"]]) {
+    const o = await hardenGit(c, { cwd: "/", timeoutMs: 1000 }, raw, 0);
+    if (!("cmd" in o)) throw new Error("refused");
+    expect(o.cmd[0]).toBe("setpriv");
+  }
+  // A trusted cwd with an untrusted --git-dir is not trusted.
+  const m = await hardenGit(["git", "--git-dir", join(r, "x.git"), "status"], { cwd: "/opt/devd", timeoutMs: 1000 }, raw, 0);
+  if (!("cmd" in m)) throw new Error("refused");
+  expect(m.cmd[0]).toBe("setpriv");
+});
+
+test("as root, a repo symlinked out of the agent root (e.g. an agent-made x.git link) runs as the agent uid, never root", async () => {
+  const r = root();
+  const outside = root();
+  mkdirSync(join(r, "harbor"));
+  symlinkSync(outside, join(r, "harbor", "x.git"));
+  setAgentGitRoots(() => [r]);
+  setTrustedGitRoots(() => ["/opt/devd"]);
+  const { raw } = recorder();
+  const h = await hardenGit(["git", "-C", join(r, "harbor", "x.git"), "log"], { timeoutMs: 1000 }, raw, 0);
+  if (!("cmd" in h)) throw new Error("refused");
+  expect(h.cmd[0]).toBe("setpriv");
+});
+
+test("the configured identity reaches git as the agent uid (pull --rebase/--autostash need one); none configured = none set", async () => {
+  const { raw } = recorder();
+  setAgentGitIdentity({ name: "Harbor Bot", email: "bot@example.com" });
+  const h = await hardenGit(["git", "-C", "/var/tmp/x", "pull", "--rebase", "--autostash"], { timeoutMs: 1000 }, raw, 0);
+  if (!("cmd" in h)) throw new Error("refused");
+  expect(h.opts.env).toMatchObject({ GIT_AUTHOR_NAME: "Harbor Bot", GIT_AUTHOR_EMAIL: "bot@example.com", GIT_COMMITTER_NAME: "Harbor Bot", GIT_COMMITTER_EMAIL: "bot@example.com" });
+  setAgentGitIdentity(null);
+  const n = await hardenGit(["git", "-C", "/var/tmp/x", "pull"], { timeoutMs: 1000 }, raw, 0);
+  if (!("cmd" in n)) throw new Error("refused");
+  expect(Object.keys(n.opts.env!)).not.toContain("GIT_COMMITTER_NAME");
+});
+
+test("network commands are refused when the repo config redirects or weakens the transport; local commands are not", async () => {
+  const entries = (key: string) => `local\0file:.git/config\0${key}\ntrue\0`;
+  for (const key of ["http.proxy", "http.sslVerify", "http.https://github.com/.extraHeader", "http.curloptResolve", "http.sslCAInfo", "remote.origin.proxy"]) {
+    const raw = async () => ({ ...ok, stdout: entries(key) });
+    const f = await hardenGit(["git", "-C", "/var/tmp/x", "fetch", "origin"], { timeoutMs: 1000 }, raw, 501);
+    expect("result" in f).toBe(true);
+    const st = await hardenGit(["git", "-C", "/var/tmp/x", "status"], { timeoutMs: 1000 }, raw, 501);
+    expect("cmd" in st).toBe(true);
+  }
 });
 
 test("not root: no wrapping (nothing to drop, and a non-root process could not switch uid)", async () => {
@@ -164,4 +212,20 @@ test.skipIf(!asRootOnLinux)("as root on Linux: clone and worktree add into root-
   expect(statSync(dest).uid).toBe(AGENT_UID);
   expect(statSync(join(dest, "a.txt")).uid).toBe(AGENT_UID);
   rmSync(r, { recursive: true, force: true });
+});
+
+test.skipIf(!asRootOnLinux)("as root on Linux: the dropped process has no capabilities, no_new_privs, no supplementary groups and only stdio fds (needs root; skipped otherwise)", async () => {
+  const { runRaw } = await import("../src/proc");
+  const r = await runRaw(asAgent(["sh", "-c", "ls /proc/self/fd; grep -E '^(Uid|Gid|Groups|NoNewPrivs|CapInh|CapPrm|CapEff|CapAmb):' /proc/self/status"]),
+    { cwd: "/", timeoutMs: 10_000, env: { PATH: "/usr/bin:/bin" }, inheritEnv: false });
+  expect(r.code).toBe(0);
+  const lines = r.stdout.trim().split("\n");
+  // ls itself opens one fd for the directory it lists (3); anything else leaked from devd.
+  expect(lines.filter((l) => /^\d+$/.test(l)).map(Number).filter((n) => n > 3)).toEqual([]);
+  const field = (k: string) => lines.find((l) => l.startsWith(`${k}:`))!.split(/\s+/).slice(1).join(" ");
+  expect(field("Uid")).toBe(`${AGENT_UID} ${AGENT_UID} ${AGENT_UID} ${AGENT_UID}`);
+  expect(field("Gid")).toBe(`${AGENT_UID} ${AGENT_UID} ${AGENT_UID} ${AGENT_UID}`);
+  expect(field("Groups")).toBe("");
+  expect(field("NoNewPrivs")).toBe("1");
+  for (const c of ["CapInh", "CapPrm", "CapEff", "CapAmb"]) expect(field(c)).toBe("0000000000000000");
 });

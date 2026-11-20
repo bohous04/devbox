@@ -38,6 +38,10 @@ export interface Settings {
   /** Runtime of a new session (and schedule) whose request names none. Absent = tmux; flipping it to chat is an
    *  owner action in the dashboard settings. Read per request (resolveDefaultRuntime), no restart needed. */
   defaultRuntime?: "tmux" | "chat";
+  /** Committer identity for host git, which runs as the container uid without a global config
+   *  (safeGit.ts layer 4): pull --rebase rewrites committers and --autostash commits. Absent = none,
+   *  and such a pull fails with git's "empty ident". Read at devd startup. */
+  hostGitIdentity?: { name: string; email: string };
 }
 
 export function resolveDefaultRuntime(s: Settings): "tmux" | "chat" {
@@ -137,6 +141,9 @@ export function validateConfig(value: unknown): DevConfig {
     throw new ConfigError("config.settings must contain numeric autoStopHours, portRangeStart, portsPerSession, diskWarnPercent");
   if (s.defaultRuntime !== undefined && s.defaultRuntime !== "tmux" && s.defaultRuntime !== "chat")
     throw new ConfigError("config.settings.defaultRuntime must be tmux or chat");
+  const id = s.hostGitIdentity;
+  if (id !== undefined && (typeof id?.name !== "string" || !id.name.trim() || typeof id.email !== "string" || !id.email.includes("@")))
+    throw new ConfigError("config.settings.hostGitIdentity must be { name, email } with a non-empty name and an email");
   if (!cfg.folders || typeof cfg.folders !== "object") throw new ConfigError("config.folders must be an object");
   const sshIssues = sshServerIssues(cfg.sshServers);
   if (sshIssues.length > 0) throw new ConfigError(sshIssues[0]);

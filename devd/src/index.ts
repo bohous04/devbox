@@ -85,8 +85,8 @@ import { parseMeminfo, resourceBreakdown } from "./resources";
 import { classifyClaudeState, collectDiskUsage, collectDockerStatsAsync, collectGitStats, collectSessionGitStat, type DockerStat, type Runner } from "./stats";
 import { createTmuxProbe } from "./tmux";
 import { barePath, buildTree, ghLister, giteaLister, sessionWorkdir } from "./tree";
-import { AGENT_UID, setAgentGitRoots, setUntrustedGitRoots } from "./safeGit";
-import { ownershipHints } from "./agentRepos";
+import { AGENT_UID, setAgentGitIdentity, setAgentGitRoots, setTrustedGitRoots, setUntrustedGitRoots } from "./safeGit";
+import { ownershipHints, untraversableForAgent } from "./agentRepos";
 import { memoAsync, memoAsyncStrict } from "./cache";
 import { selfUpdateStatus, startSelfUpdate, type SelfUpdateDeps } from "./selfUpdate";
 import { buildUnpushedReport, unpushedOps } from "./unpushed";
@@ -1039,10 +1039,16 @@ setUntrustedGitRoots(restrictedGitRoots);
 // Every agent-writable repo (workspaces, bare clones, session worktrees) lives under `root`:
 // host git over them runs as the container uid (safeGit.ts layer 4).
 setAgentGitRoots(() => [root]);
+// devd's own repos (config repo, its checkout for self-update) are the only ones host git touches as root.
+setTrustedGitRoots(() => [configDir, join(import.meta.dir, "..", "..")]);
+setAgentGitIdentity(cfg.settings.hostGitIdentity ?? null);
+if (!cfg.settings.hostGitIdentity) console.error("config.settings.hostGitIdentity is not set: host git (pull --rebase/--autostash) has no committer identity and fails where it needs one");
 // Repos root's git wrote into before that switch can hold root-owned files git as the agent uid
 // cannot rewrite (fetch/pull then fail). Say which; the fix is tools/own-agent-repos.ts.
 if (process.getuid?.() === 0) {
   try {
+    const blocked = untraversableForAgent(root);
+    if (blocked.length) console.error(`${root} or a parent is not traversable by uid ${AGENT_UID} (host git runs as that uid and fails): ${blocked.join(", ")}`);
     const stale = ownershipHints(root);
     if (stale.length) console.error(`${stale.length} agent repos have git files not owned by uid ${AGENT_UID} (host git may fail there; run tools/own-agent-repos.ts): ${stale.join(", ")}`);
   } catch (e) { console.error("agent repo ownership check failed:", (e as Error).message); }

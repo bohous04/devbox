@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { agentRepoDirs, ownAgentRepos, ownershipHints } from "../src/agentRepos";
+import { agentRepoDirs, ownAgentRepos, ownershipHints, untraversableForAgent } from "../src/agentRepos";
 
 /** harbor/api.git (bare, flat), harbor/shop/web (workspace), _sessions/dev-web (worktree),
  *  plus things that must NOT be touched: _inbox/x with a .git, a symlinked "repo", a non-repo dir. */
@@ -66,4 +66,16 @@ test("ownershipHints: cheap startup check names repos whose top or key git files
   const root = layout();
   expect(ownershipHints(root, process.getuid!())).toEqual([]);
   expect(ownershipHints(root, -2)).toEqual(agentRepoDirs(root));
+});
+
+test("untraversableForAgent names the root or a parent the agent uid cannot enter", () => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "agentrepos-trav-")));
+  const root = join(base, "srv");
+  mkdirSync(root);
+  chmodSync(base, 0o755);
+  // Another uid/gid than the owner: only the "other" bits count.
+  expect(untraversableForAgent(root, -2, -2).filter((p) => p.startsWith(base))).toEqual([]);
+  chmodSync(base, 0o750);
+  try { expect(untraversableForAgent(root, -2, -2)).toContain(base); }
+  finally { chmodSync(base, 0o755); }
 });
