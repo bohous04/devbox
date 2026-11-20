@@ -40,16 +40,23 @@ export function limiter(n: number): <T>(task: () => Promise<T>) => Promise<T> {
 /** "Open diffs" is offered up to this many files; a longer list opens one file at a time. */
 export const OPEN_ALL_MAX = 30;
 
-/** A diff line split into plain text and escapes. Combining marks, control and format characters (zero-width,
- *  bidi overrides) are invisible or bend the text around them, which hides what a line really contains (Trojan
- *  Source); the diff shows them as `̀` instead. A tab stays a tab. */
+/** A diff line split into plain text and escapes, shown as `‮`. Control and format characters (zero-width,
+ *  bidi overrides and isolates) are invisible or reorder the text around them, which hides what a line really
+ *  contains (Trojan Source); they are always escaped. A tab stays a tab. Combining marks render (NFD Czech, Indic
+ *  vowel signs, emoji variation selectors) unless they have no base to sit on: after a space, punctuation or the
+ *  line's start they would draw as a stray glyph (`[̀-ͯ]` in a regex). */
 export type DiffTextPart = { text: string; escaped: boolean };
-const INVISIBLE = /[\p{Mn}\p{Me}\p{Cc}\p{Cf}]/u;
+const CONTROL = /[\p{Cc}\p{Cf}]/u;
+const MARK = /[\p{Mn}\p{Me}]/u;
+const BASE = /[\p{L}\p{N}\p{M}\p{S}]/u;
 export function escapeInvisible(line: string): DiffTextPart[] {
   const parts: DiffTextPart[] = [];
   let plain = "";
+  // The last character drawn; an escaped mark is no base for the next one.
+  let prev = "";
   for (const ch of line) {
-    if (ch === "\t" || !INVISIBLE.test(ch)) { plain += ch; continue; }
+    const escape = ch !== "\t" && (CONTROL.test(ch) || (MARK.test(ch) && !BASE.test(prev)));
+    if (!escape) { plain += ch; prev = ch; continue; }
     if (plain) { parts.push({ text: plain, escaped: false }); plain = ""; }
     const cp = ch.codePointAt(0)!;
     parts.push({ text: cp > 0xffff ? `\\u{${cp.toString(16)}}` : `\\u${cp.toString(16).padStart(4, "0")}`, escaped: true });

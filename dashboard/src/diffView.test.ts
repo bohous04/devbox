@@ -55,3 +55,12 @@ test("escapeInvisible: combining marks, bidi and zero-width controls become esca
   expect(show("\tconst žluťoučký = 1; // 🙂")).toBe("\tconst žluťoučký = 1; // 🙂");
   expect(escapeInvisible("")).toEqual([]);
 });
+
+test("escapeInvisible: combining marks render on a base, escape without one", () => {
+  const show = (s: string) => escapeInvisible(s).map((p) => (p.escaped ? `[${p.text}]` : p.text)).join("");
+  const nfd = "zluťoucký"; // NFD Czech: marks on letters
+  expect(show(nfd)).toBe(nfd);
+  expect(show("कि")).toBe("कि"); // Devanagari ki: vowel sign on a consonant
+  expect(show("❤️")).toBe("❤️"); // heart + variation selector
+  expect(show(" ́́x")).toBe(" [\\u0301][\\u0301]x"); // after a space: no base, nor for the second mark
+});
