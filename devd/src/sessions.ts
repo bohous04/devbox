@@ -656,7 +656,7 @@ export class SessionManager {
     const dir = this.claudeProjectsDir(id);
     try {
       mkdirSync(dir, { recursive: true });
-      if (statSync(dir).uid !== 1000) await sh(dir, "chown", "-R", "1000:1000", dir);
+      if (statSync(dir).uid !== 1000) await sh("/", ...agentChownArgv(dir));
     } catch (e) { console.error(`claude projects dir ${dir} failed:`, e); }
     return dir;
   }
@@ -700,7 +700,7 @@ export class SessionManager {
   // (cheap: one stat); devd runs as root, so the chown goes through.
   private async ensureOwned(ws: string): Promise<void> {
     try {
-      if (statSync(ws).uid !== 1000) await sh(ws, "chown", "-R", "1000:1000", ws);
+      if (statSync(ws).uid !== 1000) await sh("/", ...agentChownArgv(ws)); // -h -R -P: never through a link
     } catch (e) { console.error(`chown workspace ${ws} failed:`, e); }
   }
 
