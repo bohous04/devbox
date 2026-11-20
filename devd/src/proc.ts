@@ -169,8 +169,13 @@ export async function runRaw(cmd: string[], opts: RunOpts): Promise<RunResult> {
   const stdoutDone = drain(stdoutReader, (s) => {
     const max = opts.maxStdout;
     if (max === undefined) { stdoutBuf += s; return; }
-    if (stdoutBuf.length + s.length > max) { stdoutBuf += s.slice(0, Math.max(0, max - stdoutBuf.length)); if (s) stdoutTruncated = true; }
-    else stdoutBuf += s;
+    if (stdoutTruncated) return;
+    if (stdoutBuf.length + s.length <= max) { stdoutBuf += s; return; }
+    // Over the cap: keep what fits and kill the child at once, instead of draining (and
+    // waiting for) output nobody will read. `stdoutTruncated` marks the kill as ours.
+    stdoutBuf += s.slice(0, max - stdoutBuf.length);
+    stdoutTruncated = true;
+    try { p.kill("SIGKILL"); } catch { /* already exited */ }
   });
   const stderrDone = drain(stderrReader, (s) => { stderrBuf += s; if (s) notifyStderr(s); });
 

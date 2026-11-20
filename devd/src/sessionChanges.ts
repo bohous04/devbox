@@ -1,5 +1,6 @@
-import { realpathSync, statSync } from "node:fs";
-import { isAbsolute, resolve, sep } from "node:path";
+import { mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import type { ChangedFile, ChangeStatus, FileDiff, SessionChanges } from "../../shared/changes";
 import { sh } from "./git";
 import { run, timeoutFor } from "./proc";
@@ -154,28 +155,89 @@ export async function collectFileDiff(ws: string, expected: Expected, path: stri
   if (entry) {
     // numstat says `-` for what git treats as binary (incl. a `-diff` attribute).
     if (entry.added === null) return { path, status: entry.status, base, binary: true, truncated: false, diff: "" };
-    const r = await run(["git", "-c", `safe.directory=${ws}`, "--git-dir", repo.gitDir, "--work-tree", ws, "--literal-pathspecs",
-      "diff", "-M", "--no-color", "-U3", "--src-prefix=a/", "--dst-prefix=b/", "-O/dev/null", repo.rev, "--", ...(entry.oldPath ? [entry.oldPath] : []), path],
-      { cwd: ws, timeoutMs: timeoutFor("LOCAL"), maxStdout: MAX_DIFF + 1 });
-    if (r.code !== 0 && !r.stdoutTruncated) {
-      console.error(`changes ${ws}: git diff -- ${path} failed: ${r.stderr.trim()}`);
-      throw new ChangesError(500, "git diff failed");
+    // Root git never reads the working copy here (lstat-then-open would follow a swapped
+    // symlink): the base side comes from the object store, the working side from the owner child.
+    const result = (diff: string, truncated: boolean, binary = false): FileDiff => ({ path, status: entry.status, base, binary, truncated, diff });
+    const old = entry.status === "added" ? "" : await baseBlob(repo, entry.oldPath ?? path);
+    let cur = "";
+    if (entry.status !== "deleted") {
+      const file = await readWorking(ws, path, MAX_SIDE, counterDeps);
+      if (file.binary) return result("", false, true);
+      if (file.truncated) return result("", true);
+      cur = file.content;
     }
-    const cut = r.stdout.length > MAX_DIFF;
-    return { path, status: entry.status, base, binary: false, truncated: cut, diff: cut ? toLastLine(r.stdout.slice(0, MAX_DIFF)) : r.stdout };
+    if (old === null) return result("", true);
+    if (old.includes("\0")) return result("", false, true);
+    const hunks = await unifiedHunks(ws, old, cur);
+    const header = trackedHeader(entry.status, entry.oldPath ?? path, path);
+    return capped(header + hunks, (diff, truncated) => result(diff, truncated));
   }
   if (!untracked.includes(path)) throw new ChangesError(404, "file is not among the session's changes");
-  const file = await readUntracked(ws, path, MAX_DIFF, counterDeps).catch(rethrowRootOwned);
-  if ("unavailable" in file) {
-    console.error(`changes ${ws}: reading untracked ${path} failed: ${file.unavailable}`);
-    throw new ChangesError(500, "reading the file failed");
-  }
-  if (!file.ok) throw new ChangesError(409, "file is not a readable regular file in the worktree");
+  const file = await readWorking(ws, path, MAX_DIFF, counterDeps);
   if (file.binary) return { path, status: "untracked", base, binary: true, truncated: false, diff: "" };
   return { path, status: "untracked", base, binary: false, ...newFileDiff(path, file.content, file, MAX_DIFF) };
 }
 
 const toLastLine = (s: string): string => s.slice(0, s.lastIndexOf("\n") + 1);
+
+/** A side larger than this is not diffed (truncated:true, empty diff): a diff of two prefixes
+ *  would show changes that are not there. */
+const MAX_SIDE = 1024 * 1024;
+
+const capped = <T,>(diff: string, done: (diff: string, truncated: boolean) => T): T =>
+  diff.length > MAX_DIFF ? done(toLastLine(diff.slice(0, MAX_DIFF)), true) : done(diff, false);
+
+/** The working-copy content of `path`, read by the owner child (never by root). */
+async function readWorking(ws: string, path: string, maxBytes: number, counterDeps?: CounterDeps) {
+  const file = await readUntracked(ws, path, maxBytes, counterDeps).catch(rethrowRootOwned);
+  if ("unavailable" in file) {
+    console.error(`changes ${ws}: reading ${path} failed: ${file.unavailable}`);
+    throw new ChangesError(500, "reading the file failed");
+  }
+  if (!file.ok) throw new ChangesError(409, "file is not a readable regular file in the worktree");
+  return file;
+}
+
+/** `<rev>:<path>` from the object store, or null when it is larger than MAX_SIDE. `cat-file blob`
+ *  applies no filters or textconv. The object lookup itself still honours the bare clone's
+ *  objects/info/alternates (agent-writable), which could point at another repo's object store —
+ *  the same accepted class of risk as the rest of safeGit.ts (it needs the agent's own rev/tree to
+ *  name a foreign blob). */
+async function baseBlob(repo: Repo, path: string): Promise<string | null> {
+  const spec = `${repo.rev}:${path}`;
+  const size = Number((await repo.must("reading the base size", "cat-file", "-s", spec)).trim());
+  if (!Number.isFinite(size)) throw new ChangesError(500, "reading the base size failed");
+  if (size > MAX_SIDE) return null;
+  return repo.must("reading the base", "cat-file", "blob", spec);
+}
+
+/** Hunks (from the first `@@`) of `old` → `cur`, by `git diff --no-index` over two files in a fresh
+ *  root-owned temp dir — git sees only those two files, never the worktree or its config. */
+async function unifiedHunks(ws: string, old: string, cur: string): Promise<string> {
+  const dir = mkdtempSync(join(tmpdir(), "devd-diff-"));
+  try {
+    writeFileSync(join(dir, "a"), old);
+    writeFileSync(join(dir, "b"), cur);
+    const r = await run(["git", "diff", "--no-index", "--no-color", "-U3", "--", "a", "b"],
+      { cwd: dir, timeoutMs: timeoutFor("LOCAL"), maxStdout: MAX_DIFF + 1 });
+    // Exit 1 = "files differ"; a non-zero exit is otherwise accepted only after our own kill at maxStdout.
+    if (r.code !== 0 && r.code !== 1 && !r.stdoutTruncated) {
+      console.error(`changes ${ws}: git diff --no-index failed: ${r.stderr.trim()}`);
+      throw new ChangesError(500, "git diff failed");
+    }
+    const at = r.stdout.search(/^@@/m);
+    return at < 0 ? "" : r.stdout.slice(at);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+/** git's header for a tracked change (mode assumed 100644: modes are not part of the listing). */
+function trackedHeader(status: ChangeStatus, oldPath: string, path: string): string {
+  const head = `diff --git a/${oldPath} b/${path}\n`;
+  if (status === "added") return `${head}new file mode 100644\n--- /dev/null\n+++ b/${path}\n`;
+  if (status === "deleted") return `${head}deleted file mode 100644\n--- a/${path}\n+++ /dev/null\n`;
+  if (status === "renamed") return `${head}rename from ${oldPath}\nrename to ${path}\n--- a/${oldPath}\n+++ b/${path}\n`;
+  return `${head}--- a/${path}\n+++ b/${path}\n`;
+}
 
 /** `git diff` output for a new file with `content`, at most `cap` characters; a cut-off read
  *  (`truncated`) drops its last partial line. The hunk header counts only included lines. */

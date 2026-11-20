@@ -20,11 +20,27 @@ import { run as procRun, type RunOpts, type RunResult } from "./proc";
  * regular-file/NUL checks; rebuilding O_NOFOLLOW + fstat + inode check in shell is not simpler.
  */
 
+/** Shared by both child scripts: is the opened fd really a file inside `root`? On Linux the
+ *  fd's own path from /proc is race-free; a string realpath + stat would re-resolve the path, so a
+ *  timed swap could pass it. Only without /proc (macOS dev machines) it falls back to realpath
+ *  plus "same inode". */
+const FD_CHECK_JS = `
+import { closeSync, constants, existsSync, fstatSync, openSync, readlinkSync, readSync, realpathSync, statSync } from "node:fs";
+import { join } from "node:path";
+const HAS_PROC = existsSync("/proc/self/fd");
+const insideRoot = (p, root) => p === root || p.startsWith(root + "/");
+const fdInside = (fd, p, st, root) => {
+  if (HAS_PROC) return insideRoot(readlinkSync("/proc/self/fd/" + fd), root);
+  const real = realpathSync(p);
+  if (!insideRoot(real, root)) return false;
+  const at = statSync(real);
+  return at.dev === st.dev && at.ino === st.ino;
+};
+`;
+
 /** Runs in the child (`bun -e`, so the source needs no file readable by the owner).
  *  stdin: {root, paths, maxBytes, budget}; stdout: {counts: (number|null)[], capped}. */
-export const COUNTER_JS = `
-import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
-import { join } from "node:path";
+export const COUNTER_JS = FD_CHECK_JS + `
 const { root, paths: rel, maxBytes, budget: total } = JSON.parse(await Bun.stdin.text());
 const paths = rel.map((p) => join(root, p));
 let budget = total, capped = false;
@@ -36,10 +52,7 @@ const count = (p) => {
     const st = fstatSync(fd);
     if (!st.isFile() || st.size > maxBytes) return null;
     if (st.size > budget) { capped = true; return null; }
-    const real = realpathSync(p);
-    if (real !== root && !real.startsWith(root + "/")) return null;
-    const at = statSync(real);
-    if (at.dev !== st.dev || at.ino !== st.ino) return null;
+    if (!fdInside(fd, p, st, root)) return null;
     const buf = Buffer.alloc(st.size);
     const n = readSync(fd, buf, 0, st.size, 0);
     if (n !== st.size || buf.includes(0)) return null;
@@ -119,9 +132,7 @@ export async function countUntracked(
 /** Sibling of COUNTER_JS for the per-file diff: the first `maxBytes` of one untracked file, with
  *  the same checks. stdin: {root, path, maxBytes}; stdout: {ok:false} or
  *  {ok:true, binary, truncated, exec, content(base64)}. */
-export const READER_JS = `
-import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
-import { join } from "node:path";
+export const READER_JS = FD_CHECK_JS + `
 const { root, path, maxBytes } = JSON.parse(await Bun.stdin.text());
 const p = join(root, path);
 const read = () => {
@@ -129,16 +140,15 @@ const read = () => {
   try { fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch { return { ok: false }; }
   try {
     const st = fstatSync(fd);
-    if (!st.isFile()) return { ok: false };
-    const real = realpathSync(p);
-    if (real !== root && !real.startsWith(root + "/")) return { ok: false };
-    const at = statSync(real);
-    if (at.dev !== st.dev || at.ino !== st.ino) return { ok: false };
+    if (!st.isFile() || !fdInside(fd, p, st, root)) return { ok: false };
     const len = Math.min(st.size, maxBytes);
     const buf = Buffer.alloc(len);
-    const data = buf.subarray(0, readSync(fd, buf, 0, len, 0));
+    let data = buf.subarray(0, readSync(fd, buf, 0, len, 0));
     const binary = data.includes(0);
-    return { ok: true, binary, truncated: st.size > data.length, exec: (st.mode & 0o111) !== 0, content: binary ? "" : data.toString("base64") };
+    const truncated = st.size > data.length;
+    // Cut back to the last whole line, so no UTF-8 sequence is split.
+    if (truncated) data = data.subarray(0, data.lastIndexOf(10) + 1);
+    return { ok: true, binary, truncated, exec: (st.mode & 0o111) !== 0, content: binary ? "" : data.toString("base64") };
   } catch { return { ok: false }; } finally { closeSync(fd); }
 };
 process.stdout.write(JSON.stringify(read()));

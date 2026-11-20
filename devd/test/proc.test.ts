@@ -176,3 +176,11 @@ test("run: a background orphan does not block run() even WITHOUT a timeout (the 
   expect(r.timedOut).toBe(false);
   expect(r.code).toBe(0);
 });
+
+test("maxStdout kills the child as soon as the cap is hit", async () => {
+  const started = Date.now();
+  const r = await run(["yes"], { timeoutMs: 30_000, maxStdout: 1000 });
+  expect(Date.now() - started).toBeLessThan(3000);
+  expect(r.stdoutTruncated).toBe(true);
+  expect(r.stdout.length).toBe(1000);
+});

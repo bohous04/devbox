@@ -6,7 +6,8 @@ import { sh } from "./helpers/sh";
 import { createApp } from "../src/api";
 import { insertSession, openDb, type SessionRow } from "../src/db";
 import { collectFileDiff, newFileDiff } from "../src/sessionChanges";
-import { readUntracked } from "../src/untrackedCounter";
+import { readUntracked, type CounterDeps } from "../src/untrackedCounter";
+import { run as procRun } from "../src/proc";
 import { createShare } from "../src/shares";
 
 const dirs: string[] = [];
@@ -147,6 +148,50 @@ test("newFileDiff: empty file has no hunk, executable mode, single line", () => 
   expect(newFileDiff("e", "", { exec: false, truncated: false }, CAP)).toEqual({ diff: "diff --git a/e b/e\nnew file mode 100644\n", truncated: false });
   expect(newFileDiff("run.sh", "x\n", { exec: true, truncated: false }, CAP).diff)
     .toBe("diff --git a/run.sh b/run.sh\nnew file mode 100755\n--- /dev/null\n+++ b/run.sh\n@@ -0,0 +1 @@\n+x\n");
+});
+
+test("a tracked file swapped for a symlink never yields the target's content: 409", async () => {
+  const ws = repo();
+  const outside = tmp("diff-sentinel-");
+  writeFileSync(join(outside, "secret"), "SENTINEL-HARBOR\n");
+  rmSync(join(ws, "keep.txt"));
+  symlinkSync(join(outside, "secret"), join(ws, "keep.txt"));
+  await expect(collectFileDiff(ws, plainGit(ws), "keep.txt")).rejects.toMatchObject({ status: 409, message: "file is not a readable regular file in the worktree" });
+});
+
+test("a tracked file under a parent swapped for a symlink never yields the target's content", async () => {
+  const ws = repo();
+  git(ws, "add", "sub/inner.txt");
+  git(ws, "commit", "-qm", "sub");
+  writeFileSync(join(ws, "sub", "inner.txt"), "i\nchanged\n");
+  const outside = tmp("diff-sentinel-");
+  writeFileSync(join(outside, "inner.txt"), "SENTINEL-HARBOR\n");
+  // Listed while sub/ is a real dir, swapped before the content is read.
+  const swapBeforeRead: CounterDeps = { myUid: process.getuid!(), ownerOf: () => ({ uid: 0, gid: 0 }), run: (cmd, opts) => {
+    rmSync(join(ws, "sub"), { recursive: true });
+    symlinkSync(outside, join(ws, "sub"));
+    return procRun(cmd, opts);
+  } };
+  const swapped = await collectFileDiff(ws, plainGit(ws), "sub/inner.txt", swapBeforeRead).then((r) => JSON.stringify(r), (e: { status: number }) => `error ${e.status}`);
+  expect(swapped).not.toContain("SENTINEL");
+  expect(swapped).toBe("error 409");
+});
+
+test("a tracked file replaced by a FIFO does not hang", async () => {
+  const ws = repo();
+  rmSync(join(ws, "keep.txt"));
+  sh(ws, "mkfifo", "keep.txt");
+  const r = await collectFileDiff(ws, plainGit(ws), "keep.txt").then((x) => x.status as string, (e: { status: number }) => `error ${e.status}`);
+  // git's own listing refuses a FIFO ("unsupported file type") → explicit 500, never a hang.
+  expect(r).toBe("error 500");
+}, 10_000);
+
+test("the base side of a tracked diff comes from the object store, not the working tree", async () => {
+  const ws = repo();
+  const r = await collectFileDiff(ws, plainGit(ws), "new-name.txt");
+  expect(r.diff).toStartWith("diff --git a/old-name.txt b/new-name.txt\n");
+  // Renamed with identical content: no hunk.
+  expect(r.diff).not.toContain("@@");
 });
 
 /* ------------------------------ route ------------------------------ */
