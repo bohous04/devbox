@@ -324,3 +324,21 @@ test("boot: a user's first prompt pruned with its not-running session is reporte
   expect(notified[0]).toContain("dev-p-user");
   expect((db.query("SELECT session_id, type FROM events").all() as { session_id: string; type: string }[])).toEqual([{ session_id: "dev-p-user", type: "first_prompt_failed" }]);
 });
+
+test("continue: a named chat session with a prompt gets it as an ordinary turn (startTurn), the 409 rules unchanged", async () => {
+  const seen: Record<string, unknown>[] = [];
+  const joined: Opened = { created: false, session: { id: "dev-p-r", status: "running", runtime: "chat" } };
+  const a = appWith(async (t) => { seen.push(t); return joined; });
+  insertSession(a.db, { id: "dev-p-r", folder: "f", project: "p", repo: "r", container: "dev-p-r", port_base: 40100,
+    status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0, runtime: "chat" } as never);
+  const r = await post(a, { ...BASE, runtime: "chat", sessionId: "dev-p-r", prompt: "also cover the empty case" });
+  expect(r.status).toBe(200);
+  expect(seen[0]).toMatchObject({ sessionId: "dev-p-r", runtime: "chat" });
+  expect(a.turns.map((t) => [t.id, t.text])).toEqual([["dev-p-r", "also cover the empty case"]]);
+  // Busy: refused with 409 as before, nothing queued.
+  const busy = appWith(async () => joined, { runs: [{ status: "running" }] });
+  insertSession(busy.db, { id: "dev-p-r", folder: "f", project: "p", repo: "r", container: "dev-p-r", port_base: 40100,
+    status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0, runtime: "chat" } as never);
+  expect((await post(busy, { ...BASE, runtime: "chat", sessionId: "dev-p-r", prompt: "also cover the empty case" })).status).toBe(409);
+  expect(busy.turns).toEqual([]);
+});

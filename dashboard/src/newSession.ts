@@ -157,3 +157,18 @@ export function sessionsFor<T extends { project: string; repo: string; id: strin
   return sessions.filter((s) => s.project === project && s.repo === repo)
     .sort((a, b) => a.id.localeCompare(b.id));
 }
+
+/** What the New session page's send does. Typed text with an existing session of the repo is asked about ("ask"),
+ *  never sent to one side by itself; an empty box opens that session; otherwise a new one starts. */
+export type SendPlan = "instabox" | "open" | "ask" | "new";
+export function sendPlan(prompt: string, reusable: unknown | null, onInstabox: boolean): SendPlan {
+  if (onInstabox) return "instabox";
+  if (reusable === null) return "new";
+  return prompt === "" ? "open" : "ask";
+}
+
+/** Whether continuing `s` can take the typed message: InstaBox sessions take none, and a running terminal's agent has
+ *  already read its prompt file (devd refuses one there). */
+export function continueTakesPrompt(s: { status: "running" | "stopped"; host?: "vps" | "instabox" }, runtime: "tmux" | "chat"): boolean {
+  return s.host !== "instabox" && !(runtime === "tmux" && s.status === "running");
+}

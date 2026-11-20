@@ -45,7 +45,8 @@ export function Composer({ running, onSend, onStop, controls, notices, placehold
   controls?: ReactNode;
   /** Above the box: the switchers' status and error lines. */
   notices?: ReactNode;
-  onSend: (text: string, images: Blob[]) => Promise<void>;
+  /** `false`: nothing was sent (the page asked and the user cancelled), so the text and images stay. */
+  onSend: (text: string, images: Blob[]) => Promise<void | false>;
   onStop: () => Promise<void>;
 }) {
   const [text, setText] = useState("");
@@ -156,7 +157,10 @@ export function Composer({ running, onSend, onStop, controls, notices, placehold
     const sent = text;
     const sentImages = images;
     // Text typed and images added while the send was in flight stay.
-    try { await onSend(sent, sentImages.map((a) => a.blob)); setText((cur) => (cur === sent ? "" : cur)); detach(sentImages); }
+    try {
+      if ((await onSend(sent, sentImages.map((a) => a.blob))) === false) return;
+      setText((cur) => (cur === sent ? "" : cur)); detach(sentImages);
+    }
     catch (e) { setErr(errorText(e)); }
     finally { setBusy(false); }
   }
