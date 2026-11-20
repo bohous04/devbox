@@ -67,7 +67,7 @@ import { parseOtlpMetrics, pointsToRows } from "./metrics";
 import { classifyClaudeState } from "./stats";
 import { isValidTmuxName, killSessionCmd, labelSetCmd, parseProbe, probeCmd, type TmuxSession } from "./tmux";
 import { barePath, sessionWorkdir, type TreeProject } from "./tree";
-import { ChangesError, collectChanges } from "./sessionChanges";
+import { ChangesError, collectChanges, collectFileDiff } from "./sessionChanges";
 import { COMMIT, VERSION } from "./version";
 import type { SelfUpdateStatus } from "./selfUpdate";
 import type { Decision } from "./criticGate";
@@ -1203,8 +1203,9 @@ export function createApp(d: ApiDeps): Hono {
   });
 
   // Changed-files card in the chat thread: the worktree's changes against the upstream / default branch.
-  app.get("/api/sessions/:id/changes", async (c) => {
-    const s = getSession(d.db, c.req.param("id"));
+  // Same guards for the listing and the per-file diff; `read` gets the worktree and the git dirs it must resolve to.
+  const sessionChanges = async <T,>(c: Context, read: (ws: string, expected: { gitDir: string; commonDir: string }) => Promise<T>) => {
+    const s = getSession(d.db, c.req.param("id") ?? "");
     if (!s) return c.json({ error: "unknown session" }, 404);
     { const g = ibxOnly(c, s, "Changed files"); if (g) return g; }
     // safeGit would refuse anyway; this way the dashboard gets the same message as other routes.
@@ -1214,8 +1215,14 @@ export function createApp(d: ApiDeps): Hono {
     const ws = sessionWorkdir(d.root, s);
     const bare = s.worktree ? barePath(d.root, s.folder, s.project, s.repo) : null;
     const expected = bare ? { gitDir: join(bare, "worktrees", basename(ws)), commonDir: bare } : { gitDir: join(ws, ".git"), commonDir: join(ws, ".git") };
-    try { return c.json(await collectChanges(ws, expected)); }
+    try { return c.json(await read(ws, expected)); }
     catch (e) { if (e instanceof ChangesError) return c.json({ error: e.message }, e.status); throw e; }
+  };
+  app.get("/api/sessions/:id/changes", (c) => sessionChanges(c, collectChanges));
+  app.get("/api/sessions/:id/changes/diff", (c) => {
+    const path = c.req.query("path");
+    if (!path) return c.json({ error: "path required" }, 400);
+    return sessionChanges(c, (ws, expected) => collectFileDiff(ws, expected, path));
   });
 
   app.get("/api/sessions/:id/reviews", (c) => {

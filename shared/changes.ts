@@ -29,3 +29,15 @@ export interface SessionChanges {
    *  counts are null and the totals miss their lines. */
   countsUnavailable?: true;
 }
+
+/** GET /api/sessions/:id/changes/diff?path= — one changed file's unified diff against `base`. */
+export interface FileDiff {
+  path: string;
+  status: ChangeStatus;
+  base: string;
+  /** Binary file: `diff` is empty. */
+  binary: boolean;
+  /** `diff` was cut at 256 KB on a line boundary. */
+  truncated: boolean;
+  diff: string;
+}

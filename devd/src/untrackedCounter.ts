@@ -2,7 +2,8 @@ import { lstatSync, realpathSync } from "node:fs";
 import { run as procRun, type RunOpts, type RunResult } from "./proc";
 
 /**
- * Line counts of untracked files in an agent-controlled worktree.
+ * Line counts (COUNTER_JS) and content for the per-file diff (READER_JS) of untracked files in
+ * an agent-controlled worktree.
  *
  * Not read by devd itself: devd runs as root, and the agent can swap any path component at any
  * time — O_NOFOLLOW only guards the last one, so root could be made to open a host file or a
@@ -19,11 +20,27 @@ import { run as procRun, type RunOpts, type RunResult } from "./proc";
  * regular-file/NUL checks; rebuilding O_NOFOLLOW + fstat + inode check in shell is not simpler.
  */
 
+/** Shared by both child scripts: is the opened fd really a file inside `root`? On Linux the
+ *  fd's own path from /proc is race-free; a string realpath + stat would re-resolve the path, so a
+ *  timed swap could pass it. Only without /proc (macOS dev machines) it falls back to realpath
+ *  plus "same inode". */
+const FD_CHECK_JS = `
+import { closeSync, constants, existsSync, fstatSync, openSync, readlinkSync, readSync, realpathSync, statSync } from "node:fs";
+import { join } from "node:path";
+const HAS_PROC = existsSync("/proc/self/fd");
+const insideRoot = (p, root) => p === root || p.startsWith(root + "/");
+const fdInside = (fd, p, st, root) => {
+  if (HAS_PROC) return insideRoot(readlinkSync("/proc/self/fd/" + fd), root);
+  const real = realpathSync(p);
+  if (!insideRoot(real, root)) return false;
+  const at = statSync(real);
+  return at.dev === st.dev && at.ino === st.ino;
+};
+`;
+
 /** Runs in the child (`bun -e`, so the source needs no file readable by the owner).
  *  stdin: {root, paths, maxBytes, budget}; stdout: {counts: (number|null)[], capped}. */
-export const COUNTER_JS = `
-import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
-import { join } from "node:path";
+export const COUNTER_JS = FD_CHECK_JS + `
 const { root, paths: rel, maxBytes, budget: total } = JSON.parse(await Bun.stdin.text());
 const paths = rel.map((p) => join(root, p));
 let budget = total, capped = false;
@@ -35,10 +52,7 @@ const count = (p) => {
     const st = fstatSync(fd);
     if (!st.isFile() || st.size > maxBytes) return null;
     if (st.size > budget) { capped = true; return null; }
-    const real = realpathSync(p);
-    if (real !== root && !real.startsWith(root + "/")) return null;
-    const at = statSync(real);
-    if (at.dev !== st.dev || at.ino !== st.ino) return null;
+    if (!fdInside(fd, p, st, root)) return null;
     const buf = Buffer.alloc(st.size);
     const n = readSync(fd, buf, 0, st.size, 0);
     if (n !== st.size || buf.includes(0)) return null;
@@ -73,11 +87,10 @@ export type CountResult = { counts: (number | null)[]; capped: boolean } | { una
  *  `RootOwnedError` for a root-owned worktree: no uid to drop to. */
 export class RootOwnedError extends Error {}
 
-export async function countUntracked(
-  ws: string, paths: string[], limits: { maxBytes: number; budget: number }, deps: CounterDeps = defaultDeps(),
-): Promise<CountResult> {
-  if (!paths.length) return { counts: [], capped: false };
-  const counter = [process.execPath, "--no-env-file", "--config=/dev/null", "--no-install", "-e", COUNTER_JS];
+/** Runs `js` (`bun -e`) under the worktree owner with `input` on stdin; see the header for the
+ *  hardening. `{unavailable}` = the child could not run or failed. */
+async function ownerChild(ws: string, js: string, input: Record<string, unknown>, deps: CounterDeps): Promise<{ stdout: string } | { unavailable: string }> {
+  const child = [process.execPath, "--no-env-file", "--config=/dev/null", "--no-install", "-e", js];
   let root: string;
   try { root = realpathSync(ws); } catch (e) { return { unavailable: `cannot resolve the worktree: ${(e as Error).message}` }; }
   let cmd: string[];
@@ -85,19 +98,28 @@ export async function countUntracked(
     let owner: { uid: number; gid: number };
     try { owner = deps.ownerOf(ws); } catch (e) { return { unavailable: `cannot read the worktree owner: ${(e as Error).message}` }; }
     if (owner.uid === 0) throw new RootOwnedError("session worktree is owned by root");
-    cmd = ["setpriv", `--reuid=${owner.uid}`, `--regid=${owner.gid}`, "--clear-groups", ...counter];
+    cmd = ["setpriv", `--reuid=${owner.uid}`, `--regid=${owner.gid}`, "--clear-groups", ...child];
   } else {
     // devd is not root (tests, dev machines): running as devd's own uid gains no privilege
     // over what devd already has, and a non-root process could not switch uid anyway.
-    cmd = counter;
+    cmd = child;
   }
   const r = await deps.run(cmd, {
     cwd: "/", inheritEnv: false, env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: "/nonexistent" },
-    stdin: JSON.stringify({ root, paths, ...limits }), timeoutMs: TIMEOUT_MS,
+    stdin: JSON.stringify({ root, ...input }), timeoutMs: TIMEOUT_MS,
   });
-  if (r.timedOut) return { unavailable: "counter timed out" };
-  if (r.code !== 0) return { unavailable: `counter exited ${r.code}: ${r.stderr.trim().slice(0, 500)}` };
-  if (r.stdout.length > MAX_OUTPUT) return { unavailable: "counter output too large" };
+  if (r.timedOut) return { unavailable: "child timed out" };
+  if (r.code !== 0) return { unavailable: `child exited ${r.code}: ${r.stderr.trim().slice(0, 500)}` };
+  if (r.stdout.length > MAX_OUTPUT) return { unavailable: "child output too large" };
+  return { stdout: r.stdout };
+}
+
+export async function countUntracked(
+  ws: string, paths: string[], limits: { maxBytes: number; budget: number }, deps: CounterDeps = defaultDeps(),
+): Promise<CountResult> {
+  if (!paths.length) return { counts: [], capped: false };
+  const r = await ownerChild(ws, COUNTER_JS, { paths, ...limits }, deps);
+  if ("unavailable" in r) return r;
   let out: { counts?: unknown; capped?: unknown };
   try { out = JSON.parse(r.stdout); } catch { return { unavailable: "counter output is not JSON" }; }
   const counts = out.counts;
@@ -105,4 +127,47 @@ export async function countUntracked(
     return { unavailable: "counter output is malformed" };
   }
   return { counts: counts as (number | null)[], capped: out.capped === true };
+}
+
+/** Sibling of COUNTER_JS for the per-file diff: the first `maxBytes` of one untracked file, with
+ *  the same checks. stdin: {root, path, maxBytes}; stdout: {ok:false} or
+ *  {ok:true, binary, truncated, exec, content(base64)}. */
+export const READER_JS = FD_CHECK_JS + `
+const { root, path, maxBytes } = JSON.parse(await Bun.stdin.text());
+const p = join(root, path);
+const read = () => {
+  let fd;
+  try { fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch { return { ok: false }; }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || !fdInside(fd, p, st, root)) return { ok: false };
+    const len = Math.min(st.size, maxBytes);
+    const buf = Buffer.alloc(len);
+    let data = buf.subarray(0, readSync(fd, buf, 0, len, 0));
+    const binary = data.includes(0);
+    const truncated = st.size > data.length;
+    // Cut back to the last whole line, so no UTF-8 sequence is split.
+    if (truncated) data = data.subarray(0, data.lastIndexOf(10) + 1);
+    return { ok: true, binary, truncated, exec: (st.mode & 0o111) !== 0, content: binary ? "" : data.toString("base64") };
+  } catch { return { ok: false }; } finally { closeSync(fd); }
+};
+process.stdout.write(JSON.stringify(read()));
+`;
+
+export type ReadResult =
+  | { ok: false }
+  | { ok: true; binary: boolean; truncated: boolean; exec: boolean; content: string }
+  | { unavailable: string };
+
+/** One untracked file's content (UTF-8, at most `maxBytes`), read by the owner child. */
+export async function readUntracked(ws: string, path: string, maxBytes: number, deps: CounterDeps = defaultDeps()): Promise<ReadResult> {
+  const r = await ownerChild(ws, READER_JS, { path, maxBytes }, deps);
+  if ("unavailable" in r) return r;
+  let out: { ok?: unknown; binary?: unknown; truncated?: unknown; exec?: unknown; content?: unknown };
+  try { out = JSON.parse(r.stdout); } catch { return { unavailable: "reader output is not JSON" }; }
+  if (out.ok === false) return { ok: false };
+  if (out.ok !== true || typeof out.binary !== "boolean" || typeof out.truncated !== "boolean" || typeof out.exec !== "boolean" || typeof out.content !== "string") {
+    return { unavailable: "reader output is malformed" };
+  }
+  return { ok: true, binary: out.binary, truncated: out.truncated, exec: out.exec, content: Buffer.from(out.content, "base64").toString("utf8") };
 }

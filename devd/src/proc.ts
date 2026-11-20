@@ -11,7 +11,7 @@
 
 import { hardenGit, isGitArgv } from "./safeGit";
 
-export interface RunResult { code: number; stdout: string; stderr: string; timedOut: boolean }
+export interface RunResult { code: number; stdout: string; stderr: string; timedOut: boolean; stdoutTruncated?: true }
 export interface RunOpts {
   cwd?: string;
   env?: Record<string, string>;
@@ -19,6 +19,9 @@ export interface RunOpts {
   unsetEnv?: readonly string[];
   /** false = the child gets ONLY `env`, nothing from devd's process.env (secrets). */
   inheritEnv?: false;
+  /** Keep at most this many characters of stdout (the rest is drained and dropped);
+   *  the result then has `stdoutTruncated: true`. */
+  maxStdout?: number;
   stdin?: string;
   timeoutMs: number;
   /** Incremental chunks of stderr as they arrive (e.g. `git clone --progress`). The final
@@ -127,6 +130,7 @@ export async function runRaw(cmd: string[], opts: RunOpts): Promise<RunResult> {
   // instead of waiting for an EOF which, after a SIGKILL (or for a child that left its
   // own descendant running in the background), may never come.
   let stdoutBuf = "";
+  let stdoutTruncated = false;
   let stderrBuf = "";
   const stdoutReader = (p.stdout as ReadableStream<Uint8Array>).getReader();
   const stderrReader = (p.stderr as ReadableStream<Uint8Array>).getReader();
@@ -162,7 +166,17 @@ export async function runRaw(cmd: string[], opts: RunOpts): Promise<RunResult> {
   // so `p.exited` would never come.
   // An exception from the preview must not end the drain — an undrained pipe would block the child.
   const notifyStderr = (s: string) => { try { opts.onStderr?.(s); } catch { /* preview only */ } };
-  const stdoutDone = drain(stdoutReader, (s) => { stdoutBuf += s; });
+  const stdoutDone = drain(stdoutReader, (s) => {
+    const max = opts.maxStdout;
+    if (max === undefined) { stdoutBuf += s; return; }
+    if (stdoutTruncated) return;
+    if (stdoutBuf.length + s.length <= max) { stdoutBuf += s; return; }
+    // Over the cap: keep what fits and kill the child at once, instead of draining (and
+    // waiting for) output nobody will read. `stdoutTruncated` marks the kill as ours.
+    stdoutBuf += s.slice(0, max - stdoutBuf.length);
+    stdoutTruncated = true;
+    try { p.kill("SIGKILL"); } catch { /* already exited */ }
+  });
   const stderrDone = drain(stderrReader, (s) => { stderrBuf += s; if (s) notifyStderr(s); });
 
   let timedOut = false;
@@ -212,7 +226,7 @@ export async function runRaw(cmd: string[], opts: RunOpts): Promise<RunResult> {
     try { await stderrReader.cancel(); } catch { /* already done/closed */ }
     const took = Date.now() - started;
     if (took > slowWarnMs()) console.warn(`slow subprocess (${(took / 1000).toFixed(1)} s): ${redactArgv(cmd).join(" ")}`);
-    return { code: code ?? 1, stdout: stdoutBuf, stderr: stderrBuf, timedOut };
+    return { code: code ?? 1, stdout: stdoutBuf, stderr: stderrBuf, timedOut, ...(stdoutTruncated ? { stdoutTruncated: true as const } : {}) };
   } finally {
     clearTimeout(timer);
   }
