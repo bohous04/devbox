@@ -53,15 +53,16 @@ struct ChatSwitchers<Content: View>: View {
             HStack(spacing: 4) {
                 if busy != nil { ProgressView().controlSize(.mini) }
                 Text(model).lineLimit(1)
-                Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.C.mutedForeground)
+                Image(systemName: "chevron.down").font(.system(size: ChatType.s(10), weight: .semibold)).foregroundStyle(Theme.C.mutedForeground)
             }
-            .font(.system(size: 14, weight: .medium))
+            .font(.system(size: ChatType.s(14), weight: .medium))
             .foregroundStyle(Theme.C.foreground)
             .padding(.horizontal, 8).frame(minHeight: 32)
             .contentShape(Capsule())
         }
         // The menu stays openable while switching is blocked, so the current choices stay visible; the submenus are
         // disabled then and the reason is in the status lines.
+        .labelOnlyMenu()
         .disabled(busy != nil)
         .accessibilityLabel("Model: \(model), agent \(agent)"))
     }

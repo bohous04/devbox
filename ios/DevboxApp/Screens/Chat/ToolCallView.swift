@@ -52,7 +52,7 @@ struct ToolCallView: View {
                     Text(label.verb).foregroundStyle(Theme.C.mutedForeground).fixedSize()
                     if !label.target.isEmpty {
                         if label.code {
-                            Text(label.target).font(.system(size: 13, design: .monospaced)).foregroundStyle(Theme.C.foreground.opacity(0.85))
+                            Text(label.target).font(.system(size: ChatType.s(13), design: .monospaced)).foregroundStyle(Theme.C.foreground.opacity(0.85))
                                 .lineLimit(open ? nil : 1).truncationMode(.middle)
                                 .padding(.horizontal, 6).padding(.vertical, 2)
                                 .background(Theme.C.muted, in: RoundedRectangle(cornerRadius: 5))
@@ -67,10 +67,10 @@ struct ToolCallView: View {
                     } else if item.status == .done, item.output != nil {
                         StatusMark(.pass).image
                     }
-                    Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.C.mutedForeground)
+                    Image(systemName: "chevron.right").font(.system(size: ChatType.s(11), weight: .semibold)).foregroundStyle(Theme.C.mutedForeground)
                         .rotationEffect(.degrees(open ? 90 : 0)).accessibilityHidden(true)
                 }
-                .font(.system(size: 14))
+                .font(.system(size: ChatType.s(14)))
                 .frame(minHeight: 36)
                 .contentShape(Rectangle())
             }
@@ -78,7 +78,7 @@ struct ToolCallView: View {
             .accessibilityHint(open ? "Hides the details" : "Shows the input and output")
             // A failed command says why without opening it: the output's first line, under the command.
             if !open, item.isError == true, let line = Self.firstLine(item.output) {
-                Text(line).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.C.dangerText)
+                Text(line).font(.system(size: ChatType.s(12), design: .monospaced)).foregroundStyle(Theme.C.dangerText)
                     .lineLimit(2).truncationMode(.tail)
                     .padding(.leading, 26).padding(.bottom, 6)
             }
@@ -104,7 +104,7 @@ struct ToolCallView: View {
 
     private func code(_ text: String, error: Bool = false) -> some View {
         ScrollView {
-            Text(text).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+            Text(text).font(.system(size: ChatType.s(12), design: .monospaced)).textSelection(.enabled)
                 .foregroundStyle(error ? Theme.C.dangerText : Theme.C.foreground.opacity(0.85))
                 .frame(maxWidth: .infinity, alignment: .leading)
         }

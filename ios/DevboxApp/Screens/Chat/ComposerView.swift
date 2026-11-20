@@ -8,7 +8,7 @@ import UniformTypeIdentifiers
 /// next message.
 /// One box (the web's composer): attach, the field, the model chip and send on one row; from the field's second line
 /// the box grows into two tiers, the field on top and the controls under it, and stays so until the text is cleared
-/// (switching back while typing would make the field jump between widths).
+/// (switching back while typing would make the field jump between widths). The Mac always has the two tiers.
 struct ComposerView: View {
     let running: Bool
     /// The model chip (ChatSwitchers); nil while the session's target is unknown.
@@ -29,7 +29,7 @@ struct ComposerView: View {
     @State private var stopping = false
     @State private var preparing = 0
     @State private var error: String?
-    @State private var twoTier = false
+    @State private var twoTier = ChatLayout.composerTwoRows
     /// The field's height with one line, measured while it is empty.
     @State private var oneLine: CGFloat = 0
 
@@ -92,9 +92,10 @@ struct ComposerView: View {
             Button { pasteImages() } label: { Label("Paste image", systemImage: "doc.on.clipboard") }
                 .disabled(!ImagePasteboard.hasImages)
         } label: {
-            Image(systemName: "paperclip").font(.system(size: 17)).foregroundStyle(Theme.C.mutedForeground)
+            Image(systemName: "paperclip").font(.system(size: ChatType.s(17))).foregroundStyle(Theme.C.mutedForeground)
                 .frame(width: 36, height: 36).contentShape(Rectangle())
         }
+        .labelOnlyMenu()
         .disabled(images.count >= ImagePrep.maxImagesPerMessage)
         .accessibilityLabel("Attach images")
     }
@@ -102,7 +103,7 @@ struct ComposerView: View {
     private var field: some View {
         TextField(running ? "Queue a message" : "Ask anything", text: $text, axis: .vertical)
             .lineLimit(1...6)
-            .font(.system(size: 16))
+            .font(.system(size: ChatType.s(16)))
             .textFieldStyle(.plain)
             .padding(.vertical, 6)
             .accessibilityLabel("Message")
@@ -111,7 +112,7 @@ struct ComposerView: View {
                 // Grows to two tiers at the second line; back to one row only when the text is cleared.
                 if !twoTier, oneLine > 0, h > oneLine + 4 { withAnimation(.snappy) { twoTier = true } }
             }
-            .onChange(of: text) { _, t in if t.isEmpty, twoTier { withAnimation(.snappy) { twoTier = false } } }
+            .onChange(of: text) { _, t in if t.isEmpty, twoTier, !ChatLayout.composerTwoRows { withAnimation(.snappy) { twoTier = false } } }
     }
 
     @ViewBuilder
@@ -119,20 +120,22 @@ struct ComposerView: View {
         if let chip { chip }
         if running {
             Button { stop() } label: {
-                Image(systemName: "stop.fill").font(.system(size: 13)).foregroundStyle(Theme.C.foreground)
+                Image(systemName: "stop.fill").font(.system(size: ChatType.s(13))).foregroundStyle(Theme.C.foreground)
                     .frame(width: 34, height: 34).background(Theme.C.muted, in: Circle())
                     .iPhoneTapTarget()
             }
+            .labelOnlyButton()
             .disabled(stopping)
             .accessibilityLabel("Stop the run")
         }
         Button { send() } label: {
-            Image(systemName: "arrow.up").font(.system(size: 15, weight: .semibold))
+            Image(systemName: "arrow.up").font(.system(size: ChatType.s(15), weight: .semibold))
                 .foregroundStyle(canSend ? Theme.C.primaryForeground : Theme.C.mutedForeground)
                 .frame(width: 34, height: 34)
                 .background(canSend ? Theme.C.primary : Theme.C.muted, in: Circle())
                 .iPhoneTapTarget()
         }
+        .labelOnlyButton()
         .disabled(!canSend)
         .accessibilityLabel("Send")
     }

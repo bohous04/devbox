@@ -74,9 +74,15 @@ test("chat item: attention from the thread and the link, lastText is the newest 
   chat(t, BASE, [started("r1"), said("r1", long), completed("r1")]);
   const it = t.inbox.item(getSession(t.db, BASE.id)!);
   expect(it).toEqual({
-    sessionId: BASE.id, runtime: "chat", title: "a/chat", project: "a", repo: "chat", agent: "claude",
+    sessionId: BASE.id, runtime: "chat", title: "a/chat", project: "a", repo: "chat", agent: "claude", branch: null,
     attention: { section: "needs_you", reason: "completed", since: 3000 }, lastText: `${"x".repeat(LAST_TEXT_MAX)}…`,
   });
+});
+
+test("an item carries the branch devd recorded for the session", () => {
+  const t = setup();
+  insertSession(t.db, { ...BASE, worktree: "/w/a-chat", branch: "dev/a-chat-1" });
+  expect(t.inbox.item(getSession(t.db, BASE.id)!).branch).toBe("dev/a-chat-1");
 });
 
 test("tmux item uses the hub's live state and carries runtime tmux", () => {

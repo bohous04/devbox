@@ -88,10 +88,16 @@ final class ChangesTests: XCTestCase {
 
     func testShortURLAndCodeOnlyCells() {
         XCTAssertEqual(ChatMarkdownParse.shortURL("https://example.com/docs"), "https://example.com/docs")
-        let long = ChatMarkdownParse.shortURL("https://example.com/docs/sync/offline-queue/retry-and-backoff#drain-order")
+        // iPhone: the middle cut, so host and end both stay.
+        let long = ChatMarkdownParse.shortURL("https://example.com/docs/sync/offline-queue/retry-and-backoff#drain-order", max: 34, tail: false)
         XCTAssertEqual(long.count, 34)
         XCTAssertTrue(long.hasPrefix("example.com/docs/"))
         XCTAssertTrue(long.hasSuffix("#drain-order"))
+        // Mac: the tail cut, read from the start.
+        let mac = ChatMarkdownParse.shortURL("https://example.com/docs/sync/offline-queue/retry-and-backoff-strategies#drain-order", max: 60, tail: true)
+        XCTAssertEqual(mac.count, 60)
+        XCTAssertTrue(mac.hasPrefix("example.com/docs/sync/offline-queue/"))
+        XCTAssertTrue(mac.hasSuffix("…"))
         XCTAssertTrue(ChatMarkdownParse.linkBareURLs("see https://example.com/docs/sync/offline-queue/retry-and-backoff")
             .contains("](https://example.com/docs/sync/offline-queue/retry-and-backoff)"))
         XCTAssertTrue(ChatMarkdownParse.isCodeOnly(" `bun test src/a.ts` "))

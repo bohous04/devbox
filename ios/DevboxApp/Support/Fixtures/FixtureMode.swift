@@ -13,8 +13,9 @@ enum FixtureMode {
     ]
 
     /// The requested set's name, or nil when the argument is absent. An unknown name stops the app: a screenshot of
-    /// the wrong data must not pass for the right one.
-    static let requested: String? = {
+    /// the wrong data must not pass for the right one. Settable for the Mac's offscreen screenshot test, which runs in
+    /// the test host without launch arguments.
+    static var requested: String? = {
         let args = ProcessInfo.processInfo.arguments
         guard let i = args.firstIndex(of: "-DevboxFixtures") else { return nil }
         guard i + 1 < args.count, sets[args[i + 1]] != nil else {
@@ -24,6 +25,34 @@ enum FixtureMode {
     }()
 
     static var isActive: Bool { requested != nil }
+
+    /// `-DevboxAppearance light|dark` (Mac): the app's appearance whatever the system's, for screenshots of both.
+    static let appearance: String? = {
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "-DevboxAppearance") else { return nil }
+        guard isActive, i + 1 < args.count, ["light", "dark"].contains(args[i + 1]) else {
+            fatalError("-DevboxAppearance takes light or dark and needs -DevboxFixtures")
+        }
+        return args[i + 1]
+    }()
+
+    /// `-DevboxSelect <sessionId>` (Mac): the first window opens on that session.
+    static let selected: String? = {
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "-DevboxSelect") else { return nil }
+        guard isActive, i + 1 < args.count else { fatalError("-DevboxSelect takes a session id and needs -DevboxFixtures") }
+        return args[i + 1]
+    }()
+
+    /// `-DevboxWindowSize 1440x900` (Mac): the window's size in points, so screenshots of every run match. Only with
+    /// `-DevboxFixtures`; a malformed value stops the app.
+    static let windowSize: CGSize? = {
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "-DevboxWindowSize") else { return nil }
+        let parts = i + 1 < args.count ? args[i + 1].split(separator: "x").compactMap { Double($0) } : []
+        guard isActive, parts.count == 2 else { fatalError("-DevboxWindowSize takes WIDTHxHEIGHT and needs -DevboxFixtures") }
+        return CGSize(width: parts[0], height: parts[1])
+    }()
 
     /// `-DevboxScrollTo bottom`: a screen that supports it scrolls to its end once loaded, so a screenshot can show
     /// the lower half. Only with `-DevboxFixtures`; any other value stops the app.

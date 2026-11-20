@@ -91,6 +91,9 @@ export interface InboxItem {
   project: string;
   repo: string;
   agent: string;
+  /** The branch the session's worktree was created on (devd's record, no git call); null when devd has none
+   *  (shared workspace, or a row from before branches were recorded). Optional: older devd does not send it. */
+  branch?: string | null;
   attention: Attention;
   lastText: string | null;
 }

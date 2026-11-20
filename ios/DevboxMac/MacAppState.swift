@@ -19,6 +19,9 @@ final class MacAppState: ObservableObject {
     /// The test bundle runs inside this app: then nothing of the real app's startup runs (no devd connection, no login
     /// item, a throwaway window list), so a test run never changes the user's app state.
     let isTestRun: Bool
+    /// DEBUG fixture mode (`-DevboxFixtures`, Support/Fixtures): connected to canned data, but like a test run it
+    /// keeps a throwaway window list and registers no login item, so a screenshot run leaves the real app's state alone.
+    let isFixtureRun: Bool
     private(set) var startedLoginItem = false
 
     private static let logger = Logger(subsystem: "com.example.devbox", category: "MacApp")
@@ -29,15 +32,22 @@ final class MacAppState: ObservableObject {
     /// Threads asked for (a `devbox://` link) before any view could open a window.
     private var pending: [String] = []
 
-    init(isTestRun: Bool = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil) {
+    init(isTestRun: Bool = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil,
+         isFixtureRun: Bool = MacAppState.fixtureArgument) {
         self.isTestRun = isTestRun
+        self.isFixtureRun = isFixtureRun
         appModel = AppModel()
         loginItem = LoginItem(service: MainAppLoginItem(), defaults: .standard)
-        if isTestRun {
-            let scratch = "DevboxMac-test-host"
+        #if DEBUG
+        if let look = FixtureMode.appearance { NSApp.appearance = NSAppearance(named: look == "dark" ? .darkAqua : .aqua) }
+        #endif
+        if isTestRun || isFixtureRun {
+            let scratch = isTestRun ? "DevboxMac-test-host" : "DevboxMac-fixtures"
             let defaults = UserDefaults(suiteName: scratch)!
             defaults.removePersistentDomain(forName: scratch)
             windows = ThreadWindows(defaults: defaults, directory: FileManager.default.temporaryDirectory.appending(path: scratch))
+            if isTestRun { return }
+            clientWatch = appModel.$client.sink { [weak self] in self?.use($0) }
             return
         }
         windows = ThreadWindows(defaults: .standard,
@@ -46,9 +56,17 @@ final class MacAppState: ObservableObject {
         clientWatch = appModel.$client.sink { [weak self] in self?.use($0) }
     }
 
-    /// Launch at login on first launch; not in a test run.
+    nonisolated static var fixtureArgument: Bool {
+        #if DEBUG
+        FixtureMode.isActive
+        #else
+        false
+        #endif
+    }
+
+    /// Launch at login on first launch; not in a test or fixture run.
     func startLoginItem() {
-        guard !isTestRun else { return }
+        guard !isTestRun, !isFixtureRun else { return }
         startedLoginItem = true
         loginItem.registerOnFirstLaunch()
     }
@@ -59,6 +77,12 @@ final class MacAppState: ObservableObject {
         let threads = pending
         pending = []
         threads.forEach(openThread)
+        // A fixture run (screenshots) starts with no window of its own; it opens the one window it draws.
+        #if DEBUG
+        if isFixtureRun && threads.isEmpty {
+            if let id = FixtureMode.selected { action(value: id) } else { action(id: MacWindow.sceneId) }
+        }
+        #endif
     }
 
     /// Brings the thread's window to the front, or opens one (SwiftUI focuses a window already showing the value).

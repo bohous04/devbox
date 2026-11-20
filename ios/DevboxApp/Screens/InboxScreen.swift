@@ -321,7 +321,7 @@ struct InboxRow: View {
         .padding(.leading, 12)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilityText(title: title.text, detail: preview ? detail : ""))
+        .accessibilityLabel(Self.spokenLabel(item, now: now, title: title.text, detail: preview ? detail : ""))
     }
 
     private var dot: some View { Text("·").opacity(0.5).accessibilityHidden(true) }
@@ -346,8 +346,9 @@ struct InboxRow: View {
         .fixedSize()
     }
 
-    /// One spoken line per row: title, state in words, when, where, which agent.
-    private func accessibilityText(title: String, detail: String) -> String {
+    /// One spoken line per row: title, state in words, when, where, which agent. The Mac's sidebar row also shows it
+    /// as its tooltip.
+    static func spokenLabel(_ item: InboxItem, now: Int, title: String, detail: String) -> String {
         let a = item.attention
         let state = InboxView.reasonLabel(a.reason)
         let when = a.until.map { "snoozed until \(Self.untilLabel($0))" } ?? (a.since > 0 ? Format.agoLabel(Double(now - a.since)) : "")

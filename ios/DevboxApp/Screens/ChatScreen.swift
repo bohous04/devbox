@@ -12,6 +12,12 @@ struct ChatScreen: View {
     @State private var wentAway = false
     /// On screen (not under a pushed screen or another tab): only then does coming back reopen the stream.
     @State private var visible = false
+    /// Room under the thread's end that keeps a sliver of a row from showing at the top edge (ThreadEdge, Mac).
+    @State private var edgePad: CGFloat = 0
+    @State private var rowFrames = ThreadEdge.Frames()
+    @State private var viewportTop: CGFloat = 0
+    /// The thread's height without that room: a change (a card that loaded, a row that grew) measures the edge again.
+    @State private var contentHeight = 0
     private let sessionId: String
     private let client: DevdClient
 
@@ -20,21 +26,25 @@ struct ChatScreen: View {
     private let openTerminal: (() -> Void)?
     /// The Mac closes the thread's window when its session ended; nil on iPhone (back navigation does it).
     private let closeWindow: (() -> Void)?
+    /// The Mac header's changes chip: each new value scrolls the thread to the changes card.
+    private let revealChanges: Int
 
     init(sessionId: String, client: DevdClient) {
         self.sessionId = sessionId
         self.client = client
         openTerminal = nil
         closeWindow = nil
+        revealChanges = 0
         _store = StateObject(wrappedValue: ThreadStore(sessionId: sessionId, client: client))
     }
 
     /// The Mac keeps the store outside the screen: its window restores it and saves its seq at quit.
-    init(store: ThreadStore, client: DevdClient, openTerminal: (() -> Void)?, closeWindow: (() -> Void)?) {
+    init(store: ThreadStore, client: DevdClient, openTerminal: (() -> Void)?, closeWindow: (() -> Void)?, revealChanges: Int = 0) {
         self.sessionId = store.sessionId
         self.client = client
         self.openTerminal = openTerminal
         self.closeWindow = closeWindow
+        self.revealChanges = revealChanges
         _store = StateObject(wrappedValue: store)
     }
 
@@ -135,13 +145,16 @@ struct ChatScreen: View {
                     }
                     ForEach(store.display) { row in
                         switch row {
-                        case .work(let w): WorkGroupView(work: w).equatable()
+                        case .work(let w): WorkGroupView(work: w).equatable().modifier(ThreadEdge.Track(id: row.id, frames: rowFrames))
                         case .item(let r, _):
                             MessageRow(row: r, sessionId: sessionId, client: client,
                                        onAnswer: { try await store.answer(requestId: $0, answer: $1) })
                                 .equatable()
+                                .modifier(ThreadEdge.Track(id: row.id, frames: rowFrames, quiet: r.item.kind == .notice && !r.failedRun))
                             if let anchor = store.changesAnchor, anchor.rowId == r.id {
                                 ChangesCard(sessionId: sessionId, client: client, refreshKey: anchor.endedSeq)
+                                    .id(Self.changesId)
+                                    .modifier(ThreadEdge.Track(id: Self.changesId, frames: rowFrames))
                             }
                         }
                     }
@@ -149,18 +162,43 @@ struct ChatScreen: View {
                         Text("background: \(t.background.map(\.label).joined(separator: ", "))")
                             .font(Theme.F.meta).foregroundStyle(Theme.C.mutedForeground)
                     }
+                    if edgePad > 0 { Color.clear.frame(height: edgePad).accessibilityHidden(true) }
                     // Follow the conversation while the user is at its end; leave them alone when they scrolled up.
                     Color.clear.frame(height: 1).id("end")
                         .onAppear { atEnd = true }
                         .onDisappear { atEnd = false }
                 }
                 .padding(Theme.S.screenPadding)
+                .padding(.top, ChatLayout.top)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                    if ChatLayout.trimTopEdge { contentHeight = Int(($0 - edgePad).rounded()) }
+                }
+                // The Mac reads in a centred column; the iPhone's is the screen.
+                .frame(maxWidth: ChatLayout.column)
+                .frame(maxWidth: .infinity)
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
             // lastSeq moves with events; a notice adds an item without one.
             .onChange(of: [t.lastSeq, t.items.count]) { _, _ in
                 if atEnd { proxy.scrollTo("end", anchor: .bottom) }
+            }
+            .onChange(of: revealChanges) { _, _ in
+                // The card sits in its answer's ForEach row: a lazy stack scrolls to that row's identity even when it
+                // is not built yet, and to the card itself only once it is.
+                guard let anchor = store.changesAnchor else { return }
+                proxy.scrollTo(ThreadDisplayRow.itemId(anchor.rowId), anchor: .top)
+                DispatchQueue.main.async { withAnimation(.snappy) { proxy.scrollTo(Self.changesId, anchor: .top) } }
+            }
+            // Once the thread settles at its end, push a cut row's sliver up past the edge.
+            .task(id: [t.lastSeq, t.items.count, contentHeight]) {
+                // Only at the end: resetting the pad while the user reads further up would shift what they read.
+                guard ChatLayout.trimTopEdge, atEnd else { return }
+                edgePad = 0
+                try? await Task.sleep(for: .milliseconds(400))
+                guard !Task.isCancelled, atEnd, let pad = ThreadEdge.pad(Array(rowFrames.rows.values), top: viewportTop) else { return }
+                edgePad = pad
+                proxy.scrollTo("end", anchor: .bottom)
             }
             .safeAreaInset(edge: .bottom) {
                 ChatSwitchers(sessionId: sessionId, thread: t, targetKey: store.switchKey, client: client) { chip, status in
@@ -172,6 +210,8 @@ struct ChatScreen: View {
                     }
                 }
                 .padding(.horizontal, Theme.S.screenPadding)
+                .frame(maxWidth: ChatLayout.column)
+                .frame(maxWidth: .infinity)
                 .padding(.top, 8).padding(.bottom, 6)
                 // Opaque: the thread scrolls under the composer, not through it, and fades out just above it
                 // instead of being cut at a hard line. The fill runs on under the home indicator and the keyboard,
@@ -188,9 +228,17 @@ struct ChatScreen: View {
                 ChatMarkdownParse.isWebLink(url) ? .systemAction : .discarded
             })
             // The header's bottom edge: a hairline the thread scrolls under.
-            .overlay(alignment: .top) { Rectangle().fill(Theme.C.border).frame(height: 1 / 3).accessibilityHidden(true) }
+            .overlay(alignment: .top) {
+                Rectangle().fill(Theme.C.border).frame(height: 1 / 3).accessibilityHidden(true)
+                    // The header's edge, where a row would show cut (ThreadEdge), in the rows' space.
+                    .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: {
+                        if ChatLayout.trimTopEdge { viewportTop = $0 }
+                    }
+            }
         }
     }
+
+    private static let changesId = "changes"
 
     @ViewBuilder
     private var banners: some View {
@@ -208,5 +256,57 @@ struct ChatScreen: View {
         if let seen = store.seenError {
             Text("Could not mark the thread as seen: \(seen)").font(Theme.F.meta).foregroundStyle(Theme.C.dangerText)
         }
+    }
+}
+
+/// Resting at the thread's end, the top edge can cut a row, leaving a sliver of a line under the header, or a quiet
+/// notice ("Agent bridge restarted") can be the first thing in view. When the sliver and the notices right under it
+/// take at most `maxSliver`, the thread gets that much room under its end, so they scroll out of view; a taller part
+/// of a row stays (it is readable, and hiding it would hide content). Mac only (ChatLayout.trimTopEdge).
+enum ThreadEdge {
+    static let maxSliver: CGFloat = 80
+
+    struct Row: Equatable {
+        var rect: CGRect
+        /// A notice that may scroll away with a sliver (not a failed run's, which stays prominent).
+        var quiet = false
+    }
+
+    /// Row frames by row id, in the window's space (as the header's edge). A class: rows write while scrolling, and no write may
+    /// redraw the thread.
+    final class Frames { var rows: [String: Row] = [:] }
+
+    struct Track: ViewModifier {
+        let id: String
+        let frames: Frames
+        var quiet = false
+
+        func body(content: Content) -> some View {
+            if ChatLayout.trimTopEdge {
+                content
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+                        frames.rows[id] = Row(rect: $0, quiet: quiet)
+                    }
+                    // A lazy row out of view keeps no stale frame that could pass for a cut one.
+                    .onDisappear { frames.rows[id] = nil }
+            } else {
+                content
+            }
+        }
+    }
+
+    /// The room that lifts a cut sliver and the quiet notices under it out of view at the edge `top`, or nil when
+    /// there is none or it would take more than `maxSliver`.
+    static func pad(_ rows: [Row], top: CGFloat) -> CGFloat? {
+        let visible = rows.filter { $0.rect.maxY > top + 0.5 }.sorted { $0.rect.minY < $1.rect.minY }
+        var pad: CGFloat = 0
+        for (n, row) in visible.enumerated() {
+            let cut = n == 0 && row.rect.minY < top - 0.5
+            guard cut || row.quiet else { break }
+            let next = row.rect.maxY - top
+            guard next <= maxSliver else { break }
+            pad = next
+        }
+        return pad > 0 ? pad.rounded(.up) : nil
     }
 }

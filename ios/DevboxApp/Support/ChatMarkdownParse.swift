@@ -155,11 +155,18 @@ enum ChatMarkdownParse {
     }
 
     /// A long bare URL shown without its scheme and with its middle cut, so the host and the end (often the page's
-    /// name) both stay; the link itself keeps the full address.
-    static func shortURL(_ url: String, max: Int = 34) -> String {
+    /// name) both stay; the link itself keeps the full address. A Mac window has the room to show it from the start:
+    /// cut only at its tail, past 60 characters.
+    #if os(macOS)
+    static let defaultMax = 60, cutsTail = true
+    #else
+    static let defaultMax = 34, cutsTail = false
+    #endif
+    static func shortURL(_ url: String, max: Int = defaultMax, tail: Bool = cutsTail) -> String {
         guard url.count > max else { return url }
         let bare = strip(url, scheme)
         guard bare.count > max else { return bare }
+        if tail { return String(bare.prefix(max - 1)) + "…" }
         let head = max / 2
         return String(bare.prefix(head)) + "…" + String(bare.suffix(max - head - 1))
     }

@@ -20,10 +20,13 @@ enum ThreadDisplayRow: Identifiable, Equatable {
 
     var id: String {
         switch self {
-        case .item(let r, _): return "item:\(r.id)"
+        case .item(let r, _): return Self.itemId(r.id)
         case .work(let w): return "work:\(w.runId)"
         }
     }
+
+    /// The id of the row showing the `ChatRow` with this id.
+    static func itemId(_ rowId: Int) -> String { "item:\(rowId)" }
 }
 
 enum WorkGroups {

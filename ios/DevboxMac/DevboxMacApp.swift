@@ -17,6 +17,7 @@ struct DevboxMacApp: App {
         // Links go to the delegate, which focuses or opens the thread's window, never a blank extra window.
         .handlesExternalEvents(matching: [])
         .defaultSize(width: 1100, height: 760)
+        .commands { MacWindowCommands() }
 
         Settings {
             MacSettings()
@@ -28,6 +29,27 @@ struct DevboxMacApp: App {
             MenuBarMenu(state: delegate.state)
         } label: {
             MenuBarLabel(state: delegate.state)
+        }
+    }
+}
+
+/// ⌘N opens New session, ⌘⇧N a new window (the default ⌘N), ⌘F the sidebar's search, all in the key window.
+struct MacWindowCommands: Commands {
+    @FocusedValue(\.macWindowActions) private var actions
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("New Session") { actions?.newSession() }
+                .keyboardShortcut("n")
+                .disabled(actions == nil)
+            Button("New Window") { openWindow(id: MacWindow.sceneId) }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
+        }
+        CommandGroup(after: .textEditing) {
+            Button("Find Session…") { actions?.find() }
+                .keyboardShortcut("f")
+                .disabled(actions == nil)
         }
     }
 }

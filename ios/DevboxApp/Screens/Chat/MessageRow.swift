@@ -48,7 +48,7 @@ struct MessageRow: View, Equatable {
         } else {
             HStack(spacing: 10) {
                 Rectangle().fill(Theme.C.border).frame(height: 1 / 3)
-                Text(item.text).font(.system(size: 11)).foregroundStyle(Theme.C.mutedForeground).multilineTextAlignment(.center)
+                Text(item.text).font(.system(size: ChatType.s(11))).foregroundStyle(Theme.C.mutedForeground).multilineTextAlignment(.center)
                     .layoutPriority(1)
                 Rectangle().fill(Theme.C.border).frame(height: 1 / 3)
             }
@@ -77,6 +77,7 @@ struct MessageRow: View, Equatable {
             .background(Theme.C.muted, in: UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: 18, bottomTrailingRadius: 6, topTrailingRadius: 18))
             .overlay(UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: 18, bottomTrailingRadius: 6, topTrailingRadius: 18).strokeBorder(Theme.C.border.opacity(0.7)))
             .opacity(queued ? 0.7 : 1)
+            .frame(maxWidth: ChatLayout.bubble, alignment: .trailing)
         }
     }
 
@@ -104,7 +105,7 @@ struct MessageRow: View, Equatable {
     }
 }
 
-/// A long prompt folds to six lines so it does not outweigh the answer; "Show more" opens it in place. The toggle
+/// A long prompt folds (six lines, three on the Mac) so it does not outweigh the answer; "Show more" opens it in place. The toggle
 /// shows only when the text really is longer (measured against the same text unclamped).
 struct ClampedText: View {
     let text: String
@@ -114,18 +115,18 @@ struct ClampedText: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(text).font(.system(size: 16)).lineSpacing(3).textSelection(.enabled)
-                .lineLimit(open ? nil : 6)
+            Text(text).font(.system(size: ChatLayout.bubbleText)).lineSpacing(3).textSelection(.enabled)
+                .lineLimit(open ? nil : ChatLayout.bubbleLines)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { if !open { clamped = $0 } }
                 .background(alignment: .topLeading) {
                     // The same text unclamped, invisible, for its real height.
-                    Text(text).font(.system(size: 16)).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                    Text(text).font(.system(size: ChatLayout.bubbleText)).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
                         .hidden()
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { full = $0 }
                 }
             if open || full > clamped + 1 {
                 Button(open ? "Show less" : "Show more") { withAnimation(.snappy) { open.toggle() } }
-                    .font(.system(size: 14, weight: .medium)).foregroundStyle(Theme.C.mutedForeground)
+                    .font(.system(size: ChatType.s(14), weight: .medium)).foregroundStyle(Theme.C.mutedForeground)
                     .buttonStyle(.plain)
             }
         }
