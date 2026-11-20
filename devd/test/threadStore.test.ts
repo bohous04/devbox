@@ -412,6 +412,28 @@ test("T8: a store written by a newer devd (higher schema version) is refused wit
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("T8: a schema-1 store from before the effort table (live since #91 shipped it in schema 1) gains it and reads/writes effort", () => {
+  const dir = mkdtempSync(join(tmpdir(), "threads-"));
+  try {
+    const old = ThreadStore.open(dir, "dev-a-b-1");
+    n = 0;
+    old.apply(ev({ type: "run.queued", runId: "r1", text: "hi", attachments: [] }));
+    old.close();
+    // The live store's shape: version 1, no effort table.
+    const db = new Database(ThreadStore.path(dir, "dev-a-b-1"));
+    db.run("DROP TABLE effort");
+    db.run("PRAGMA user_version = 1");
+    db.close();
+    const s = ThreadStore.open(dir, "dev-a-b-1");
+    expect(s.snapshot().effort).toBeNull();
+    expect(s.snapshot().runs.map((r) => r.runId)).toEqual(["r1"]);
+    s.apply(ev({ type: "effort.state", model: "m", supported: ["low", "high"], effective: "high", chosen: null }));
+    expect(s.snapshot().effort).toEqual({ model: "m", supported: ["low", "high"], effective: "high", chosen: null });
+    s.close();
+    expect(userVersion(dir)).toBe(THREAD_STORE_SCHEMA);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("effort.state: kept for the snapshot across a reopen; levels outside the known list are dropped, logged once", () => {
   const dir = mkdtempSync(join(tmpdir(), "threads-"));
   const errors = spyOn(console, "error").mockImplementation(() => {});

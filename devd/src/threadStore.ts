@@ -24,7 +24,7 @@ export interface ProviderThread {
 
 /** The thread store's schema (`PRAGMA user_version`). A change to the schema raises it and adds a migration from the
  *  previous version in `open`; a store with a higher version (written by a newer devd) is refused, never guessed at. */
-export const THREAD_STORE_SCHEMA = 1;
+export const THREAD_STORE_SCHEMA = 2;
 
 /** Per-session conversation store: `<root>/_threads/<id>.sqlite`. Conversation data stays out of the
  *  main devd DB on purpose. Items are ordered by their own `id`; `seq` is the log seq of the event that created them (one event can create
@@ -53,6 +53,7 @@ export class ThreadStore {
       throw new Error(`thread store schema ${version} is newer than this devd's (${THREAD_STORE_SCHEMA}): ${ThreadStore.path(root, sessionId)}`);
     }
     if (version === 0) db.transaction(() => ThreadStore.createSchema1(db))();
+    if (version <= 1) db.transaction(() => ThreadStore.migrateTo2(db))();
     return new ThreadStore(db, opts.onNotice ?? (() => {}));
   }
 
@@ -78,7 +79,6 @@ export class ThreadStore {
     db.run(`CREATE TABLE IF NOT EXISTS native (
       id INTEGER PRIMARY KEY CHECK (id = 1), harness TEXT NOT NULL, native_thread_id TEXT NOT NULL,
       account TEXT, model TEXT)`);
-    db.run(`CREATE TABLE IF NOT EXISTS effort (id INTEGER PRIMARY KEY CHECK (id = 1), state TEXT NOT NULL)`);
     db.run(`CREATE TABLE IF NOT EXISTS provider_threads (
       harness TEXT NOT NULL, account TEXT, native_thread_id TEXT NOT NULL, covered_through_run TEXT,
       last_used_at INTEGER NOT NULL, caps TEXT, resume_failed INTEGER NOT NULL DEFAULT 0,
@@ -92,6 +92,12 @@ export class ThreadStore {
       db.run("ALTER TABLE items ADD COLUMN attachments TEXT");
     }
     db.run(`PRAGMA user_version = 1`);
+  }
+
+  /** Schema 2: the effort table (the agent's reasoning effort, effort.state). Stores already at version 1 lacked it. */
+  private static migrateTo2(db: Database) {
+    db.run(`CREATE TABLE IF NOT EXISTS effort (id INTEGER PRIMARY KEY CHECK (id = 1), state TEXT NOT NULL)`);
+    db.run(`PRAGMA user_version = 2`);
   }
 
   lastSeq(): number { return this.meta("last_seq"); }
