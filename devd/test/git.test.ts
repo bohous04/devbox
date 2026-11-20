@@ -43,6 +43,18 @@ test("conflictPrompt is English and lists files", () => {
   const p = conflictPrompt(["a.ts", "b.ts"]);
   expect(p).toContain("A git pull resulted in a conflict");
   expect(p).toContain("a.ts, b.ts");
+  expect(p).not.toContain("more");
+});
+
+test("conflictPrompt lists at most 50 files and stays far below one argv word with a full first prompt", () => {
+  const many = Array.from({ length: 1000 }, (_, i) => `src/some/deeply/nested/module-${i}/file.ts`);
+  const p = conflictPrompt(many);
+  expect(p).toContain("module-49/file.ts and 950 more (see git status)");
+  expect(p).not.toContain("module-50/");
+  // A path is up to 4096 bytes: the character bound holds even when 50 of them would not fit.
+  const long = conflictPrompt(Array.from({ length: 1000 }, (_, i) => `${"d/".repeat(2000)}${i}`));
+  expect(long).toContain("more (see git status)");
+  expect(Buffer.byteLength(long) + 64_000 + 2).toBeLessThan(128 * 1024);
 });
 
 test("giteaAuthEnv builds host-scoped extraHeader env (Basic devbox:token)", () => {

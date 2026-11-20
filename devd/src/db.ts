@@ -716,6 +716,8 @@ export function deleteSession(db: Database, id: string): void {
   // A later session may get the same id: it must not start settled or snoozed.
   db.query(`DELETE FROM session_attention WHERE session_id=?`).run(id);
   db.query(`DELETE FROM session_prs WHERE session_id=?`).run(id);
+  // An undelivered first message must not reach a later session that reuses the id.
+  db.query(`DELETE FROM pending_first_turns WHERE session_id=?`).run(id);
 }
 
 export function getSession(db: Database, id: string): SessionRow | null {
@@ -1193,9 +1195,13 @@ export function getPendingFirstTurn(db: Database, sessionId: string): PendingFir
   const r = db.query(`SELECT text, after_seq, tag FROM pending_first_turns WHERE session_id=?`).get(sessionId) as { text: string; after_seq: number; tag: string | null } | null;
   return r ? { text: r.text, seq: r.after_seq, tag: r.tag } : null;
 }
-/** On devd start: a pending first message of a session that is gone or not running will never be delivered. */
-export function prunePendingFirstTurns(db: Database): number {
-  return db.query(`DELETE FROM pending_first_turns WHERE session_id NOT IN (SELECT id FROM sessions WHERE status='running')`).run().changes;
+/** On devd start: a pending first message of a session that is gone or not running will never be delivered. Returns
+ *  the deleted rows, so the caller can report the ones whose sender is still waiting (a user's first prompt). */
+export function prunePendingFirstTurns(db: Database): { sessionId: string; tag: string | null }[] {
+  const where = `session_id NOT IN (SELECT id FROM sessions WHERE status='running')`;
+  const rows = db.query(`SELECT session_id, tag FROM pending_first_turns WHERE ${where}`).all() as { session_id: string; tag: string | null }[];
+  db.query(`DELETE FROM pending_first_turns WHERE ${where}`).run();
+  return rows.map((r) => ({ sessionId: r.session_id, tag: r.tag }));
 }
 export function deletePendingFirstTurn(db: Database, sessionId: string): void {
   db.query(`DELETE FROM pending_first_turns WHERE session_id=?`).run(sessionId);

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { openDb, insertSchedule, getSession, insertSession, type ScheduleRow, type SessionRow } from "../src/db";
-import { CommandTimeout } from "../src/bridgeLink";
+import { CommandTimeout, FirstTurnPending } from "../src/bridgeLink";
 import { createScheduler, dueSchedules, scheduledNotifySession, scheduledPrompt, slug, stamp } from "../src/scheduler";
 
 function sched(over: Partial<ScheduleRow> = {}): ScheduleRow {
@@ -151,7 +151,7 @@ test("fireSchedule: a skipped run does not set auto_end", async () => {
 
 // Chat schedules: no prompt file; the prompt is the session's first turn, sent through the bridge once it connects.
 // `mode`: how the bridge reacts to the first turn.
-function fakeLinks(mode: "accept" | "refuse" | "never" | "late" | "unknown" = "accept") {
+function fakeLinks(mode: "accept" | "refuse" | "never" | "late" | "unknown" | "pending" = "accept") {
   const calls: string[] = []; const turns: Record<string, string> = {};
   let done: ((e: Error | null) => void) | null = null;
   return {
@@ -161,6 +161,7 @@ function fakeLinks(mode: "accept" | "refuse" | "never" | "late" | "unknown" = "a
     links: {
       ensure: (id: string) => { calls.push(`ensure ${id}`); },
       startTurnWhenConnected: (id: string, text: string, onDone: (e: Error | null) => void) => {
+        if (mode === "pending") throw new FirstTurnPending(`${id} already has a first message waiting to be sent`);
         calls.push(`start ${id}`); turns[id] = text; done = onDone;
         if (mode === "accept") onDone(null);
         if (mode === "refuse") onDone(new Error("bridge refused the turn"));
@@ -241,6 +242,22 @@ test("fireSchedule (chat): a bridge refusal of the first turn is a failure and e
   expect(notes[0]).toContain("bridge refused the turn");
   expect(ended).toEqual(["dev-shop-cms"]);
   expect((db.query("SELECT type FROM events").all() as { type: string }[]).map((e) => e.type)).toEqual(["auto_end", "schedule_error"]);
+});
+
+test("fireSchedule (chat): a session already holding a first message refuses the run's; the run fails and leaves the session", async () => {
+  const db = openDb(":memory:");
+  const notes: string[] = []; const ended: string[] = [];
+  insertSession(db, row());
+  const s = createScheduler({
+    db, open: async () => ({ session: { id: "dev-shop-cms" } }),
+    notify: (_t, m) => { notes.push(m); }, ...chatDeps(fakeLinks("pending"), ended),
+  });
+  await s.fireSchedule(sched({ runtime: "chat" }));
+  expect(notes).toHaveLength(1);
+  expect(notes[0]).toContain("already has a first message waiting");
+  expect(notes[0]).toContain("left as it is");
+  expect(ended).toEqual([]);
+  expect((db.query("SELECT type FROM events").all() as { type: string }[]).map((e) => e.type)).toEqual(["schedule_error"]);
 });
 
 test("fireSchedule (chat): a failure on a reused session with a dirty tree keeps the worktree", async () => {

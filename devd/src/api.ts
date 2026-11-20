@@ -25,6 +25,7 @@ import { execInContainer } from "./docker";
 import { createReadStream, mkdtempSync, openSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { Readable } from "node:stream";
 import { liveActivitiesRoutes, type LiveActivities } from "./liveActivities";
+import { USER_FIRST_PROMPT_TAG } from "./bridgeLink";
 import { AGENT_EVENTS, type AgentEvent, type AgentEventHub, type HookMeta, type NotifyFn } from "./agentEvents";
 import { AGENT_IDS, AGENTS, chatRuntimeBlock, instaboxAgentBlock, runtimeForOmitted, specFor, tmuxRuntimeBlock, type Upstream } from "./agents";
 import { buildProjectLeaderboard, buildRange, buildSessionUsage, buildTotals, buildWorkHours, predictDisk, PROMPT_CHARS, PROMPT_WAIT } from "./aggregate";
@@ -61,7 +62,7 @@ import { createScopeGrant, keyCovered, listScopeGrants, liveScopeGrant, revokeSc
 import { dbEntry, roUrl, entitledDbs, type Catalog, type Access, type DbEntry, type ServerRef } from "./prodDb";
 import { createProposal, listProposals, getProposal, setStatus, type WriteStatus, type WriteScope } from "./prodWrites";
 import type { ListenerClient } from "./listener";
-import { agentContextTokens, ExternalStartError, resolveAgent, RestartError, SessionBusyError, storedRuntime, type SessionManager } from "./sessions";
+import { agentContextTokens, ExternalStartError, FirstPromptRefused, MAX_FIRST_PROMPT_BYTES, resolveAgent, RestartError, SessionBusyError, storedRuntime, type SessionManager } from "./sessions";
 import { localEnvProfiles } from "./localEnv";
 import { parseOtlpMetrics, pointsToRows } from "./metrics";
 import { classifyClaudeState } from "./stats";
@@ -113,6 +114,26 @@ export interface ShareLockdown {
 }
 
 const endSyncWaitMs = () => Number(process.env.DEVD_END_SYNC_WAIT_MS ?? 20_000);
+
+/** A user's first prompt (POST /api/sessions) that never reached the agent: said in the thread, the event log and a
+ *  notification. Also used after a devd restart (index.ts onRestoredTurnDone). */
+export function reportFirstPromptFailed(d: { db: Database; threads?: (id: string) => { addNotice: (text: string, at: number) => void }; notify: NotifyFn }, s: Pick<SessionRow, "id" | "project" | "repo">, err: Error): void {
+  try {
+    logEvent(d.db, s.id, "first_prompt_failed", { error: err.message });
+    d.threads?.(s.id).addNotice(`Your first message was not delivered (${err.message}). Send it again.`, Date.now());
+    d.notify(`${s.project}/${s.repo}`, `First message to ${s.id} was not delivered: ${err.message}`, { session: { id: s.id, project: s.project, repo: s.repo, runtime: "chat" } });
+  } catch (e) { console.error(`reporting the failed first message of ${s.id} failed:`, e); }
+}
+
+/** The user's first prompts devd deleted at boot (prunePendingFirstTurns: their session was not running) are reported
+ *  like any undelivered one. Scheduled runs' rows stay silent, as before; a session that is gone has no one to tell. */
+export function reportPrunedFirstPrompts(d: Parameters<typeof reportFirstPromptFailed>[0], pruned: { sessionId: string; tag: string | null }[]): void {
+  for (const p of pruned) {
+    if (p.tag !== USER_FIRST_PROMPT_TAG) continue;
+    const s = getSession(d.db, p.sessionId);
+    if (s) reportFirstPromptFailed(d, s, new Error("devd restarted while the session was not running"));
+  }
+}
 
 export interface ApiDeps { mgr: SessionManager; db: Database; cfg: DevConfig; root: string; tree: () => Promise<TreeProject[]>; listener: ListenerClient; notify: NotifyFn; stats: () => unknown; resources?: () => unknown; cloneQueue: CloneQueue; configRepo: ConfigRepo; dashboardDir?: string; previewHost?: string; backup: { build: () => Promise<string>; restore: (tarPath: string) => Promise<void> }; github?: { owners: () => GithubOwner[] | Promise<GithubOwner[]>; repos: (owner: string) => GithubRepo[] | Promise<GithubRepo[]>; sharedRepos?: () => GithubRepo[] | Promise<GithubRepo[]> }; gitea?: GiteaApi; opToken?: string; vault?: Vault; gitProxy?: Hono; prodCatalogPath?: string; prodAccessPath?: string; sshKeyTitles?: () => Promise<string[]>; coolifyInstances?: () => Record<string, CoolifyInstance>; execOperation?: (op: string, params: Record<string, string>) => Promise<string>; dbTargets?: DbTargets; dbProxyHost?: string; agentEvents?: AgentEventHub; spawnPty?: SpawnPty; scheduler?: { fireNow: (id: string) => Promise<boolean> }; prodCatalog?: Catalog; prodDbAccess?: Record<string, Access>; readProdSecret?: (opItem: string) => string | Promise<string>; execProdWrite?: (opts: { entry: DbEntry; server: ServerRef; sql: string; preview: boolean; scope?: WriteScope }) => Promise<{ rows: number; note: string }>; tmuxProbe?: (containers: string[], now?: number) => Promise<Record<string, TmuxSession[]>>; onConfigWritten?: () => void;
   liveActivities?: LiveActivities;
@@ -180,7 +201,8 @@ export interface ApiDeps { mgr: SessionManager; db: Database; cfg: DevConfig; ro
   ccUpkeep?: { status: () => Promise<CcStatus>; run: (only?: string[]) => Promise<UpkeepResult | null> };
   // Chat sessions (threadApi.ts): bridge links, per-session thread stores, the SSE bus and the inbox.
   // Optional like the other feature deps: without them the thread, inbox and stream routes answer 503.
-  links?: ThreadApiDeps["links"];
+  /** `hasFirstTurn`: POST /api/sessions never replaces a first message already waiting (BridgeLinks). */
+  links?: ThreadApiDeps["links"] & { hasFirstTurn: (sessionId: string) => boolean };
   threads?: ThreadApiDeps["threads"];
   bus?: ThreadApiDeps["bus"];
   inbox?: ThreadApiDeps["inbox"];
@@ -973,24 +995,60 @@ export function createApp(d: ApiDeps): Hono {
   // Link the bridge of an opened chat session now instead of at the next 5 s link sync in index.ts. The session
   // did open, so a failure here is logged, not answered: that sync retries. devd's prompt for the agent (a pull
   // conflict) reaches a chat session as its first message, as the prompt file does for tmux.
-  const linkOpenedChat = (r: { session: SessionRow; claudePrompt?: string }) => {
+  // `prompt`: the request's first prompt for a chat session; devd's own (a pull conflict) goes first, in the same turn.
+  // Its outcome is not lost: a refusal or timeout lands in the thread, the event log and a notification.
+  const linkOpenedChat = (r: { session: SessionRow; claudePrompt?: string }, prompt?: string) => {
     const s = r.session;
+    const onDone = prompt === undefined ? undefined : (err: Error | null) => { if (err) reportFirstPromptFailed(d, s, err); };
     try {
-      if (storedRuntime(s) === "chat" && s.status === "running") {
-        d.links?.ensure(s.id);
-        if (r.claudePrompt !== undefined) d.links?.startTurnWhenConnected(s.id, r.claudePrompt);
+      if (storedRuntime(s) === "chat" && s.status === "running") d.links?.ensure(s.id);
+      // The user's prompt is queued even when the session is not running yet: the persisted first turn goes out once
+      // its bridge connects. devd's own conflict message keeps its old rule (a running session only).
+      if (storedRuntime(s) === "chat" && (s.status === "running" || prompt !== undefined)) {
+        const first = r.claudePrompt !== undefined && prompt !== undefined ? `${r.claudePrompt}\n\n${prompt}` : r.claudePrompt ?? prompt;
+        // Tagged only when it carries the user's prompt, so a devd restart still reports its outcome (index.ts).
+        if (first !== undefined) d.links?.startTurnWhenConnected(s.id, first, onDone, prompt !== undefined ? USER_FIRST_PROMPT_TAG : null);
       }
     }
-    catch (e) { console.error(`bridge link of opened session ${s.id} failed:`, e); }
+    catch (e) { console.error(`bridge link of opened session ${s.id} failed:`, e); onDone?.(e as Error); }
     d.inbox?.changedSafe(s.id);
   };
   app.post("/api/sessions", async (c) => {
     noIdleTimeout(c);
-    const body = (await c.req.json().catch(() => null)) as { folder: string; project: string; repo?: string; cloneUrl?: string; solo?: boolean; agent?: string; fresh?: boolean; host?: string; sessionId?: string; runtime?: unknown } | null;
+    const body = (await c.req.json().catch(() => null)) as { folder: string; project: string; repo?: string; cloneUrl?: string; solo?: boolean; agent?: string; fresh?: boolean; host?: string; sessionId?: string; runtime?: unknown; prompt?: unknown } | null;
     if (!body) return c.json({ error: "invalid JSON body" }, 400);
+    // The optional first prompt (the dashboard's New session page). Text only, refused explicitly rather than cut or
+    // dropped; a chat session gets it as its first turn (linkOpenedChat), a tmux one through the prompt file.
+    // `null` is absent, as before the field existed. Control characters are refused, not stripped: what reaches the
+    // agent is exactly what was typed.
+    let prompt: string | undefined;
+    if (body.prompt !== undefined && body.prompt !== null) {
+      if (typeof body.prompt !== "string") return c.json({ error: "prompt must be a string" }, 400);
+      // eslint-disable-next-line no-control-regex -- the point of the check
+      if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(body.prompt)) return c.json({ error: "prompt must not contain control characters (other than tab and newlines)" }, 400);
+      const trimmed = body.prompt.trim();
+      if (Buffer.byteLength(trimmed, "utf8") > MAX_FIRST_PROMPT_BYTES) return c.json({ error: `prompt is larger than ${MAX_FIRST_PROMPT_BYTES} bytes` }, 413);
+      if (trimmed !== "") prompt = trimmed;
+    }
+    if (prompt !== undefined) {
+      // An agent in a container must not open sessions with instructions of its own: only the owner's devices may.
+      if (!isApprovalAllowed(d.remoteAddr?.(c), d.sshApprovalAllowExtra ?? [])) return c.json({ error: "a first prompt can only come from the dashboard or a trusted device, not from a container" }, 403);
+      if (body.host === "instabox") return c.json({ error: "InstaBox sessions do not take a first prompt" }, 400);
+      if (body.solo) return c.json({ error: "claudeSolo sessions do not take a first prompt" }, 400);
+      if (body.runtime !== "tmux" && body.runtime !== "chat") return c.json({ error: "a prompt needs an explicit runtime (tmux|chat)" }, 400);
+      // agent-launch passes the file as the agent CLI's last argument after `--` (so a leading '-' is text), but Claude
+      // Code still runs a single word after `--` as its subcommand (`logout`, `update`, `mcp`, …). A multi-word prompt
+      // is one argv word and never matches a subcommand name.
+      if (body.runtime === "tmux" && !/\s/.test(prompt)) return c.json({ error: "a terminal session's first prompt must be more than one word (the agent CLI would run a single word as its subcommand)" }, 400);
+    }
     if (body.agent !== undefined && !isAgentName(body.agent))
       return c.json({ error: `invalid agent (${AGENT_IDS.join("|")})` }, 400);
     const agent = body.agent as AgentName | undefined;
+    // agy takes the prompt as the value of `-i`, and its flag parser reads a value starting with '-' as flags
+    // (`agy -i --version` → "flags provided but not defined"); the other CLIs get it after `--`.
+    if (prompt !== undefined && body.runtime === "tmux" && prompt.startsWith("-") && body.folder && body.project && body.repo
+      && resolveAgent(agent, getRepoAgent(d.db, body.folder, body.project, body.repo)) === "antigravity")
+      return c.json({ error: "an Antigravity terminal session's first prompt cannot start with '-' (agy would read it as a flag)" }, 400);
     if (body.host !== undefined && body.host !== "vps" && body.host !== "instabox") return c.json({ error: "invalid host (vps|instabox)" }, 400);
     if (body.runtime !== undefined && body.runtime !== "tmux" && body.runtime !== "chat") return c.json({ error: "invalid runtime (tmux|chat)" }, 400);
     const runtime = body.runtime as SessionRuntime | undefined;
@@ -1040,15 +1098,28 @@ export function createApp(d: ApiDeps): Hono {
         if (typeof body.sessionId !== "string" || body.fresh) return c.json({ error: "sessionId must be a string and cannot be combined with fresh" }, 400);
         const s = getSession(d.db, body.sessionId);
         if (!s || s.folder !== body.folder || s.project !== body.project || s.repo !== body.repo) return c.json({ error: `unknown session ${body.sessionId} for this repo` }, 404);
+        // The prompt goes the way the request's runtime says; a session of the other runtime would never get it.
+        if (prompt !== undefined && storedRuntime(s) !== runtime) return c.json({ error: `${s.id} is a ${storedRuntime(s)} session; the prompt was sent for ${runtime}` }, 400);
         // The stored runtime wins over the body: a chat session never gets an agent chat cannot run.
         if (s.runtime === "chat") {
           const blocked = chatRuntimeBlock(resolveAgent(agent, getRepoAgent(d.db, body.folder, body.project, body.repo)), "vps");
           if (blocked) return c.json({ error: blocked }, 400);
         }
       }
+      // A chat prompt travels only over the bridge link: without one it would be dropped, so it is refused first.
+      if (runtime === "chat" && prompt !== undefined && !d.links) return c.json({ error: "chat sessions cannot take a first prompt here (no bridge link)" }, 503);
       if (runtime !== undefined || body.sessionId !== undefined) {
-        const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, runtime, fresh: body.fresh, sessionId: body.sessionId });
-        linkOpenedChat(r);
+        const firstPrompt = runtime === "tmux" ? prompt : undefined;
+        const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, runtime, fresh: body.fresh, sessionId: body.sessionId, ...(firstPrompt !== undefined ? { firstPrompt } : {}) });
+        // A joined chat session that is busy, or already has a first message waiting, keeps it: never overwritten.
+        if (runtime === "chat" && prompt !== undefined && !r.created) {
+          const busyRun = d.threads?.(r.session.id).snapshot({ limit: 0 }).runs.some((run) => run.status === "running" || run.status === "queued") ?? false;
+          if (busyRun || d.links?.hasFirstTurn(r.session.id)) {
+            linkOpenedChat(r);
+            return c.json({ error: `${r.session.id} ${busyRun ? "has a run in progress" : "already has a first message waiting"}, so your message was not sent: open it and send it there, or create another session` }, 409);
+          }
+        }
+        linkOpenedChat(r, runtime === "chat" ? prompt : undefined);
         return c.json(r, r.created ? 201 : 200);
       }
       // No runtime named: an existing session of either runtime is joined (one the agent can run in, the
@@ -1063,6 +1134,7 @@ export function createApp(d: ApiDeps): Hono {
       linkOpenedChat(r);
       return c.json(r.created && picked.notice ? { ...r, runtimeNotice: picked.notice } : r, r.created ? 201 : 200);
     } catch (e) {
+      if (e instanceof FirstPromptRefused) return c.json({ error: e.message }, 409);
       return busy(c, e) ?? c.json({ error: (e as Error).message }, 400);
     }
   });

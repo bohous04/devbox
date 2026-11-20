@@ -180,7 +180,7 @@ function Section({ title, options, loadErr, blocked, current, render, onPick, na
 }
 
 /** A small tinted mark per agent runtime, so the chip says which agent runs without spelling it out. */
-function AgentGlyph({ agent }: { agent: ChatTarget["agent"] }) {
+export function AgentGlyph({ agent }: { agent: ChatTarget["agent"] }) {
   const runtime = profileFor(agent).runtime;
   const [Icon, tint] = runtime === "claude" ? [Asterisk, "text-orange-600 dark:text-orange-400"]
     : runtime === "codex" ? [Hexagon, "text-sky-600 dark:text-sky-400"]

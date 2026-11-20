@@ -30,8 +30,11 @@ test("session CRUD", () => {
   expect(getSession(db, "dev-shop-cms")).toMatchObject({ status: "stopped", last_active_at: 9 });
   expect(listSessions(db)).toHaveLength(1);
   logEvent(db, "dev-shop-cms", "stop");
+  savePendingFirstTurn(db, "dev-shop-cms", "the user's prompt", 0, null);
   deleteSession(db, "dev-shop-cms");
   expect(getSession(db, "dev-shop-cms")).toBeNull();
+  // A later session with the same id must not inherit an undelivered first message.
+  expect(getPendingFirstTurn(db, "dev-shop-cms")).toBeNull();
 });
 
 test("setSessionName persists the display name and clears it with null", () => {
@@ -492,7 +495,7 @@ test("prunePendingFirstTurns keeps rows of running sessions only", () => {
   const mk = (id: string, status: string, port: number) => insertSession(db, { id, folder: "f", project: id, repo: "r", container: id, port_base: port, status, solo: 0, created_at: 0, last_active_at: 0, important: 0 } as SessionRow);
   mk("run", "running", 1); mk("stop", "stopped", 2);
   for (const id of ["run", "stop", "ghost"]) savePendingFirstTurn(db, id, "t", 7, "tag");
-  expect(prunePendingFirstTurns(db)).toBe(2);
+  expect(prunePendingFirstTurns(db)).toEqual([{ sessionId: "stop", tag: "tag" }, { sessionId: "ghost", tag: "tag" }]);
   expect(getPendingFirstTurn(db, "run")).toEqual({ text: "t", seq: 7, tag: "tag" });
   expect(getPendingFirstTurn(db, "stop")).toBeNull();
 });

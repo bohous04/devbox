@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { LiveActivities } from "./liveActivities";
 import { AgentEventHub, STUCK_MS, stuckText, type NotifyExtra } from "./agentEvents";
 import { endFinishedRuns } from "./autoEnd";
-import { createApp, type ApiDeps } from "./api";
+import { createApp, reportFirstPromptFailed, reportPrunedFirstPrompts, type ApiDeps } from "./api";
 import { loadCatalog, mergeAccess, readAccessFile, type Access, type DbEntry, type ServerRef } from "./prodDb";
 import { listSshKeys, readOpField, readSshKey } from "./op";
 import { createProdKeyPath } from "./prodKeys";
@@ -71,7 +71,7 @@ import { createPushover, type Pushover } from "./pushover";
 import { createApnsChannel, tickPushAlerts, type RunFn } from "./pushChannel";
 import { predictDisk } from "./aggregate";
 import { DEFAULT_CONTROL_ROOT, DEFAULT_DEVD_URL, DEFAULT_OPENROUTER_URL, SessionManager, storedRuntime, upstreamKey } from "./sessions";
-import { BridgeLinks } from "./bridgeLink";
+import { BridgeLinks, USER_FIRST_PROMPT_TAG } from "./bridgeLink";
 import { ThreadStore } from "./threadStore";
 import { ChatHub } from "./chatHub";
 import { ChatSwitch } from "./chatSwitch";
@@ -141,7 +141,8 @@ const useVault = !!vaultPath && existsSync(vaultPath);
 const secrets: Secrets = useVault ? {} : loadSecrets(secretsPath);
 if (applyPendingRestore(env("DEVD_DB", "/var/lib/devd/devd.sqlite"))) console.log("devd: restored database swapped in");
 const db = openDb(env("DEVD_DB", "/var/lib/devd/devd.sqlite"));
-prunePendingFirstTurns(db);
+// Reported once the thread stores exist (reportPrunedFirstPrompts below).
+const prunedFirstTurns = prunePendingFirstTurns(db);
 startCheckpointer(env("DEVD_DB", "/var/lib/devd/devd.sqlite"));
 initCodexAccounts(db);
 
@@ -481,6 +482,12 @@ const bridgeLinks = new BridgeLinks({
   // outcome is logged and notified here. (No session end on failure: that needs the schedule run's own state.)
   onRestoredTurnDone: (id, schedule, err) => {
     const s = getSession(db, id);
+    // A user's first prompt (POST /api/sessions): only a failure is news, said the same way as before the restart.
+    if (schedule === USER_FIRST_PROMPT_TAG) {
+      // A deleted session takes its pending row with it (deleteSession), so `s` is there when the turn was restored.
+      if (err && s) reportFirstPromptFailed({ db, threads: threadStore, notify }, s, err);
+      return;
+    }
     const target = s ? { session: scheduledNotifySession(s) } : undefined;
     if (err === null) {
       logEvent(db, id, "schedule_run", { schedule, restored: true });
@@ -491,6 +498,7 @@ const bridgeLinks = new BridgeLinks({
     }
   },
 });
+reportPrunedFirstPrompts({ db, threads: threadStore, notify }, prunedFirstTurns);
 const releaseThread = (id: string) => {
   bridgeLinks.drop(id);
   chatHub.drop(id);

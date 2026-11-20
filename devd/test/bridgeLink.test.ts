@@ -6,7 +6,7 @@ import type { Socket } from "bun";
 import { Database, type SQLiteError } from "bun:sqlite";
 import { BRIDGE_VERSION } from "../../image/agent-bridge/src/version";
 import { ACK_MIN_BRIDGE_VERSION } from "../../shared/bridgeVersion";
-import { AgentDisconnected, BridgeLinks, CommandFailed, CommandTimeout, POISON_LIMIT } from "../src/bridgeLink";
+import { AgentDisconnected, BridgeLinks, CommandFailed, CommandTimeout, FirstTurnPending, POISON_LIMIT, USER_FIRST_PROMPT_TAG } from "../src/bridgeLink";
 import { ThreadStore } from "../src/threadStore";
 import type { LinkStatus, LoggedEvent } from "../../shared/thread";
 
@@ -425,6 +425,30 @@ test("a restored first turn reports its outcome with the saved tag", async () =>
   second.links.ensure(ID);
   await waitFor(() => heard.length === 1, "outcome");
   expect(heard).toEqual([[ID, "Nightly bump", null]]);
+});
+
+test("a second first message is refused while one waits (memory or persisted): never replaced", () => {
+  const { saved, pendingTurns } = persistence();
+  const root = tmpRoot();
+  const { links } = devdOver(root, pendingTurns);
+  links.startTurnWhenConnected(ID, "the user's prompt", undefined, USER_FIRST_PROMPT_TAG);
+  expect(() => links.startTurnWhenConnected(ID, "scheduled prompt", undefined, "Nightly bump")).toThrow(FirstTurnPending);
+  expect(saved.get(ID)).toMatchObject({ text: "the user's prompt", tag: USER_FIRST_PROMPT_TAG });
+  // After a restart only the DB row is left; it still counts.
+  const second = devdOver(root, pendingTurns);
+  expect(() => second.links.startTurnWhenConnected(ID, "scheduled prompt")).toThrow(FirstTurnPending);
+});
+
+test("dropping a link (the session is not running) discards a waiting first message and tells its caller", () => {
+  const { saved, pendingTurns } = persistence();
+  const { links } = devdOver(tmpRoot(), pendingTurns);
+  const got: (Error | null)[] = [];
+  // Queued for a session that is not running: no link yet, as linkOpenedChat does; syncBridgeLinks then drops it.
+  links.startTurnWhenConnected(ID, "the user's prompt", (e) => got.push(e), USER_FIRST_PROMPT_TAG);
+  links.drop(ID);
+  expect(got).toHaveLength(1);
+  expect(got[0]?.message).toContain("discarded");
+  expect(saved.has(ID)).toBe(false);
 });
 
 test("startTurnWhenConnected reports the bridge's answer to onDone", async () => {

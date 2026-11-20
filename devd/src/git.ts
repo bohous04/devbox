@@ -533,10 +533,20 @@ export async function removeWorktree(bare: string, dest: string): Promise<void> 
   }
 }
 
+// The prompt reaches a terminal agent as one argv word (Linux caps one at 128 KiB) together with a first prompt of up
+// to 64000 bytes, so the list is bounded: at most 50 paths and ~8000 characters, then "and N more" (git status has them).
 export function conflictPrompt(files: string[]): string {
+  const shown: string[] = [];
+  let length = 0;
+  for (const f of files) {
+    if (shown.length === 50 || length + f.length > 8000) break;
+    shown.push(f);
+    length += f.length + 2;
+  }
+  const more = files.length - shown.length;
   return (
     `A git pull resulted in a conflict (rebase in progress). ` +
-    `Conflicted files: ${files.join(", ")}. ` +
+    `Conflicted files: ${shown.join(", ")}${more > 0 ? ` and ${more} more (see git status)` : ""}. ` +
     `Resolve the conflicts — preserve the local work in progress while incorporating the remote changes. ` +
     `When resolved, continue the rebase and verify the project still builds.`
   );

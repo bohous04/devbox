@@ -27,8 +27,20 @@ function textWidth(text: string, css: CSSStyleDeclaration): number {
  *  Images pasted, dropped or picked (at most 10) are scaled down (imageView.ts), previewed and go with the next message.
  *  While a run is active and nothing is typed, the round primary button stops the run; with text typed it sends
  *  (queues) and a separate stop button sits next to it. */
-export function Composer({ running, onSend, onStop, controls, notices }: {
+export function Composer({ running, onSend, onStop, controls, notices, placeholder: placeholderText, start, onDraft, fieldOff, imagesOff, card = false }: {
   running: boolean;
+  /** Replaces the default placeholder (e.g. the new-session page's). */
+  placeholder?: string;
+  /** The new-session page: the primary button starts a session, also with nothing typed, once `ready`. */
+  start?: { label: string; ready: boolean };
+  /** Hears every change of the typed text (the new-session page decides what can start with it). */
+  onDraft?: (text: string) => void;
+  /** Why this message cannot take text: the field is disabled while empty (typed text stays editable, to clear it). */
+  fieldOff?: string;
+  /** Always the two-tier card, also on a phone at rest (the new-session page: a start screen with room for it). */
+  card?: boolean;
+  /** Why this message cannot take images: attaching is disabled, a paste or drop says why. */
+  imagesOff?: string;
   /** Inside the box, bottom right: the session's agent, model and account switchers. */
   controls?: ReactNode;
   /** Above the box: the switchers' status and error lines. */
@@ -48,7 +60,7 @@ export function Composer({ running, onSend, onStop, controls, notices }: {
   // attached; otherwise the two-tier card (the field on top across the full width, the toolbar below). Only the
   // container's classes change, never the textarea element, so focus, caret and the on-screen keyboard survive.
   const [twoTier, setTwoTier] = useState(false);
-  const oneRow = !twoTier && images.length === 0;
+  const oneRow = !card && !twoTier && images.length === 0;
   // The field's width in the one-row layout with text (the chip then shows only its mark), for the way back.
   const oneRowWidth = useRef(0);
   const [redecide, setRedecide] = useState(0);
@@ -120,6 +132,7 @@ export function Composer({ running, onSend, onStop, controls, notices }: {
   const errorText = (e: unknown) => (e instanceof ApiError ? composerErrorText(e.status, e.body) : (e as Error).message);
 
   async function attach(files: File[]) {
+    if (imagesOff) { setErr(imagesOff); return; }
     const { take, message } = takeImages(images.length, files.length);
     setErr(message);
     for (const file of files.slice(0, take)) {
@@ -138,7 +151,7 @@ export function Composer({ running, onSend, onStop, controls, notices }: {
   }
 
   async function send() {
-    if (busy || text.trim() === "") return;
+    if (busy || !canSend) return;
     setBusy(true); setErr(null);
     const sent = text;
     const sentImages = images;
@@ -156,9 +169,10 @@ export function Composer({ running, onSend, onStop, controls, notices }: {
   }
 
   const empty = text.trim() === "";
+  const canSend = start ? start.ready : !empty;
   // Enter sends only with a mouse or trackpad (see onKeyDown), so only then is the keyboard hint shown.
   const finePointer = window.matchMedia("(pointer: fine)").matches;
-  const placeholder = running ? "Queue a message for after this run" : "Ask anything";
+  const placeholder = placeholderText ?? (running ? "Queue a message for after this run" : "Ask anything");
   const full = images.length >= MAX_IMAGES_PER_MESSAGE;
   // Round buttons: below sm the hit area is 44px (size-11, the same minimum index.css sets for buttons there), the
   // visible circle stays 32px so it matches the icons.
@@ -226,11 +240,14 @@ export function Composer({ running, onSend, onStop, controls, notices }: {
                 // Scrolled: the top 12px of the field fade out, inside the field, so nothing is cut hard at its edge.
                 scrolled && "[mask-image:linear-gradient(to_bottom,transparent,black_0.75rem)]",
                 // An empty phone row keeps the placeholder on its line instead of wrapping it.
-                text === "" && "max-sm:overflow-hidden max-sm:whitespace-nowrap",
+                text === "" && !card && "max-sm:overflow-hidden max-sm:whitespace-nowrap",
+                // The card on a phone rests two lines tall too, as it does from sm.
+                card && "min-h-[52px]",
               )}
               onScroll={(e) => setScrolled(e.currentTarget.scrollTop > 0)}
               value={text}
-              onChange={(e) => setText(e.target.value)}
+              disabled={fieldOff !== undefined && text === ""}
+              onChange={(e) => { setText(e.target.value); onDraft?.(e.target.value); }}
               onPaste={(e) => {
                 const files = Array.from(e.clipboardData.files);
                 if (files.length === 0) return;
@@ -250,16 +267,16 @@ export function Composer({ running, onSend, onStop, controls, notices }: {
               onChange={(e) => { const files = Array.from(e.target.files ?? []); e.target.value = ""; void attach(files); }}
             />
             <Button
-              type="button" variant="ghost" size="icon-sm" disabled={full}
+              type="button" variant="ghost" size="icon-sm" disabled={full || imagesOff !== undefined}
               className={cn("size-11 rounded-full text-muted-foreground hover:text-foreground sm:size-8 [&_svg]:size-[18px]", oneRow && "max-sm:order-first")}
-              onClick={() => picker.current?.click()} aria-label="Attach image" title={full ? `At most ${MAX_IMAGES_PER_MESSAGE} images per message` : "Attach image (PNG, JPEG, WebP or GIF), or paste or drop one"}
+              onClick={() => picker.current?.click()} aria-label="Attach image" title={imagesOff ?? (full ? `At most ${MAX_IMAGES_PER_MESSAGE} images per message` : "Attach image (PNG, JPEG, WebP or GIF), or paste or drop one")}
             >
               <Paperclip />
             </Button>
             {finePointer && (
               // Quiet, and only while typing: the placeholder stays short.
               <p aria-hidden="true" className="ml-1 hidden truncate text-xs text-muted-foreground opacity-0 transition-opacity duration-150 group-focus-within/box:opacity-100 sm:block">
-                Enter to send · Shift+Enter for a new line · paste or drop images
+                Enter to send · Shift+Enter for a new line{imagesOff ? "" : " · paste or drop images"}
               </p>
             )}
             <div className={cn("ml-auto flex min-w-0 items-center gap-0.5 sm:gap-1", oneRow && "max-sm:shrink-0")}>
@@ -270,16 +287,16 @@ export function Composer({ running, onSend, onStop, controls, notices }: {
                 </button>
               )}
               <button
-                type={stopPrimary ? "button" : "submit"} disabled={stopPrimary ? stopping : busy || empty}
+                type={stopPrimary ? "button" : "submit"} disabled={stopPrimary ? stopping : busy || !canSend}
                 onClick={stopPrimary ? () => void stop() : undefined}
-                aria-label={stopPrimary ? "Stop the run" : "Send"} title={stopPrimary ? "Stop the run" : finePointer ? "Send (Enter)" : "Send"}
+                aria-label={stopPrimary ? "Stop the run" : start?.label ?? "Send"} title={stopPrimary ? "Stop the run" : `${start?.label ?? "Send"}${finePointer ? " (Enter)" : ""}`}
                 className={round}
               >
                 {/* A muted filled circle while empty (its arrow keeps 3:1 against the circle and the card), the primary
                     one once there is something to send or a run to stop. */}
                 <span className={cn(dot, stopPrimary
                   ? "bg-primary text-primary-foreground shadow-sm group-hover:bg-primary/85 group-disabled:opacity-50"
-                  : empty ? "bg-foreground/[0.08] text-foreground/55 dark:text-foreground/65"
+                  : !canSend ? "bg-foreground/[0.08] text-foreground/55 dark:text-foreground/65"
                   : "bg-primary text-primary-foreground shadow-sm group-hover:bg-primary/85")}>
                   {stopPrimary ? stopIcon : busy ? <LoaderCircle className="size-4 animate-spin" aria-hidden="true" /> : <ArrowUp className="size-4" strokeWidth={2.5} aria-hidden="true" />}
                 </span>

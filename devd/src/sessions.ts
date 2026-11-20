@@ -47,6 +47,30 @@ export class ExternalStartError extends Error {
   constructor(message: string, public kind: "unknown" | "not-running") { super(message); }
 }
 
+/** The largest first prompt POST /api/sessions accepts, in UTF-8 bytes; larger is refused with 413, never truncated.
+ *  A tmux prompt becomes one argv word of the agent CLI (Linux caps one at 128 KiB, MAX_ARG_STRLEN), and devd's own
+ *  pull-conflict task can precede it in the same word: half of that is left for the conflict text. */
+export const MAX_FIRST_PROMPT_BYTES = 64_000;
+
+/** A first prompt that would not reach the agent: refused before anything changes (POST /api/sessions answers 409). */
+export class FirstPromptRefused extends Error {
+  constructor(message: string) { super(message); this.name = "FirstPromptRefused"; }
+}
+
+/** Why a tmux first prompt (the prompt file, read once by agent-launch when the agent starts) cannot reach the session
+ *  open() resolved to, or null. A running container's agent already started, so the file would wait for some later
+ *  restart; an InstaBox session runs elsewhere and never reads devd's control mount; a chat session takes its first
+ *  prompt through the bridge link instead (POST /api/sessions routes it there). */
+export function firstPromptRefusal(existing: SessionRow | null | undefined, runtime: SessionRuntime | undefined, containerState: string, recoveryJournal: boolean): string | null {
+  if (existing?.host === "instabox") return "InstaBox sessions do not take a first prompt";
+  if ((existing ? storedRuntime(existing) : (runtime ?? "tmux")) !== "tmux") return "a chat session takes its first prompt through the bridge, not the prompt file";
+  if (existing && containerState === "running") return `${existing.id} is already running, so a first prompt would not reach its agent: open it without one, or create another session`;
+  // A recovery launch skips the prompt file (agent-launch: DEVD_RECOVERY_LAUNCH), which would then fire later in
+  // another agent window of the session.
+  if (existing && recoveryJournal) return `${existing.id} is waiting to be restored from its recovery journal, so a first prompt would not reach its agent: open it without one, or create another session`;
+  return null;
+}
+
 export class RestartError extends Error {
   constructor(message: string, public kind: "unknown" | "not-solo" | "not-stopped") { super(message); }
 }
@@ -641,7 +665,9 @@ export class SessionManager {
   // entrypoint, so the file channel also covers restarted containers.
   // A chat session has no launcher reading the file: the prompt is only returned, and the API sends it as the
   // session's first message once the bridge link connects.
-  private syncPromptFile(id: string, runtime: SessionRuntime, pull: PullResult, override?: string): string | undefined {
+  // `first`: the user's first prompt (POST /api/sessions `prompt`, tmux only). Unlike a scheduled `override` it is
+  // never dropped for a pull conflict: it follows the conflict task in the same file.
+  private syncPromptFile(id: string, runtime: SessionRuntime, pull: PullResult, override?: string, first?: string): string | undefined {
     const dir = this.ensureControlDir(id);
     chmodSync(dir, 0o777); // devd may run as root; container user is uid 1000 (a real dir: ensureControlDir)
     const file = join(dir, "prompt");
@@ -652,13 +678,14 @@ export class SessionManager {
       return pull.status === "conflict" ? conflictPrompt(pull.files) : override;
     }
     if (pull.status === "conflict") {
-      const prompt = conflictPrompt(pull.files);
+      const prompt = first === undefined ? conflictPrompt(pull.files) : `${conflictPrompt(pull.files)}\n\n${first}`;
       write(prompt);
       return prompt;                                   // a conflict takes precedence (Claude handles the rebase)
     }
-    if (override) {                                     // scheduled run: initial prompt into the channel
-      write(override);
-      return override;
+    const initial = override ?? first;
+    if (initial) {                                      // scheduled run or the user's first prompt: into the channel
+      write(initial);
+      return initial;
     }
     rmSync(file, { force: true });
     return undefined;
@@ -817,7 +844,7 @@ export class SessionManager {
   /** `sessionId`: open (resume/attach) EXACTLY this existing session of the repo, not the one
    *  existingSessionId would pick — e.g. a paused InstaBox session when the repo also has a VPS
    *  session (smoke test, M8). Never creates a new one. */
-  async open(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; runtime?: SessionRuntime; joinRuntimes?: SessionRuntime[]; fresh?: boolean; sessionId?: string }) {
+  async open(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; joinRuntimes?: SessionRuntime[]; fresh?: boolean; sessionId?: string }) {
     // The repo key while the id is not known (a new session only gets it here); then also the id,
     // so open does not collide with stop/end/recreate of the same existing session.
     return this.locked([openKey(t)], "open", async () => {
@@ -832,7 +859,7 @@ export class SessionManager {
       const joinable = t.joinRuntimes ?? [t.runtime ?? "tmux"];
       const id = t.sessionId ?? (t.fresh
         ? nextSessionId(this.d.db, t.project, t.repo, leftover)
-        : (joinableSessionId(this.d.db, t.project, t.repo, joinable, t.prompt !== undefined) ?? nextSessionId(this.d.db, t.project, t.repo, leftover)));
+        : (joinableSessionId(this.d.db, t.project, t.repo, joinable, t.prompt !== undefined || t.firstPrompt !== undefined) ?? nextSessionId(this.d.db, t.project, t.repo, leftover)));
       try {
         return await this.locked([id], "open", () => this.openWithEarlyDind(t, id));
       } finally {
@@ -847,7 +874,7 @@ export class SessionManager {
   // repo: 14 s → the sidecar alone ~3 s of it). openUnlocked still awaits it before the session
   // container runs, so "docker works from the first command" holds. When the open fails before
   // the container exists, the sidecar would be an orphaned privileged container — removed here.
-  private async openWithEarlyDind(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string }, id: string) {
+  private async openWithEarlyDind(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string }, id: string) {
     const fresh = !t.sessionId && !getSession(this.d.db, id);   // sessionId never creates (see open)
     const dind = fresh && this.d.dind ? this.ensureDind(id).catch((e) => { console.error(`dind for ${id} failed:`, e); }) : undefined;
     try {
@@ -858,13 +885,17 @@ export class SessionManager {
     }
   }
 
-  private async openUnlocked(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string }, id: string, earlyDind?: Promise<void>) {
+  private async openUnlocked(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string }, id: string, earlyDind?: Promise<void>) {
     const ws = workspacePath(this.d.root, t.folder, t.project, t.repo);
     const existing = getSession(this.d.db, id);
     // The session ended in the meantime (or belongs to another repo) → an error, not a silent new session with the same id.
     if (t.sessionId && (!existing || existing.folder !== t.folder || existing.project !== t.project || existing.repo !== t.repo)) {
       throw new Error(`Unknown session ${t.sessionId} for ${t.folder}/${t.project}/${t.repo}`);
     }
+    // A first prompt only reaches a session whose agent launches now: checked again once the container state is known.
+    const journal = () => existsSync(join(this.controlDir(id), "recovery", "latest.json"));
+    const refusedEarly = t.firstPrompt === undefined ? null : firstPromptRefusal(existing, t.runtime, "missing", journal());
+    if (refusedEarly) throw new FirstPromptRefused(refusedEarly);
     if (existing?.host === "instabox") return this.openInstabox(existing, t);
     const agent = resolveAgent(t.agent, getRepoAgent(this.d.db, t.folder, t.project, t.repo));
     // The stored runtime wins over the request: a chat session must not be handed an agent the chat
@@ -880,6 +911,8 @@ export class SessionManager {
     }
     const observed: CanonicalWorkspaceContainer = existing ? await inspectCanonicalWorkspace(id) : { state: "missing" };
     const state = observed.state === "stopped" ? "exited" : observed.state;
+    const refused = t.firstPrompt === undefined ? null : firstPromptRefusal(existing, t.runtime, observed.state, journal());
+    if (refused) throw new FirstPromptRefused(refused);
 
     if (t.agent) setRepoAgent(this.d.db, t.folder, t.project, t.repo, t.agent, this.now());
 
@@ -1010,7 +1043,7 @@ export class SessionManager {
     progress({ step: "pull" });
     const pull = await pullWithRebase(dir, authEnv);
     progress({ step: "container", detail: "setting file ownership" });
-    const claudePrompt = this.syncPromptFile(id, existing ? storedRuntime(existing) : (t.runtime ?? "tmux"), pull, t.prompt);
+    const claudePrompt = this.syncPromptFile(id, existing ? storedRuntime(existing) : (t.runtime ?? "tmux"), pull, t.prompt, t.firstPrompt);
     if (pull.status === "conflict") {
       logEvent(this.d.db, id, "pull-conflict", { files: pull.files });
       this.d.notify?.("devbox", `${t.project}/${t.repo}: pull conflict — Claude is resolving it`);
