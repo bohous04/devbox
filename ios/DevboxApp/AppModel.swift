@@ -134,11 +134,34 @@ final class AppModel: ObservableObject {
         pathMonitor.cancel()
     }
 
+    #if DEBUG
+    /// Fixture mode (Support/Fixtures, `-DevboxFixtures`): the app runs on canned data and never touches the saved
+    /// configuration. Settable so tests can switch a model into it.
+    var fixtureMode = FixtureMode.isActive
+    #endif
+
+    /// Saving or testing a live configuration in fixture mode would put a real client under an app that believes it
+    /// is offline: it stops the app instead, as an unknown fixture set does.
+    private func refuseInFixtureMode() {
+        #if DEBUG
+        if fixtureMode { fatalError("fixture mode: no live configuration can be saved or tested") }
+        #endif
+    }
+
     /// Reloads the network configuration from Keychain. Called by `init` and then by `ContentView` when
     /// protected data become available (phone unlocked) or the app comes to the foreground, until it is
     /// `configured`. An unavailable Keychain yields `.unknown` (no client, no onboarding) — but
     /// a transient error does not sign out an app that is already configured.
     func reloadConfiguration() {
+        #if DEBUG
+        // Screenshot mode (Support/Fixtures): configured against canned responses, Keychain untouched.
+        if fixtureMode {
+            if client == nil || loadedEndpoints != nil { client = FixtureMode.client() }
+            loadedEndpoints = nil
+            configState = .configured
+            return
+        }
+        #endif
         guard let values = readEndpointValues() else {
             if configState != .configured {
                 configState = .unknown
@@ -203,6 +226,7 @@ final class AppModel: ObservableObject {
     /// write failure (see `KeychainStore.set`) returns `.keychainWriteFailed`.
     @discardableResult
     func saveConfig(hostname: String, cfId: String, cfSecret: String, tailnet: String) -> Result<Void, ConfigSaveError> {
+        refuseInFixtureMode()
         guard [hostname, cfId, cfSecret, tailnet].contains(where: { Self.normalizeString($0) != nil }) else {
             return .failure(.emptyConfig)
         }
@@ -235,6 +259,10 @@ final class AppModel: ObservableObject {
     /// (`KeychainRead.unavailable`): an empty string would look like "not filled in" here, and the next
     /// Save/Test would delete that item — Settings then prefills nothing and blocks saving.
     func currentConfig() -> (hostname: String, cfId: String, cfSecret: String, tailnet: String)? {
+        #if DEBUG
+        // The fixture app shows no saved configuration: Settings must not prefill (and then save) the real one.
+        if fixtureMode { return nil }
+        #endif
         guard let values = readEndpointValues() else { return nil }
         return (
             hostname: values[KeychainStore.cfHostname] ?? "",
@@ -343,6 +371,7 @@ final class AppModel: ObservableObject {
     /// Calls `/api/health` via the currently configured client and returns the devd version.
     /// Without a configured path it returns an error right away, without attempting a request.
     func testConnection() async -> Result<String, Error> {
+        refuseInFixtureMode()
         guard let client else {
             // User-visible (Settings renders it) — must be in English, see the app UI language.
             return .failure(DevdClientError(description: "No network path configured"))
@@ -354,6 +383,7 @@ final class AppModel: ObservableObject {
     /// (saving is up to the caller, after success). An empty form returns the same error
     /// as `saveConfig`.
     func testConnection(hostname: String, cfId: String, cfSecret: String, tailnet: String) async -> Result<String, Error> {
+        refuseInFixtureMode()
         guard [hostname, cfId, cfSecret, tailnet].contains(where: { Self.normalizeString($0) != nil }) else {
             return .failure(ConfigSaveError.emptyConfig)
         }

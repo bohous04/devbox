@@ -22,6 +22,16 @@ struct DevboxAppApp: App {
         #endif
     }
 
+    /// DEBUG fixture mode (`-DevboxFixtures <set>`, Support/Fixtures): the app runs on canned data, so it registers
+    /// no push or Live Activity tokens and asks for no permission.
+    private var offline: Bool {
+        #if DEBUG
+        activityPreview || FixtureMode.isActive
+        #else
+        false
+        #endif
+    }
+
     var body: some Scene {
         WindowGroup {
             Group {
@@ -40,7 +50,7 @@ struct DevboxAppApp: App {
                     // End old cards from build 12 on EVERY launch (even in preview mode —
                     // it starts nothing new), see LegacySessionActivityCleanup.swift.
                     appModel.legacySessionActivityCleanup.appLaunched()
-                    guard !activityPreview else { return }
+                    guard !offline else { return }
                     // AppDelegate is created before `appModel` (SwiftUI lifecycle) and cannot build
                     // `PushManager` itself — so the wiring happens from here, once.
                     appDelegate.pushManager = appModel.pushManager
@@ -51,7 +61,7 @@ struct DevboxAppApp: App {
                 }
                 .onChange(of: scenePhase) { _, phase in
                     appModel.legacySessionActivityCleanup.sceneBecame(active: phase == .active)
-                    guard !activityPreview else { return }
+                    guard !offline else { return }
                     appModel.liveActivityManager.setForeground(phase == .active)
                 }
                 .task(id: appModel.configured) {
@@ -59,7 +69,7 @@ struct DevboxAppApp: App {
                     // configured path has nowhere to register the token. `task(id:)` runs again
                     // as soon as `configured` flips to `true` (and also right at launch when the app
                     // was already configured).
-                    guard !activityPreview, appModel.configured else { return }
+                    guard !offline, appModel.configured else { return }
                     await appModel.pushManager.requestAuthorization()
                 }
                 .onOpenURL { appModel.handleDeepLinkURL($0) }

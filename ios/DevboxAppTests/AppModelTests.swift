@@ -156,6 +156,25 @@ final class AppModelTests: XCTestCase {
         XCTAssertNotNil(model.client)
     }
 
+    /// Fixture mode (-DevboxFixtures) never shows or uses the saved configuration: Settings gets nothing to prefill,
+    /// and a live client is replaced by the fixture one. (Saving and testing a configuration stop the app there.)
+    func testFixtureModeHidesTheSavedConfigurationAndSwapsTheClient() throws {
+        try KeychainAvailability.skipIfUnavailable()
+        let keychain = KeychainStore(requireBiometryForVault: false)
+        keychain.set(KeychainStore.tailnetBase, "100.100.100.100:4300")
+        let model = AppModel(keychain: keychain)
+        let live = try XCTUnwrap(model.client)
+        XCTAssertNotNil(model.currentConfig())
+
+        model.fixtureMode = true
+        model.reloadConfiguration()
+
+        XCTAssertTrue(model.configured)
+        XCTAssertNil(model.currentConfig())
+        XCTAssertFalse(try XCTUnwrap(model.client) === live)
+        XCTAssertEqual(keychain.get(KeychainStore.tailnetBase), "100.100.100.100:4300")
+    }
+
     // MARK: - saveConfig roundtrip
 
     func testSaveConfigPersistsToKeychainAndRebuildsClient() throws {
