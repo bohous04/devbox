@@ -1008,7 +1008,7 @@ export function createApp(d: ApiDeps): Hono {
     if (body.prompt !== undefined && body.prompt !== null) {
       if (typeof body.prompt !== "string") return c.json({ error: "prompt must be a string" }, 400);
       // eslint-disable-next-line no-control-regex -- the point of the check
-      if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(body.prompt)) return c.json({ error: "prompt must not contain control characters (other than tab and newlines)" }, 400);
+      if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(body.prompt)) return c.json({ error: "prompt must not contain control characters (other than tab and newlines)" }, 400);
       const trimmed = body.prompt.trim();
       if (Buffer.byteLength(trimmed, "utf8") > MAX_FIRST_PROMPT_BYTES) return c.json({ error: `prompt is larger than ${MAX_FIRST_PROMPT_BYTES} bytes` }, 413);
       if (trimmed !== "") prompt = trimmed;
@@ -1019,9 +1019,9 @@ export function createApp(d: ApiDeps): Hono {
       if (body.host === "instabox") return c.json({ error: "InstaBox sessions do not take a first prompt" }, 400);
       if (body.solo) return c.json({ error: "claudeSolo sessions do not take a first prompt" }, 400);
       if (body.runtime !== "tmux" && body.runtime !== "chat") return c.json({ error: "a prompt needs an explicit runtime (tmux|chat)" }, 400);
-      // agent-launch passes the file as the agent CLI's last argument: a leading '-' would be parsed as an option.
-      if (body.runtime === "tmux" && prompt.startsWith("-")) return c.json({ error: "a terminal session's first prompt cannot start with '-' (the agent CLI would read it as an option)" }, 400);
-      // ...and a single word would be run as its subcommand (`logout`, `update`, `mcp`, `resume`, …).
+      // agent-launch passes the file as the agent CLI's last argument after `--` (so a leading '-' is text), but Claude
+      // Code still runs a single word after `--` as its subcommand (`logout`, `update`, `mcp`, …). A multi-word prompt
+      // is one argv word and never matches a subcommand name.
       if (body.runtime === "tmux" && !/\s/.test(prompt)) return c.json({ error: "a terminal session's first prompt must be more than one word (the agent CLI would run a single word as its subcommand)" }, 400);
     }
     if (body.agent !== undefined && !isAgentName(body.agent))

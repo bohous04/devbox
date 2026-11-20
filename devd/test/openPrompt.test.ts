@@ -85,7 +85,7 @@ test("an empty or whitespace prompt is the same as none", async () => {
   expect(a.turns).toEqual([]);
 });
 
-test("refused explicitly, before anything opens: type, controls, size, runtime, InstaBox, solo, tmux '-' and one word", async () => {
+test("refused explicitly, before anything opens: type, controls, size, runtime, InstaBox, solo, tmux one word", async () => {
   let calls = 0;
   const a = appWith(async () => { calls++; return tmuxOpened; });
   const cases: [unknown, number, string][] = [
@@ -93,12 +93,13 @@ test("refused explicitly, before anything opens: type, controls, size, runtime, 
     [{ ...BASE, runtime: "chat", prompt: "a\u0000b" }, 400, "prompt must not contain control characters (other than tab and newlines)"],
     [{ ...BASE, runtime: "chat", prompt: "clear \u001b[2J screen" }, 400, "prompt must not contain control characters (other than tab and newlines)"],
     [{ ...BASE, runtime: "chat", prompt: "a\u007fb" }, 400, "prompt must not contain control characters (other than tab and newlines)"],
+    [{ ...BASE, runtime: "chat", prompt: "a\u009bb" }, 400, "prompt must not contain control characters (other than tab and newlines)"],
+    [{ ...BASE, runtime: "chat", prompt: "a\u0085b" }, 400, "prompt must not contain control characters (other than tab and newlines)"],
     // Bytes, not characters: 4-byte emoji cross the cap at a quarter of the length.
     [{ ...BASE, runtime: "chat", prompt: "😀".repeat(MAX_FIRST_PROMPT_BYTES / 4 + 1) }, 413, `prompt is larger than ${MAX_FIRST_PROMPT_BYTES} bytes`],
     [{ ...BASE, prompt: "hi there" }, 400, "a prompt needs an explicit runtime (tmux|chat)"],
     [{ ...BASE, runtime: "tmux", host: "instabox", cloneUrl: "https://git.example/x.git", prompt: "hi there" }, 400, "InstaBox sessions do not take a first prompt"],
     [{ folder: "f", project: "p", solo: true, runtime: "tmux", prompt: "hi there" }, 400, "claudeSolo sessions do not take a first prompt"],
-    [{ ...BASE, runtime: "tmux", prompt: "--dangerous flag" }, 400, "a terminal session's first prompt cannot start with '-' (the agent CLI would read it as an option)"],
     // A single word is the CLI's subcommand (`logout`, `update`, `mcp`, …), not a prompt.
     [{ ...BASE, runtime: "tmux", prompt: "logout" }, 400, "a terminal session's first prompt must be more than one word (the agent CLI would run a single word as its subcommand)"],
   ];
@@ -110,6 +111,9 @@ test("refused explicitly, before anything opens: type, controls, size, runtime, 
   expect(calls).toBe(0);
   // Tabs and newlines are text; exactly at the cap is fine; one word is fine in chat (plain text there).
   expect((await post(a, { ...BASE, runtime: "tmux", prompt: "fix\tit\r\nnow" })).status).toBe(201);
+  // agent-launch passes the prompt after `--`, so a leading '-' is text; U+00A0 is just past the C1 block.
+  expect((await post(a, { ...BASE, runtime: "tmux", prompt: "--dangerous flag" })).status).toBe(201);
+  expect((await post(a, { ...BASE, runtime: "tmux", prompt: "café\u00a0now" })).status).toBe(201);
   expect((await post(a, { ...BASE, runtime: "tmux", prompt: `a ${"x".repeat(MAX_FIRST_PROMPT_BYTES - 2)}` })).status).toBe(201);
   const chat = appWith(async () => chatOpened());
   expect((await post(chat, { ...BASE, runtime: "chat", prompt: "continue" })).status).toBe(201);

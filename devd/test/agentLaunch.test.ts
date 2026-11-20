@@ -561,17 +561,24 @@ test("antigravity without onboarding overwrites an old pending prompt with the n
   expect(readFileSync(pendingFile, "utf8")).toBe("do X");
 });
 
-test("the claude profile still sends the prompt positionally (current behaviour unchanged)", async () => {
-  const { dir, promptFile } = fakePromptLaunch("cc");
-  const p = Bun.spawn(["bash", join(IMAGE, "agent-launch.sh"), "claude"], {
-    env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, DEVD_AGENT: "", DEVD_PROMPT_FILE: promptFile },
-    stdin: "ignore", stdout: "pipe", stderr: "ignore",
+// `--` before the prompt: a prompt starting with '-' is never an option, and codex/grok never run a one-word prompt
+// as a subcommand. Checked against the real CLIs: `codex -- completion` and `grok -- version` open the TUI,
+// `claude -- --version` takes "--version" as the prompt (but `claude -- mcp` still runs `mcp`: devd refuses one word).
+for (const [profile, bin] of [["claude", "cc"], ["claude-openrouter", "cc"], ["codex", "co"], ["grok", "gr"]]) {
+  test(`the ${profile} profile sends the prompt positionally after --`, async () => {
+    const { dir, promptFile } = fakePromptLaunch(bin);
+    writeFileSync(promptFile, "-x review the diff");
+    const p = Bun.spawn(["bash", join(IMAGE, "agent-launch.sh"), profile], {
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, DEVD_AGENT: "", DEVD_PROMPT_FILE: promptFile,
+        DEVD_UPSTREAM_KEY: "k1", DEVD_AGENT_MODEL: "m" },
+      stdin: "ignore", stdout: "pipe", stderr: "ignore",
+    });
+    const out = await new Response(p.stdout).text();
+    await p.exited;
+    expect(out).toContain(`${bin}-argv: -- -x review the diff`);
+    expect(out).not.toContain("-i");
   });
-  const out = await new Response(p.stdout).text();
-  await p.exited;
-  expect(out).toContain("cc-argv: do X");
-  expect(out).not.toContain("-i");
-});
+}
 
 test("cc, co and gr use yolo even on recovery after a restart (DEVD_RECOVERY_LAUNCH)", async () => {
   // The container itself is the sandbox; a recovered conversation without yolo would hang on sandbox/approvals.

@@ -19,17 +19,22 @@ profile="${args[0]:-${DEVD_AGENT:-claude}}"
 # see devd/src/agentSwitch.ts). Without an explicit profile the array is empty and the
 # expansion below yields no word (the script does not run under set -u).
 extra=("${args[@]:1}")
-# The initial prompt usually goes to the binary as the last positional argument (claude/codex/
-# grok read it that way). agy does not document this — its help only knows `-i, --prompt-interactive
+# The initial prompt goes to the binary as the last positional argument, after `--` (claude/codex/
+# grok read it that way). `--` keeps a prompt starting with '-' from being read as an option by all
+# three, and a one-word prompt from running as a subcommand in codex and grok (`codex -- login`
+# opens the TUI with the prompt "login"). Claude Code still dispatches a one-word `-- update` to
+# its subcommand (commander matches the first operand), so devd refuses one-word first prompts.
+# A multi-word prompt is one argv word and never matches a subcommand name in any of them.
+# agy does not document this — its help only knows `-i, --prompt-interactive
 # Run an initial prompt interactively and continue the session` — so a positional
 # argument is not a guaranteed way to start a turn. The array is empty for
 # all other profiles, leaving today's behavior unchanged (expanding an empty array
 # without `set -u` yields no word, see the comment at `extra` above).
 prompt_flag=()
 case "$profile" in
-  claude|claude-gemini|claude-openrouter) bin=cc ;;
-  codex) bin=co ;;
-  grok)  bin=gr ;;
+  claude|claude-gemini|claude-openrouter) bin=cc; prompt_flag=(--) ;;
+  codex) bin=co; prompt_flag=(--) ;;
+  grok)  bin=gr; prompt_flag=(--) ;;
   antigravity) bin=ag; prompt_flag=(-i) ;;
   # Mistral Vibe runs only in chat sessions (devd's tmuxRuntimeBlock): no TUI launcher; a chat session's shell
   # windows still end here and pass the chat check below.
