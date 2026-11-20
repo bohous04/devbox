@@ -1,5 +1,6 @@
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants as C, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, writeFileSync, writeSync } from "node:fs";
 import { basename, extname, join } from "node:path";
+import { openDirNoFollow, withDir, writeFileAt, type DirHandle } from "./noFollowFs";
 
 const SAFE = /[^A-Za-z0-9._-]/g;
 
@@ -21,29 +22,51 @@ export function uniquePath(dir: string, name: string, exists: (p: string) => boo
   }
 }
 
+const lexists = (p: string): boolean => { try { lstatSync(p); return true; } catch { return false; } };
+
 // Creates <workspace>/.inbox and (when the repo is git) adds .inbox/ to .git/info/exclude,
 // so the files do not clutter `git status`. Does not touch the committed .gitignore.
+// The workspace is agent-writable and devd runs as root: nothing below it is followed through a
+// symlink (noFollowFs.ts) — a planted `.inbox` link is an error, a planted exclude link is skipped.
 export function ensureInbox(workspace: string): string {
-  const dir = join(workspace, ".inbox");
-  mkdirSync(dir, { recursive: true });
-  const info = join(workspace, ".git", "info");
-  if (existsSync(info)) {
-    const exclude = join(info, "exclude");
-    const cur = existsSync(exclude) ? readFileSync(exclude, "utf8") : "";
-    if (!cur.split("\n").includes(".inbox/")) {
-      appendFileSync(exclude, (cur === "" || cur.endsWith("\n") ? "" : "\n") + ".inbox/\n");
-    }
+  withDir(workspace, [".inbox"], true, () => {});
+  addInboxExclude(workspace);
+  return join(workspace, ".inbox");
+}
+
+function addInboxExclude(workspace: string): void {
+  let info: DirHandle;
+  try { info = openDirNoFollow(workspace, [".git", "info"]); }
+  catch (e) {
+    // No .git/info (not a git repo, or a worktree whose .git is a file): nothing to exclude.
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTDIR") console.warn(`inbox: ${workspace}/.git/info skipped (${code})`);
+    return;
   }
-  return dir;
+  try {
+    let fd: number;
+    // O_NONBLOCK: a planted FIFO must not hang the open.
+    try { fd = openSync(join(info.path, "exclude"), C.O_RDWR | C.O_APPEND | C.O_CREAT | C.O_NOFOLLOW | C.O_NONBLOCK, 0o644); }
+    catch (e) { console.warn(`inbox: ${workspace}/.git/info/exclude skipped (${(e as NodeJS.ErrnoException).code})`); return; }
+    try {
+      const st = fstatSync(fd);
+      if (!st.isFile() || st.size > 1024 * 1024) { console.warn(`inbox: ${workspace}/.git/info/exclude is not a small regular file, skipped`); return; }
+      const buf = Buffer.alloc(st.size);
+      const cur = buf.subarray(0, readSync(fd, buf, 0, st.size, 0)).toString("utf8");
+      if (!cur.split("\n").includes(".inbox/")) writeSync(fd, (cur === "" || cur.endsWith("\n") ? "" : "\n") + ".inbox/\n");
+    } finally { closeSync(fd); }
+  } finally { info.close(); }
 }
 
 export function stageFile(workspace: string, rawName: string, bytes: Uint8Array): string {
   const name = sanitizeName(rawName);
   if (!name) throw new Error("invalid file name");
-  const dir = ensureInbox(workspace);
-  const target = uniquePath(dir, name);
-  writeFileSync(target, bytes, { flag: "wx" });
-  return "/workspace/.inbox/" + basename(target);
+  ensureInbox(workspace);
+  return withDir(workspace, [".inbox"], false, (d) => {
+    const target = basename(uniquePath(d.path, name, lexists));
+    writeFileAt(d, target, bytes, { mode: 0o644 });
+    return "/workspace/.inbox/" + target;
+  });
 }
 
 // Shared inbox: the file goes into the host's `sharedDir` (= <root>/_inbox), which is
