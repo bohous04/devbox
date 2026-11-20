@@ -118,15 +118,13 @@ struct OperationsScreen: View {
             if OperationsStore.canDecide(r) {
                 HStack {
                     Spacer()
-                    // The app's port of the web buttons: the system's prominent style draws light text on the
-                    // near-white primary in dark mode.
                     let approvable = busy == nil && review.problem == nil
                     Button("Reject") { confirmReject = r }
-                        .buttonStyle(DevboxButtonStyle(variant: .outline))
+                        .decisionButtonStyle(prominent: false)
                         .disabled(busy != nil)
                         .opacity(busy == nil ? 1 : 0.5)
                     Button("Approve operation") { confirmApprove = r }
-                        .buttonStyle(DevboxButtonStyle())
+                        .decisionButtonStyle(prominent: true)
                         .disabled(!approvable)
                         .opacity(approvable ? 1 : 0.5)
                 }

@@ -175,3 +175,21 @@ extension View {
         #endif
     }
 }
+
+extension View {
+    /// A decision button (approve, reject): the app's web-styled button on iPhone, where the system's prominent style
+    /// draws light text on the near-white primary in dark mode; a compact system button on the Mac, where 44 pt
+    /// would tower over the rest of the detail pane.
+    @ViewBuilder
+    func decisionButtonStyle(prominent: Bool) -> some View {
+        #if os(macOS)
+        if prominent {
+            buttonStyle(.borderedProminent).controlSize(.small)
+        } else {
+            buttonStyle(.bordered).controlSize(.small)
+        }
+        #else
+        buttonStyle(DevboxButtonStyle(variant: prominent ? .default : .outline))
+        #endif
+    }
+}
