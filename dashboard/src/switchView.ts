@@ -52,6 +52,27 @@ export function modelOptions(t: ChatTarget): SwitchOption[] {
   return models.map((m) => option(m, m, m === current));
 }
 
+const FAMILY_PREFIX: Readonly<Record<string, string | null>> = { claude: null, gpt: "GPT-", grok: "Grok ", mistral: "Mistral ", gemini: "Gemini " };
+const cap = (w: string) => w.charAt(0).toUpperCase() + w.slice(1);
+/** Display name of a model id for the composer ("claude-opus-5-5-high" → "Opus 5.5 High"). Display only: switches
+ *  and devd keep the id. An id of an unknown family or shape stays the raw id, so nothing is guessed. */
+export function modelLabel(id: string): string {
+  const resolved = Object.hasOwn(SAME_MODEL_ALIASES, id) ? SAME_MODEL_ALIASES[id] : id;
+  const [family, ...rest] = resolved.replace(/-(\d{8}|\d{4}-\d{2}-\d{2})$/, "").split("-");
+  if (!Object.hasOwn(FAMILY_PREFIX, family) || rest.length === 0 || rest.some((t) => !/^[a-z0-9.]+$/.test(t))) return id;
+  // Version parts split by dashes ("5-5") join with dots; words are capitalised.
+  const parts: string[] = [];
+  for (const t of rest) {
+    const prev = parts[parts.length - 1];
+    if (/^\d+$/.test(t) && prev !== undefined && /^\d+$/.test(prev)) parts[parts.length - 1] = `${prev}.${t}`;
+    else parts.push(t);
+  }
+  const prefix = FAMILY_PREFIX[family];
+  if (prefix === null) return parts.map(cap).join(" ");
+  const [first, ...more] = parts;
+  return prefix === "GPT-" ? [`GPT-${first}`, ...more.map(cap)].join(" ") : `${prefix}${parts.map(cap).join(" ")}`;
+}
+
 /** devd: 400 no-account-pool. Proxy profiles and ACP agents (their own CLI login) have no account pool. */
 export function accountMenuBlocked(t: ChatTarget): string | null {
   const p = profileFor(t.agent);
