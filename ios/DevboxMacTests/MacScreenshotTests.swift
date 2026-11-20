@@ -46,7 +46,6 @@ final class MacScreenshotTests: XCTestCase {
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
-        window.toolbarStyle = .unifiedCompact // as the app's window scene (DevboxMacApp)
         window.appearance = NSAppearance(named: look == "dark" ? .darkAqua : .aqua)
         window.contentView = NSHostingView(rootView: root)
         window.setContentSize(size)
@@ -82,7 +81,8 @@ final class MacScreenshotTests: XCTestCase {
         // The sidebar list makes its rows when it is drawn on a screen; offscreen they are made here.
         for case let table as NSTableView in Self.views(in: frame, named: "SwiftUIOutlineListView") {
             for row in 0..<table.numberOfRows { _ = table.rowView(atRow: row, makeIfNecessary: true) }
-            // The selected row's highlight is a material too: drawn as the inactive window's plain selection colour.
+            // The selected row's highlight is a material too: drawn as the plain selection colour of a list that does
+            // not have the focus (the thread does, after a click on a row).
             for row in Self.views(in: table, named: "ListTableRowView") {
                 for effect in row.subviews where effect is NSVisualEffectView {
                     effect.layer?.sublayers?.forEach { $0.isHidden = true }

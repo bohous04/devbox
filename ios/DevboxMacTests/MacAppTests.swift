@@ -36,12 +36,24 @@ final class MacAppTests: XCTestCase {
         XCTAssertEqual(MacInboxRow.when(try item("idle", reason: nil, since: 1_000), now: 1_000 + 3 * 60_000), "3m")
     }
 
-    /// A row cut by the top edge with a sliver showing gets that much room under the end; a tall part stays.
+    /// Columns that fit keep their width and the last takes the rest; a narrow column keeps its width when the
+    /// others have to share.
+    func testTableColumnsShareByContent() {
+        XCTAssertEqual(TableColumns.widths(natural: [100, 50], available: 300), [100, 200])
+        XCTAssertEqual(TableColumns.widths(natural: [400, 80], available: 300), [220, 80])
+        XCTAssertEqual(TableColumns.widths(natural: [400, 400], available: 300), [150, 150])
+    }
+
+    /// A row cut by the top edge with a sliver showing, and quiet notices under it, get room under the end; a tall part stays.
     func testThreadEdgeLiftsOnlyASliver() {
         let top: CGFloat = 52
-        XCTAssertEqual(ThreadEdge.pad([CGRect(x: 0, y: -200, width: 10, height: 270)], top: top), 18)
-        XCTAssertNil(ThreadEdge.pad([CGRect(x: 0, y: -200, width: 10, height: 600)], top: top), "most of the row shows: it stays")
-        XCTAssertNil(ThreadEdge.pad([CGRect(x: 0, y: 60, width: 10, height: 100)], top: top), "nothing cut")
+        func row(_ y: CGFloat, _ h: CGFloat, quiet: Bool = false) -> ThreadEdge.Row { .init(rect: CGRect(x: 0, y: y, width: 10, height: h), quiet: quiet) }
+        XCTAssertEqual(ThreadEdge.pad([row(-200, 270)], top: top), 18)
+        XCTAssertNil(ThreadEdge.pad([row(-200, 600)], top: top), "most of the row shows: it stays")
+        XCTAssertNil(ThreadEdge.pad([row(60, 100)], top: top), "nothing cut")
+        XCTAssertEqual(ThreadEdge.pad([row(-200, 270), row(86, 20, quiet: true), row(122, 300)], top: top), 54,
+                       "a quiet notice under the sliver goes with it")
+        XCTAssertEqual(ThreadEdge.pad([row(60, 20, quiet: true), row(96, 300)], top: top), 28, "a notice first in view goes")
     }
 
     /// The second line: what a needs-you row asks; for the others the branch when devd recorded one, else the message.
@@ -54,10 +66,10 @@ final class MacAppTests: XCTestCase {
     }
 
     func testSidebarAgentGlyphAndConnection() {
-        XCTAssertEqual(MacInboxRow.agentGlyph("claude").symbol, "asterisk")
-        XCTAssertEqual(MacInboxRow.agentGlyph("codex").symbol, "hexagon")
-        XCTAssertEqual(MacInboxRow.agentGlyph("grok").symbol, "bolt")
-        XCTAssertEqual(MacInboxRow.agentGlyph("something-new").symbol, "wind")
+        XCTAssertEqual(MacInboxRow.agentGlyph("claude"), "asterisk")
+        XCTAssertEqual(MacInboxRow.agentGlyph("codex"), "hexagon")
+        XCTAssertEqual(MacInboxRow.agentGlyph("grok"), "bolt")
+        XCTAssertEqual(MacInboxRow.agentGlyph("something-new"), "wind")
         XCTAssertEqual(MacInboxSidebar.connection(paused: false, loadError: nil, loaded: true).text, "Connected")
         XCTAssertEqual(MacInboxSidebar.connection(paused: true, loadError: "x", loaded: true).text, "Reconnecting — refreshing every 5 s")
         XCTAssertEqual(MacInboxSidebar.connection(paused: false, loadError: "x", loaded: false).text, "Can't reach devd")

@@ -17,8 +17,6 @@ struct DevboxMacApp: App {
         // Links go to the delegate, which focuses or opens the thread's window, never a blank extra window.
         .handlesExternalEvents(matching: [])
         .defaultSize(width: 1100, height: 760)
-        // A compact title bar: the sidebar's search sits close under it, not below a tall empty band.
-        .windowToolbarStyle(.unifiedCompact)
         .commands { MacWindowCommands() }
 
         Settings {

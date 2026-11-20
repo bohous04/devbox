@@ -203,7 +203,7 @@ struct MacInboxSidebar: View {
             .help("New session (⌘N)")
             .accessibilityLabel("New session")
         }
-        .padding(.horizontal, 12).padding(.top, 2).padding(.bottom, 8)
+        .padding(.horizontal, 12).padding(.bottom, 8)
         .background(MacTone.sidebar)
     }
 
@@ -281,7 +281,7 @@ struct MacInboxSidebar: View {
 
     private func rows(_ items: [InboxItem], now: Int, preview: Bool) -> some View {
         ForEach(items) { item in
-            MacInboxRow(item: item, now: now, preview: preview, selected: selection == item.sessionId)
+            MacInboxRow(item: item, now: now, preview: preview)
                 .tag(item.sessionId as String?)
                 .contextMenu {
                     Button("Open in New Window") { openWindow(value: item.sessionId) }
@@ -323,15 +323,13 @@ private struct MacGroupHead: View {
 }
 
 /// A sidebar row: the title with its state on the right (one coloured word when the row needs you, otherwise how long
-/// ago, after a live dot while it works) and one muted line (`secondLine`) ending in the agent's glyph. Titles are
-/// regular; a row that needs you is semibold unless selected. The agent's name, "tmux" and the message are also in
-/// the tooltip and the spoken label.
+/// ago, after a live dot while it works) and one muted line (`secondLine`) ending in the agent's glyph. Every title is
+/// regular: a row that needs you stands out by its coloured word. The agent's name, "tmux" and the message are also
+/// in the tooltip and the spoken label.
 struct MacInboxRow: View {
     let item: InboxItem
     let now: Int
     let preview: Bool
-    /// The selection fill marks the row; its title stays regular.
-    var selected = false
 
     /// The word for a row that needs you, by its reason; nil for every other row (it shows its age).
     static func word(_ i: InboxItem) -> (text: String, tone: InboxView.Tone)? {
@@ -347,15 +345,15 @@ struct MacInboxRow: View {
         }
     }
 
-    /// The agent's glyph, the dashboard's (Switchers.tsx AgentGlyph) as SF Symbols with the same tints: Claude's
-    /// asterisk, Codex's hexagon, Grok's bolt, Antigravity's orbit, Vibe's wind.
-    static func agentGlyph(_ agent: String) -> (symbol: String, tint: Color) {
+    /// The agent's glyph, the dashboard's shapes (Switchers.tsx AgentGlyph) as SF Symbols: Claude's asterisk,
+    /// Codex's hexagon, Grok's bolt, Antigravity's orbit, Vibe's wind. Drawn monochrome: metadata, not status.
+    static func agentGlyph(_ agent: String) -> String {
         switch AgentName(rawValue: agent) ?? .unknown {
-        case .claude, .claudeGemini, .claudeOpenrouter: return ("asterisk", Color(light: 0xEA580C, dark: 0xFB923C))
-        case .codex: return ("hexagon", Color(light: 0x0284C7, dark: 0x38BDF8))
-        case .grok: return ("bolt", Theme.C.foreground)
-        case .antigravity: return ("atom", Color(light: 0x7C3AED, dark: 0xA78BFA))
-        case .vibe, .unknown: return ("wind", Color(light: 0xD97706, dark: 0xFBBF24))
+        case .claude, .claudeGemini, .claudeOpenrouter: return "asterisk"
+        case .codex: return "hexagon"
+        case .grok: return "bolt"
+        case .antigravity: return "atom"
+        case .vibe, .unknown: return "wind"
         }
     }
 
@@ -383,7 +381,7 @@ struct MacInboxRow: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(title.text)
-                    .font(.system(size: 13, weight: Self.word(item) != nil && !selected ? .semibold : .regular))
+                    .font(.system(size: 13))
                     .foregroundStyle(Theme.C.foreground)
                     .lineLimit(1)
                 Spacer(minLength: 0)
@@ -403,8 +401,8 @@ struct MacInboxRow: View {
                     .foregroundStyle(Theme.C.mutedForeground)
                     .lineLimit(1)
                 Spacer(minLength: 0)
-                let glyph = Self.agentGlyph(item.agent)
-                Image(systemName: glyph.symbol).font(.system(size: 11, weight: .medium)).foregroundStyle(glyph.tint.opacity(0.7))
+                Image(systemName: Self.agentGlyph(item.agent)).font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.C.mutedForeground.opacity(0.75))
                     .accessibilityHidden(true)
             }
         }
