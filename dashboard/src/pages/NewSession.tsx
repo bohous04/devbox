@@ -46,6 +46,8 @@ export function NewSession() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
+  // The composer's text: what may start with it is decided here (InstaBox and a running terminal take none).
+  const [draft, setDraft] = useState("");
   // Flipped to false on unmount — polling the InstaBox job must not keep calling the API or touch the state of a
   // disposed page after the user navigated away (see startInstabox below).
   const aliveRef = useRef(true);
@@ -122,17 +124,21 @@ export function NewSession() {
     if (aliveRef.current) navigate(`/sessions?open=${encodeURIComponent(id)}`, { state: { notice: message } });
   }
 
-  async function startVps(fresh?: boolean) {
+  // `prompt`: the composer's text, trimmed; empty starts the session without one, as before. A failure is thrown to the
+  // caller: from the composer it shows under the box and the text stays (Composer keeps it on a failed send).
+  async function startVps(fresh?: boolean, prompt = "") {
     if (!folder || !project || !repo || busy || !choice) return;
     setErr(null); setIbxFailed(false); setBusy(true);
     try {
       const r = repo === SOLO
         ? await api.openSolo({ folder, project, agent })
-        : await api.openSession({ folder, project, repo, cloneUrl: selected?.cloneUrl, agent, fresh, runtime: choice.runtime });
+        : await api.openSession({ folder, project, repo, cloneUrl: selected?.cloneUrl, agent, fresh, runtime: choice.runtime, ...(prompt ? { prompt } : {}) });
       if (!aliveRef.current) return;
       await opened(r.session.id, choice.runtime, openedNotice(r.pull, choice.runtime));
-    } catch (e) { if (aliveRef.current) setErr((e as Error).message); } finally { if (aliveRef.current) setBusy(false); }
+    } finally { if (aliveRef.current) setBusy(false); }
   }
+  // The buttons outside the composer show a failure on the page.
+  const report = (p: Promise<void>) => { p.catch((e) => { if (aliveRef.current) setErr((e as Error).message); }); };
 
   // InstaBox always creates a NEW session (R3) and runs as a job: the page stays and shows the step until the
   // machine, clone and container are ready.
@@ -162,9 +168,20 @@ export function NewSession() {
     void opened(s.id, s.runtime ?? "tmux", "Session is running.");
   }
 
-  const start = (fresh?: boolean) => (onIbx ? startInstabox() : startVps(fresh));
+  const prompt = draft.trim();
+  // What the typed text cannot go with, said before the press (devd refuses the same with the same reasons).
+  const runningTerminal = !onIbx && choice?.runtime === "tmux" && existing[0]?.status === "running" ? existing[0] : null;
+  // `textBlock` stops every start; a running terminal only stops joining it (Create another starts a new one).
+  const textBlock = prompt === "" ? null
+    : onIbx ? "InstaBox sessions start without a prompt: clear the text, or run it on the VPS."
+    : repo === SOLO ? "claudeSolo starts without a prompt: clear the text, or pick a repo."
+    : choice?.runtime === "tmux" && prompt.startsWith("-") ? "A terminal session's first prompt can't start with '-' (the agent would read it as an option)."
+    : null;
+  const promptBlock = textBlock
+    ?? (prompt !== "" && runningTerminal ? `${runningTerminal.id} is already running, so it can't take a first prompt: Create another starts a new session with it.` : null);
+  const start = (fresh?: boolean) => (onIbx ? startInstabox() : startVps(fresh, prompt));
   const startLabel = ibxFailed && onIbx ? "Try again" : onIbx ? "Start on InstaBox" : existing.length > 0 ? "Open existing" : "Start session";
-  const canStart = !!repo && !busy && !!choice;
+  const canStart = !!repo && !busy && !!choice && promptBlock === null;
 
   const where = onIbx ? "on InstaBox" : "on the VPS";
   const what = choice?.runtime === "chat" ? "chat" : "terminal";
@@ -181,13 +198,15 @@ export function NewSession() {
 
       <Composer
         running={false} onStop={async () => {}}
-        placeholder={repo ? "Describe the task, or leave empty to just open the session" : "Pick a repo above, then describe the task"}
+        placeholder={!repo ? "Pick a repo above, then describe the task"
+          : onIbx ? "InstaBox sessions start without a prompt"
+          : repo === SOLO ? "claudeSolo starts without a prompt"
+          : "Describe the task, or leave it empty to just open the session"}
+        fieldOff={onIbx ? "InstaBox sessions start without a prompt" : repo === SOLO ? "claudeSolo starts without a prompt" : undefined}
+        imagesOff="Images can be added once the session is open"
         start={{ label: startLabel, ready: canStart }}
-        onSend={async (text, images) => {
-          // Waits for the owner's call on how a first prompt reaches the agent (see the PR); never dropped silently.
-          if (text.trim() !== "" || images.length > 0) throw new Error("A first message is not supported yet: clear it to start the session.");
-          await start();
-        }}
+        onDraft={setDraft}
+        onSend={async () => { await start(); }}
         controls={<AgentMenu agent={agent} disabled={!repo || busy} onPick={setAgent} />}
       />
 
@@ -205,7 +224,8 @@ export function NewSession() {
 
         <div className="flex flex-col gap-1.5 text-sm">
           {busy && step && <p role="status" className="text-muted-foreground">{JOB_STEP_LABEL[step] ?? step}…</p>}
-          {!busy && summary && <p className="text-foreground/80">{summary}</p>}
+          {!busy && summary && <p className="text-foreground/80">{summary}{!onIbx && repo !== SOLO && prompt !== "" && promptBlock === null ? " The agent starts with your message." : ""}</p>}
+          {promptBlock && <p role="status" className="text-amber-700 dark:text-amber-300">{promptBlock}</p>}
           {choice?.runtime === "chat" && <Hint>The agent runs behind the chat view; its terminal stays available as a tab.</Hint>}
           {repo && choice?.notice && <p role="status" className="text-amber-700 dark:text-amber-300">{choice.notice}</p>}
           {repo && !choice?.notice && chatDisabled && <Hint>{chatDisabled}</Hint>}
@@ -225,8 +245,8 @@ export function NewSession() {
 
         {(ibxFailed || (!onIbx && existing.length > 0)) && (
           <div className="flex flex-wrap gap-2">
-            {!onIbx && existing.length > 0 && <Button type="button" variant="outline" size="sm" disabled={!repo || busy} onClick={() => void startVps(true)}>Create another</Button>}
-            {ibxFailed && <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => { setHost("vps"); void startVps(); }}>Open on VPS</Button>}
+            {!onIbx && existing.length > 0 && <Button type="button" variant="outline" size="sm" disabled={!repo || busy || textBlock !== null} onClick={() => report(startVps(true, prompt))}>Create another</Button>}
+            {ibxFailed && <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => { setHost("vps"); report(startVps()); }}>Open on VPS</Button>}
           </div>
         )}
 

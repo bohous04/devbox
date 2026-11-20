@@ -27,12 +27,18 @@ function textWidth(text: string, css: CSSStyleDeclaration): number {
  *  Images pasted, dropped or picked (at most 10) are scaled down (imageView.ts), previewed and go with the next message.
  *  While a run is active and nothing is typed, the round primary button stops the run; with text typed it sends
  *  (queues) and a separate stop button sits next to it. */
-export function Composer({ running, onSend, onStop, controls, notices, placeholder: placeholderText, start }: {
+export function Composer({ running, onSend, onStop, controls, notices, placeholder: placeholderText, start, onDraft, fieldOff, imagesOff }: {
   running: boolean;
   /** Replaces the default placeholder (e.g. the new-session page's). */
   placeholder?: string;
   /** The new-session page: the primary button starts a session, also with nothing typed, once `ready`. */
   start?: { label: string; ready: boolean };
+  /** Hears every change of the typed text (the new-session page decides what can start with it). */
+  onDraft?: (text: string) => void;
+  /** Why this message cannot take text: the field is disabled while empty (typed text stays editable, to clear it). */
+  fieldOff?: string;
+  /** Why this message cannot take images: attaching is disabled, a paste or drop says why. */
+  imagesOff?: string;
   /** Inside the box, bottom right: the session's agent, model and account switchers. */
   controls?: ReactNode;
   /** Above the box: the switchers' status and error lines. */
@@ -124,6 +130,7 @@ export function Composer({ running, onSend, onStop, controls, notices, placehold
   const errorText = (e: unknown) => (e instanceof ApiError ? composerErrorText(e.status, e.body) : (e as Error).message);
 
   async function attach(files: File[]) {
+    if (imagesOff) { setErr(imagesOff); return; }
     const { take, message } = takeImages(images.length, files.length);
     setErr(message);
     for (const file of files.slice(0, take)) {
@@ -235,7 +242,8 @@ export function Composer({ running, onSend, onStop, controls, notices, placehold
               )}
               onScroll={(e) => setScrolled(e.currentTarget.scrollTop > 0)}
               value={text}
-              onChange={(e) => setText(e.target.value)}
+              disabled={fieldOff !== undefined && text === ""}
+              onChange={(e) => { setText(e.target.value); onDraft?.(e.target.value); }}
               onPaste={(e) => {
                 const files = Array.from(e.clipboardData.files);
                 if (files.length === 0) return;
@@ -255,16 +263,16 @@ export function Composer({ running, onSend, onStop, controls, notices, placehold
               onChange={(e) => { const files = Array.from(e.target.files ?? []); e.target.value = ""; void attach(files); }}
             />
             <Button
-              type="button" variant="ghost" size="icon-sm" disabled={full}
+              type="button" variant="ghost" size="icon-sm" disabled={full || imagesOff !== undefined}
               className={cn("size-11 rounded-full text-muted-foreground hover:text-foreground sm:size-8 [&_svg]:size-[18px]", oneRow && "max-sm:order-first")}
-              onClick={() => picker.current?.click()} aria-label="Attach image" title={full ? `At most ${MAX_IMAGES_PER_MESSAGE} images per message` : "Attach image (PNG, JPEG, WebP or GIF), or paste or drop one"}
+              onClick={() => picker.current?.click()} aria-label="Attach image" title={imagesOff ?? (full ? `At most ${MAX_IMAGES_PER_MESSAGE} images per message` : "Attach image (PNG, JPEG, WebP or GIF), or paste or drop one")}
             >
               <Paperclip />
             </Button>
             {finePointer && (
               // Quiet, and only while typing: the placeholder stays short.
               <p aria-hidden="true" className="ml-1 hidden truncate text-xs text-muted-foreground opacity-0 transition-opacity duration-150 group-focus-within/box:opacity-100 sm:block">
-                Enter to send · Shift+Enter for a new line · paste or drop images
+                Enter to send · Shift+Enter for a new line{imagesOff ? "" : " · paste or drop images"}
               </p>
             )}
             <div className={cn("ml-auto flex min-w-0 items-center gap-0.5 sm:gap-1", oneRow && "max-sm:shrink-0")}>
