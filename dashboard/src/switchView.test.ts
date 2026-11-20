@@ -3,8 +3,9 @@ import type { RunRow } from "../../shared/thread";
 import type { AccountView, ChatTarget, CodexAccountView } from "./api";
 import {
   accountMenuBlocked, claudeAccountOptions, codexAccountOptions, harnessOptions, modelMenuBlocked, modelOptions,
-  awaitingTargetText, switchBlocked, switchErrorText, switchResultText,
+  awaitingTargetText, modelLabel, switchBlocked, switchErrorText, switchResultText,
 } from "./switchView";
+import { CHAT_MODELS } from "../../shared/chatModels";
 // Tests may import devd (see newSession.test.ts): the model list is the one devd accepts.
 import { CHAT_MODELS as DEVD_CHAT_MODELS } from "../../devd/src/chatSwitch";
 
@@ -148,4 +149,22 @@ test("switch results: unchanged and an exhausted account are said, a plain switc
   expect(switchResultText({ kind: "set-model", unchanged: true })).toMatch(/already/i);
   expect(switchResultText({ kind: "restart-resume", exhausted: true })).toMatch(/over its usage limit/);
   expect(switchResultText({ kind: "fresh-with-handoff" })).toBeNull();
+});
+
+test("model label: known families read as names, efforts and dated snapshots included; unknown ids stay the raw id", () => {
+  expect(modelLabel("claude-opus-5-5")).toBe("Opus 5.5");
+  expect(modelLabel("claude-sonnet-5-5-high")).toBe("Sonnet 5.5 High");
+  expect(modelLabel("claude-haiku-4-5-20251001")).toBe("Haiku 4.5");
+  expect(modelLabel("gpt-6.1-sol")).toBe("GPT-6.1 Sol");
+  expect(modelLabel("gpt-5.4-mini-2026-03-17")).toBe("GPT-5.4 Mini");
+  expect(modelLabel("gpt-5.3-codex")).toBe("GPT-5.3 Codex");
+  expect(modelLabel("grok-4.7-build-fast")).toBe("Grok 4.7 Build Fast");
+  expect(modelLabel("mistral-large-4-0")).toBe("Mistral Large 4.0");
+  expect(modelLabel("mistral-medium-latest")).toBe("Mistral Medium 3.5");
+  expect(modelLabel("gemini-4-neon")).toBe("Gemini 4 Neon");
+  expect(modelLabel("claude-opus-5-5[1m]")).toBe("claude-opus-5-5[1m]");
+  expect(modelLabel("llama-9")).toBe("llama-9");
+  expect(modelLabel("claude")).toBe("claude");
+  // Every model the menus offer gets a readable name.
+  for (const id of Object.values(CHAT_MODELS).flat()) expect(modelLabel(id)).not.toBe(id);
 });
