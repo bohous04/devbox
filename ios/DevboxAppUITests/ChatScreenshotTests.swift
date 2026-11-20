@@ -19,6 +19,16 @@ final class ChatScreenshotTests: XCTestCase {
     func testDark() throws { try shoot(appearance: "dark") }
     func testLight() throws { try shoot(appearance: "light") }
 
+    /// The composer's row on a narrow phone at an accessibility text size: the model chip must leave the field room.
+    /// Run it on a small simulator (iPhone SE width); the file name says what it shows, not the device.
+    func testCompactAccessibilityText() throws {
+        let app = XCUIApplication()
+        openThread(app, extra: ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityL"])
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'example.com/docs/sync'")).firstMatch.waitForExistence(timeout: 20))
+        sleep(1)
+        try save(app, "ios-compact-ax-end")
+    }
+
     private func shoot(appearance: String) throws {
         let app = XCUIApplication()
         openThread(app)
@@ -66,8 +76,11 @@ final class ChatScreenshotTests: XCTestCase {
                 sleep(1)
                 try save(app, "ios-\(appearance)-effort-menu")
             }
-            // Closes the submenu, then the menu: a tap above them, away from the composer.
-            for _ in 0..<2 { app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap(); sleep(1) }
+            // A tap outside closes the menu (with its submenu): on the navigation bar's title, which does nothing itself.
+            // Not Escape: the simulator's menu does not get it, and the menu offers no dismiss element.
+            app.navigationBars.firstMatch.tap()
+            sleep(1)
+            XCTAssertFalse(app.buttons["Applies from your next message."].exists, "the chip's menu is still open")
         }
 
         // The composer from its second line: two tiers, the field over the controls.
@@ -90,8 +103,8 @@ final class ChatScreenshotTests: XCTestCase {
         try save(app, "ios-\(appearance)-top")
     }
 
-    private func openThread(_ app: XCUIApplication) {
-        app.launchArguments = ["-DevboxFixtures", "demo"]
+    private func openThread(_ app: XCUIApplication, extra: [String] = []) {
+        app.launchArguments = ["-DevboxFixtures", "demo"] + extra
         app.launch()
         app.open(URL(string: "devbox://thread/dev-orchard-sync")!)
     }

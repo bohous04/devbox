@@ -138,6 +138,11 @@ final class ChatSwitchTests: XCTestCase {
         XCTAssertEqual(ChatSwitch.effortOptions(effort())[0].detail, "The level shows after the agent's first reply")
     }
 
+    func testEffortBodySendsNullForDefault() throws {
+        XCTAssertEqual(String(decoding: try JSONEncoder().encode(ChatSwitch.EffortBody(effort: nil)), as: UTF8.self), #"{"effort":null}"#)
+        XCTAssertEqual(String(decoding: try JSONEncoder().encode(ChatSwitch.EffortBody(effort: "high")), as: UTF8.self), #"{"effort":"high"}"#)
+    }
+
     func testEffortMenuBlocked() {
         XCTAssertEqual(ChatSwitch.effortMenuBlocked(effort(), target(bridge: "1.6.0")), "This session's agent bridge (1.6.0) cannot change the effort: recreate the session's container")
         XCTAssertEqual(ChatSwitch.effortMenuBlocked(effort(), target(bridge: nil)), "This session's agent bridge (unknown version) cannot change the effort: recreate the session's container")

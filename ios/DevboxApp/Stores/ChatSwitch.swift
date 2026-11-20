@@ -214,6 +214,17 @@ enum ChatSwitch {
         return nil
     }
 
+    /// POST thread/effort's body. `{"effort": null}` goes back to the model default: the key must be sent, so null is
+    /// encoded, not left out.
+    struct EffortBody: Encodable {
+        let effort: String?
+        private enum K: String, CodingKey { case effort }
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: K.self)
+            try c.encode(effort, forKey: .effort)
+        }
+    }
+
     /// "Default" (value "": the model's own level, sent as null) and the levels the model lists.
     static func effortOptions(_ e: ThreadEffort) -> [Option] {
         let detail: String? = e.chosen != nil ? nil

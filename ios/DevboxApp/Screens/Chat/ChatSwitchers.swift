@@ -58,13 +58,16 @@ struct ChatSwitchers<Content: View>: View {
         } label: {
             HStack(spacing: 4) {
                 if busy != nil { ProgressView().controlSize(.mini) }
-                Text(model).lineLimit(1)
+                // The model's name gives way first: the level and the chevron always show whole.
+                Text(model).lineLimit(1).truncationMode(.middle)
                 if let effort {
                     Text("·").foregroundStyle(Theme.C.mutedForeground)
-                    Text(effort).fontWeight(.semibold).lineLimit(1)
+                    Text(effort).fontWeight(.semibold).lineLimit(1).fixedSize()
                 }
                 Image(systemName: "chevron.down").font(.system(size: ChatType.s(10), weight: .semibold)).foregroundStyle(Theme.C.mutedForeground)
             }
+            // The web's max-w-56: a long raw model id never takes the composer's row.
+            .frame(maxWidth: 224)
             .font(.system(size: ChatType.s(14), weight: .medium))
             .foregroundStyle(Theme.C.foreground)
             .padding(.horizontal, 8).frame(minHeight: 32)
@@ -76,10 +79,10 @@ struct ChatSwitchers<Content: View>: View {
         // As written, also when it opens upward from the composer (iOS then reverses a menu by default): the effort
         // levels low to high with "Applies from your next message." last, and the sections as on the web.
         .menuOrder(.fixed)
-        // Its whole label before the field takes the row: the level must not cut the model's name short.
+        // Its label (up to the cap) before the field, which keeps its own minimum width (ComposerView).
         .layoutPriority(1)
         .disabled(busy != nil)
-        .accessibilityLabel("Model: \(model)\(effort.map { ", effort \($0)" } ?? ""), agent \(agent)"))
+        .accessibilityLabel("Model: \(model)\(effort.map { ", effort \($0)" } ?? ""), agent \(agent)\(busy.map { ", \(busyText($0))" } ?? "")"))
     }
 
     @ViewBuilder
@@ -130,11 +133,13 @@ struct ChatSwitchers<Content: View>: View {
         } label: {
             // A submenu row: what it switches, and the current choice under it.
             Text(title)
-            Text(busy == which ? (which == .effort ? "Changing…" : "Switching…") : label)
+            Text(busy == which ? busyText(which) : label)
         }
         .disabled(blocked != nil || busy != nil)
-        .accessibilityLabel("\(title): \(label)")
+        .accessibilityLabel("\(title): \(busy == which ? busyText(which) : label)")
     }
+
+    private func busyText(_ which: Which) -> String { which == .effort ? "Changing…" : "Switching…" }
 
     private func loadTarget() async {
         do {
@@ -165,42 +170,31 @@ struct ChatSwitchers<Content: View>: View {
     private struct ModelBody: Encodable { let model: String }
     private struct AccountBody: Encodable { let accountId: String }
     private struct HarnessBody: Encodable { let agent: String }
-    /// `{"effort": null}` goes back to the model default: the key must be sent, so null is encoded, not left out.
-    private struct EffortBody: Encodable {
-        let effort: String?
-        private enum K: String, CodingKey { case effort }
-        func encode(to encoder: Encoder) throws {
-            var c = encoder.container(keyedBy: K.self)
-            try c.encode(effort, forKey: .effort)
-        }
-    }
 
     private func pick(_ which: Which, _ o: ChatSwitch.Option) {
         busy = which
         error = nil
         note = nil
         Task {
-            if which == .effort {
-                // 202 once the bridge took it; the level comes back as the stream's thread-effort.
-                do { try await client.postVoid("\(base)/effort", body: EffortBody(effort: o.value.isEmpty ? nil : o.value)) }
-                catch { self.error = "Effort change to \(o.label) failed: \(ChatSwitch.errorText(error))" }
-                busy = nil
-                return
-            }
             do {
-                let r: ChatSwitchResult
                 switch which {
-                case .model: r = try await client.post("\(base)/model", body: ModelBody(model: o.value))
-                case .account: r = try await client.post("\(base)/account", body: AccountBody(accountId: o.value))
-                case .harness: r = try await client.post("\(base)/harness", body: HarnessBody(agent: o.value))
-                case .effort: preconditionFailure("an effort change is sent above")
+                case .model: note = ChatSwitch.resultText(try await client.post("\(base)/model", body: ModelBody(model: o.value)))
+                case .account: note = ChatSwitch.resultText(try await client.post("\(base)/account", body: AccountBody(accountId: o.value)))
+                case .harness: note = ChatSwitch.resultText(try await client.post("\(base)/harness", body: HarnessBody(agent: o.value)))
+                // 202 once the bridge took it; the level comes back as the stream's thread-effort.
+                case .effort: try await client.postVoid("\(base)/effort", body: ChatSwitch.EffortBody(effort: o.value.isEmpty ? nil : o.value))
                 }
-                note = ChatSwitch.resultText(r)
             } catch {
-                let what = which == .harness ? "Agent" : which == .model ? "Model" : "Account"
-                self.error = "\(what) switch to \(o.label) failed: \(ChatSwitch.errorText(error))"
+                let what = switch which {
+                case .harness: "Agent switch"
+                case .model: "Model switch"
+                case .effort: "Effort change"
+                case .account: "Account switch"
+                }
+                self.error = "\(what) to \(o.label) failed: \(ChatSwitch.errorText(error))"
             }
-            // Also after a timeout: the bridge may have switched, and the menus should say where it is.
+            // Also after a timeout (the bridge may have switched) and a refusal such as bridge-too-old (the target then
+            // carries the bridge's version and the Effort menu disables): the menus should say where it is.
             await loadTarget()
             busy = nil
         }

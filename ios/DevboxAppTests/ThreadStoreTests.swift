@@ -74,6 +74,18 @@ final class ThreadStoreTests: XCTestCase {
         XCTAssertEqual(ThreadView.mergeSnapshot(.empty, frame).effort, ThreadEffort(model: "m", supported: ["low"], effective: nil, chosen: "low"))
     }
 
+    func testSnapshotWithAnUnreadableEffortStillLoadsWithoutIt() throws {
+        for effort in [#"{"model":"m","supported":["low",null],"effective":null,"chosen":null}"#, #"{"model":"m","supported":["low"],"effective":3,"chosen":null}"#] {
+            let json = #"{"lastSeq":4,"seenSeq":0,"runs":[],"items":[],"pending":[],"background":[],"native":null,"effort":"# + effort + "}"
+            let s = try JSONDecoder().decode(ThreadSnapshot.self, from: Data(json.utf8))
+            XCTAssertEqual(s.lastSeq, 4)
+            XCTAssertNil(s.effort)
+        }
+        // A devd from before effort: no key at all.
+        let old = #"{"lastSeq":1,"seenSeq":0,"runs":[],"items":[],"pending":[],"background":[],"native":null}"#
+        XCTAssertNil(try JSONDecoder().decode(ThreadSnapshot.self, from: Data(old.utf8)).effort)
+    }
+
     func testToolInputNullIsKeptAsAValue() throws {
         let json = #"{"seq":1,"ts":5,"event":{"type":"tool.started","runId":"r","itemId":"t","tool":"X","input":null}}"#
         let e = try JSONDecoder().decode(LoggedEvent.self, from: Data(json.utf8))

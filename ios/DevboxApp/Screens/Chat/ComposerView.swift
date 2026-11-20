@@ -106,6 +106,8 @@ struct ComposerView: View {
             .font(.system(size: ChatType.s(16)))
             .textFieldStyle(.plain)
             .padding(.vertical, 6)
+            // The model chip on the same row goes first (ChatSwitchers); the field keeps room to read and tap.
+            .frame(minWidth: 96)
             .accessibilityLabel("Message")
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
                 if text.isEmpty { oneLine = h }
