@@ -68,6 +68,16 @@ final class MacScreenshotTests: XCTestCase {
         // The sidebar list makes its rows when it is drawn on a screen; offscreen they are made here.
         for case let table as NSTableView in Self.views(in: frame, named: "SwiftUIOutlineListView") {
             for row in 0..<table.numberOfRows { _ = table.rowView(atRow: row, makeIfNecessary: true) }
+            // The selected row's highlight is a material too: drawn as the inactive window's plain selection colour.
+            for row in Self.views(in: table, named: "ListTableRowView") {
+                for effect in row.subviews where effect is NSVisualEffectView {
+                    effect.layer?.sublayers?.forEach { $0.isHidden = true }
+                    window.effectiveAppearance.performAsCurrentDrawingAppearance {
+                        effect.layer?.backgroundColor = NSColor.unemphasizedSelectedContentBackgroundColor.cgColor
+                    }
+                    effect.layer?.cornerRadius = 6
+                }
+            }
         }
         frame.layoutSubtreeIfNeeded()
         frame.displayIfNeeded()
@@ -90,6 +100,16 @@ final class MacScreenshotTests: XCTestCase {
         context.fill(CGRect(x: 0, y: 0, width: rep.pixelsWide, height: rep.pixelsHigh))
         context.scaleBy(x: scale, y: scale)
         Self.dropCompositing(layer)
+        // The segmented control knocks its selection out of the labels with a black layer the window server
+        // composites away; drawn plainly it is a black pill over "Chat", so it is left out.
+        func all(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(all) }
+        for segmented in all(frame) where String(describing: type(of: segmented)).contains("AppKitSegmentedControl") {
+            func knockouts(_ l: CALayer) -> [CALayer] {
+                (l.backgroundColor.flatMap { NSColor(cgColor: $0) }.map { $0.alphaComponent == 1 && $0.brightnessComponent == 0 } == true ? [l] : [])
+                    + (l.sublayers ?? []).flatMap(knockouts)
+            }
+            segmented.layer.map(knockouts)?.forEach { $0.isHidden = true }
+        }
         layer.render(in: context)
         // The title bar's blur is a window-server backdrop too: without it the thread scrolls visibly under the
         // title, so the bar gets the window background and its items are drawn again on top.
@@ -122,7 +142,7 @@ final class MacScreenshotTests: XCTestCase {
             context.restoreGState()
         }
         let png = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
-        try png.write(to: dir.appending(path: "mac-r2-\(name).png"))
+        try png.write(to: dir.appending(path: "mac-\(name).png"))
         state.inbox?.stop()
         state.live?.stop()
     }
@@ -130,6 +150,7 @@ final class MacScreenshotTests: XCTestCase {
     private static func dropCompositing(_ layer: CALayer) {
         layer.compositingFilter = nil
         layer.filters = nil
+        layer.backgroundFilters = nil
         layer.sublayers?.forEach(dropCompositing)
     }
 
