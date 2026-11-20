@@ -31,7 +31,8 @@ export const THREAD_STORE_SCHEMA = 2;
  *  several items); `updated_seq`
  *  is the seq of their last change, so `snapshot({afterSeq})` also returns items that kept streaming. */
 export class ThreadStore {
-  /** Effort values already logged as dropped, so a bridge repeating one logs it once per session. */
+  /** Effort fields (model, supported, effective, chosen) already logged with a dropped value: one line per field per
+   *  session, so a bridge sending ever new values cannot grow the log or this set. */
   private effortLogged = new Set<string>();
 
   private constructor(private db: Database, private onNotice: (item: ThreadItem) => void) {}
@@ -403,9 +404,10 @@ export class ThreadStore {
   private parseEffort(raw: unknown, where: string): ThreadEffort {
     const { effort, dropped } = parseEffortState(raw);
     for (const what of dropped) {
-      if (this.effortLogged.has(what)) continue;
-      this.effortLogged.add(what);
-      console.error(`thread store: effort ${what} at ${where} dropped`);
+      const field = what.split(" ")[0]!;
+      if (this.effortLogged.has(field)) continue;
+      this.effortLogged.add(field);
+      console.error(`thread store: effort ${what} at ${where} dropped (later ones of this field are not logged)`);
     }
     return effort;
   }
