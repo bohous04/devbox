@@ -92,9 +92,10 @@ struct ComposerView: View {
             Button { pasteImages() } label: { Label("Paste image", systemImage: "doc.on.clipboard") }
                 .disabled(!ImagePasteboard.hasImages)
         } label: {
-            Image(systemName: "paperclip").font(.system(size: 17)).foregroundStyle(Theme.C.mutedForeground)
+            Image(systemName: "paperclip").font(.system(size: ChatType.s(17))).foregroundStyle(Theme.C.mutedForeground)
                 .frame(width: 36, height: 36).contentShape(Rectangle())
         }
+        .labelOnlyMenu()
         .disabled(images.count >= ImagePrep.maxImagesPerMessage)
         .accessibilityLabel("Attach images")
     }
@@ -102,7 +103,7 @@ struct ComposerView: View {
     private var field: some View {
         TextField(running ? "Queue a message" : "Ask anything", text: $text, axis: .vertical)
             .lineLimit(1...6)
-            .font(.system(size: 16))
+            .font(.system(size: ChatType.s(16)))
             .textFieldStyle(.plain)
             .padding(.vertical, 6)
             .accessibilityLabel("Message")
@@ -119,7 +120,7 @@ struct ComposerView: View {
         if let chip { chip }
         if running {
             Button { stop() } label: {
-                Image(systemName: "stop.fill").font(.system(size: 13)).foregroundStyle(Theme.C.foreground)
+                Image(systemName: "stop.fill").font(.system(size: ChatType.s(13))).foregroundStyle(Theme.C.foreground)
                     .frame(width: 34, height: 34).background(Theme.C.muted, in: Circle())
                     .iPhoneTapTarget()
             }
@@ -127,7 +128,7 @@ struct ComposerView: View {
             .accessibilityLabel("Stop the run")
         }
         Button { send() } label: {
-            Image(systemName: "arrow.up").font(.system(size: 15, weight: .semibold))
+            Image(systemName: "arrow.up").font(.system(size: ChatType.s(15), weight: .semibold))
                 .foregroundStyle(canSend ? Theme.C.primaryForeground : Theme.C.mutedForeground)
                 .frame(width: 34, height: 34)
                 .background(canSend ? Theme.C.primary : Theme.C.muted, in: Circle())

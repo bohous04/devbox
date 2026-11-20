@@ -66,6 +66,39 @@ enum Theme {
     }
 }
 
+/// The chat's type and layout per platform. The iPhone sizes read like a zoomed-in page on a Mac window, so the Mac
+/// takes desktop sizes (14 pt body) and a centred reading column; the iPhone keeps its own (`s` returns the size given).
+enum ChatType {
+    /// The chat's font size for the iPhone size `ios`.
+    static func s(_ ios: CGFloat) -> CGFloat {
+        #if os(macOS)
+        switch ios {
+        case 18...: return ios - 2
+        case 16..<18: return 14
+        case 13..<16: return ios - 1
+        default: return max(ios - 1, 10)
+        }
+        #else
+        return ios
+        #endif
+    }
+}
+
+enum ChatLayout {
+    #if os(macOS)
+    /// The thread's reading column, centred in the window.
+    static let column: CGFloat = 740
+    /// The user's bubble: at most ~70% of the column.
+    static let bubble: CGFloat = 520
+    /// Room between the header and the first message.
+    static let top: CGFloat = 24
+    #else
+    static let column: CGFloat = .infinity
+    static let bubble: CGFloat = .infinity
+    static let top: CGFloat = 0
+    #endif
+}
+
 extension Color {
     /// Dynamic light/dark color from hex, for one-off tones outside the theme palette (asset catalog): the stats
     /// `MetricCard` tones and the inbox's status and project-badge tints.

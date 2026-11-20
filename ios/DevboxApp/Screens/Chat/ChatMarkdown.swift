@@ -7,7 +7,7 @@ struct ChatMarkdown: View {
     let text: String
     var quiet = false
 
-    private var font: Font { quiet ? .system(size: 14) : .system(size: 16) }
+    private var font: Font { quiet ? .system(size: ChatType.s(14)) : .system(size: ChatType.s(16)) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: quiet ? 6 : 12) {
@@ -24,7 +24,7 @@ struct ChatMarkdown: View {
     private func block(_ b: MdBlock) -> some View {
         switch b {
         case .paragraph(let s): ChatInline.text(s)
-        case .heading(let level, let s): ChatInline.text(s).font(.system(size: level <= 2 ? 18 : 16, weight: .semibold))
+        case .heading(let level, let s): ChatInline.text(s).font(.system(size: ChatType.s(level <= 2 ? 18 : 16), weight: .semibold))
         case .quote(let s):
             ChatInline.text(s).foregroundStyle(Theme.C.mutedForeground)
                 .padding(.leading, 12)
@@ -33,12 +33,17 @@ struct ChatMarkdown: View {
         case .numbered(let start, let items): list(items.enumerated().map { ("\(start + $0).", $1) })
         case .code(let s):
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(s).font(.system(size: 13, design: .monospaced)).lineSpacing(2).fixedSize()
+                Text(s).font(.system(size: ChatType.s(13), design: .monospaced)).lineSpacing(2).fixedSize()
                     .padding(12)
             }
             .plainScrollEdges()
             .background(Theme.C.muted, in: RoundedRectangle(cornerRadius: Theme.R.lg))
-        case .table(let header, let rows): table(header, rows)
+        case .table(let header, let rows):
+            #if os(macOS)
+            grid(header, rows)
+            #else
+            table(header, rows)
+            #endif
         }
     }
 
@@ -53,6 +58,44 @@ struct ChatMarkdown: View {
         }
     }
 
+    #if os(macOS)
+    /// A Mac window has room for columns: a real grid, cells aligned under their header, rows apart by hairlines.
+    /// A code-only cell stays on one line, cut in the middle where it does not fit.
+    private func grid(_ header: [String], _ rows: [[String]]) -> some View {
+        let columns = max(header.count, rows.map(\.count).max() ?? 0)
+        let hasHeader = !header.allSatisfy { $0.trimmingCharacters(in: .whitespaces).isEmpty }
+        func cell(_ s: String) -> some View {
+            Group {
+                if ChatMarkdownParse.isCodeOnly(s) { ChatInline.text(s).lineLimit(1).truncationMode(.middle) } else { ChatInline.text(s) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12).padding(.vertical, 8)
+        }
+        // No spacing of its own: each cell pads itself, so the header's fill and the hairlines run edge to edge.
+        return Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 0, verticalSpacing: 0) {
+            if hasHeader {
+                GridRow {
+                    ForEach(0..<columns, id: \.self) { j in
+                        Text(j < header.count ? header[j] : "").font(.system(size: ChatType.s(12), weight: .medium))
+                            .foregroundStyle(Theme.C.mutedForeground)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 12).padding(.vertical, 7)
+                            .background { Rectangle().fill(Theme.C.muted.opacity(0.6)) }
+                    }
+                }
+            }
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                Divider().gridCellUnsizedAxes(.horizontal).overlay(Theme.C.border)
+                GridRow {
+                    ForEach(0..<columns, id: \.self) { j in cell(j < row.count ? row[j] : "") }
+                }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: Theme.R.lg))
+        .overlay(RoundedRectangle(cornerRadius: Theme.R.lg).strokeBorder(Theme.C.border))
+    }
+    #endif
+
     /// A phone has no room for columns: each row stacks its cells (the first, the check, above the result) inside one
     /// bordered group headed by the column names, rows apart by hairlines, so it reads as a table, not as a list of
     /// buttons. A table of more than two columns labels the later cells with their header.
@@ -60,7 +103,7 @@ struct ChatMarkdown: View {
         VStack(alignment: .leading, spacing: 0) {
             if !header.allSatisfy({ $0.trimmingCharacters(in: .whitespaces).isEmpty }) {
                 Text(header.prefix(2).joined(separator: " · "))
-                    .font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.C.mutedForeground)
+                    .font(.system(size: ChatType.s(12), weight: .medium)).foregroundStyle(Theme.C.mutedForeground)
                     .padding(.horizontal, 12).padding(.vertical, 7)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background { Rectangle().fill(Theme.C.muted.opacity(0.6)) }
@@ -125,7 +168,7 @@ enum ChatInline {
             ?? AttributedString(s)
         // Code a size under the prose: monospace at the same size reads larger and makes the line lumpy.
         for run in a.runs where run.inlinePresentationIntent?.contains(.code) == true {
-            a[run.range].font = .system(size: 14, design: .monospaced)
+            a[run.range].font = .system(size: ChatType.s(14), design: .monospaced)
         }
         dropNonWebLinks(&a)
         // Links in the accent colour, no underline: the colour alone marks them, as in the rest of iOS.

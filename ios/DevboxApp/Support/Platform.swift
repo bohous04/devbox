@@ -66,6 +66,16 @@ enum Clipboard {
 }
 
 extension View {
+    /// A menu drawn by its own label. The Mac's default menu adds a bezel and its own chevron (a second one beside the
+    /// label's) and a dropdown arrow to an icon button; the iPhone draws only the label already.
+    func labelOnlyMenu() -> some View {
+        #if os(macOS)
+        menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        #else
+        self
+        #endif
+    }
+
     /// Inline navigation title on iPhone; the Mac has no title display modes.
     func inlineNavigationTitle() -> some View {
         #if os(iOS)

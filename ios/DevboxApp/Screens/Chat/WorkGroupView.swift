@@ -30,7 +30,7 @@ struct WorkGroupView: View, Equatable {
                         Spacer(minLength: 0)
                     }
                 }
-                .font(.system(size: 14))
+                .font(.system(size: ChatType.s(14)))
                 .foregroundStyle(open ? Theme.C.foreground : Theme.C.mutedForeground)
                 .frame(minHeight: 36)
                 .contentShape(Rectangle())
@@ -55,7 +55,7 @@ struct WorkGroupView: View, Equatable {
     }
 
     private var chevron: some View {
-        Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold))
+        Image(systemName: "chevron.right").font(.system(size: ChatType.s(11), weight: .semibold))
             .rotationEffect(.degrees(open ? 90 : 0)).accessibilityHidden(true)
     }
 

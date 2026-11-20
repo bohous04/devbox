@@ -155,6 +155,10 @@ struct ChatScreen: View {
                         .onDisappear { atEnd = false }
                 }
                 .padding(Theme.S.screenPadding)
+                .padding(.top, ChatLayout.top)
+                // The Mac reads in a centred column; the iPhone's is the screen.
+                .frame(maxWidth: ChatLayout.column)
+                .frame(maxWidth: .infinity)
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
@@ -172,6 +176,8 @@ struct ChatScreen: View {
                     }
                 }
                 .padding(.horizontal, Theme.S.screenPadding)
+                .frame(maxWidth: ChatLayout.column)
+                .frame(maxWidth: .infinity)
                 .padding(.top, 8).padding(.bottom, 6)
                 // Opaque: the thread scrolls under the composer, not through it, and fades out just above it
                 // instead of being cut at a hard line. The fill runs on under the home indicator and the keyboard,

@@ -13,6 +13,16 @@ final class InboxStoreTests: XCTestCase {
         return try JSONDecoder().decode(InboxItem.self, from: JSONSerialization.data(withJSONObject: json))
     }
 
+    func testSearchMatchesEveryWordInTitleProjectRepoOrMessageIgnoringCaseAndAccents() throws {
+        let json: [String: Any] = ["sessionId": "dev-acme-web", "runtime": "chat", "title": "Café menu redesign", "project": "acme",
+                                   "repo": "web", "agent": "claude", "attention": ["section": "idle", "since": 0], "lastText": "Tests pass"]
+        let i = try JSONDecoder().decode(InboxItem.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertTrue(InboxView.matches(i, ""))
+        XCTAssertTrue(InboxView.matches(i, "cafe ACME"))
+        XCTAssertTrue(InboxView.matches(i, "tests web"))
+        XCTAssertFalse(InboxView.matches(i, "cafe billing"))
+    }
+
     func testDecodesShelvesReasonsAndUntil() throws {
         let json = #"""
         {"items":[

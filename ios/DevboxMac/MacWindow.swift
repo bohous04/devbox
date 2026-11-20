@@ -12,6 +12,9 @@ struct MacWindow: View {
     @Environment(\.openWindow) private var openWindow
     /// Identifies this window to `ThreadWindows` while it is open (the restore list holds threads, not windows).
     @State private var windowId = UUID().uuidString
+    @State private var newSession = false
+    /// Bumped by ⌘F: the sidebar focuses its search field.
+    @State private var findRequest = 0
 
     var body: some View {
         content
@@ -32,6 +35,9 @@ struct MacWindow: View {
                 #if DEBUG
                 if let size = FixtureMode.windowSize {
                     window.setFrame(NSRect(origin: window.frame.origin, size: size), display: true)
+                    // A screenshot run shows the window as the user sees it in use: key, not dimmed as inactive.
+                    NSApp.activate(ignoringOtherApps: true)
+                    window.makeKeyAndOrderFront(nil)
                 }
                 #endif
             })
@@ -43,6 +49,8 @@ struct MacWindow: View {
                 for id in plan.open { openWindow(value: id) }
             }
             .onChange(of: thread) { _, id in state.windows.show(window: windowId, thread: id) }
+            // ⌘N and ⌘F (DevboxMacApp's commands) act on the key window.
+            .focusedSceneValue(\.macWindowActions, MacWindowActions(newSession: { newSession = true }, find: { findRequest += 1 }))
             .onDisappear { state.windows.close(window: windowId) }
     }
 
@@ -50,7 +58,7 @@ struct MacWindow: View {
     private var content: some View {
         if let client = appModel.client, let inbox = state.inbox, let live = state.live {
             NavigationSplitView {
-                MacInboxSidebar(store: inbox, selection: $thread)
+                MacInboxSidebar(store: inbox, selection: $thread, findRequest: findRequest, newSession: { newSession = true })
                     .navigationSplitViewColumnWidth(min: 260, ideal: 320)
             } detail: {
                 if let id = thread {
@@ -62,6 +70,13 @@ struct MacWindow: View {
                 }
             }
             .environmentObject(live)
+            .sheet(isPresented: $newSession) {
+                // The same New session flow as the iPhone's; a chat session opens in this window.
+                NewSessionSheet(actions: SessionActions(client: client), onStarted: { await live.refreshNow() },
+                                onOpenChat: { id in thread = id })
+                    .environmentObject(live)
+                    .frame(minWidth: 480, minHeight: 520)
+            }
         } else {
             switch appModel.configState {
             case .notConfigured:
@@ -81,15 +96,22 @@ struct MacWindow: View {
 }
 
 /// The inbox as the sidebar, by the same rules as the web and iPhone (InboxView): needs you, finished (five, then
-/// "N more"), idle, then the working, snoozed and settled shelves (collapsed). Rows are the iPhone's InboxRow, with
-/// the preview line only in Needs you, Working and Snoozed, and their times tick every 15 s. ↑/↓ move the selection
-/// (List); the context menu has the row actions and "Open in New Window".
+/// "N more"), idle, then the working, snoozed and settled shelves (collapsed). Every group is a disclosure group with
+/// its count aligned at the right. Rows are the iPhone's InboxRow, with the preview line only in Needs you, Working
+/// and Snoozed, and their times tick every 15 s. Above them: the search field (⌘F) and New session (⌘N). ↑/↓ move
+/// the selection (List); the context menu has the row actions and "Open in New Window".
 struct MacInboxSidebar: View {
     @ObservedObject var store: InboxStore
     @Binding var selection: String?
+    /// Changes when ⌘F was pressed in this window.
+    let findRequest: Int
+    let newSession: () -> Void
     @Environment(\.openWindow) private var openWindow
-    @State private var openShelves: Set<String> = []
+    @State private var expanded: Set<String> = ["Needs you", "Finished", "Idle"]
+    @State private var showAll: Set<String> = []
     @State private var actionsFor: InboxItem?
+    @State private var query = ""
+    @FocusState private var searching: Bool
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 15)) { context in
@@ -102,7 +124,12 @@ struct MacInboxSidebar: View {
                         .listRowSeparator(.hidden)
                 }
                 if let items = store.items {
-                    groups(InboxView.group(items), now: InboxView.ms(context.date))
+                    let shown = items.filter { InboxView.matches($0, query) }
+                    if shown.isEmpty, !query.isEmpty {
+                        Text("No session matches “\(query)”").font(.callout).foregroundStyle(Theme.C.mutedForeground)
+                    } else {
+                        groups(InboxView.group(shown), now: InboxView.ms(context.date))
+                    }
                 } else if let error = store.loadError {
                     Label { Text("Can't load the inbox: \(error)") } icon: { Image(systemName: "exclamationmark.triangle") }
                         .font(Theme.F.meta)
@@ -120,17 +147,50 @@ struct MacInboxSidebar: View {
             // An opaque sidebar, one tone with the window, instead of the translucent material.
             .scrollContentBackground(.hidden)
             .background(MacTone.sidebar)
+            .safeAreaInset(edge: .top, spacing: 0) { tools }
         }
         .navigationTitle("Inbox")
+        .onChange(of: findRequest) { _, _ in searching = true }
         .sheet(item: $actionsFor) { item in
             InboxRowActions(item: item, store: store).frame(minWidth: 360, minHeight: 320)
         }
     }
 
+    /// Search and New session, above the groups.
+    private var tools: some View {
+        HStack(spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundStyle(Theme.C.mutedForeground).accessibilityHidden(true)
+                TextField("Search", text: $query)
+                    .textFieldStyle(.plain)
+                    .focused($searching)
+                    .onExitCommand { query = ""; searching = false }
+                if !query.isEmpty {
+                    Button { query = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain).foregroundStyle(Theme.C.mutedForeground)
+                        .accessibilityLabel("Clear search")
+                }
+            }
+            .font(.system(size: 13))
+            .padding(.horizontal, 8).frame(height: 28)
+            .background(Theme.C.foreground.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(searching ? Theme.C.link.opacity(0.6) : .clear))
+            .help("Search sessions (⌘F)")
+            Button(action: newSession) {
+                Image(systemName: "square.and.pencil").font(.system(size: 14, weight: .medium)).frame(width: 28, height: 28)
+            }
+            .buttonStyle(.borderless)
+            .help("New session (⌘N)")
+            .accessibilityLabel("New session")
+        }
+        .padding(.horizontal, 12).padding(.top, 6).padding(.bottom, 8)
+        .background(MacTone.sidebar)
+    }
+
     @ViewBuilder
     private func groups(_ g: InboxView.Groups, now: Int) -> some View {
         let split = InboxView.splitNeedsYou(g.needsYou)
-        if split.action.isEmpty {
+        if split.action.isEmpty, query.isEmpty {
             Label { Text("Nothing waiting for you") } icon: { Image(systemName: "checkmark.circle").foregroundStyle(InboxTone.doneIcon) }
                 .font(.callout)
                 .foregroundStyle(Theme.C.mutedForeground)
@@ -139,45 +199,37 @@ struct MacInboxSidebar: View {
         group("Needs you", split.action, now: now, preview: true)
         group("Finished", split.finished, now: now, preview: false, cap: 5)
         group("Idle", g.idle, now: now, preview: false)
-        shelf("Working", g.working, now: now, preview: true)
-        shelf("Snoozed", g.snoozed, now: now, preview: true)
-        shelf("Settled", g.settled, now: now, preview: false)
+        group("Working", g.working, now: now, preview: true)
+        group("Snoozed", g.snoozed, now: now, preview: true)
+        group("Settled", g.settled, now: now, preview: false)
     }
 
-    /// An open group, not shown while empty; with `cap`, rows past it hide behind "N more".
+    /// A disclosure group, not shown while empty; open while searching, so every match shows. With `cap`, rows past it
+    /// hide behind "N more".
     @ViewBuilder
     private func group(_ label: String, _ items: [InboxItem], now: Int, preview: Bool, cap: Int? = nil) -> some View {
         if !items.isEmpty {
-            let all = openShelves.contains(label)
+            let open = expanded.contains(label) || !query.isEmpty
+            let all = showAll.contains(label)
             Section {
-                rows(cap.map { all ? items : Array(items.prefix($0)) } ?? items, now: now, preview: preview)
-                if let cap, items.count > cap {
-                    Button(all ? "Show fewer" : "\(items.count - cap) more") { toggle(label) }
-                        .buttonStyle(.plain)
-                        .font(.callout)
-                        .foregroundStyle(Theme.C.mutedForeground)
-                        .accessibilityValue(all ? "expanded" : "collapsed")
+                if open {
+                    rows(cap.map { all ? items : Array(items.prefix($0)) } ?? items, now: now, preview: preview)
+                    if let cap, items.count > cap {
+                        Button(all ? "Show fewer" : "\(items.count - cap) more") { flip(label, in: &showAll) }
+                            .buttonStyle(.plain)
+                            .font(.callout)
+                            .foregroundStyle(Theme.C.mutedForeground)
+                            .accessibilityValue(all ? "expanded" : "collapsed")
+                    }
                 }
             } header: {
-                MacGroupHead(label: label, count: items.count)
+                MacGroupHead(label: label, count: items.count, open: open) { flip(label, in: &expanded) }
             }
         }
     }
 
-    /// A group that starts collapsed; not shown while empty.
-    @ViewBuilder
-    private func shelf(_ label: String, _ items: [InboxItem], now: Int, preview: Bool) -> some View {
-        if !items.isEmpty {
-            Section(isExpanded: Binding(get: { openShelves.contains(label) }, set: { _ in toggle(label) })) {
-                rows(items, now: now, preview: preview)
-            } header: {
-                MacGroupHead(label: label, count: items.count)
-            }
-        }
-    }
-
-    private func toggle(_ label: String) {
-        if openShelves.contains(label) { openShelves.remove(label) } else { openShelves.insert(label) }
+    private func flip(_ label: String, in set: inout Set<String>) {
+        if set.contains(label) { set.remove(label) } else { set.insert(label) }
     }
 
     private func rows(_ items: [InboxItem], now: Int, preview: Bool) -> some View {
@@ -193,18 +245,30 @@ struct MacInboxSidebar: View {
     }
 }
 
-/// A group heading: the name and a quiet count, as on the web and iPhone.
+/// A group heading as a disclosure button: chevron, name, and the count aligned at the sidebar's right edge.
 private struct MacGroupHead: View {
     let label: String
     let count: Int
+    let open: Bool
+    let toggle: () -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
-            Text(label).foregroundStyle(Theme.C.foreground.opacity(0.85))
-            Text("\(count)").monospacedDigit().foregroundStyle(Theme.C.mutedForeground)
+        Button(action: toggle) {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.right").font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Theme.C.mutedForeground)
+                    .rotationEffect(.degrees(open ? 90 : 0))
+                    .frame(width: 10)
+                Text(label).foregroundStyle(Theme.C.foreground.opacity(0.85))
+                Spacer(minLength: 8)
+                Text("\(count)").monospacedDigit().foregroundStyle(Theme.C.mutedForeground)
+            }
+            .font(.system(size: 12, weight: .semibold))
+            .contentShape(Rectangle())
         }
-        .font(.callout.weight(.semibold))
-        .accessibilityElement(children: .combine)
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(label), \(count)")
+        .accessibilityValue(open ? "expanded" : "collapsed")
     }
 }
 
@@ -275,5 +339,20 @@ struct MacThreadDetail: View {
                 .labelsHidden()
             }
         }
+    }
+}
+
+/// What ⌘N and ⌘F do in the key window (DevboxMacApp's commands read it).
+struct MacWindowActions {
+    let newSession: () -> Void
+    let find: () -> Void
+}
+
+private struct MacWindowActionsKey: FocusedValueKey { typealias Value = MacWindowActions }
+
+extension FocusedValues {
+    var macWindowActions: MacWindowActions? {
+        get { self[MacWindowActionsKey.self] }
+        set { self[MacWindowActionsKey.self] = newValue }
     }
 }

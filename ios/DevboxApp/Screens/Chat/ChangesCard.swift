@@ -60,7 +60,7 @@ struct ChangesCard: View {
                             Text("counts incomplete").font(Theme.F.meta).foregroundStyle(Theme.C.warnText).fixedSize()
                         }
                         // Next to the title, apart from "Open diffs": the chevron belongs to the list, not to that button.
-                        Image(systemName: "chevron.down").font(.system(size: 12, weight: .semibold))
+                        Image(systemName: "chevron.down").font(.system(size: ChatType.s(12), weight: .semibold))
                             .foregroundStyle(Theme.C.mutedForeground)
                             .rotationEffect(.degrees(open ? 180 : 0)).accessibilityHidden(true)
                         Spacer(minLength: 4)
@@ -78,7 +78,7 @@ struct ChangesCard: View {
                             shown = allShown ? [] : Set(c.files.map(\.path))
                         }
                     }
-                    .font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.C.mutedForeground)
+                    .font(.system(size: ChatType.s(13), weight: .medium)).foregroundStyle(Theme.C.mutedForeground)
                     .buttonStyle(.borderless)
                     .frame(minHeight: 44)
                 }
@@ -93,13 +93,13 @@ struct ChangesCard: View {
                     ForEach(groups, id: \.dir) { g in
                         if !g.dir.isEmpty {
                             HStack(spacing: 6) {
-                                Image(systemName: "folder").font(.system(size: 12)).accessibilityHidden(true)
+                                Image(systemName: "folder").font(.system(size: ChatType.s(12))).accessibilityHidden(true)
                                 escapedText(g.dir).lineLimit(1).truncationMode(.middle)
                                 Spacer(minLength: 4)
                                 // One folder's sum would only repeat the header's totals.
                                 if groups.count > 1, g.files.count > 1 { Stat(added: g.added, removed: g.removed) }
                             }
-                            .font(.system(size: 13, design: .monospaced)).foregroundStyle(Theme.C.mutedForeground)
+                            .font(.system(size: ChatType.s(13), design: .monospaced)).foregroundStyle(Theme.C.mutedForeground)
                             .padding(.horizontal, 12).padding(.top, 6).padding(.bottom, 2)
                         }
                         ForEach(g.files, id: \.path) { f in fileRow(f, indent: !g.dir.isEmpty) }
@@ -113,7 +113,7 @@ struct ChangesCard: View {
                 .overlay(alignment: .top) { Rectangle().fill(Theme.C.border).frame(height: 1 / 3) }
             }
         }
-        .font(.system(size: 14))
+        .font(.system(size: ChatType.s(14)))
         .background(Theme.C.card.opacity(0.4), in: RoundedRectangle(cornerRadius: Theme.R.lg))
         .overlay(RoundedRectangle(cornerRadius: Theme.R.lg).strokeBorder(Theme.C.border))
         .clipShape(RoundedRectangle(cornerRadius: Theme.R.lg))
@@ -134,17 +134,23 @@ struct ChangesCard: View {
                         .frame(width: 12).accessibilityLabel(f.status.rawValue)
                     (f.oldPath.map { (escapedText(ChangesView.splitPath($0).name) + Text(" → ")).foregroundColor(Theme.C.mutedForeground) } ?? Text(""))
                         + escapedText(name).foregroundColor(Theme.C.foreground.opacity(0.9))
+                    #if !os(macOS)
                     Spacer(minLength: 4)
+                    #endif
+                    // On a wide Mac row the counts sit beside the name, not across the window from it.
                     if let s = ChangesView.stat(f) {
                         Stat(added: s.added, removed: s.removed)
                     } else {
                         Text("not counted").foregroundStyle(Theme.C.mutedForeground)
                     }
-                    Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.C.mutedForeground)
+                    #if os(macOS)
+                    Spacer(minLength: 4)
+                    #endif
+                    Image(systemName: "chevron.right").font(.system(size: ChatType.s(11), weight: .semibold)).foregroundStyle(Theme.C.mutedForeground)
                         .rotationEffect(.degrees(isShown ? 90 : 0)).accessibilityHidden(true)
                 }
                 .lineLimit(1).truncationMode(.middle)
-                .font(.system(size: 13, design: .monospaced))
+                .font(.system(size: ChatType.s(13), design: .monospaced))
                 .padding(.leading, indent ? 30 : 12).padding(.trailing, 12)
                 .frame(minHeight: 36)
                 .background { Rectangle().fill(isShown ? Theme.C.muted.opacity(0.5) : .clear) }
@@ -176,7 +182,7 @@ private struct Stat: View {
     var body: some View {
         (Text("+\(added)").foregroundColor(added > 0 ? Theme.C.okText : Theme.C.mutedForeground.opacity(0.6))
             + Text(" −\(removed)").foregroundColor(removed > 0 ? Theme.C.dangerText : Theme.C.mutedForeground.opacity(0.6)))
-            .font(.system(size: 12, design: .monospaced)).monospacedDigit().fixedSize()
+            .font(.system(size: ChatType.s(12), design: .monospaced)).monospacedDigit().fixedSize()
             .accessibilityLabel("\(added) added, \(removed) removed")
     }
 }
@@ -247,7 +253,7 @@ struct FileDiffView: View {
             .fixedSize(horizontal: false, vertical: true)
             if shown.count < d.lines.count {
                 Button("Show all \(d.lines.count) lines") { showAll = true }
-                    .font(.system(size: 13, weight: .medium)).buttonStyle(.borderless)
+                    .font(.system(size: ChatType.s(13), weight: .medium)).buttonStyle(.borderless)
                     .padding(.horizontal, 12).frame(minHeight: 36)
             }
             if d.truncated { note("Diff truncated: the rest of this file's changes are not shown.") }
@@ -259,7 +265,7 @@ struct FileDiffView: View {
 
     @ViewBuilder
     private func row(_ l: DiffView.Prepared.Line, digits: Int) -> some View {
-        let mono = Font.system(size: 12, design: .monospaced)
+        let mono = Font.system(size: ChatType.s(12), design: .monospaced)
         switch l.kind {
         case .hunk, .note:
             escapedText(l.parts).font(mono).italic(l.kind == .note).foregroundStyle(Theme.C.mutedForeground)
