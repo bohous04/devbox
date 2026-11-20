@@ -4,10 +4,10 @@ import { expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createApp, reportFirstPromptFailed } from "../src/api";
+import { createApp, reportFirstPromptFailed, reportPrunedFirstPrompts } from "../src/api";
 import { USER_FIRST_PROMPT_TAG } from "../src/bridgeLink";
 import { DEFAULT_CONFIG } from "../src/config";
-import { openDb, setRepoAgent } from "../src/db";
+import { insertSession, openDb, prunePendingFirstTurns, savePendingFirstTurn, setRepoAgent } from "../src/db";
 import { MAX_FIRST_PROMPT_BYTES, SessionManager } from "../src/sessions";
 
 const IMAGE = join(import.meta.dir, "..", "..", "image");
@@ -307,4 +307,20 @@ test("reportFirstPromptFailed (also used after a devd restart) says it in the th
   expect(notices[0]).toContain("Your first message was not delivered (first message discarded before it was sent)");
   expect(notified[0]).toContain("dev-p-r");
   expect((db.query("SELECT type FROM events").all() as { type: string }[]).map((e) => e.type)).toEqual(["first_prompt_failed"]);
+});
+
+test("boot: a user's first prompt pruned with its not-running session is reported; a scheduled run's stays silent", () => {
+  const db = openDb(":memory:");
+  const mk = (id: string, port: number) => insertSession(db, { id, folder: "f", project: "p", repo: id, container: id, port_base: port, status: "stopped", solo: 0, created_at: 0, last_active_at: 0, important: 0, runtime: "chat" } as never);
+  mk("dev-p-user", 1); mk("dev-p-sched", 2);
+  savePendingFirstTurn(db, "dev-p-user", "fix the login bug", 0, USER_FIRST_PROMPT_TAG);
+  savePendingFirstTurn(db, "dev-p-sched", "scheduled prompt", 0, "Nightly bump");
+  savePendingFirstTurn(db, "dev-p-gone", "fix it", 0, USER_FIRST_PROMPT_TAG);
+  const notices: [string, string][] = []; const notified: string[] = [];
+  reportPrunedFirstPrompts({ db, threads: (id: string) => ({ addNotice: (t: string) => { notices.push([id, t]); } }), notify: (_t: string, b: string) => { notified.push(b); } },
+    prunePendingFirstTurns(db));
+  expect(notices).toEqual([["dev-p-user", "Your first message was not delivered (devd restarted while the session was not running). Send it again."]]);
+  expect(notified).toHaveLength(1);
+  expect(notified[0]).toContain("dev-p-user");
+  expect((db.query("SELECT session_id, type FROM events").all() as { session_id: string; type: string }[])).toEqual([{ session_id: "dev-p-user", type: "first_prompt_failed" }]);
 });

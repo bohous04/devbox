@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { LiveActivities } from "./liveActivities";
 import { AgentEventHub, STUCK_MS, stuckText, type NotifyExtra } from "./agentEvents";
 import { endFinishedRuns } from "./autoEnd";
-import { createApp, reportFirstPromptFailed, type ApiDeps } from "./api";
+import { createApp, reportFirstPromptFailed, reportPrunedFirstPrompts, type ApiDeps } from "./api";
 import { loadCatalog, mergeAccess, readAccessFile, type Access, type DbEntry, type ServerRef } from "./prodDb";
 import { listSshKeys, readOpField, readSshKey } from "./op";
 import { createProdKeyPath } from "./prodKeys";
@@ -141,7 +141,8 @@ const useVault = !!vaultPath && existsSync(vaultPath);
 const secrets: Secrets = useVault ? {} : loadSecrets(secretsPath);
 if (applyPendingRestore(env("DEVD_DB", "/var/lib/devd/devd.sqlite"))) console.log("devd: restored database swapped in");
 const db = openDb(env("DEVD_DB", "/var/lib/devd/devd.sqlite"));
-prunePendingFirstTurns(db);
+// Reported once the thread stores exist (reportPrunedFirstPrompts below).
+const prunedFirstTurns = prunePendingFirstTurns(db);
 startCheckpointer(env("DEVD_DB", "/var/lib/devd/devd.sqlite"));
 initCodexAccounts(db);
 
@@ -497,6 +498,7 @@ const bridgeLinks = new BridgeLinks({
     }
   },
 });
+reportPrunedFirstPrompts({ db, threads: threadStore, notify }, prunedFirstTurns);
 const releaseThread = (id: string) => {
   bridgeLinks.drop(id);
   chatHub.drop(id);

@@ -125,6 +125,16 @@ export function reportFirstPromptFailed(d: { db: Database; threads?: (id: string
   } catch (e) { console.error(`reporting the failed first message of ${s.id} failed:`, e); }
 }
 
+/** The user's first prompts devd deleted at boot (prunePendingFirstTurns: their session was not running) are reported
+ *  like any undelivered one. Scheduled runs' rows stay silent, as before; a session that is gone has no one to tell. */
+export function reportPrunedFirstPrompts(d: Parameters<typeof reportFirstPromptFailed>[0], pruned: { sessionId: string; tag: string | null }[]): void {
+  for (const p of pruned) {
+    if (p.tag !== USER_FIRST_PROMPT_TAG) continue;
+    const s = getSession(d.db, p.sessionId);
+    if (s) reportFirstPromptFailed(d, s, new Error("devd restarted while the session was not running"));
+  }
+}
+
 export interface ApiDeps { mgr: SessionManager; db: Database; cfg: DevConfig; root: string; tree: () => Promise<TreeProject[]>; listener: ListenerClient; notify: NotifyFn; stats: () => unknown; resources?: () => unknown; cloneQueue: CloneQueue; configRepo: ConfigRepo; dashboardDir?: string; previewHost?: string; backup: { build: () => Promise<string>; restore: (tarPath: string) => Promise<void> }; github?: { owners: () => GithubOwner[] | Promise<GithubOwner[]>; repos: (owner: string) => GithubRepo[] | Promise<GithubRepo[]>; sharedRepos?: () => GithubRepo[] | Promise<GithubRepo[]> }; gitea?: GiteaApi; opToken?: string; vault?: Vault; gitProxy?: Hono; prodCatalogPath?: string; prodAccessPath?: string; sshKeyTitles?: () => Promise<string[]>; coolifyInstances?: () => Record<string, CoolifyInstance>; execOperation?: (op: string, params: Record<string, string>) => Promise<string>; dbTargets?: DbTargets; dbProxyHost?: string; agentEvents?: AgentEventHub; spawnPty?: SpawnPty; scheduler?: { fireNow: (id: string) => Promise<boolean> }; prodCatalog?: Catalog; prodDbAccess?: Record<string, Access>; readProdSecret?: (opItem: string) => string | Promise<string>; execProdWrite?: (opts: { entry: DbEntry; server: ServerRef; sql: string; preview: boolean; scope?: WriteScope }) => Promise<{ rows: number; note: string }>; tmuxProbe?: (containers: string[], now?: number) => Promise<Record<string, TmuxSession[]>>; onConfigWritten?: () => void;
   liveActivities?: LiveActivities;
   /** Dashboard origins allowed to mutate the API from a browser; default see originGuard.ts (+ DEVD_DASHBOARD_ORIGINS). */
