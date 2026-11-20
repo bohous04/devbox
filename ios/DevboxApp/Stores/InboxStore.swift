@@ -82,6 +82,115 @@ enum InboxView {
     }
 
     static func ms(_ d: Date) -> Int { Int((d.timeIntervalSince1970 * 1000).rounded()) }
+
+    // MARK: - Row presentation (inboxView.ts: splitNeedsYou, rowStatus, statusParts, projectBadge, rowTitle)
+
+    /// "Needs you" holds two asks: something to act on, and a run that merely finished unseen (`completed`). The
+    /// screen shows them as separate groups; finished reads newest first, the rest keeps devd's order.
+    static func splitNeedsYou(_ needsYou: [InboxItem]) -> (action: [InboxItem], finished: [InboxItem]) {
+        (needsYou.filter { $0.attention.reason != .completed },
+         needsYou.filter { $0.attention.reason == .completed }.sorted { $0.attention.since > $1.attention.since })
+    }
+
+    enum Tone: Equatable { case action, danger, done, busy, quiet }
+
+    struct Mark: Equatable {
+        let label: String
+        let tone: Tone
+    }
+
+    /// The chip for a reason whatever shelf the row is on (the outcome mark of a finished or settled run).
+    static func reasonStatus(_ r: AttentionReason?) -> Mark? {
+        switch r {
+        case nil, .unknown?: return nil
+        case .request?: return Mark(label: "Needs answer", tone: .action)
+        case .failed?: return Mark(label: "Failed", tone: .danger)
+        case .rateLimited?: return Mark(label: "Rate limited", tone: .danger)
+        case .disconnected?: return Mark(label: "Disconnected", tone: .danger)
+        case .bridgeBehind?: return Mark(label: "Bridge behind", tone: .danger)
+        case .ciFailed?: return Mark(label: "CI failed", tone: .danger)
+        case .completed?: return Mark(label: "Done", tone: .done)
+        case .running?: return Mark(label: "Working", tone: .busy)
+        case .background?: return Mark(label: "Background", tone: .busy)
+        case .queued?: return Mark(label: "Queued", tone: .busy)
+        case .prChecks?: return Mark(label: "CI running", tone: .busy)
+        }
+    }
+
+    /// A row's chip: snoozed rows say so, settled and reasonless rows have none.
+    static func rowStatus(_ i: InboxItem) -> Mark? {
+        if i.attention.section == .snoozed { return Mark(label: "Snoozed", tone: .quiet) }
+        if i.attention.section == .settled { return nil }
+        return reasonStatus(i.attention.reason)
+    }
+
+    struct StatusParts: Equatable {
+        let mark: Mark?
+        let showLabel: Bool
+        let until: Int?
+        let ago: String
+    }
+
+    /// What a row's meta line says about its state, or nil when there is nothing to say. `compact` rows (groups
+    /// whose heading names the state) show only the mark, except a danger mark keeps its label: touch has no tooltip.
+    static func statusParts(_ i: InboxItem, now: Int, compact: Bool) -> StatusParts? {
+        let a = i.attention
+        let mark = compact ? reasonStatus(a.reason) : rowStatus(i)
+        let ago = a.since > 0 ? shortAgo(now - a.since) : ""
+        if mark == nil && ago.isEmpty && a.until == nil { return nil }
+        return StatusParts(mark: mark, showLabel: mark != nil && (!compact || mark?.tone == .danger), until: a.until, ago: ago)
+    }
+
+    /// The meta line's trailing parts after the state, each set off by a "·": the agent, and "tmux" for a terminal.
+    static func metaTail(_ i: InboxItem) -> [String] {
+        [AgentProfiles.profile(for: AgentName(rawValue: i.agent)).short] + (i.runtime == .tmux ? ["tmux"] : [])
+    }
+
+    /// Compact elapsed time: "now", "7m", "3h", "2d".
+    static func shortAgo(_ ms: Int) -> String {
+        let min = max(0, ms) / 60_000
+        if min < 1 { return "now" }
+        if min < 60 { return "\(min)m" }
+        let h = min / 60
+        return h < 24 ? "\(h)h" : "\(h / 24)d"
+    }
+
+    /// A project's badge: up to two letters from its name's words and a stable colour slot (0-5), the same slot as
+    /// the dashboard's for the same name.
+    static func projectBadge(_ project: String) -> (letters: String, slot: Int) {
+        let words = project.split(whereSeparator: { !($0.isLetter || $0.isNumber) }).map(String.init)
+        let letters = words.count > 1 ? String(words[0].prefix(1)) + String(words[1].prefix(1)) : String((words.first ?? "?").prefix(2))
+        var h: UInt32 = 0
+        for c in project.unicodeScalars { h = h &* 31 &+ c.value }
+        return (letters.uppercased(), Int(h % 6))
+    }
+
+    private static let previewRules: [(NSRegularExpression, String)] = [
+        ("`+", ""), (#"\*\*(.+?)\*\*"#, "$1"), (#"(?<=^|\s)__(\S(?:.*?\S)?)__(?=$|\s|[,;:!?)])"#, "$1"), (#"^#+\s+"#, ""), (#"\s+"#, " "),
+    ].map { (try! NSRegularExpression(pattern: $0.0), $0.1) }
+
+    /// A message preview as plain text: markdown's code ticks, emphasis and heading marks would show raw in one line.
+    /// `__x__` only between spaces or line edges, so names like `__init__.py` stay whole.
+    static func plainPreview(_ t: String) -> String {
+        previewRules.reduce(t) { s, rule in
+            rule.0.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: rule.1)
+        }.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// What a row names the session by. A custom name wins; a session still named after its repo path takes its
+    /// newest message instead, or with none (tmux) the repo and the session's number from its id ("api #14").
+    /// `fromMessage` tells the row not to repeat that message as its preview.
+    static func rowTitle(_ i: InboxItem) -> (text: String, fromMessage: Bool) {
+        if i.title != "\(i.project)/\(i.repo)" { return (i.title, false) }
+        // A message of only whitespace or markdown marks names nothing: the repo fallback below takes over.
+        if let last = i.lastText, case let text = plainPreview(last), !text.isEmpty { return (text, true) }
+        let suffix = "-\(i.repo)-"
+        if let r = i.sessionId.range(of: suffix, options: .backwards) {
+            let n = i.sessionId[r.upperBound...]
+            if !n.isEmpty, n.allSatisfy(\.isASCII), n.allSatisfy(\.isNumber) { return ("\(i.repo) #\(n)", false) }
+        }
+        return (i.repo, false)
+    }
 }
 
 /// The inbox over devd's stream: the list loads when the stream opens, `inbox` frames update it, and while the

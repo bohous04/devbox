@@ -123,7 +123,7 @@ struct MacInboxSidebar: View {
 
     private func rows(_ items: [InboxItem]) -> some View {
         ForEach(items) { item in
-            InboxRow(item: item)
+            InboxRow(item: item, now: InboxView.ms(Date()), preview: true)
                 .tag(item.sessionId as String?)
                 .contextMenu {
                     Button("Open in New Window") { openWindow(value: item.sessionId) }
