@@ -60,16 +60,26 @@ struct ChatMarkdown: View {
 
     #if os(macOS)
     /// A Mac window has room for columns: a real grid, cells aligned under their header, rows apart by hairlines.
-    /// Every cell wraps: a command stays whole, broken at its spaces.
+    /// Plain rules, no box: the header over a hairline, rows apart by hairlines. A command or path stays on one line,
+    /// at its full width, the other columns wrapping around it; past 64 characters it is cut at its end (the whole
+    /// text in its tooltip).
     private func grid(_ header: [String], _ rows: [[String]]) -> some View {
         let columns = max(header.count, rows.map(\.count).max() ?? 0)
         let hasHeader = !header.allSatisfy { $0.trimmingCharacters(in: .whitespaces).isEmpty }
+        @ViewBuilder
         func cell(_ s: String) -> some View {
-            ChatInline.text(s)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12).padding(.vertical, 8)
+            if ChatMarkdownParse.isCodeOnly(s) {
+                // Its full width first (the other columns wrap around it); only a very long one is cut.
+                ChatInline.text(s).lineLimit(1).truncationMode(.tail).help(s)
+                    .fixedSize(horizontal: s.count <= 64, vertical: false)
+                    .padding(.trailing, 16).padding(.vertical, 6)
+            } else {
+                ChatInline.text(s)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.trailing, 16).padding(.vertical, 6)
+            }
         }
-        // No spacing of its own: each cell pads itself, so the header's fill and the hairlines run edge to edge.
+        // No spacing of its own: each cell pads itself, so the hairlines run edge to edge.
         return Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 0, verticalSpacing: 0) {
             if hasHeader {
                 GridRow {
@@ -77,8 +87,7 @@ struct ChatMarkdown: View {
                         Text(j < header.count ? header[j] : "").font(.system(size: ChatType.s(12), weight: .medium))
                             .foregroundStyle(Theme.C.mutedForeground)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 12).padding(.vertical, 7)
-                            .background { Rectangle().fill(Theme.C.muted.opacity(0.6)) }
+                            .padding(.trailing, 16).padding(.vertical, 5)
                     }
                 }
             }
@@ -89,8 +98,6 @@ struct ChatMarkdown: View {
                 }
             }
         }
-        .clipShape(RoundedRectangle(cornerRadius: Theme.R.lg))
-        .overlay(RoundedRectangle(cornerRadius: Theme.R.lg).strokeBorder(Theme.C.border))
     }
     #endif
 

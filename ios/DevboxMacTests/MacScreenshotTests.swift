@@ -46,6 +46,7 @@ final class MacScreenshotTests: XCTestCase {
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
+        window.toolbarStyle = .unifiedCompact // as the app's window scene (DevboxMacApp)
         window.appearance = NSAppearance(named: look == "dark" ? .darkAqua : .aqua)
         window.contentView = NSHostingView(rootView: root)
         window.setContentSize(size)
