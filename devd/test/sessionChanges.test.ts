@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sh } from "./helpers/sh";
@@ -7,6 +7,7 @@ import { createApp } from "../src/api";
 import { insertSession, openDb, type SessionRow } from "../src/db";
 import { collectChanges, parseDiff } from "../src/sessionChanges";
 import { countUntracked, type CounterDeps } from "../src/untrackedCounter";
+import { run as procRun, type RunOpts } from "../src/proc";
 import { createShare } from "../src/shares";
 
 const dirs: string[] = [];
@@ -164,6 +165,44 @@ test("the counter stops reading at the byte budget and says so", async () => {
   writeFileSync(join(ws, "a"), "1\n2\n");
   writeFileSync(join(ws, "b"), "3\n4\n");
   expect(await countUntracked(ws, ["a", "b"], { maxBytes: 1024, budget: 6 })).toEqual({ counts: [2, null], capped: true });
+});
+
+test("the counter child loads no bunfig.toml preload or .env from the worktree and inherits no devd env", async () => {
+  const ws = tmp("changes-bunfig-");
+  const marker = join(tmp("changes-marker-"), "MARKER");
+  writeFileSync(join(ws, "evil.ts"), `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, JSON.stringify(process.env));\n`);
+  writeFileSync(join(ws, "bunfig.toml"), 'preload = ["./evil.ts"]\n');
+  writeFileSync(join(ws, ".env"), "HARBOR_FROM_DOTENV=1\n");
+  writeFileSync(join(ws, "a.txt"), "1\n");
+  process.env.HARBOR_CANARY = "secret";
+  try {
+    expect(await countUntracked(ws, ["a.txt"], LIMITS)).toEqual({ counts: [1], capped: false });
+  } finally { delete process.env.HARBOR_CANARY; }
+  expect(existsSync(marker)).toBe(false);
+});
+
+test("the counter child gets only PATH and HOME=/nonexistent, cwd /, and no config from cwd", async () => {
+  const ws = tmp("changes-env-");
+  const seen: { cmd: string[]; opts: RunOpts }[] = [];
+  await countUntracked(ws, ["a"], LIMITS, { myUid: 501, ownerOf: () => ({ uid: 501, gid: 20 }), run: async (cmd, opts) => {
+    seen.push({ cmd, opts });
+    return { code: 0, stdout: JSON.stringify({ counts: [null], capped: false }), stderr: "", timedOut: false };
+  } });
+  const { cmd, opts } = seen[0]!;
+  expect(cmd.slice(0, 5)).toEqual([process.execPath, "--no-env-file", "--config=/dev/null", "--no-install", "-e"]);
+  expect(opts.cwd).toBe("/");
+  expect(opts.inheritEnv).toBe(false);
+  expect(Object.keys(opts.env!).sort()).toEqual(["HOME", "PATH"]);
+  expect(opts.env!.HOME).toBe("/nonexistent");
+  expect(JSON.parse(opts.stdin!).root).toBe(realpathSync(ws));
+});
+
+test("run() with inheritEnv:false passes only the given env to the child", async () => {
+  process.env.HARBOR_CANARY = "secret";
+  try {
+    const r = await procRun(["/usr/bin/env"], { env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent" }, inheritEnv: false, timeoutMs: 5000 });
+    expect(r.stdout.trim().split("\n").sort()).toEqual(["HOME=/nonexistent", "PATH=/usr/bin:/bin"]);
+  } finally { delete process.env.HARBOR_CANARY; }
 });
 
 const asRoot = (owner: { uid: number; gid: number }, run: CounterDeps["run"]): CounterDeps => ({ myUid: 0, ownerOf: () => owner, run });

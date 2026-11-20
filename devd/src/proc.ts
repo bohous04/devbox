@@ -17,6 +17,8 @@ export interface RunOpts {
   env?: Record<string, string>;
   /** Remove these names after merging env, only in this child's environment. */
   unsetEnv?: readonly string[];
+  /** false = the child gets ONLY `env`, nothing from devd's process.env (secrets). */
+  inheritEnv?: false;
   stdin?: string;
   timeoutMs: number;
   /** Incremental chunks of stderr as they arrive (e.g. `git clone --progress`). The final
@@ -95,7 +97,7 @@ export async function runRaw(cmd: string[], opts: RunOpts): Promise<RunResult> {
   if (!cmd.length) throw new Error("run(): empty argv");
   let p: ReturnType<typeof Bun.spawn>;
   try {
-    const childEnv = { ...process.env, ...(opts.env ?? {}) };
+    const childEnv = { ...(opts.inheritEnv === false ? {} : process.env), ...(opts.env ?? {}) };
     for (const name of opts.unsetEnv ?? []) delete childEnv[name];
     p = Bun.spawn(cmd, {
       cwd: opts.cwd,

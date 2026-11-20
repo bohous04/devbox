@@ -1,4 +1,4 @@
-import { lstatSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import { run as procRun, type RunOpts, type RunResult } from "./proc";
 
 /**
@@ -10,14 +10,22 @@ import { run as procRun, type RunOpts, type RunResult } from "./proc";
  * process under the worktree owner's uid/gid (setpriv, as in sshAgent.ts), which can open only
  * what the agent could open anyway. Inside, it keeps O_NOFOLLOW, the regular-file check and a
  * realpath check (stay inside the worktree — other sessions' trees belong to the same uid).
+ *
+ * Bun itself must not pick anything up from the agent: it loads `bunfig.toml` (preload = code)
+ * and `.env` from its cwd and config from HOME. So: cwd "/", `--config=/dev/null`,
+ * `--no-env-file`, `--no-install`, and an environment of only PATH and HOME=/nonexistent (devd's
+ * own env carries secrets). The worktree's realpath goes in on stdin; the child joins paths.
+ * Why bun and not coreutils (`wc -l` under setpriv): wc follows symlinks and has no
+ * regular-file/NUL checks; rebuilding O_NOFOLLOW + fstat + inode check in shell is not simpler.
  */
 
 /** Runs in the child (`bun -e`, so the source needs no file readable by the owner).
- *  stdin: {paths, maxBytes, budget}; stdout: {counts: (number|null)[], capped}. */
+ *  stdin: {root, paths, maxBytes, budget}; stdout: {counts: (number|null)[], capped}. */
 export const COUNTER_JS = `
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
-const { paths, maxBytes, budget: total } = JSON.parse(await Bun.stdin.text());
-const root = realpathSync(".");
+import { join } from "node:path";
+const { root, paths: rel, maxBytes, budget: total } = JSON.parse(await Bun.stdin.text());
+const paths = rel.map((p) => join(root, p));
 let budget = total, capped = false;
 const count = (p) => {
   let fd;
@@ -69,7 +77,9 @@ export async function countUntracked(
   ws: string, paths: string[], limits: { maxBytes: number; budget: number }, deps: CounterDeps = defaultDeps(),
 ): Promise<CountResult> {
   if (!paths.length) return { counts: [], capped: false };
-  const counter = [process.execPath, "-e", COUNTER_JS];
+  const counter = [process.execPath, "--no-env-file", "--config=/dev/null", "--no-install", "-e", COUNTER_JS];
+  let root: string;
+  try { root = realpathSync(ws); } catch (e) { return { unavailable: `cannot resolve the worktree: ${(e as Error).message}` }; }
   let cmd: string[];
   if (deps.myUid === 0) {
     let owner: { uid: number; gid: number };
@@ -81,7 +91,10 @@ export async function countUntracked(
     // over what devd already has, and a non-root process could not switch uid anyway.
     cmd = counter;
   }
-  const r = await deps.run(cmd, { cwd: ws, stdin: JSON.stringify({ paths, ...limits }), timeoutMs: TIMEOUT_MS });
+  const r = await deps.run(cmd, {
+    cwd: "/", inheritEnv: false, env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: "/nonexistent" },
+    stdin: JSON.stringify({ root, paths, ...limits }), timeoutMs: TIMEOUT_MS,
+  });
   if (r.timedOut) return { unavailable: "counter timed out" };
   if (r.code !== 0) return { unavailable: `counter exited ${r.code}: ${r.stderr.trim().slice(0, 500)}` };
   if (r.stdout.length > MAX_OUTPUT) return { unavailable: "counter output too large" };
