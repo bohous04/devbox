@@ -64,6 +64,13 @@ export function githubAuthEnv(token: string | undefined): Record<string, string>
   return token ? basicAuthEnv("https://github.com/", "x-access-token", token) : {};
 }
 
+/** An SSH remote (`ssh://…`, `git+ssh://…` or scp-form `host:path`). Host git runs as the agent
+ *  uid without root's keys, so such a remote is an explicit error, never a root fallback. */
+export function sshRemote(url: string): boolean {
+  if (/^(ssh|git\+ssh|ssh\+git):\/\//.test(url)) return true;
+  return !url.includes("://") && /^[^/:]+:/.test(url);
+}
+
 function basicAuthEnv(base: string, user: string, token: string): Record<string, string> {
   const b64 = Buffer.from(`${user}:${token}`).toString("base64");
   return {

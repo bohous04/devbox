@@ -37,7 +37,7 @@ import { switchAgent, type SwitchAgentDeps } from "./agentSwitch";
 import { giteaTokensByHost, loadConfig, loadSecrets, materializeGiteaTokens, materializeMcpServers, readKeyFile, resolveAccountPool, resolveInstaboxSettings, saveGiteaTokens, writeKeyFile, type Secrets } from "./config";
 import { createConfigRepo } from "./configrepo";
 import { createGiteaApi } from "./gitea";
-import { giteaAuthEnv, githubAuthEnv } from "./git";
+import { giteaAuthEnv, githubAuthEnv, sshRemote } from "./git";
 import {
   activeLeases, diskHistoryEnds, failRunningCloneJobs, getSession, getSessionPr, type SessionRow, insertDiskTotal, lastMetricTs, listAccounts, listSessions, logEvent,
   getRepoAgent, applyPendingRestore, checkpointFully, savePendingFirstTurn, prunePendingFirstTurns, getPendingFirstTurn, deletePendingFirstTurn, openDb, startCheckpointer, pruneAccountLeases, pruneCriticReviews, pruneDiskStats, pruneEvents, pruneNotifyLog, prunePushAlerts,
@@ -109,7 +109,7 @@ import { BaseBuilder, localImageDigest } from "./instabox/base";
 import { createStatusCache, killOrphan, reconcile } from "./instabox/reconcile";
 import { IBX_PATHS } from "./instabox/runOpts";
 import { readHostLoad } from "./placement";
-import { run, timeoutFor } from "./proc";
+import { redactArgv, run, timeoutFor } from "./proc";
 import { COMMIT } from "./version";
 import { createScheduler, scheduledNotifySession } from "./scheduler";
 import { ccStatus, dueForCheck, inWindow, resolveCcUpkeep, runCcUpkeep, type UpkeepDeps, type UpkeepResult } from "./ccUpkeep";
@@ -399,6 +399,7 @@ const githubToken = async (): Promise<string | undefined> => {
   return token;
 };
 const credentialsForUrl = async (url: string): Promise<Record<string, string>> => {
+  if (sshRemote(url)) throw new Error(`SSH remote ${redactArgv([url])[0]} is not supported: host git runs as the container user without SSH keys; use the https URL`);
   const host = hostOf(url);
   if (!host) return {};
   if (host === "github.com" && url.startsWith("https://")) return githubAuthEnv(await githubToken());

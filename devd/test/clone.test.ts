@@ -73,6 +73,22 @@ test("credentials(url) result is threaded to cloneBare (new) and fetch (existing
   expect(fetchAuth).toEqual([{ url: "https://x/web.git" }]); // web existed -> fetched
 });
 
+test("a credentials error (e.g. an SSH remote) fails only that repo, the rest of the job goes on", async () => {
+  const root = mkdtempSync(join(tmpdir(), "clone-"));
+  const cloned: string[] = [];
+  const q = new CloneQueue({
+    db: openDb(":memory:"), root, tree,
+    credentials: (url) => { if (url.endsWith("/cms.git")) throw new Error("SSH remote is not supported"); return {}; },
+    cloneBare: async (url, dest) => { cloned.push(url); mkdirSync(dest, { recursive: true }); },
+    fetchRepo: () => {},
+    idFor: () => "job-ssh",
+  });
+  const id = await q.start({ kind: "all" });
+  await q.wait(id);
+  expect(q.get(id)!.results.find((r) => r.repo === "cms")).toMatchObject({ ok: false, error: "SSH remote is not supported" });
+  expect(cloned).toContain("https://x/web.git");
+});
+
 test("get unknown job returns null", () => {
   const q = new CloneQueue({ db: openDb(":memory:"), root: "/tmp", tree });
   expect(q.get("nope")).toBeNull();

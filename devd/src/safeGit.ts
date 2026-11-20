@@ -33,7 +33,7 @@
 // allowed (tests and local bare clones use it) — it runs nothing, but pull/push
 // would touch a different repo on the host.
 import { realpathSync } from "node:fs";
-import { basename, isAbsolute, resolve } from "node:path";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import type { RunOpts, RunResult } from "./proc";
 
 /** Env for every host git. Overrides the caller's env. */
@@ -211,7 +211,16 @@ export async function hardenGit(cmd: string[], opts: RunOpts, raw: Raw, uid: num
     if ((a === "--git-dir" || a === "--work-tree") && globals[i + 1] !== undefined) targets.push(canon(resolve(dir, globals[++i]!)));
     else if (a.startsWith("--git-dir=") || a.startsWith("--work-tree=")) targets.push(canon(resolve(dir, a.slice(a.indexOf("=") + 1))));
   }
+  // Classification under an agent root: repos (`<folder>/<project>/…`) and session worktrees
+  // (`_sessions/<id>`) are agent-writable git targets. devd's other `_`-dirs (inbox, threads,
+  // archives, recovery copies) are never git targets, so git there is refused rather than run.
   const agent = agentRoots().filter(Boolean).map(canon);
+  const own = targets.some((t) => agent.some((r) => {
+    if (!within(t, r)) return false;
+    const top = relative(r, t).split(sep)[0]!;
+    return top.startsWith("_") && top !== "_sessions";
+  }));
+  if (own) return { result: refused("target is devd's own directory, not a repo") };
   const dropToAgent = uid === 0 && targets.some((t) => agent.some((r) => within(t, r)));
   const env = dropToAgent ? { ...(opts.env ?? {}), ...AGENT_GIT_ENV, ...SAFE_GIT_ENV } : { ...(opts.env ?? {}), ...SAFE_GIT_ENV };
   const unsetEnv = [...(opts.unsetEnv ?? []), ...UNSAFE_GIT_ENV];

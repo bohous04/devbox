@@ -50,6 +50,25 @@ test("as root, --git-dir or --work-tree under an agent root is enough to switch 
   expect(h.cmd[0]).toBe("setpriv");
 });
 
+test("classification under the agent root: repos and _sessions run as the agent uid; devd's own _-dirs are refused, not run as root", async () => {
+  const r = root();
+  setAgentGitRoots(() => [r]);
+  const { raw } = recorder();
+  for (const dir of [join(r, "harbor", "api"), join(r, "harbor", "api", "api.git"), join(r, "_sessions", "dev-api")]) {
+    const h = await hardenGit(["git", "-C", dir, "status"], { timeoutMs: 1000 }, raw, 0);
+    if (!("cmd" in h)) throw new Error(`refused ${dir}`);
+    expect(h.cmd[0]).toBe("setpriv");
+  }
+  for (const dir of [join(r, "_inbox", "x"), join(r, "_chat-archive", "dev-api-1"), join(r, "_cleanup-recovery", "a"), join(r, "_pre-migration-1", "app")]) {
+    const h = await hardenGit(["git", "-C", dir, "status"], { timeoutMs: 1000 }, raw, 0);
+    expect("result" in h).toBe(true);
+    if ("result" in h) expect(h.result.stderr).toContain("devd's own directory");
+  }
+  // A --git-dir into such a dir is refused as well, even from a repo cwd.
+  const g = await hardenGit(["git", "--git-dir", join(r, "_broken", "x.git"), "status"], { cwd: join(r, "harbor"), timeoutMs: 1000 }, raw, 0);
+  expect("result" in g).toBe(true);
+});
+
 test("git outside the agent roots (devd's own checkout, config repo) stays as is", async () => {
   const r = root();
   setAgentGitRoots(() => [r]);

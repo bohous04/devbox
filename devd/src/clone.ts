@@ -101,8 +101,9 @@ export class CloneQueue {
     for (const t of targets) {
       const bare = barePath(this.d.root, t.folder, t.project, t.repo.name);
       const ws = workspacePath(this.d.root, t.folder, t.project, t.repo.name);
-      const authEnv = (await this.d.credentials?.(t.repo.cloneUrl!)) ?? {};
       try {
+        // Inside the try: an unusable remote (SSH) fails this repo, not the whole job.
+        const authEnv = (await this.d.credentials?.(t.repo.cloneUrl!)) ?? {};
         // A bare clone already exists → just fetch, not a second clone next to it (a stale copy
         // nobody fetches anymore). Otherwise an old workspace → fetch, behaves as today.
         // Otherwise the repo is not here in any form → cloned directly as bare (the new shape).

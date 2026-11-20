@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cloneRepo, conflictPrompt, defaultBranch, giteaAuthEnv, githubAuthEnv, pullWithRebase, sh as shAsync } from "../src/git";
+import { cloneRepo, conflictPrompt, defaultBranch, giteaAuthEnv, githubAuthEnv, sshRemote, pullWithRebase, sh as shAsync } from "../src/git";
 import { sh } from "./helpers/sh";
 
 function fixture() {
@@ -119,4 +119,9 @@ test("githubAuthEnv scopes the token to https://github.com/ via GIT_CONFIG_* (ne
   expect(env.GIT_CONFIG_KEY_0).toBe("http.https://github.com/.extraHeader");
   expect(env.GIT_CONFIG_VALUE_0).toBe(`Authorization: Basic ${Buffer.from("x-access-token:tok456").toString("base64")}`);
   expect(githubAuthEnv(undefined)).toEqual({});
+});
+
+test("sshRemote: scp-form and ssh:// URLs are SSH (host git as the agent uid has no keys); https, http and local paths are not", () => {
+  for (const u of ["git@github.com:acme/api.git", "ssh://git@git.example/acme/api.git", "git+ssh://git.example/x", "harbor:acme/api"]) expect(sshRemote(u)).toBe(true);
+  for (const u of ["https://github.com/acme/api.git", "http://198.51.100.7:3000/bob/x.git", "/srv/repos/x.git", "./x", "file:///srv/x.git"]) expect(sshRemote(u)).toBe(false);
 });
