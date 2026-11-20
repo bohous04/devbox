@@ -93,15 +93,21 @@ enum ChatLayout {
     /// Room between the header and the first message.
     static let top: CGFloat = 24
     /// A long prompt folds to this many lines.
-    static let bubbleLines = 4
+    static let bubbleLines = 3
+    /// The user's bubble text, a step below the answer's.
+    static let bubbleText: CGFloat = 13
     /// The composer keeps the field over its controls (the web's layout); the iPhone starts on one row.
     static let composerTwoRows = true
+    /// Resting at the thread's end, no row shows cut at the header (ThreadEdge).
+    static let trimTopEdge = true
     #else
     static let column: CGFloat = .infinity
     static let bubble: CGFloat = .infinity
     static let top: CGFloat = 0
     static let bubbleLines = 6
+    static let bubbleText: CGFloat = 16
     static let composerTwoRows = false
+    static let trimTopEdge = false
     #endif
 }
 

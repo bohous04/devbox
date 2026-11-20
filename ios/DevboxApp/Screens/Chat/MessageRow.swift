@@ -105,7 +105,7 @@ struct MessageRow: View, Equatable {
     }
 }
 
-/// A long prompt folds (six lines, four on the Mac) so it does not outweigh the answer; "Show more" opens it in place. The toggle
+/// A long prompt folds (six lines, three on the Mac) so it does not outweigh the answer; "Show more" opens it in place. The toggle
 /// shows only when the text really is longer (measured against the same text unclamped).
 struct ClampedText: View {
     let text: String
@@ -115,12 +115,12 @@ struct ClampedText: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(text).font(.system(size: ChatType.s(16))).lineSpacing(3).textSelection(.enabled)
+            Text(text).font(.system(size: ChatLayout.bubbleText)).lineSpacing(3).textSelection(.enabled)
                 .lineLimit(open ? nil : ChatLayout.bubbleLines)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { if !open { clamped = $0 } }
                 .background(alignment: .topLeading) {
                     // The same text unclamped, invisible, for its real height.
-                    Text(text).font(.system(size: ChatType.s(16))).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                    Text(text).font(.system(size: ChatLayout.bubbleText)).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
                         .hidden()
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { full = $0 }
                 }
