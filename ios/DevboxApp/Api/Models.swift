@@ -1111,6 +1111,7 @@ struct ThreadSnapshot: Codable, Equatable {
 extension ThreadSnapshot {
     /// The effort decodes on its own: an effort of an unexpected shape is logged and read as not reported, never a
     /// thread that fails to load.
+    /// Hand-written, so a field added to ThreadSnapshot must be decoded here too, or it is never read.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         lastSeq = try c.decode(Int.self, forKey: .lastSeq)

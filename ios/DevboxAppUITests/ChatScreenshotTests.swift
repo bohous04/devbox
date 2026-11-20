@@ -80,7 +80,7 @@ final class ChatScreenshotTests: XCTestCase {
             // Not Escape: the simulator's menu does not get it, and the menu offers no dismiss element.
             app.navigationBars.firstMatch.tap()
             sleep(1)
-            XCTAssertFalse(app.buttons["Applies from your next message."].exists, "the chip's menu is still open")
+            XCTAssertFalse(app.descendants(matching: .any)["Applies from your next message."].exists, "the chip's menu is still open")
         }
 
         // The composer from its second line: two tiers, the field over the controls.
