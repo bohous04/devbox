@@ -9,6 +9,8 @@ export interface ChangedFile {
   removed: number | null;
   /** Only for `renamed`. */
   oldPath?: string;
+  /** The name is not valid UTF-8 (shown with U+FFFD); an untracked one is then not counted. */
+  nameNotUtf8?: true;
 }
 
 export interface SessionChanges {
@@ -20,4 +22,7 @@ export interface SessionChanges {
   totals: { files: number; added: number; removed: number };
   /** Present when `files` was capped. */
   truncated?: true;
+  /** Present when devd stopped reading untracked files (per-request file or byte cap), so the
+   *  totals miss their lines. */
+  countsCapped?: true;
 }

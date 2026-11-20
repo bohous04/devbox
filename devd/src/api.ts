@@ -66,7 +66,7 @@ import { localEnvProfiles } from "./localEnv";
 import { parseOtlpMetrics, pointsToRows } from "./metrics";
 import { classifyClaudeState } from "./stats";
 import { isValidTmuxName, killSessionCmd, labelSetCmd, parseProbe, probeCmd, type TmuxSession } from "./tmux";
-import { sessionWorkdir, type TreeProject } from "./tree";
+import { barePath, sessionWorkdir, type TreeProject } from "./tree";
 import { ChangesError, collectChanges } from "./sessionChanges";
 import { COMMIT, VERSION } from "./version";
 import type { SelfUpdateStatus } from "./selfUpdate";
@@ -1209,7 +1209,10 @@ export function createApp(d: ApiDeps): Hono {
     { const g = ibxOnly(c, s, "Changed files"); if (g) return g; }
     // safeGit would refuse anyway; this way the dashboard gets the same message as other routes.
     if (restricted(s.id)) return c.json({ error: SHARED_DENIED }, 403);
-    try { return c.json(await collectChanges(sessionWorkdir(d.root, s))); }
+    // The repo git must resolve to: the bare clone devd created for a worktree session, else <ws>/.git.
+    const ws = sessionWorkdir(d.root, s);
+    const commonDir = s.worktree ? barePath(d.root, s.folder, s.project, s.repo) : join(ws, ".git");
+    try { return c.json(await collectChanges(ws, commonDir)); }
     catch (e) { if (e instanceof ChangesError) return c.json({ error: e.message }, e.status); throw e; }
   });
 
