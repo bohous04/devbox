@@ -60,14 +60,12 @@ struct ChatMarkdown: View {
 
     #if os(macOS)
     /// A Mac window has room for columns: a real grid, cells aligned under their header, rows apart by hairlines.
-    /// A code-only cell stays on one line, cut in the middle where it does not fit.
+    /// Every cell wraps: a command stays whole, broken at its spaces.
     private func grid(_ header: [String], _ rows: [[String]]) -> some View {
         let columns = max(header.count, rows.map(\.count).max() ?? 0)
         let hasHeader = !header.allSatisfy { $0.trimmingCharacters(in: .whitespaces).isEmpty }
         func cell(_ s: String) -> some View {
-            Group {
-                if ChatMarkdownParse.isCodeOnly(s) { ChatInline.text(s).lineLimit(1).truncationMode(.middle) } else { ChatInline.text(s) }
-            }
+            ChatInline.text(s)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12).padding(.vertical, 8)
         }

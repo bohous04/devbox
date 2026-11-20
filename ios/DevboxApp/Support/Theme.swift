@@ -92,10 +92,13 @@ enum ChatLayout {
     static let bubble: CGFloat = 520
     /// Room between the header and the first message.
     static let top: CGFloat = 24
+    /// A long prompt folds to this many lines.
+    static let bubbleLines = 4
     #else
     static let column: CGFloat = .infinity
     static let bubble: CGFloat = .infinity
     static let top: CGFloat = 0
+    static let bubbleLines = 6
     #endif
 }
 

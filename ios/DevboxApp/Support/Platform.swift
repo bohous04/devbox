@@ -76,6 +76,16 @@ extension View {
         #endif
     }
 
+    /// A button drawn only by its label. The Mac's default style puts a bezel around a custom label (a square behind
+    /// the composer's round send button); the iPhone draws only the label already.
+    func labelOnlyButton() -> some View {
+        #if os(macOS)
+        buttonStyle(.plain)
+        #else
+        self
+        #endif
+    }
+
     /// Inline navigation title on iPhone; the Mac has no title display modes.
     func inlineNavigationTitle() -> some View {
         #if os(iOS)

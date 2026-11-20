@@ -124,6 +124,7 @@ struct ComposerView: View {
                     .frame(width: 34, height: 34).background(Theme.C.muted, in: Circle())
                     .iPhoneTapTarget()
             }
+            .labelOnlyButton()
             .disabled(stopping)
             .accessibilityLabel("Stop the run")
         }
@@ -134,6 +135,7 @@ struct ComposerView: View {
                 .background(canSend ? Theme.C.primary : Theme.C.muted, in: Circle())
                 .iPhoneTapTarget()
         }
+        .labelOnlyButton()
         .disabled(!canSend)
         .accessibilityLabel("Send")
     }
