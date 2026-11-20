@@ -87,7 +87,7 @@ import { createTmuxProbe } from "./tmux";
 import { barePath, buildTree, ghLister, giteaLister, sessionWorkdir } from "./tree";
 import { AGENT_UID, setAgentGitIdentity, setAgentGitRoots, setTrustedGitRoots, setUntrustedGitRoots } from "./safeGit";
 import { ownershipHints, untraversableForAgent } from "./agentRepos";
-import { memoAsync, memoAsyncStrict } from "./cache";
+import { backgroundSnapshot, memoAsync, memoAsyncStrict } from "./cache";
 import { selfUpdateStatus, startSelfUpdate, type SelfUpdateDeps } from "./selfUpdate";
 import { buildUnpushedReport, unpushedOps } from "./unpushed";
 import { ApiErrorRetry, retryContainers, sweep429 } from "./apiErrorRetry";
@@ -676,10 +676,10 @@ const gitea = createGiteaApi({
 // is only a safety net for changes that come from outside (a new repo in the GitHub organization).
 const treeCache = memoAsync(() => buildTree(freshCfg(), root, listers), 60_000);
 const tree = () => treeCache.get();
-// Unpushed commits across the whole workspace (Work in progress page). Scan = several
-// git calls per repo, four at a time; stale-while-revalidate just like
-// tree — the page gets the old value immediately and the refresh runs in the background.
-const unpushedCache = memoAsync(() => buildUnpushedReport(root, { giteaHosts: getGiteaInstances().map((i) => i.url) }), 60_000);
+// Unpushed commits across the whole workspace (Work in progress page). Built only in the
+// background: the API serves the last report at once (the first scan after a restart answers
+// "scanning"), so a slow repo never holds a request.
+const unpushedCache = backgroundSnapshot(() => buildUnpushedReport(root, { giteaHosts: getGiteaInstances().map((i) => i.url) }), 60_000);
 // Push / Create PR from the page: git auth for Gitea same as for clone (credentialsForUrl),
 // GitHub goes through the gh helper on the host; PRs on Gitea via the API with a token from the vault.
 const unpushed = {

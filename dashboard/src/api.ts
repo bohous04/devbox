@@ -328,6 +328,9 @@ export interface UnpushedRepo {
 }
 export interface UnpushedFolder { folder: string; count: number; repos: UnpushedRepo[] }
 export interface UnpushedReport { at: number; total: number; scanned: number; folders: UnpushedFolder[] }
+/** GET /api/unpushed never waits for a scan: the last report (null before the first one finished),
+ *  whether a scan runs now, and the last scan's error. */
+export interface UnpushedStatus { report: UnpushedReport | null; scanning: boolean; error: string | null }
 
 // Mirror of SshApprovalRow from devd/src/sshApprovals.ts. `revoked` is a terminal state
 // set by revokeGrant alongside clearing grant_until — separate from `expired`
@@ -673,7 +676,7 @@ export const api = {
   sshRevokeScopeGrant: (id: string) => j<{ ok: true }>(`/api/ssh-scope-grants/${id}`, { method: "DELETE" }),
   sshGate: () => j<{ enabled: boolean }>("/api/ssh-gate"),
   // `fresh` = Refresh in the UI: the server drops the cache and waits for a full scan.
-  unpushed: (fresh = false) => j<UnpushedReport>(fresh ? "/api/unpushed?fresh=1" : "/api/unpushed"),
+  unpushed: (fresh = false) => j<UnpushedStatus>(fresh ? "/api/unpushed?fresh=1" : "/api/unpushed"),
   unpushedPush: (path: string, branch: string) => j<{ ok: true }>("/api/unpushed/push", post({ path, branch })),
   // The server pushes first, then creates the PR — one click from the UI.
   unpushedPr: (path: string, branch: string, title: string, body: string) =>

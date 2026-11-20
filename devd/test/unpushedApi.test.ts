@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createApp } from "../src/api";
+import type { Snapshot } from "../src/cache";
 import type { UnpushedReport } from "../src/unpushed";
 import { fakeDeps } from "./helpers/apiHarness";
 
@@ -14,24 +15,34 @@ const REPORT: UnpushedReport = {
   }] }],
 };
 
-function fakeCache() {
+function fakeCache(snap: Partial<Snapshot<UnpushedReport>> = {}) {
   let gets = 0, invalidates = 0;
   return {
     calls: () => ({ gets, invalidates }),
-    dep: { get: async () => { gets++; return REPORT; }, invalidate: () => { invalidates++; } },
+    dep: {
+      peek: (): Snapshot<UnpushedReport> => { gets++; return { value: REPORT, at: 5000, scanning: false, error: null, ...snap }; },
+      refresh: () => { invalidates++; },
+    },
   };
 }
 
-test("GET /api/unpushed returns the report from the cache", async () => {
-  const cache = fakeCache();
+test("GET /api/unpushed returns the last report at once, with whether a scan runs and its error", async () => {
+  const cache = fakeCache({ scanning: true });
   const app = createApp(fakeDeps({ unpushed: cache.dep }));
   const r = await app.request("/api/unpushed");
   expect(r.status).toBe(200);
-  expect(await r.json()).toEqual(REPORT);
+  expect(await r.json()).toEqual({ report: REPORT, scanning: true, error: null });
   expect(cache.calls()).toEqual({ gets: 1, invalidates: 0 });
 });
 
-test("GET /api/unpushed?fresh=1 first drops the cache, then reads", async () => {
+test("GET /api/unpushed before the first scan finished: an explicit scanning state, no report, no wait", async () => {
+  const app = createApp(fakeDeps({ unpushed: fakeCache({ value: null, at: null, scanning: true }).dep }));
+  const r = await app.request("/api/unpushed");
+  expect(r.status).toBe(200);
+  expect(await r.json()).toEqual({ report: null, scanning: true, error: null });
+});
+
+test("GET /api/unpushed?fresh=1 starts a rescan and still answers at once", async () => {
   const cache = fakeCache();
   const app = createApp(fakeDeps({ unpushed: cache.dep }));
   const r = await app.request("/api/unpushed?fresh=1");
