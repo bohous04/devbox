@@ -1043,6 +1043,15 @@ class Guard:
         admin=owner/admin[len('/workspace/'):] if admin.startswith('/workspace/') else Path(admin)
         return admin if admin.parent.name=='worktrees' and beneath(admin,self.root) else None
 
+    def claimed_elsewhere(self, admin, owner, target):
+        """Sessions share the bare repo and reuse names (w, w1 both registered as
+        /workspace/.worktrees/w/.git): True when another session's worktree at that path
+        still points its `.git` to admin, i.e. the registration is not ours to change."""
+        if not target.startswith('/workspace/') or not target.endswith('/.git'):
+            return False
+        rel=target[len('/workspace/'):-len('/.git')]
+        return any(s!=owner and self.admin_dir(s/rel,s)==admin for s in (self.root/'_sessions').iterdir())
+
     def remove_worktree(self, p, owner):
         """Git removes the worktree and its registration. A worktree added inside the container
         is registered as /workspace/..., which `worktree remove <host path>` never matches
@@ -1052,10 +1061,7 @@ class Guard:
         gitdir=admin/'gitdir' if admin else None
         target=gitdir.read_text().strip() if gitdir and gitdir.is_file() else ''
         if target.startswith('/workspace/') and owner/target[len('/workspace/'):]==p/'.git':
-            # Sessions share the bare repo and reuse names: refuse a registration that another
-            # session's worktree at the same relative path still points to.
-            rel=target[len('/workspace/'):-len('/.git')]
-            if any(s!=owner and self.admin_dir(s/rel,s)==admin for s in (self.root/'_sessions').iterdir()):
+            if self.claimed_elsewhere(admin,owner,target):
                 raise RuntimeError(f'Registration {admin} is also claimed by another session')
             # As the owner: agents control the admin dir, root must not write through their symlinks.
             run(self.as_owner(p)+['/usr/bin/tee',gitdir],input=f'{p}/.git\n'.encode())
@@ -1102,8 +1108,12 @@ class Guard:
         except OSError:
             return
         mapped=owner/target[len('/workspace/'):] if target.startswith('/workspace/') else Path(target)
-        if mapped==p/'.git':
-            shutil.rmtree(admin)
+        if mapped!=p/'.git':
+            return
+        if self.claimed_elsewhere(admin,owner,target):
+            self.audit('registration-kept-claimed-elsewhere',path=str(p),admin=str(admin))
+            return
+        shutil.rmtree(admin)
 
     def cache_maintenance(self):
         # Content-addressed npm download blobs only. Never remove _npx executables,

@@ -286,6 +286,19 @@ class Safety(unittest.TestCase):
         self.assertTrue(w.exists())
         self.assertEqual((bare/'worktrees'/'w1'/'gitdir').read_text(),'/workspace/.worktrees/w/.git\n')
 
+    def test_unregistered_removal_drops_only_its_own_registration(self):
+        bare,(owner,other)=self.container_worktrees()
+        self.g.remove_unregistered(owner/'.worktrees'/'w',owner)
+        self.assertFalse((owner/'.worktrees'/'w').exists());self.assertFalse((bare/'worktrees'/'w').exists())
+        self.assertTrue((bare/'worktrees'/'w1').exists(),'the other session keeps its registration')
+
+    def test_unregistered_removal_never_takes_another_sessions_registration(self):
+        bare,(owner,other)=self.container_worktrees()
+        w=owner/'.worktrees'/'w';(w/'.git').write_text(f'gitdir: {bare}/worktrees/w1\n')
+        self.g.remove_unregistered(w,owner)
+        self.assertFalse(w.exists())
+        self.assertTrue((bare/'worktrees'/'w1').exists(),"the other session's live worktree stays registered")
+
     def test_other_git_failure_is_kept_for_review(self):
         bare=self.root/'fivem'/'repo.git';(bare/'worktrees'/'w').mkdir(parents=True);(bare/'objects').mkdir()
         w=self.released('w')['w'];self.git(w,f'gitdir: {bare}/worktrees/w\n')   # registered, git just failed
