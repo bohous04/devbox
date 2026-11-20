@@ -35,6 +35,10 @@ enum InboxFixtures {
                  since: ago(2), last: "Updating the colour tokens in theme.css and the two settings forms."),
             item("dev-acme-rename", "Rename the billing module", "acme", "billing", agent: "codex", section: "needs_you",
                  reason: "completed", since: ago(95), last: "Done. Renamed 14 files and updated the imports; tests pass."),
+            // The session ThreadFixtures has a thread for, so a screenshot can show a row selected with its thread open.
+            item("dev-orchard-sync", "Which Node version does the sync service pin?", "orchard", "sync", section: "needs_you",
+                 reason: "completed", since: ago(3),
+                 last: "I added src/sync/queue.ts and queue.test.ts with six bun tests; all pass. The typecheck command fails."),
             item("dev-lumen-docs", "Write the 2.4 release notes", "lumen", "docs", section: "needs_you", reason: "completed",
                  since: ago(320), last: "Drafted the notes in CHANGELOG.md: 6 features, 11 fixes."),
             item("dev-lumen-onboarding", "Draft the onboarding emails", "lumen", "app", section: "idle", reason: nil,
