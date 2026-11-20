@@ -28,9 +28,11 @@ interface Repo {
   must: (what: string, ...args: string[]) => Promise<string>;
   /** "origin/<default>" or null (then everything is compared to HEAD). */
   base: string | null;
-  /** What `git diff` compares the working tree to: the merge-base, or HEAD. */
+  /** What `git diff` compares the working tree to: the merge-base, or HEAD — always a commit id,
+   *  resolved once, so a commit made during the request cannot move it. */
   rev: string;
-  gitDir: string;
+  /** Pinned git with a stdout cap (proc kills the child at the cap). */
+  gitCapped: (maxStdout: number, ...args: string[]) => ReturnType<typeof run>;
 }
 
 /**
@@ -63,7 +65,9 @@ async function openRepo(ws: string, expected: Expected): Promise<Repo> {
     console.error(`changes ${ws}: git dir ${gitDir} / common dir ${commonDir}, expected ${expected.gitDir} / ${expected.commonDir}`);
     throw new ChangesError(409, "session worktree points to a different git repository");
   }
-  const git: Git = (...args) => sh(ws, "git", "-c", `safe.directory=${ws}`, "--git-dir", gitDir, "--work-tree", ws, ...args);
+  const pinned = ["git", "-c", `safe.directory=${ws}`, "--git-dir", gitDir, "--work-tree", ws];
+  const git: Git = (...args) => sh(ws, ...pinned, ...args);
+  const gitCapped = (maxStdout: number, ...args: string[]) => run([...pinned, ...args], { cwd: ws, timeoutMs: timeoutFor("LOCAL"), maxStdout });
   const must = async (what: string, ...args: string[]): Promise<string> => {
     const r = await git(...args);
     if (r.code !== 0) {
@@ -72,10 +76,11 @@ async function openRepo(ws: string, expected: Expected): Promise<Repo> {
     }
     return r.stdout;
   };
-  if ((await git("rev-parse", "--verify", "--quiet", "HEAD^{commit}")).code !== 0) throw new ChangesError(409, "repository has no commits yet");
+  const head = await git("rev-parse", "--verify", "--quiet", "HEAD^{commit}");
+  if (head.code !== 0) throw new ChangesError(409, "repository has no commits yet");
   const base = await originDefault(git, gitDir, commonDir);
-  const rev = base ? (await must(`merge-base with ${base}`, "merge-base", base, "HEAD")).trim() : "HEAD";
-  return { ws, git, must, base, rev, gitDir };
+  const rev = base ? (await must(`merge-base with ${base}`, "merge-base", base, head.stdout.trim())).trim() : head.stdout.trim();
+  return { ws, git, must, base, rev, gitCapped };
 }
 
 /** Tracked changes (status + counts in one git call, so both describe the same moment) and the
@@ -158,7 +163,6 @@ export async function collectFileDiff(ws: string, expected: Expected, path: stri
     // Root git never reads the working copy here (lstat-then-open would follow a swapped
     // symlink): the base side comes from the object store, the working side from the owner child.
     const result = (diff: string, truncated: boolean, binary = false): FileDiff => ({ path, status: entry.status, base, binary, truncated, diff });
-    const old = entry.status === "added" ? "" : await baseBlob(repo, entry.oldPath ?? path);
     let cur = "";
     if (entry.status !== "deleted") {
       const file = await readWorking(ws, path, MAX_SIDE, counterDeps);
@@ -166,6 +170,7 @@ export async function collectFileDiff(ws: string, expected: Expected, path: stri
       if (file.truncated) return result("", true);
       cur = file.content;
     }
+    const old = entry.status === "added" ? "" : await baseBlob(repo, entry.oldPath ?? path);
     if (old === null) return result("", true);
     if (old.includes("\0")) return result("", false, true);
     const hunks = await unifiedHunks(ws, old, cur);
@@ -204,11 +209,19 @@ async function readWorking(ws: string, path: string, maxBytes: number, counterDe
  *  the same accepted class of risk as the rest of safeGit.ts (it needs the agent's own rev/tree to
  *  name a foreign blob). */
 async function baseBlob(repo: Repo, path: string): Promise<string | null> {
-  const spec = `${repo.rev}:${path}`;
-  const size = Number((await repo.must("reading the base size", "cat-file", "-s", spec)).trim());
+  // Size and content of one object id (repo.rev is already a commit id), with a stdout cap as
+  // the backstop — nothing can make devd buffer more than MAX_SIDE.
+  const oid = (await repo.must("resolving the base", "rev-parse", "--verify", "--quiet", `${repo.rev}:${path}`)).trim();
+  const size = Number((await repo.must("reading the base size", "cat-file", "-s", oid)).trim());
   if (!Number.isFinite(size)) throw new ChangesError(500, "reading the base size failed");
   if (size > MAX_SIDE) return null;
-  return repo.must("reading the base", "cat-file", "blob", spec);
+  const r = await repo.gitCapped(MAX_SIDE + 1, "cat-file", "blob", oid);
+  if (r.stdoutTruncated) return null;
+  if (r.code !== 0) {
+    console.error(`changes ${repo.ws}: git cat-file blob ${oid} failed: ${r.stderr.trim()}`);
+    throw new ChangesError(500, "reading the base failed");
+  }
+  return r.stdout;
 }
 
 /** Hunks (from the first `@@`) of `old` → `cur`, by `git diff --no-index` over two files in a fresh
@@ -218,8 +231,9 @@ async function unifiedHunks(ws: string, old: string, cur: string): Promise<strin
   try {
     writeFileSync(join(dir, "a"), old);
     writeFileSync(join(dir, "b"), cur);
+    // GIT_CEILING_DIRECTORIES: git must not discover a repo above the temp dir.
     const r = await run(["git", "diff", "--no-index", "--no-color", "-U3", "--", "a", "b"],
-      { cwd: dir, timeoutMs: timeoutFor("LOCAL"), maxStdout: MAX_DIFF + 1 });
+      { cwd: dir, env: { GIT_CEILING_DIRECTORIES: tmpdir() }, timeoutMs: timeoutFor("LOCAL"), maxStdout: MAX_DIFF + 1 });
     // Exit 1 = "files differ"; a non-zero exit is otherwise accepted only after our own kill at maxStdout.
     if (r.code !== 0 && r.code !== 1 && !r.stdoutTruncated) {
       console.error(`changes ${ws}: git diff --no-index failed: ${r.stderr.trim()}`);

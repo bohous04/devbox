@@ -259,3 +259,22 @@ test("GET /api/sessions/:id/changes/diff: restricted 403, InstaBox 409, foreign 
   expect(foreign.status).toBe(409);
   expect(await foreign.json()).toEqual({ error: "session worktree points to a different git repository" });
 });
+
+test("the base is pinned to a commit id: HEAD moving to a huge blob mid-request changes nothing", async () => {
+  const ws = tmp("diff-pinned-");
+  git(ws, "init", "-q");
+  writeFileSync(join(ws, "a.txt"), "1\n");
+  git(ws, "add", ".");
+  git(ws, "commit", "-qm", "init");
+  writeFileSync(join(ws, "a.txt"), "2\n");
+  // Runs after the repo was opened and listed, before the base blob is read.
+  const moveHead: CounterDeps = { myUid: process.getuid!(), ownerOf: () => ({ uid: 0, gid: 0 }), run: (cmd, opts) => {
+    writeFileSync(join(ws, "a.txt"), "x".repeat(2 * 1024 * 1024));
+    git(ws, "commit", "-qam", "huge");
+    writeFileSync(join(ws, "a.txt"), "2\n");
+    return procRun(cmd, opts);
+  } };
+  const r = await collectFileDiff(ws, plainGit(ws), "a.txt", moveHead);
+  expect(r).toMatchObject({ base: "HEAD", binary: false, truncated: false });
+  expect(r.diff).toContain("@@ -1 +1 @@\n-1\n+2\n");
+});
