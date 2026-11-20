@@ -52,7 +52,9 @@ final class MacScreenshotTests: XCTestCase {
         // Ordered in far off any screen: AppKit then lays out and draws the list's rows, which it skips for a window
         // that is not visible. Nothing shows on a display, and it works with the screen locked.
         window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
-        window.orderFront(nil)
+        // Key, as the window someone is using: the title and toolbar draw in their active colours.
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
         defer { window.close() }
 
         // Let the stores load the fixtures and the thread render; .task and the inbox stream run on the main loop.
