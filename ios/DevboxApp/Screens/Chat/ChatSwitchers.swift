@@ -4,12 +4,16 @@ import SwiftUI
 /// switch between turns and records it in the thread as a notice. The menus show the target devd plans the next
 /// switch from (GET thread/target), re-read when the thread announces a new native thread, a run ends or a notice
 /// arrives. Disabled options show their reason under the name (touch has no hover).
-struct ChatSwitchers: View {
+/// One chip (the model, with the agent's name for VoiceOver) opens a menu with the agent, model and account submenus;
+/// `content` places the chip (nil while the target is unknown) and the status lines (why switching is blocked, the
+/// last switch's result or error) — the composer puts the chip in its box.
+struct ChatSwitchers<Content: View>: View {
     let sessionId: String
     let thread: ThreadSnapshot
     /// `ThreadView.switchKey(thread)`, precomputed by the store.
     let targetKey: String
     let client: DevdClient
+    @ViewBuilder let content: (_ chip: AnyView?, _ status: AnyView) -> Content
 
     private enum Which: String { case harness, model, account }
 
@@ -24,21 +28,49 @@ struct ChatSwitchers: View {
     private var base: String { "/api/sessions/\(pathSegment(sessionId))/thread" }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        content(chip, AnyView(status))
+            .task(id: targetKey) { await loadTarget() }
+            .task(id: target.map { "\($0.harness):\($0.account ?? "-")" }) {
+                if let target, ChatSwitch.accountMenuBlocked(target) == nil { await loadAccounts(target) }
+            }
+            // A result note belongs to the last switch; the next message is a new action.
+            .onChange(of: thread.runs.count) { _, _ in note = nil }
+    }
+
+    private var chip: AnyView? {
+        guard let target else { return nil }
+        let blocked = ChatSwitch.blocked(runs: thread.runs, target: target)
+        let agent = AgentProfiles.profile(for: AgentName(rawValue: target.agent)).short
+        let model = target.model.map(ChatSwitch.modelLabel) ?? "Default model"
+        let accountTitle = target.harness == "codex" ? "Codex account" : "Claude account"
+        return AnyView(Menu {
+            menu(.harness, title: "Agent", label: agent, blocked: blocked, options: ChatSwitch.harnessOptions(target), loadError: nil)
+            menu(.model, title: "Model", label: model, blocked: blocked ?? ChatSwitch.modelMenuBlocked(target),
+                 options: ChatSwitch.modelOptions(target), loadError: nil)
+            menu(.account, title: accountTitle, label: accounts?.first(where: \.current)?.label ?? target.account ?? "no account",
+                 blocked: blocked ?? ChatSwitch.accountMenuBlocked(target), options: accounts, loadError: accountsError)
+        } label: {
+            HStack(spacing: 4) {
+                if busy != nil { ProgressView().controlSize(.mini) }
+                Text(model).lineLimit(1)
+                Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.C.mutedForeground)
+            }
+            .font(.system(size: 14, weight: .medium))
+            .foregroundStyle(Theme.C.foreground)
+            .padding(.horizontal, 8).frame(minHeight: 32)
+            .contentShape(Capsule())
+        }
+        // The menu stays openable while switching is blocked, so the current choices stay visible; the submenus are
+        // disabled then and the reason is in the status lines.
+        .disabled(busy != nil)
+        .accessibilityLabel("Model: \(model), agent \(agent)"))
+    }
+
+    @ViewBuilder
+    private var status: some View {
+        VStack(alignment: .leading, spacing: 2) {
             if let target {
-                let blocked = ChatSwitch.blocked(runs: thread.runs, target: target)
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        menu(.harness, title: "Agent", label: AgentProfiles.profile(for: AgentName(rawValue: target.agent)).short,
-                             blocked: blocked, options: ChatSwitch.harnessOptions(target), loadError: nil)
-                        menu(.model, title: "Model", label: target.model ?? "default model",
-                             blocked: blocked ?? ChatSwitch.modelMenuBlocked(target), options: ChatSwitch.modelOptions(target), loadError: nil)
-                        menu(.account, title: target.harness == "codex" ? "Codex account" : "Claude account",
-                             label: accounts?.first(where: \.current)?.label ?? target.account ?? "no account",
-                             blocked: blocked ?? ChatSwitch.accountMenuBlocked(target), options: accounts, loadError: accountsError)
-                    }
-                }
-                if let blocked { line(blocked, Theme.C.mutedForeground) }
+                if let blocked = ChatSwitch.blocked(runs: thread.runs, target: target) { line(blocked, Theme.C.mutedForeground) }
                 if let awaiting = ChatSwitch.awaitingTargetText(target) { line(awaiting, Theme.C.mutedForeground) }
                 if let note { line(note, Theme.C.warnText) }
                 if let error { line(error, Theme.C.dangerText) }
@@ -50,12 +82,6 @@ struct ChatSwitchers: View {
                 }
             }
         }
-        .task(id: targetKey) { await loadTarget() }
-        .task(id: target.map { "\($0.harness):\($0.account ?? "-")" }) {
-            if let target, ChatSwitch.accountMenuBlocked(target) == nil { await loadAccounts(target) }
-        }
-        // A result note belongs to the last switch; the next message is a new action.
-        .onChange(of: thread.runs.count) { _, _ in note = nil }
     }
 
     private func line(_ text: String, _ color: Color) -> some View {
@@ -84,14 +110,9 @@ struct ChatSwitchers: View {
                 }
             }
         } label: {
-            HStack(spacing: 4) {
-                if busy == which { ProgressView().controlSize(.mini) }
-                Text(label).lineLimit(1)
-                Image(systemName: "chevron.down").font(.caption2)
-            }
-            .font(Theme.F.meta)
-            .padding(.horizontal, 10).padding(.vertical, 6)
-            .overlay(Capsule().strokeBorder(Theme.C.border))
+            // A submenu row: what it switches, and the current choice under it.
+            Text(title)
+            Text(busy == which ? "Switching…" : label)
         }
         .disabled(blocked != nil || busy != nil)
         .accessibilityLabel("\(title): \(label)")

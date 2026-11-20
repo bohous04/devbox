@@ -6,8 +6,13 @@ import UniformTypeIdentifiers
 /// bridge and shows as queued. On a failed send the text and images stay and nothing is retried. Images picked
 /// from Photos or pasted (at most 10) are scaled down and re-encoded (`ImagePrep`), previewed, and go with the
 /// next message.
+/// One box (the web's composer): attach, the field, the model chip and send on one row; from the field's second line
+/// the box grows into two tiers, the field on top and the controls under it, and stays so until the text is cleared
+/// (switching back while typing would make the field jump between widths).
 struct ComposerView: View {
     let running: Bool
+    /// The model chip (ChatSwitchers); nil while the session's target is unknown.
+    let chip: AnyView?
     let onSend: (String, [Data]) async throws -> Void
     let onStop: () async throws -> Void
 
@@ -24,6 +29,9 @@ struct ComposerView: View {
     @State private var stopping = false
     @State private var preparing = 0
     @State private var error: String?
+    @State private var twoTier = false
+    /// The field's height with one line, measured while it is empty.
+    @State private var oneLine: CGFloat = 0
 
     private var canSend: Bool { !busy && preparing == 0 && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
@@ -50,35 +58,23 @@ struct ComposerView: View {
                     .padding(.top, 4)
                 }
             }
-            HStack(alignment: .bottom, spacing: 8) {
-                Menu {
-                    PhotosPicker(selection: $picks, maxSelectionCount: max(1, ImagePrep.maxImagesPerMessage - images.count), matching: .images) {
-                        Label("Photo library", systemImage: "photo.on.rectangle")
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .center, spacing: 6) {
+                    if !twoTier { attach }
+                    field
+                    if !twoTier { controls }
+                }
+                if twoTier {
+                    HStack(spacing: 6) {
+                        attach
+                        Spacer(minLength: 0)
+                        controls
                     }
-                    Button { pasteImages() } label: { Label("Paste image", systemImage: "doc.on.clipboard") }
-                        .disabled(!ImagePasteboard.hasImages)
-                } label: {
-                    Image(systemName: "photo.badge.plus").frame(width: 36, height: 36)
                 }
-                .disabled(images.count >= ImagePrep.maxImagesPerMessage)
-                .accessibilityLabel("Attach images")
-
-                TextField(running ? "Message (queued after the current run)" : "Message the agent", text: $text, axis: .vertical)
-                    .lineLimit(1...6)
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("Message")
-
-                if running {
-                    Button { stop() } label: { Image(systemName: "stop.fill").frame(width: 36, height: 36) }
-                        .disabled(stopping)
-                        .accessibilityLabel("Stop the run")
-                }
-                Button { send() } label: {
-                    Image(systemName: "arrow.up.circle.fill").font(.system(size: 30))
-                }
-                .disabled(!canSend)
-                .accessibilityLabel("Send")
             }
+            .padding(.leading, twoTier ? 14 : 6).padding(.trailing, 6).padding(.vertical, 6)
+            .background(Theme.C.card, in: RoundedRectangle(cornerRadius: 22))
+            .overlay(RoundedRectangle(cornerRadius: 22).strokeBorder(Theme.C.border))
             if let error { Text(error).font(Theme.F.meta).foregroundStyle(Theme.C.dangerText) }
         }
         .onChange(of: picks) { _, items in
@@ -86,6 +82,59 @@ struct ComposerView: View {
             picks = []
             Task { await attach(items.count) { i in try await items[i].loadTransferable(type: Data.self) } }
         }
+    }
+
+    private var attach: some View {
+        Menu {
+            PhotosPicker(selection: $picks, maxSelectionCount: max(1, ImagePrep.maxImagesPerMessage - images.count), matching: .images) {
+                Label("Photo library", systemImage: "photo.on.rectangle")
+            }
+            Button { pasteImages() } label: { Label("Paste image", systemImage: "doc.on.clipboard") }
+                .disabled(!ImagePasteboard.hasImages)
+        } label: {
+            Image(systemName: "paperclip").font(.system(size: 17)).foregroundStyle(Theme.C.mutedForeground)
+                .frame(width: 36, height: 36).contentShape(Rectangle())
+        }
+        .disabled(images.count >= ImagePrep.maxImagesPerMessage)
+        .accessibilityLabel("Attach images")
+    }
+
+    private var field: some View {
+        TextField(running ? "Queue a message" : "Ask anything", text: $text, axis: .vertical)
+            .lineLimit(1...6)
+            .font(.system(size: 16))
+            .textFieldStyle(.plain)
+            .padding(.vertical, 6)
+            .accessibilityLabel("Message")
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                if text.isEmpty { oneLine = h }
+                // Grows to two tiers at the second line; back to one row only when the text is cleared.
+                if !twoTier, oneLine > 0, h > oneLine + 4 { withAnimation(.snappy) { twoTier = true } }
+            }
+            .onChange(of: text) { _, t in if t.isEmpty, twoTier { withAnimation(.snappy) { twoTier = false } } }
+    }
+
+    @ViewBuilder
+    private var controls: some View {
+        if let chip { chip }
+        if running {
+            Button { stop() } label: {
+                Image(systemName: "stop.fill").font(.system(size: 13)).foregroundStyle(Theme.C.foreground)
+                    .frame(width: 34, height: 34).background(Theme.C.muted, in: Circle())
+                    .iPhoneTapTarget()
+            }
+            .disabled(stopping)
+            .accessibilityLabel("Stop the run")
+        }
+        Button { send() } label: {
+            Image(systemName: "arrow.up").font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(canSend ? Theme.C.primaryForeground : Theme.C.mutedForeground)
+                .frame(width: 34, height: 34)
+                .background(canSend ? Theme.C.primary : Theme.C.muted, in: Circle())
+                .iPhoneTapTarget()
+        }
+        .disabled(!canSend)
+        .accessibilityLabel("Send")
     }
 
     private func pasteImages() {

@@ -28,6 +28,8 @@ enum Theme {
         static let okText = Color("okText")
         static let warnText = Color("warnText")
         static let dangerText = Color("dangerText")
+        /// Links in chat answers (the web's sky-700 / sky-400).
+        static let link = Color("link")
 
         /// `--chart-1`…`--chart-5`, in the order from the web.
         static let chart: [Color] = (1...5).map { Color("chart\($0)") }

@@ -246,6 +246,8 @@ struct ChatRow: Identifiable, Equatable {
     let pending: PendingRequest?
     let queued: Bool
     let critic: Bool
+    /// A notice of a run that failed (run.failed); other notices carry a runId too ("event for unknown run").
+    var failedRun = false
 }
 
 @MainActor
@@ -262,6 +264,11 @@ final class ThreadStore: ObservableObject {
     /// The last frame that could not be read (also logged); the thread may miss that update until a reload.
     @Published private(set) var badFrame: String?
     @Published private(set) var seenError: String?
+    /// Where the changed-files card goes (under the latest finished answer); nil: no card.
+    @Published private(set) var changesAnchor: ChangesAnchor?
+    /// A short title from the first user message (`ThreadTitle`), worked out again only when that message changes.
+    private(set) var title: String?
+    private var titleSource: String?
     /// devd refused the stream with 404 (or 409 not-a-chat-session): the session is gone. Final: no reconnect.
     @Published private(set) var ended = false
     /// devd answered 409 session-ending: an end is under way, but a failed end leaves the session alive, so the
@@ -269,6 +276,8 @@ final class ThreadStore: ObservableObject {
     @Published private(set) var ending = false
     /// Derived from `thread` once per update (set before it, so a render sees them together), not on every render.
     private(set) var rows: [ChatRow] = []
+    /// `rows` laid out: finished runs' work folded (WorkGroups.rows).
+    private(set) var display: [ThreadDisplayRow] = []
     private(set) var switchKey = ""
 
     private static let logger = Logger(subsystem: "com.example.devbox", category: "Thread")
@@ -415,9 +424,18 @@ final class ThreadStore: ObservableObject {
         let queued = Set(ThreadView.queuedRunIds(t))
         let critic = Set(ThreadView.criticRunIds(t))
         let open = Dictionary(t.pending.map { ($0.requestId, $0) }, uniquingKeysWith: { a, _ in a })
+        let failed = Set(t.runs.filter { $0.status == .failed }.map(\.runId))
         rows = t.items.enumerated().map { i, it in
             ChatRow(id: i, item: it, pending: it.itemId.flatMap { open[$0] },
-                    queued: it.runId.map(queued.contains) ?? false, critic: it.runId.map(critic.contains) ?? false)
+                    queued: it.runId.map(queued.contains) ?? false, critic: it.runId.map(critic.contains) ?? false,
+                    failedRun: it.kind == .notice && it.runId.map(failed.contains) == true)
+        }
+        display = WorkGroups.rows(rows, runs: t.runs)
+        changesAnchor = ChangesView.anchor(rows, runs: t.runs)
+        let first = t.items.first(where: { $0.kind == .user })?.text
+        if first != titleSource {
+            titleSource = first
+            title = first.flatMap(ThreadTitle.from)
         }
         switchKey = ThreadView.switchKey(t)
         thread = t
