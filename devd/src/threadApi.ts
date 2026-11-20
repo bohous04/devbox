@@ -1,6 +1,6 @@
 import type { Context, Hono } from "hono";
 import type { Database } from "bun:sqlite";
-import { IMAGES_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
+import { EFFORT_MIN_BRIDGE_VERSION, IMAGES_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
 import type { LoggedEvent } from "../../shared/thread";
 import { AgentDisconnected, CommandFailed, CommandTimeout, type BridgeLinks } from "./bridgeLink";
 import { SwitchRefused, type ChatSwitch, type SwitchRequest } from "./chatSwitch";
@@ -184,6 +184,33 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
   switchRoute("account", (b) => (b.accountId === undefined ? { kind: "account" }
     : nonEmpty(b.accountId) ? { kind: "account", accountId: b.accountId } : "accountId must be a non-empty string"));
   switchRoute("harness", (b) => (nonEmpty(b.agent) ? { kind: "harness", agent: b.agent } : "agent must be a non-empty string"));
+
+  /** The agent's reasoning effort from the next message on: `effort` a level, or null for the model default. Allowed
+   *  during a run (the running turn keeps its level). 202 once the bridge took it; 400 for a level the model's latest
+   *  effort.state does not list; 409 bridge-too-old before 1.7.0, command-failed when the bridge refuses it. */
+  app.post("/api/sessions/:id/thread/effort", async (c) => {
+    const id = c.req.param("id");
+    const r = chat(c, id);
+    if ("res" in r) return r.res;
+    const body = await c.req.json().catch(() => null);
+    const effort = isRecord(body) ? body.effort : undefined;
+    // The bridge's own check (protocol.ts parseCommand): a bad value would drop devd's whole link.
+    if (effort !== null && (typeof effort !== "string" || !/^[a-z]{1,16}$/.test(effort))) {
+      return c.json({ error: "effort must be a lowercase level name or null" }, 400);
+    }
+    const version = d.bridgeVersion(id);
+    if (version === null || !versionAtLeast(version, EFFORT_MIN_BRIDGE_VERSION)) {
+      return c.json({ error: "bridge-too-old", message: `this session's agent bridge (${version ?? "unknown version"}) cannot change the effort; it needs ${EFFORT_MIN_BRIDGE_VERSION} — recreate the session's container` }, 409);
+    }
+    const known = r.store.snapshot({ limit: 0 }).effort;
+    if (effort !== null && known?.supported && !known.supported.includes(effort)) {
+      const takes = known.supported.length === 0 ? "takes no effort levels" : `takes ${known.supported.join(", ")}`;
+      return c.json({ error: "unsupported-effort", message: `${known.model ?? "this model"} ${takes}` }, 400);
+    }
+    try { await d.links.send(id, { kind: "setEffort", effort }); }
+    catch (e) { return commandError(c, e); }
+    return c.body(null, 202);
+  });
 
   app.post("/api/sessions/:id/thread/seen", async (c) => {
     const id = c.req.param("id");

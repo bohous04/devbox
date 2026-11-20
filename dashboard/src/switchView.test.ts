@@ -1,7 +1,8 @@
-import { expect, test } from "bun:test";
-import type { RunRow } from "../../shared/thread";
+import { describe, expect, test } from "bun:test";
+import type { RunRow, ThreadEffort } from "../../shared/thread";
 import type { AccountView, ChatTarget, CodexAccountView } from "./api";
 import {
+  effortChipLabel, effortMenuBlocked, effortOptions,
   accountMenuBlocked, claudeAccountOptions, codexAccountOptions, harnessOptions, modelMenuBlocked, modelOptions,
   awaitingTargetText, modelLabel, switchBlocked, switchErrorText, switchResultText,
 } from "./switchView";
@@ -167,4 +168,39 @@ test("model label: known families read as names, efforts and dated snapshots inc
   expect(modelLabel("claude")).toBe("claude");
   // Every model the menus offer gets a readable name.
   for (const id of Object.values(CHAT_MODELS).flat()) expect(modelLabel(id)).not.toBe(id);
+});
+
+describe("effort (bridge 1.7.0)", () => {
+  const eff = (o: Partial<ThreadEffort> = {}): ThreadEffort => ({ model: "claude-opus-5-5", supported: ["low", "medium", "high", "xhigh", "max"], effective: null, chosen: null, ...o });
+  const NEW = { bridgeVersion: "1.7.0" }, OLD = { bridgeVersion: "1.6.0" };
+
+  test("chip: the level the agent reported, else the choice, else Default; nothing for an agent without levels", () => {
+    expect(effortChipLabel(eff({ chosen: "max", effective: "high" }), NEW)).toBe("High");
+    expect(effortChipLabel(eff({ chosen: "high", effective: "high" }), NEW)).toBe("High");
+    expect(effortChipLabel(eff({ effective: "medium" }), NEW)).toBe("Medium");
+    expect(effortChipLabel(eff(), NEW)).toBe("Default");
+    expect(effortChipLabel(eff({ chosen: "xhigh" }), NEW)).toBe("Extra high");
+    expect(effortChipLabel(eff({ supported: [] }), NEW)).toBeNull();
+    expect(effortChipLabel(null, NEW)).toBeNull();
+    expect(effortChipLabel(eff({ chosen: "high" }), OLD)).toBeNull();
+  });
+
+  test("menu: Default first with what it runs at, then each level the model lists, the current one ticked", () => {
+    const o = effortOptions(eff({ chosen: "high", effective: "high" }));
+    expect(o.map((x) => [x.value, x.label, x.current])).toEqual([
+      ["", "Default", false], ["low", "Low", false], ["medium", "Medium", false], ["high", "High", true], ["xhigh", "Extra high", false], ["max", "Max", false],
+    ]);
+    expect(effortOptions(eff({ effective: "medium", supported: ["low", "medium"] }))[0]).toMatchObject({ current: true, detail: "Medium for claude-opus-5-5" });
+    // Claude's default is known only from a reply's level: never guessed.
+    expect(effortOptions(eff())[0]!.detail).toBe("The level shows after the agent's first reply");
+  });
+
+  test("menu blocked: an old bridge says what to do, unknown levels and a model without levels say so", () => {
+    expect(effortMenuBlocked(eff(), OLD)).toBe("This session's agent bridge (1.6.0) cannot change the effort: recreate the session's container");
+    expect(effortMenuBlocked(eff(), { bridgeVersion: null })).toBe("This session's agent bridge (unknown version) cannot change the effort: recreate the session's container");
+    expect(effortMenuBlocked(null, NEW)).toBe("The agent has not reported its effort levels yet");
+    expect(effortMenuBlocked(eff({ supported: null }), NEW)).toBe("The agent has not reported the effort levels of claude-opus-5-5");
+    expect(effortMenuBlocked(eff({ supported: [] }), NEW)).toBe("claude-opus-5-5 has no effort levels");
+    expect(effortMenuBlocked(eff(), NEW)).toBeNull();
+  });
 });

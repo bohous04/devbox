@@ -60,3 +60,12 @@ test("composerErrorText: the three command failures, the rest by message", () =>
 test("composerErrorText shows a bridge-too-old refusal's message", () => {
   expect(composerErrorText(409, { error: "bridge-too-old", message: "recreate the container" })).toBe("recreate the container");
 });
+
+test("effort.state sets the thread's effort, the latest wins, and a snapshot brings it too", () => {
+  const e = (chosen: string | null): BridgeEvent => ({ type: "effort.state", model: "gpt-6.1-sol", supported: ["low", "medium", "high"], effective: chosen ?? "medium", chosen });
+  const t = run(emptyThread(), [e(null), e("high")]);
+  expect(t.effort).toEqual({ model: "gpt-6.1-sol", supported: ["low", "medium", "high"], effective: "high", chosen: "high" });
+  expect(t.items).toEqual([]);
+  const merged = mergeSnapshot(emptyThread(), { afterSeq: 0, snapshot: { ...emptyThread(), effort: t.effort } });
+  expect(merged.effort).toEqual(t.effort);
+});

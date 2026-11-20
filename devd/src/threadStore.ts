@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { BackgroundWork, Capabilities, LoggedEvent, PendingRequest, RunRow, ThreadItem, ThreadSnapshot } from "../../shared/thread";
+import type { BackgroundWork, Capabilities, LoggedEvent, PendingRequest, RunRow, ThreadEffort, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
 const TERMINAL: ReadonlySet<string> = new Set(["completed", "interrupted", "failed"]);
 /** A user item's images; no field when the message has none (same rule in dashboard/src/threadView.ts). */
@@ -74,6 +74,7 @@ export class ThreadStore {
     db.run(`CREATE TABLE IF NOT EXISTS native (
       id INTEGER PRIMARY KEY CHECK (id = 1), harness TEXT NOT NULL, native_thread_id TEXT NOT NULL,
       account TEXT, model TEXT)`);
+    db.run(`CREATE TABLE IF NOT EXISTS effort (id INTEGER PRIMARY KEY CHECK (id = 1), state TEXT NOT NULL)`);
     db.run(`CREATE TABLE IF NOT EXISTS provider_threads (
       harness TEXT NOT NULL, account TEXT, native_thread_id TEXT NOT NULL, covered_through_run TEXT,
       last_used_at INTEGER NOT NULL, caps TEXT, resume_failed INTEGER NOT NULL DEFAULT 0,
@@ -233,6 +234,11 @@ export class ThreadStore {
       case "bridge.notice":
         this.insertItem(seq, ts, { runId: null, itemId: null, kind: "notice", text: ev.text, status: "done" });
         return;
+      case "effort.state": {
+        const state: ThreadEffort = { model: ev.model, supported: ev.supported, effective: ev.effective, chosen: ev.chosen };
+        db.query("INSERT INTO effort (id, state) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET state=excluded.state").run(JSON.stringify(state));
+        return;
+      }
       default: {
         const unknown: never = ev;
         const type = (unknown as { type?: unknown }).type;
@@ -365,10 +371,12 @@ export class ThreadStore {
       });
     const bg = this.db.query("SELECT work FROM background WHERE id=1").get() as { work: string } | null;
     const n = this.db.query("SELECT * FROM native WHERE id=1").get() as Record<string, any> | null;
+    const effort = this.db.query("SELECT state FROM effort WHERE id=1").get() as { state: string } | null;
     return {
       lastSeq: this.lastSeq(), seenSeq: this.meta("seen_seq"), runs, items, pending,
       background: bg ? (JSON.parse(bg.work) as BackgroundWork[]) : [],
       native: n ? { harness: n.harness, nativeThreadId: n.native_thread_id, account: n.account, model: n.model } : null,
+      effort: effort ? (JSON.parse(effort.state) as ThreadEffort) : null,
     };
   }
 

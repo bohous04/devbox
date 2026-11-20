@@ -57,7 +57,14 @@ export interface ThreadSnapshot {
   pending: PendingRequest[];
   background: BackgroundWork[];
   native: { harness: string; nativeThreadId: string; account: string | null; model: string | null } | null;
+  /** The agent's reasoning effort from the bridge's latest `effort.state` (bridge 1.7.0+); null before one. */
+  effort: ThreadEffort | null;
 }
+
+/** `supported`: the levels the current model takes ([] = none, null = not known yet); `effective`: the level the agent
+ *  runs at, null when it is not known (Claude's model default, before its first reply); `chosen`: the user's pick, null =
+ *  the model default. */
+export interface ThreadEffort { model: string | null; supported: string[] | null; effective: string | null; chosen: string | null }
 
 /** devd's connection to a chat session's agent bridge socket. */
 export type LinkStatus = "connecting" | "connected" | "disconnected";

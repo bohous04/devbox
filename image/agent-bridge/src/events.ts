@@ -58,7 +58,9 @@ export type BridgeEvent =
   | { type: "bridge.started"; version: string; resumed: boolean; awaitingTarget?: boolean; notice?: string }
   // (bridge 1.5.0+) Something the user must know that is not about a run, shown in the thread as a notice: e.g. devd
   // asked for events the log no longer holds.
-  | { type: "bridge.notice"; text: string };
+  | { type: "bridge.notice"; text: string }
+  // (bridge 1.7.0) Reasoning effort of the current harness and model (effort.ts EffortState).
+  | { type: "effort.state"; model: string | null; supported: string[] | null; effective: string | null; chosen: string | null };
 
 export interface LoggedEvent {
   seq: number;

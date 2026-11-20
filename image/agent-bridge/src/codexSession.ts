@@ -1,5 +1,6 @@
 import { capText, HOST_SESSION_VARS, toolResultText } from "./claude.ts";
 import { ResumeFailedError, type HarnessSession } from "./claudeSession.ts";
+import { EffortState } from "./effort.ts";
 import type { BridgeEvent, Capabilities, RunOrigin, TokenUsage } from "./events.ts";
 import { JsonRpcPeer } from "./jsonRpc.ts";
 import type { InitializeParams } from "./codex-protocol/InitializeParams";
@@ -51,6 +52,14 @@ export interface CodexSessionOptions {
   developerInstructions: string;
   emit: (e: BridgeEvent) => void;
   logError?: (msg: string) => void;
+  /** The user's reasoning effort; null or absent = Codex's configured default. */
+  effort?: string | null;
+}
+
+/** The part of app-server's `model/list` (v2 Model) the adapter reads: the levels each model offers and its default. */
+interface ModelListPage {
+  data: { id: string; model: string; supportedReasoningEfforts: { reasoningEffort: string }[]; defaultReasoningEffort: string }[];
+  nextCursor: string | null;
 }
 
 // The app-server notifications the adapter consumes; everything else it receives is ignored.
@@ -231,6 +240,21 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
   const requests = new Map<string, OpenRequest>();
   let threadId: string | null = null;
   let model = o.model;
+  const effort = new EffortState(o.emit, o.effort ?? null);
+  // Levels and default per model (model/list); null until read, or when it could not be read.
+  let catalog: Map<string, { supported: string[]; default: string }> | null = null;
+  // The thread's configured effort (config.toml), null = each model's default.
+  let configured: string | null = null;
+  // The model the thread runs when no model was chosen (thread/start's answer).
+  let threadModel: string | null = null;
+  // turn/start's effort applies to that turn and every later one: once sent, going back to the default must say so.
+  let overridden = false;
+  const baseline = (m: string | null): string | null => configured ?? (m !== null ? catalog?.get(m)?.default ?? null : null);
+  const reportEffort = (m: string | null) => {
+    const supported = m === null || catalog === null ? null : catalog.get(m)?.supported ?? null;
+    if (m !== null && catalog !== null && supported === null) logError(`codex: ${m} is not in model/list; its effort levels are unknown`);
+    effort.update({ model: m, supported, effective: (chosen) => chosen ?? baseline(m) });
+  };
   let markReady: () => void = () => {};
   let failReady: (e: Error) => void = () => {};
   const ready = new Promise<void>((resolve, reject) => {
@@ -267,6 +291,7 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
       // /inbox is mounted in the container: Codex reads the files itself (no base64 in the request).
       input: [{ type: "text", text: t.text, text_elements: [] }, ...t.images.map((path) => ({ type: "localImage" as const, path }))],
       ...(model !== null ? { model } : {}),
+      ...turnEffort(),
     };
     peer.request<TurnStartResponse>("turn/start", params).then(
       (r) => bindTurn(run, r.turn.id),
@@ -278,6 +303,17 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
         startNext();
       },
     );
+  }
+
+  /** The effort turn/start carries: the choice, or the default again after a choice was sent. */
+  function turnEffort(): { effort?: string | null } {
+    if (effort.chosen !== null) {
+      overridden = true;
+      return { effort: effort.chosen };
+    }
+    if (!overridden) return {};
+    overridden = false;
+    return { effort: baseline(model ?? threadModel) };
   }
 
   function startNext(): void {
@@ -494,8 +530,15 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
       }
       if (endReason !== null) throw new Error(endReason);
       threadId = r.thread.id;
+      threadModel = r.model;
+      configured = r.reasoningEffort;
       emit({ type: "thread.native", harness: "codex", nativeThreadId: threadId, account: null, model: r.model, caps: CODEX_CAPABILITIES });
       markReady();
+      // Not awaited: turns need no levels, and a slow or failing model/list must not hold them.
+      void readCatalog().then((c) => {
+        catalog = c;
+        reportEffort(model ?? threadModel);
+      });
       startNext();
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
@@ -505,6 +548,27 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
       proc.kill();
     }
   })();
+
+  /** Every page of model/list; null (logged) when it cannot be read: the levels stay unknown, turns go on. */
+  async function readCatalog(): Promise<Map<string, { supported: string[]; default: string }> | null> {
+    const out = new Map<string, { supported: string[]; default: string }>();
+    let cursor: string | null = null;
+    try {
+      do {
+        const page: ModelListPage = await peer.request<ModelListPage>("model/list", { cursor, limit: 100, includeHidden: true });
+        for (const m of page.data) {
+          const entry = { supported: m.supportedReasoningEfforts.map((x) => x.reasoningEffort), default: m.defaultReasoningEffort };
+          out.set(m.model, entry);
+          out.set(m.id, entry);
+        }
+        cursor = page.nextCursor;
+      } while (cursor !== null);
+    } catch (e) {
+      logError(`codex: model/list failed, effort levels unknown: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
+    return out;
+  }
 
   return {
     async startTurn(runId, text, origin, images = []) {
@@ -539,6 +603,13 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
     async setModel(next) {
       if (endReason !== null) throw new Error(endReason);
       model = next;
+      reportEffort(next);
+    },
+    async setEffort(level) {
+      if (endReason !== null) throw new Error(endReason);
+      effort.check(level);
+      // Sent with the next turn/start.
+      effort.choose(level, level ?? baseline(model ?? threadModel));
     },
     async injectItems(items) {
       await ready;

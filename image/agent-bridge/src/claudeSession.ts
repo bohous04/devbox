@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { query, type CanUseTool, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type CanUseTool, type EffortLevel, type HookCallback, type ModelInfo, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { BackgroundTracker, WAKEUP_ID } from "./background.ts";
+import { EffortState } from "./effort.ts";
 import { claudeQueryOptions, mapSdkMessage, resultError, sumModelUsage, type ClaudeSdkOptions, type QueryFn } from "./claude.ts";
 import type { BridgeEvent, Capabilities, RunOrigin, TokenUsage, UsageBaseline } from "./events.ts";
 import { readImageBase64 } from "./images.ts";
@@ -14,6 +15,9 @@ export interface HarnessSession {
   answer(requestId: string, answer: string): Promise<void>;
   /** Model for the next turns; the current turn keeps its model. */
   setModel(model: string): Promise<void>;
+  /** Reasoning effort from the next message on (null = the harness's default); throws for a level the current model
+   *  does not offer. The harness reports what it knows as `effort.state`. */
+  setEffort(effort: string | null): Promise<void>;
   /** Appends raw items to the thread's model-visible history; only when `capabilities().injectItems`. */
   injectItems(items: unknown[]): Promise<void>;
   capabilities(): Capabilities;
@@ -48,6 +52,8 @@ export interface ClaudeSessionOptions {
   onUsageBaseline?: (b: UsageBaseline) => void;
   now?: () => number;
   logError?: (msg: string) => void;
+  /** The user's reasoning effort; null or absent = Claude Code's default for the model. */
+  effort?: string | null;
 }
 
 // The answer to a plan request that approves it; any other text rejects the plan with that text as feedback.
@@ -133,6 +139,7 @@ function failedSession(error: Error): HarnessSession {
     interrupt: fail,
     answer: fail,
     setModel: fail,
+    setEffort: fail,
     injectItems: fail,
     capabilities: () => CLAUDE_CAPABILITIES,
     async close() {},
@@ -164,6 +171,7 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
 
   const emit = o.emit;
   const logError = o.logError ?? ((msg: string) => console.error(msg));
+  const effort = new EffortState(emit, o.effort ?? null);
 
   // Emitted once, by whichever comes first: interrupt() returning or the run's own result.
   function reportInterrupt(run: ActiveRun): void {
@@ -218,6 +226,11 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
     if (msg.type === "system" && msg.subtype === "init" && msg.session_id !== nativeThreadId) {
       nativeThreadId = msg.session_id;
       emit({ type: "thread.native", harness: "claude", nativeThreadId, account: null, model: msg.model, caps: CLAUDE_CAPABILITIES });
+    }
+    // Launched on the CLI's default model: its levels are known once the CLI names it.
+    if (msg.type === "system" && msg.subtype === "init" && model === null) {
+      model = msg.model;
+      void reportLevels(msg.model);
     }
     if (active === null && isRootFrame(msg)) startAgentRun(msg.type === "system" && msg.subtype === "init" ? msg.model : model);
     if (active !== null) for (const e of mapSdkMessage(msg, active.runId, cursor)) emit(e);
@@ -313,6 +326,13 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
     };
   };
 
+  // The SDK reports the level a turn ran at (after any downgrade for the model) only to hooks: Stop sees it per turn.
+  const onStop: HookCallback = async (hookInput) => {
+    const level = (hookInput as { effort?: { level?: unknown } }).effort?.level;
+    if (typeof level === "string") effort.update({ effective: level });
+    return { continue: true };
+  };
+
   const stream: Query = queryFn({
     prompt: input,
     options: {
@@ -320,8 +340,34 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
       systemPrompt: { type: "preset", preset: "claude_code", append: o.appendSystemPrompt },
       mcpServers: o.mcpServers as ClaudeSdkOptions["mcpServers"],
       canUseTool,
+      hooks: { Stop: [{ hooks: [onStop] }] },
+      ...(effort.chosen !== null ? { effort: effort.chosen as EffortLevel } : {}),
     },
   });
+
+  // Levels per model, from the CLI's own model list (asked once); a model it does not list has none known.
+  let modelList: Promise<ModelInfo[]> | null = null;
+  async function reportLevels(forModel: string): Promise<void> {
+    modelList ??= stream.supportedModels();
+    let models: ModelInfo[];
+    try {
+      models = await modelList;
+    } catch (e) {
+      logError(`claude: reading the model list for effort levels failed: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    if (forModel !== model) return; // a later setModel reports its own
+    const base = forModel.replace(/\[[^\]]*\]$/, "");
+    const info = models.find((m) => m.value === forModel || m.resolvedModel === forModel || m.value === base || m.resolvedModel === base);
+    if (!info) {
+      logError(`claude: ${forModel} is not in the CLI's model list; its effort levels are unknown`);
+      effort.update({ model: forModel });
+      return;
+    }
+    const dropped = effort.update({ model: forModel, supported: info.supportsEffort ? info.supportedEffortLevels ?? [] : [] });
+    if (dropped) await stream.applyFlagSettings({ effortLevel: null }).catch((e) => logError(`claude: resetting the effort failed: ${e instanceof Error ? e.message : String(e)}`));
+  }
+  if (model !== null) void reportLevels(model);
 
   // A resumed thread is known now; a new one is announced by the CLI's init.
   if (o.resume !== null) emit({ type: "thread.native", harness: "claude", nativeThreadId: o.resume, account: null, model, caps: CLAUDE_CAPABILITIES });
@@ -379,6 +425,14 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
       if (ended) throw new Error(SESSION_ENDED);
       await stream.setModel(next);
       model = next;
+      void reportLevels(next);
+    },
+    async setEffort(level) {
+      if (ended) throw new Error(SESSION_ENDED);
+      effort.check(level);
+      await stream.applyFlagSettings({ effortLevel: level as EffortLevel | null });
+      // What a turn runs at is known only from its Stop hook.
+      effort.choose(level, null);
     },
     async injectItems() {
       throw new Error("injectItems is not supported by Claude sessions");

@@ -105,3 +105,17 @@ describe("encodeFrame", () => {
     expect(JSON.parse(out)).toEqual(frame);
   });
 });
+
+describe("setEffort (1.7.0)", () => {
+  test("takes a lowercase level or null (the harness's default)", () => {
+    expect(parseClientFrame('{"t":"cmd","id":"c1","cmd":{"kind":"setEffort","effort":"xhigh"}}')).toEqual({ t: "cmd", id: "c1", cmd: { kind: "setEffort", effort: "xhigh" } });
+    expect(parseClientFrame('{"t":"cmd","id":"c1","cmd":{"kind":"setEffort","effort":null}}')).toEqual({ t: "cmd", id: "c1", cmd: { kind: "setEffort", effort: null } });
+  });
+
+  test("refuses anything else", () => {
+    for (const effort of ['""', '"High"', '"x\\ny"', "3", '"' + "a".repeat(17) + '"']) {
+      expect(() => parseClientFrame(`{"t":"cmd","id":"c1","cmd":{"kind":"setEffort","effort":${effort}}}`)).toThrow(ProtocolError);
+    }
+    expect(() => parseClientFrame('{"t":"cmd","id":"c1","cmd":{"kind":"setEffort"}}')).toThrow(ProtocolError);
+  });
+});

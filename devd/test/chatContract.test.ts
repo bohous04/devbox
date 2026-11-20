@@ -40,6 +40,7 @@ function scriptedHarness() {
       let end: (r: { error?: string }) => void = () => {};
       const ended = new Promise<{ error?: string }>((r) => (end = r));
       return {
+        async setEffort() {},
         async startTurn(runId, _text, origin) {
           h.runId = runId;
           o.emit({ type: "run.started", runId, origin, nativeThreadId: "thread-1", model: "m" });
@@ -126,6 +127,7 @@ function resumeFailingHarness(deadThread: string) {
       ready.catch(() => {});
       if (dead) end({ error: "resume failed" });
       return {
+        async setEffort() {},
         async startTurn(runId, text, origin) {
           h.turns.push(text);
           o.emit({ type: "run.started", runId, origin, nativeThreadId: null, model: null });

@@ -607,3 +607,57 @@ test("snooze until reset without the usage dependency is 503; settle and the thr
   expect((await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/settle`))).status).toBe(200);
   expect((await t.a.fetch(req("GET", `/api/sessions/${CHAT.id}/thread`))).status).toBe(200);
 });
+
+// --- effort (bridge 1.7.0) ---
+
+const effortState = (supported: string[] | null, chosen: string | null = null): BridgeEvent =>
+  ({ type: "effort.state", model: "claude-opus-5-5", supported, effective: null, chosen });
+
+test("GET thread carries the latest effort.state; null before one", async () => {
+  const t = setup({ bridgeVersion: "1.7.0" });
+  const before = (await (await t.a.fetch(req("GET", `/api/sessions/${CHAT.id}/thread`))).json()) as ThreadSnapshot;
+  expect(before.effort).toBeNull();
+  t.feed(CHAT.id, [effortState(["low", "high"]), effortState(["low", "high"], "high")]);
+  const snap = (await (await t.a.fetch(req("GET", `/api/sessions/${CHAT.id}/thread`))).json()) as ThreadSnapshot;
+  expect(snap.effort).toEqual({ model: "claude-opus-5-5", supported: ["low", "high"], effective: null, chosen: "high" });
+});
+
+test("POST thread/effort sends setEffort, also during a run; null goes back to the model default", async () => {
+  const t = setup({ bridgeVersion: "1.7.0" });
+  t.feed(CHAT.id, [effortState(["low", "high"]), started("r1")]);
+  expect((await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/effort`, { effort: "high" }))).status).toBe(202);
+  expect((await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/effort`, { effort: null }))).status).toBe(202);
+  expect(t.sent).toEqual([[CHAT.id, { kind: "setEffort", effort: "high" }], [CHAT.id, { kind: "setEffort", effort: null }]]);
+});
+
+test("POST thread/effort refuses a malformed body and a level the model does not list, sending nothing", async () => {
+  const t = setup({ bridgeVersion: "1.7.0" });
+  // Before any effort.state too: a bad value would make the bridge drop devd's link.
+  for (const body of [{}, { effort: "" }, { effort: 3 }, { effort: "High!" }]) {
+    expect((await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/effort`, body))).status).toBe(400);
+  }
+  t.feed(CHAT.id, [effortState(["low", "high"])]);
+  const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/effort`, { effort: "max" }));
+  expect(r.status).toBe(400);
+  expect(await r.json()).toEqual({ error: "unsupported-effort", message: "claude-opus-5-5 takes low, high" });
+  expect(t.sent).toEqual([]);
+});
+
+test("POST thread/effort to a bridge older than 1.7.0 is 409 bridge-too-old with what to do", async () => {
+  for (const version of ["1.6.0", null]) {
+    const t = setup({ bridgeVersion: version });
+    const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/effort`, { effort: "high" }));
+    expect(r.status).toBe(409);
+    const body = (await r.json()) as { error: string; message: string };
+    expect(body.error).toBe("bridge-too-old");
+    expect(body.message).toContain("recreate the session's container");
+    expect(t.sent).toEqual([]);
+  }
+});
+
+test("POST thread/effort: the bridge's refusal comes back as 409 command-failed with its reason", async () => {
+  const t = setup({ bridgeVersion: "1.7.0", sendError: new CommandFailed("the agent has not reported its effort levels yet") });
+  const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/effort`, { effort: "high" }));
+  expect(r.status).toBe(409);
+  expect(await r.json()).toEqual({ error: "command-failed", message: "the agent has not reported its effort levels yet" });
+});

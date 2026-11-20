@@ -55,6 +55,7 @@ function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities | (() => 
   const f = {
     opens: [] as HarnessOpenOptions[],
     models: [] as string[],
+    efforts: [] as (string | null)[],
     /** Fails the next startTurn with this error. */
     failNextStart: null as Error | null,
     injected: [] as unknown[][],
@@ -97,6 +98,10 @@ function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities | (() => 
         async setModel(m) {
           f.models.push(m);
         },
+        async setEffort(e) {
+          if (e === "nope") throw new Error("effort nope is not one of low, high");
+          f.efforts.push(e);
+        },
         async injectItems(items) {
           f.injected.push(items);
         },
@@ -122,7 +127,7 @@ function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities | (() => 
 }
 
 function baseState(over: Partial<BridgeState> = {}): BridgeState {
-  return { harness: "claude", nativeThreadId: null, account: null, model: null, activeRunId: null, queue: [], continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, trimSeq: 0, ackCandidate: null, awaitingTarget: false, ...over };
+  return { harness: "claude", nativeThreadId: null, account: null, model: null, activeRunId: null, queue: [], continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, trimSeq: 0, ackCandidate: null, awaitingTarget: false, effort: null, ...over };
 }
 
 // Account homes for switch targets, under the test dir.
@@ -575,6 +580,31 @@ describe("switching", () => {
     const g = fakeHarness();
     await start(g);
     expect(g.opens[0].target).toMatchObject({ harness: "claude", model: "claude-opus-4-5" });
+  });
+
+  test("setEffort goes to the harness, is kept in state.json and reaches the next harness opened", async () => {
+    const f = fakeHarness();
+    const bridge = await start(f);
+    expect(f.opens[0].effort).toBeNull();
+    await cmd({ kind: "setEffort", effort: "high" });
+    expect(f.efforts).toEqual(["high"]);
+    expect(state().effort).toBe("high");
+    // A level the harness refuses is not kept.
+    await expect(cmd({ kind: "setEffort", effort: "nope" })).rejects.toThrow("not one of");
+    expect(state().effort).toBe("high");
+    await bridge.close();
+    const g = fakeHarness();
+    await start(g);
+    expect(g.opens[0].effort).toBe("high");
+  });
+
+  test("an effort.state from the harness is published and its choice kept (a dropped choice too)", async () => {
+    const f = fakeHarness();
+    await start(f);
+    await cmd({ kind: "setEffort", effort: "high" });
+    f.emit({ type: "effort.state", model: "m2", supported: ["low"], effective: "low", chosen: null });
+    expect(state().effort).toBeNull();
+    expect(events().filter((e) => e.type === "effort.state")).toEqual([{ type: "effort.state", model: "m2", supported: ["low"], effective: "low", chosen: null }]);
   });
 
   test("setModel and switchTarget during an active run are refused", async () => {

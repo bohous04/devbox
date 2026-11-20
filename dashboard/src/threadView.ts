@@ -1,7 +1,7 @@
 import type { LoggedEvent, RunRow, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
 export const emptyThread = (): ThreadSnapshot => ({
-  lastSeq: 0, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: null,
+  lastSeq: 0, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: null, effort: null,
 });
 
 /** Applies one bridge event to the client's copy of a thread. Pure; mirrors `ThreadStore.apply` in
@@ -157,6 +157,9 @@ function dispatch(n: ThreadSnapshot, { seq, ts, event: ev }: LoggedEvent) {
     case "bridge.notice":
       insertItem(n, seq, ts, { runId: null, itemId: null, kind: "notice", text: ev.text, status: "done" });
       return;
+    case "effort.state":
+      n.effort = { model: ev.model, supported: ev.supported, effective: ev.effective, chosen: ev.chosen };
+      return;
     default: {
       const unknown: never = ev;
       const type = (unknown as { type?: unknown }).type;
@@ -187,7 +190,7 @@ export function mergeSnapshot(t: ThreadSnapshot, m: { afterSeq: number; snapshot
     if (idx >= 0) runs[idx] = r;
     else runs.push(r);
   }
-  return { lastSeq: Math.max(t.lastSeq, s.lastSeq), seenSeq: s.seenSeq, items, runs, pending: s.pending, background: s.background, native: s.native };
+  return { lastSeq: Math.max(t.lastSeq, s.lastSeq), seenSeq: s.seenSeq, items, runs, pending: s.pending, background: s.background, native: s.native, effort: s.effort };
 }
 
 /** A devd notice from the stream (`thread-notice`, devd's ThreadStore.addNotice): it has an item id `notice:<n>` and no
