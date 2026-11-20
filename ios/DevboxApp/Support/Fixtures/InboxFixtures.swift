@@ -37,7 +37,7 @@ enum InboxFixtures {
             item("dev-acme-rename", "Rename the billing module", "acme", "billing", agent: "codex", branch: "rename-billing", section: "needs_you",
                  reason: "completed", since: ago(95), last: "Done. Renamed 14 files and updated the imports; tests pass."),
             // The session ThreadFixtures has a thread for, so a screenshot can show a row selected with its thread open.
-            item("dev-orchard-sync", "Which Node version does the sync service pin?", "orchard", "sync", branch: "sync-retry-queue", section: "needs_you",
+            item("dev-orchard-sync", "Add a retry queue to the offline sync", "orchard", "sync", branch: "sync-retry-queue", section: "needs_you",
                  reason: "completed", since: ago(3),
                  last: "I added src/sync/queue.ts and queue.test.ts with six bun tests; all pass. The typecheck command fails."),
             item("dev-lumen-docs", "Write the 2.4 release notes", "lumen", "docs", section: "needs_you", reason: "completed",
