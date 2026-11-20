@@ -18,6 +18,7 @@ import { containerEnv, containerMountDestinations, containerState, execInContain
 import { dockerArgv } from "./dockerTarget";
 import { inspectCanonicalWorkspace, removeStoppedWorkspaceContainer, type CanonicalWorkspaceContainer } from "./canonicalWorkspace";
 import { agentOwnedDir, archiveBranch, cloneBare, cloneRepo, conflictPrompt, type CloneProgress, defaultBranch, ensureWorktree, fetchBare, pullWithRebase, removeWorktree, sh, trackRemote, worktreeBranch, type PullResult } from "./git";
+import { agentChownArgv } from "./agentRepos";
 import { contextLengthCached } from "./openrouterModels";
 import { allocatePortBase } from "./ports";
 import { barePath, isBareLayout, workspacePath } from "./tree";
@@ -709,11 +710,13 @@ export class SessionManager {
   // to the dev user?" would be BROKEN here: after the first session `app.git` belongs to the dev user,
   // but the second session's directory under it is freshly root-owned and the second session could not
   // commit. Hence the whole tree — and only when the worktree is created, not on every open.
-  // Only entries NOT yet owned by uid 1000 are changed: `chown -R` touched every inode of a
-  // 54 GB / 620k-entry clone (2.9 s), a `find` that only stats them takes half of that.
+  // `chown -R -P -h`, not `find ! -uid 1000 -exec chown {}`: the tree is the agent's, and find hands
+  // chown paths it resolves again — a parent swapped for a symlink in between would let root chown
+  // any host file. It touches every inode (2.9 s on a 54 GB / 620k-entry clone vs ~1.5 s for find),
+  // only when a worktree is created.
   private async ownBare(bare: string): Promise<void> {
     try {
-      const r = await sh(bare, "find", bare, "!", "-uid", "1000", "-exec", "chown", "-h", "1000:1000", "{}", "+");
+      const r = await sh("/", ...agentChownArgv(bare));
       if (r.code !== 0) console.error(`chown bare ${bare} failed: ${r.stderr.trim()}`);
     } catch (e) { console.error(`chown bare ${bare} failed:`, e); }
   }

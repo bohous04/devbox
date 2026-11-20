@@ -240,20 +240,25 @@ export async function hardenGit(cmd: string[], opts: RunOpts, raw: Raw, uid: num
   // Layer 4: when devd is root, git runs as the agent uid unless EVERY target (cwd/-C, --git-dir,
   // --work-tree) is in a trusted root — whatever a repo manages to run despite layers 1-3 then runs
   // with the agent's own rights, not root's.
-  const targets = [target];
+  // Both the path as given (resolved) and its realpath: trusted only when both are.
+  const given = [dir];
   for (let i = 0; i < globals.length; i++) {
     const a = globals[i]!;
-    if ((a === "--git-dir" || a === "--work-tree") && globals[i + 1] !== undefined) targets.push(canon(resolve(dir, globals[++i]!)));
-    else if (a.startsWith("--git-dir=") || a.startsWith("--work-tree=")) targets.push(canon(resolve(dir, a.slice(a.indexOf("=") + 1))));
+    if ((a === "--git-dir" || a === "--work-tree") && globals[i + 1] !== undefined) given.push(resolve(dir, globals[++i]!));
+    else if (a.startsWith("--git-dir=") || a.startsWith("--work-tree=")) given.push(resolve(dir, a.slice(a.indexOf("=") + 1)));
   }
+  const targets = given.map(canon);
   // Classification under an agent root: repos (`<folder>/<project>/…`) and session worktrees
   // (`_sessions/<id>`) are agent-writable git targets. devd's other `_`-dirs (inbox, threads,
   // archives, recovery copies) are never git targets, so git there is refused rather than run.
   const agent = agentRoots().filter(Boolean).map(canon);
   const classes = targets.flatMap((t) => agent.map((r) => classifyGitTarget(t, r)));
   if (classes.includes("own")) return { result: refused("target is devd's own directory, not a repo") };
-  const trusted = trustedRoots().filter(Boolean).map(canon);
-  const dropToAgent = uid === 0 && !targets.every((t) => trusted.some((r) => within(t, r)));
+  const trustedRaw = trustedRoots().filter(Boolean).map((r) => resolve(r));
+  const trustedReal = trustedRaw.map(canon);
+  const inTrusted = targets.every((t) => trustedReal.some((r) => within(t, r)))
+    && given.every((g) => [...trustedRaw, ...trustedReal].some((r) => within(g, r)));
+  const dropToAgent = uid === 0 && !inTrusted;
   const env = dropToAgent ? { ...identityEnv(), ...(opts.env ?? {}), ...AGENT_GIT_ENV, ...SAFE_GIT_ENV } : { ...(opts.env ?? {}), ...SAFE_GIT_ENV };
   const unsetEnv = [...(opts.unsetEnv ?? []), ...UNSAFE_GIT_ENV];
   const envOpts = dropToAgent ? { env, unsetEnv, inheritEnv: false as const } : { env, unsetEnv };

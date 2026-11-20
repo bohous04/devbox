@@ -104,6 +104,24 @@ test("as root, a repo symlinked out of the agent root (e.g. an agent-made x.git 
   expect(h.cmd[0]).toBe("setpriv");
 });
 
+test("as root, trusted means both the path as given and its realpath: a link into or out of a trusted root runs as the agent uid", async () => {
+  const trusted = root();
+  const other = root();
+  mkdirSync(join(trusted, "repo"));
+  symlinkSync(join(trusted, "repo"), join(other, "into"));       // agent-side path resolving into the trusted root
+  symlinkSync(other, join(trusted, "out"));                      // trusted-side path resolving out of it
+  setTrustedGitRoots(() => [trusted]);
+  const { raw } = recorder();
+  for (const dir of [join(other, "into"), join(trusted, "out")]) {
+    const h = await hardenGit(["git", "-C", dir, "status"], { timeoutMs: 1000 }, raw, 0);
+    if (!("cmd" in h)) throw new Error("refused");
+    expect(h.cmd[0]).toBe("setpriv");
+  }
+  const t = await hardenGit(["git", "-C", join(trusted, "repo"), "status"], { timeoutMs: 1000 }, raw, 0);
+  if (!("cmd" in t)) throw new Error("refused");
+  expect(t.cmd[0]).toBe("git");
+});
+
 test("the configured identity reaches git as the agent uid (pull --rebase/--autostash need one); none configured = none set", async () => {
   const { raw } = recorder();
   setAgentGitIdentity({ name: "Harbor Bot", email: "bot@example.com" });

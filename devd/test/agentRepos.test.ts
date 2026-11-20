@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { agentRepoDirs, ownAgentRepos, ownershipHints, untraversableForAgent } from "../src/agentRepos";
+import { agentChownArgv, agentRepoDirs, ownAgentRepos, ownershipHints, untraversableForAgent } from "../src/agentRepos";
 
 /** harbor/api.git (bare, flat), harbor/shop/web (workspace), _sessions/dev-web (worktree),
  *  plus things that must NOT be touched: _inbox/x with a .git, a symlinked "repo", a non-repo dir. */
@@ -78,4 +78,27 @@ test("untraversableForAgent names the root or a parent the agent uid cannot ente
   chmodSync(base, 0o750);
   try { expect(untraversableForAgent(root, -2, -2)).toContain(base); }
   finally { chmodSync(base, 0o755); }
+});
+
+test("agentChownArgv: chown -h -R -P (no link followed, links changed themselves), never find -exec", () => {
+  expect(agentChownArgv("/srv/dev/harbor/api.git")).toEqual(["chown", "-h", "-R", "-P", "1000:1000", "--", "/srv/dev/harbor/api.git"]);
+});
+
+const asRootOnLinux = process.platform === "linux" && process.getuid?.() === 0;
+test.skipIf(!asRootOnLinux)("as root on Linux: agentChownArgv over a tree with a symlinked subdir pointing outside leaves the target root's (needs root; skipped otherwise)", async () => {
+  const { run } = await import("../src/proc");
+  const tree = realpathSync(mkdtempSync(join(tmpdir(), "agentchown-")));
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), "agentchown-out-")));
+  writeFileSync(join(outside, "secret"), "x");
+  mkdirSync(join(tree, "objects"));
+  writeFileSync(join(tree, "objects", "pack"), "p");
+  symlinkSync(outside, join(tree, "objects", "linked"));
+  symlinkSync(join(outside, "secret"), join(tree, "FETCH_HEAD"));
+  const r = await run(agentChownArgv(tree), { cwd: "/", timeoutMs: 30_000 });
+  expect(r.code).toBe(0);
+  for (const p of [tree, join(tree, "objects", "pack")]) expect(statSync(p).uid).toBe(1000);
+  expect(lstatSync(join(tree, "objects", "linked")).uid).toBe(1000);
+  expect(lstatSync(join(tree, "FETCH_HEAD")).uid).toBe(1000);
+  expect(statSync(outside).uid).toBe(0);
+  expect(statSync(join(outside, "secret")).uid).toBe(0);
 });

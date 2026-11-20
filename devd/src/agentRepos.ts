@@ -26,6 +26,11 @@ export function agentRepoDirs(root: string): string[] {
   return dirs;
 }
 
+/** chown of an agent-controlled tree to the agent uid: `-R -P` walks it without following any
+ *  link (fd-relative, so a dir swapped for a link mid-walk is not entered), `-h` changes a link
+ *  itself, never its target. Never `find … -exec chown {}`: that re-resolves each path. */
+export const agentChownArgv = (dir: string): string[] => ["chown", "-h", "-R", "-P", `${AGENT_UID}:${AGENT_UID}`, "--", dir];
+
 /** Entries (the dir itself included) not owned by `uid`, walked with lstat: links are counted, not followed. */
 function foreignEntries(dir: string, uid: number): number {
   let n = 0;
@@ -48,7 +53,7 @@ export async function ownAgentRepos(root: string, o: { apply: boolean; agentUid?
   const report = agentRepoDirs(root).map((path) => ({ path, foreign: foreignEntries(path, uid) }));
   if (o.apply) {
     for (const r of report) {
-      if (r.foreign > 0) await o.chown(["chown", "-h", "-R", "-P", `${AGENT_UID}:${AGENT_UID}`, "--", r.path]);
+      if (r.foreign > 0) await o.chown(agentChownArgv(r.path));
     }
   }
   return report;
