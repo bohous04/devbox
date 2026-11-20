@@ -1,20 +1,22 @@
 import SwiftUI
 
 /// Unpushed commits, mirrors `dashboard/src/pages/Unpushed.tsx` (see `UnpushedStore`): by folder, then repo, then
-/// branch, with the branch's commits folded away until asked for. Push and Create PR are the web's actions with the
-/// web's steps: Push runs on the click, Create PR opens a form with an editable title first.
+/// branch, with the branch's commits folded away until asked for. Push and Create PR are the web's actions; unlike the
+/// web, both ask for a confirmation first (like Production writes and Schedules), because one mis-tap on a phone must
+/// not push. Create PR opens a form with an editable title, then confirms.
 struct UnpushedScreen: View {
     @StateObject private var store: UnpushedStore
     @State private var expanded: Set<String> = []
     @State private var busy: String?
     @State private var actionError: [String: String] = [:]
-    @State private var prDraft: PrDraft?
+    @State private var prDraft: BranchRef?
+    @State private var confirmPush: BranchRef?
 
     init(client: DevdClient) {
         _store = StateObject(wrappedValue: UnpushedStore(client: client))
     }
 
-    struct PrDraft: Identifiable {
+    struct BranchRef: Identifiable {
         let repo: UnpushedRepo
         let branch: UnpushedBranch
         var id: String { Self.key(repo, branch) }
@@ -46,6 +48,17 @@ struct UnpushedScreen: View {
         .task { await store.load() }
         .onDisappear { store.stop() }
         .refreshable { await store.load(fresh: true) }
+        .confirmationDialog(
+            confirmPush.map { "Push \($0.branch.branch) to origin?" } ?? "Push?",
+            isPresented: Binding(get: { confirmPush != nil }, set: { if !$0 { confirmPush = nil } }),
+            titleVisibility: .visible,
+            presenting: confirmPush
+        ) { ref in
+            Button("Push") { push(ref.repo, ref.branch) }
+            Button("Cancel", role: .cancel) {}
+        } message: { ref in
+            Text("\(UnpushedStore.commitsLabel(ref.branch.count)) from \(UnpushedStore.repoTitle(ref.repo)) go to the remote.")
+        }
         .sheet(item: $prDraft) { draft in
             CreatePrSheet(repo: draft.repo, branch: draft.branch) { title in
                 try await store.createPr(draft.repo, draft.branch, title: title)
@@ -136,7 +149,7 @@ struct UnpushedScreen: View {
     }
 
     private func branchRow(_ repo: UnpushedRepo, _ branch: UnpushedBranch) -> some View {
-        let key = PrDraft.key(repo, branch)
+        let key = BranchRef.key(repo, branch)
         let open = expanded.contains(key)
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
@@ -157,11 +170,11 @@ struct UnpushedScreen: View {
                 .accessibilityValue(open ? "expanded" : "collapsed")
                 Spacer(minLength: 8)
                 if UnpushedStore.canPush(repo) {
-                    Button("Push") { push(repo, branch) }
+                    Button("Push") { confirmPush = BranchRef(repo: repo, branch: branch) }
                         .buttonStyle(.bordered).controlSize(.small)
                 }
                 if UnpushedStore.canCreatePr(repo) {
-                    Button("Create PR") { prDraft = PrDraft(repo: repo, branch: branch) }
+                    Button("Create PR") { prDraft = BranchRef(repo: repo, branch: branch) }
                         .buttonStyle(.bordered).controlSize(.small)
                 }
             }
@@ -192,7 +205,7 @@ struct UnpushedScreen: View {
     }
 
     private func push(_ repo: UnpushedRepo, _ branch: UnpushedBranch) {
-        let key = PrDraft.key(repo, branch)
+        let key = BranchRef.key(repo, branch)
         busy = key
         actionError[key] = nil
         Task {
@@ -212,6 +225,7 @@ private struct CreatePrSheet: View {
     @State private var title: String
     @State private var error: String?
     @State private var busy = false
+    @State private var confirming = false
 
     init(repo: UnpushedRepo, branch: UnpushedBranch, create: @escaping (String) async throws -> Void) {
         self.repo = repo
@@ -230,7 +244,7 @@ private struct CreatePrSheet: View {
             Form {
                 Section {
                     TextField("Pull request title", text: $title)
-                        .onSubmit(submit)
+                        .onSubmit(review)
                 } header: {
                     Text(target).textCase(nil)
                 } footer: {
@@ -244,18 +258,30 @@ private struct CreatePrSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Push + create PR", action: submit).disabled(busy)
+                    Button("Push + create PR", action: review).disabled(busy)
                 }
             }
+        }
+        .confirmationDialog("Push \(branch.branch) and open the pull request?", isPresented: $confirming, titleVisibility: .visible) {
+            Button("Push + create PR", action: submit)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(target)
         }
         #if os(macOS)
         .frame(minWidth: 420, minHeight: 220)
         #endif
     }
 
+    /// Checks the title, then asks before anything is pushed.
+    private func review() {
+        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { error = "Title is required."; return }
+        error = nil
+        confirming = true
+    }
+
     private func submit() {
         let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty else { error = "Title is required."; return }
         guard !busy else { return }
         busy = true
         error = nil

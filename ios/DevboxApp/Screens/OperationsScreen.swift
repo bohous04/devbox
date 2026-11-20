@@ -1,13 +1,16 @@
 import SwiftUI
 
 /// Operations, mirrors the deployments part of `dashboard/src/pages/Operations.tsx` (see `OperationsStore`): what
-/// agents proposed, pending first, with Approve and Reject on pending proposals, run on the click like the web.
+/// agents proposed, pending first, with Approve and Reject on pending proposals. Unlike the web, both ask first (like
+/// Production writes): approving starts a deployment, and one mis-tap on a phone must not.
 /// The page's database requests (`DbRequests`, a multi-step setup form) stay on the web; a `db-onboard` proposal
 /// points there.
 struct OperationsScreen: View {
     @StateObject private var store: OperationsStore
     @State private var busy: Int?
     @State private var actionError: String?
+    @State private var confirmApprove: OperationRow?
+    @State private var confirmReject: OperationRow?
 
     init(client: DevdClient) {
         _store = StateObject(wrappedValue: OperationsStore(client: client))
@@ -44,6 +47,26 @@ struct OperationsScreen: View {
         .navigationTitle("Operations")
         .task { store.start() }
         .onDisappear { store.stop() }
+        .confirmationDialog(
+            confirmApprove.map { "Approve \(OperationsStore.title($0))?" } ?? "Approve?",
+            isPresented: Binding(get: { confirmApprove != nil }, set: { if !$0 { confirmApprove = nil } }),
+            titleVisibility: .visible,
+            presenting: confirmApprove
+        ) { r in
+            Button("Approve operation") { act(r.id) { try await store.approve(r.id) } }
+            Button("Cancel", role: .cancel) {}
+        } message: { r in
+            Text("Approving lets operation #\(r.id) (\(r.op)) run. Nothing runs without this confirmation.")
+        }
+        .confirmationDialog(
+            confirmReject.map { "Reject \(OperationsStore.title($0))?" } ?? "Reject?",
+            isPresented: Binding(get: { confirmReject != nil }, set: { if !$0 { confirmReject = nil } }),
+            titleVisibility: .visible,
+            presenting: confirmReject
+        ) { r in
+            Button("Reject", role: .destructive) { act(r.id) { try await store.reject(r.id) } }
+            Button("Cancel", role: .cancel) {}
+        }
         .refreshable { await store.load() }
     }
 
@@ -91,10 +114,10 @@ struct OperationsScreen: View {
             if OperationsStore.canDecide(r) {
                 HStack {
                     Spacer()
-                    Button("Reject") { act(r.id) { try await store.reject(r.id) } }
+                    Button("Reject") { confirmReject = r }
                         .buttonStyle(.bordered)
                         .disabled(busy != nil)
-                    Button("Approve operation") { act(r.id) { try await store.approve(r.id) } }
+                    Button("Approve operation") { confirmApprove = r }
                         .buttonStyle(.borderedProminent)
                         .disabled(busy != nil || review.problem != nil)
                 }

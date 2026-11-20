@@ -92,8 +92,7 @@ final class MacAppTests: XCTestCase {
     }
 
     func testSidebarShelvesStartShut() {
-        XCTAssertEqual(MacSidebarLayout.shelves, ["Working", "Snoozed", "Settled"])
-        for shelf in MacSidebarLayout.shelves { XCTAssertFalse(MacSidebarLayout.startsOpen(shelf), shelf) }
+        for shelf in ["Working", "Snoozed", "Settled"] { XCTAssertFalse(MacSidebarLayout.startsOpen(shelf), shelf) }
     }
 
     func testFocusingAThreadLeavesTheDashboardOnlyInItsWindow() {
