@@ -13,17 +13,12 @@ import {
   runtimeAfterDefault, runtimeChoice, sessionsFor, tmuxRuntimeBlock,
 } from "../newSession";
 import { getDefaultRuntime, validateConfig } from "../configEdit";
+import { highlight, pickKey, repoSearch, searchTerms } from "../repoSearch";
 import { openedNotice } from "../sessionsView";
 import { useStore } from "../store";
 import { Composer } from "../components/chat/Composer";
 import { AgentGlyph } from "../components/chat/Switchers";
 import { hostDisabledReason, jobErrorText, JOB_STEP_LABEL, type IbxStatusDto, type PlacementDto } from "../instaboxView";
-
-/** The repo's sessions listed before "Show all": the list sits under the composer and must not push it away. */
-const SESSIONS_SHOWN = 4;
-
-/** One option of the repo picker: the tree's folder/project/repo cascade flattened, grouped by project. */
-const pickKey = (folder: string, project: string, repo: string) => JSON.stringify([folder, project, repo]);
 
 /** Route /new — start a session: pick the repo, type the first message in the chat composer, go. The interface
  *  (chat/terminal) and the host (VPS/InstaBox) sit under the box; every guard is the one in newSession.ts. */
@@ -126,13 +121,13 @@ export function NewSession() {
 
   // `prompt`: the composer's text, trimmed; empty starts the session without one, as before. A failure is thrown to the
   // caller: from the composer it shows under the box and the text stays (Composer keeps it on a failed send).
-  async function startVps(fresh?: boolean, prompt = "") {
+  async function startVps(fresh?: boolean, prompt = "", sessionId?: string) {
     if (!folder || !project || !repo || busy || !choice) return;
     setErr(null); setIbxFailed(false); setBusy(true);
     try {
       const r = repo === SOLO
         ? await api.openSolo({ folder, project, agent })
-        : await api.openSession({ folder, project, repo, cloneUrl: selected?.cloneUrl, agent, fresh, runtime: choice.runtime, ...(prompt ? { prompt } : {}) });
+        : await api.openSession({ folder, project, repo, cloneUrl: selected?.cloneUrl, agent, fresh, runtime: choice.runtime, ...(prompt ? { prompt } : {}), ...(sessionId ? { sessionId } : {}) });
       if (!aliveRef.current) return;
       await opened(r.session.id, choice.runtime, openedNotice(r.pull, choice.runtime));
     } finally { if (aliveRef.current) setBusy(false); }
@@ -170,24 +165,27 @@ export function NewSession() {
 
   const prompt = draft.trim();
   // What the typed text cannot go with, said before the press (devd refuses the same with the same reasons).
-  const runningTerminal = !onIbx && choice?.runtime === "tmux" && existing[0]?.status === "running" ? existing[0] : null;
-  // `textBlock` stops every start; a running terminal only stops joining it (Create another starts a new one).
   const textBlock = prompt === "" ? null
     : onIbx ? "InstaBox sessions start without a prompt: clear the text, or run it on the VPS."
     : repo === SOLO ? "claudeSolo starts without a prompt: clear the text, or pick a repo."
     : choice?.runtime === "tmux" && prompt.startsWith("-") ? "A terminal session's first prompt can't start with '-' (the agent would read it as an option)."
     : null;
-  const promptBlock = textBlock
-    ?? (prompt !== "" && runningTerminal ? `${runningTerminal.id} is already running, so it can't take a first prompt: Create another starts a new session with it.` : null);
-  const start = (fresh?: boolean) => (onIbx ? startInstabox() : startVps(fresh, prompt));
-  const startLabel = ibxFailed && onIbx ? "Try again" : onIbx ? "Start on InstaBox" : existing.length > 0 ? "Open existing" : "Start session";
-  const canStart = !!repo && !busy && !!choice && promptBlock === null;
+  // Typed text is new work: it always starts a new session with it. Empty keeps today's default, joining the repo's
+  // session of this runtime when there is one. The other choice is the secondary row under the options.
+  // The one devd joins: a running session first (joinableSessionId), so the summary names the right one.
+  const reusable = onIbx ? null : existing.find((s) => s.status === "running") ?? existing[0] ?? null;
+  const start = () => (onIbx ? startInstabox() : prompt !== "" ? startVps(reusable !== null, prompt) : startVps());
+  const startLabel = ibxFailed && onIbx ? "Try again" : onIbx ? "Start on InstaBox" : reusable && prompt === "" ? "Open existing" : "Start session";
+  const canStart = !!repo && !busy && !!choice && textBlock === null;
+  // Continuing takes the message only where devd can deliver it: a running terminal's agent has already started.
+  const continueTakesPrompt = reusable !== null && !(choice?.runtime === "tmux" && reusable.status === "running");
 
   const where = onIbx ? "on InstaBox" : "on the VPS";
   const what = choice?.runtime === "chat" ? "chat" : "terminal";
   const summary = !repo ? null
     : !choice ? "Pick an interface: the default runtime is not loaded."
-    : !onIbx && existing.length > 0 ? `Opens ${existing[0].id} (${what}, ${existing[0].status}).`
+    : prompt !== "" && textBlock === null ? `Starts a new ${what} session ${where} with your message.`
+    : reusable && prompt === "" ? `Opens ${reusable.id} (${what}, ${reusable.status}).`
     : `Starts a new ${what} session ${where}.`;
 
   return (
@@ -197,11 +195,11 @@ export function NewSession() {
       <RepoPicker tree={tree} value={repo ? pickKey(folder, project, repo) : ""} disabled={busy} onPick={pickRepo} />
 
       <Composer
-        running={false} onStop={async () => {}}
-        placeholder={!repo ? "Pick a repo above, then describe the task"
+        running={false} onStop={async () => {}} card
+        placeholder={!repo ? "Pick a repo, then describe the task… (optional)"
           : onIbx ? "InstaBox sessions start without a prompt"
           : repo === SOLO ? "claudeSolo starts without a prompt"
-          : "Describe the task, or leave it empty to just open the session"}
+          : "Describe the task… (optional)"}
         fieldOff={onIbx ? "InstaBox sessions start without a prompt" : repo === SOLO ? "claudeSolo starts without a prompt" : undefined}
         imagesOff="Images can be added once the session is open"
         start={{ label: startLabel, ready: canStart }}
@@ -224,8 +222,8 @@ export function NewSession() {
 
         <div className="flex flex-col gap-1.5 text-sm">
           {busy && step && <p role="status" className="text-muted-foreground">{JOB_STEP_LABEL[step] ?? step}…</p>}
-          {!busy && summary && <p className="text-foreground/80">{summary}{!onIbx && repo !== SOLO && prompt !== "" && promptBlock === null ? " The agent starts with your message." : ""}</p>}
-          {promptBlock && <p role="status" className="text-amber-700 dark:text-amber-300">{promptBlock}</p>}
+          {!busy && summary && <p className="text-foreground/80">{summary}</p>}
+          {textBlock && <p role="status" className="text-amber-700 dark:text-amber-300">{textBlock}</p>}
           {choice?.runtime === "chat" && <Hint>The agent runs behind the chat view; its terminal stays available as a tab.</Hint>}
           {repo && choice?.notice && <p role="status" className="text-amber-700 dark:text-amber-300">{choice.notice}</p>}
           {repo && !choice?.notice && chatDisabled && <Hint>{chatDisabled}</Hint>}
@@ -236,39 +234,45 @@ export function NewSession() {
           {/* A repo in the old layout (shared working directory) cannot give another session its own worktree or
               branch — only its own container. Two agents on one git index must be announced up front, not discovered
               from the behavior. */}
-          {!onIbx && existing.length > 0 && selected && selected.cloned && !selected.bare && (
-            <Hint>Create another shares this repo's working directory and branch (own container, same files).</Hint>
+          {reusable && selected && selected.cloned && !selected.bare && (
+            <Hint>A new session here shares this repo's working directory and branch (own container, same files).</Hint>
           )}
           {!tree && !err && <p role="status" className="text-muted-foreground">Loading workspaces…</p>}
           {err && <p role="alert" className="text-destructive">{err}</p>}
         </div>
 
-        {(ibxFailed || (!onIbx && existing.length > 0)) && (
+        {(ibxFailed || reusable) && (
           <div className="flex flex-wrap gap-2">
-            {!onIbx && existing.length > 0 && <Button type="button" variant="outline" size="sm" disabled={!repo || busy || textBlock !== null} onClick={() => report(startVps(true, prompt))}>Create another</Button>}
+            {reusable && (prompt === ""
+              ? <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => report(startVps(true))}>Create another</Button>
+              : <Button type="button" variant="ghost" size="sm" className="-ml-2 h-auto min-h-8 max-w-full whitespace-normal px-2 py-1 text-left font-normal text-muted-foreground hover:text-foreground" disabled={busy || textBlock !== null} onClick={() => report(startVps(false, continueTakesPrompt ? prompt : "", reusable.id))}>
+                  Continue {reusable.id} instead{continueTakesPrompt ? "" : " (without your message)"}
+                </Button>)}
             {ibxFailed && <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => { setHost("vps"); report(startVps()); }}>Open on VPS</Button>}
           </div>
         )}
 
         {repoSessions.length > 0 && (
-          <section aria-label="Sessions of this repo" className="flex flex-col gap-1 border-t pt-3">
-            <h2 className="text-xs font-medium text-muted-foreground">Sessions of this repo</h2>
-            <ul className="flex flex-col">
-              {(showAll ? listed : listed.slice(0, SESSIONS_SHOWN)).map((s) => (
-                <li key={s.id} className="flex min-h-9 flex-wrap items-center gap-x-2 text-sm">
-                  <span className={cn("size-1.5 rounded-full", s.status === "running" ? "bg-emerald-500" : "bg-muted-foreground/40")} aria-hidden="true" />
-                  <span className="font-mono text-[13px]">{s.id}</span>
-                  <span className="text-muted-foreground">{s.runtime === "chat" ? "chat" : "terminal"} · {s.status}</span>
-                  {runningOther.includes(s) && <Button type="button" size="sm" variant="ghost" className="ml-auto" disabled={busy} onClick={() => openRunning(s)}>Open</Button>}
-                </li>
-              ))}
-            </ul>
-            {repoSessions.length > SESSIONS_SHOWN && (
-              <Button type="button" variant="ghost" size="sm" className="-ml-2 self-start px-2 text-muted-foreground" aria-expanded={showAll} onClick={() => setShowAll((v) => !v)}>
-                {showAll ? "Show fewer" : `Show all ${repoSessions.length}`}
+          <section aria-label="Sessions of this repo" className="flex flex-col gap-1">
+            <p className="flex items-center gap-1 text-xs text-muted-foreground">
+              {repoSessions.length} {repoSessions.length === 1 ? "session" : "sessions"} in this repo ·
+              <Button type="button" variant="link" size="sm" className="h-auto min-h-0 px-0 text-xs text-muted-foreground underline-offset-2 hover:text-foreground" aria-expanded={showAll} onClick={() => setShowAll((v) => !v)}>
+                {showAll ? "Hide" : "Show"}
               </Button>
+            </p>
+            {showAll && (
+              <ul className="flex flex-col">
+                {listed.map((s) => (
+                  <li key={s.id} className="flex min-h-9 flex-wrap items-center gap-x-2 text-sm">
+                    <span className={cn("size-1.5 rounded-full", s.status === "running" ? "bg-emerald-500" : "bg-muted-foreground/40")} aria-hidden="true" />
+                    <span className="font-mono text-[13px]">{s.id}</span>
+                    <span className="text-muted-foreground">{s.runtime === "chat" ? "chat" : "terminal"} · {s.status}</span>
+                    {runningOther.includes(s) && <Button type="button" size="sm" variant="ghost" className="ml-auto" disabled={busy} onClick={() => openRunning(s)}>Open</Button>}
+                  </li>
+                ))}
+              </ul>
             )}
-            {runningOther.length > 0 && <Hint>Starting here creates a {what} session next to the running {runningOther[0].runtime === "chat" ? "chat" : "terminal"} one.</Hint>}
+            {showAll && runningOther.length > 0 && <Hint>Starting here creates a {what} session next to the running {runningOther[0].runtime === "chat" ? "chat" : "terminal"} one.</Hint>}
           </section>
         )}
       </div>
@@ -281,23 +285,15 @@ function Hint({ children }: { children: ReactNode }) {
 }
 
 /** The repo: one searchable list over the tree's folder/project/repo cascade, grouped by project (a combobox: type to
- *  filter, arrows to move, Enter to pick). The chip shows the whole path. */
+ *  filter, arrows to move, Enter to pick; matches by repo or project first, see repoSearch). The chip shows the path. */
 function RepoPicker({ tree, value, disabled, onPick }: { tree: TreeProject[] | null; value: string; disabled: boolean; onPick: (key: string) => void }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const groups = (tree ?? []).slice()
-    .sort((a, b) => a.folder.localeCompare(b.folder) || a.project.localeCompare(b.project))
-    .map((g) => ({
-      label: g.project === g.folder ? g.folder : `${g.folder} / ${g.project}`,
-      items: repoChoices(tree ?? [], g.folder, g.project)
-        .filter((r) => terms.every((t) => `${g.folder}/${g.project}/${r.value}`.toLowerCase().includes(t)))
-        .map((r) => ({ key: pickKey(g.folder, g.project, r.value), repo: r })),
-    }))
-    .filter((g) => g.items.length > 0);
-  const flat = groups.flatMap((g) => g.items);
+  const terms = searchTerms(query);
+  const sections = repoSearch(tree ?? [], query);
+  const flat = sections.flatMap((s) => s.groups.flatMap((g) => g.items));
   const at = Math.min(active, Math.max(flat.length - 1, 0));
   useEffect(() => {
     listRef.current?.querySelector(`[data-index="${at}"]`)?.scrollIntoView({ block: "nearest" });
@@ -306,6 +302,13 @@ function RepoPicker({ tree, value, disabled, onPick }: { tree: TreeProject[] | n
   const [folder, project, repo] = value ? JSON.parse(value) as [string, string, string] : ["", "", ""];
   const path = value ? [folder, ...(project === folder ? [] : [project])].join(" / ") : null;
   const pick = (key: string) => { onPick(key); setOpen(false); };
+  const marked = (text: string) => highlight(text, terms).map((part, i) =>
+    part.hit ? <mark key={i} className="rounded-[3px] bg-amber-300/45 text-inherit dark:bg-amber-400/30">{part.text}</mark> : <span key={i}>{part.text}</span>);
+  // A group's project can be what matched (repoSearch), its folder never is: only the part after the folder is marked.
+  const groupLabel = (label: string) => {
+    const cut = label.indexOf(" / ");
+    return cut === -1 ? label : <>{label.slice(0, cut + 3)}{marked(label.slice(cut + 3))}</>;
+  };
   let index = -1;
   return (
     <Popover open={open} onOpenChange={(next) => { setOpen(next); if (next) { setQuery(""); setActive(Math.max(flat.findIndex((o) => o.key === value), 0)); } }}>
@@ -327,13 +330,14 @@ function RepoPicker({ tree, value, disabled, onPick }: { tree: TreeProject[] | n
           <ChevronDown className="size-3.5 shrink-0 opacity-50" aria-hidden="true" />
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" sideOffset={6} collisionPadding={16} className="w-[min(26rem,calc(100vw-2rem))] p-0">
+      {/* As wide as the page's column, so it covers what is under it instead of leaving fragments at its edge. */}
+      <PopoverContent align="start" sideOffset={6} collisionPadding={16} className="z-50 w-[min(42rem,calc(100vw-2rem))] overflow-hidden rounded-xl bg-popover p-0 shadow-lg">
         <div className="flex items-center gap-2 border-b px-3">
           <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
           <input
             autoFocus role="combobox" aria-expanded="true" aria-controls="repo-list" aria-label="Search repos"
             aria-activedescendant={flat.length > 0 ? `repo-opt-${at}` : undefined}
-            placeholder="Search repos" value={query}
+            placeholder="Search repos and projects" value={query}
             className="h-11 min-w-0 flex-1 bg-transparent text-base outline-none placeholder:text-muted-foreground sm:text-sm"
             onChange={(e) => { setQuery(e.target.value); setActive(0); }}
             onKeyDown={(e) => {
@@ -345,24 +349,29 @@ function RepoPicker({ tree, value, disabled, onPick }: { tree: TreeProject[] | n
         </div>
         <div ref={listRef} id="repo-list" role="listbox" aria-label="Repos" className="max-h-[min(22rem,50dvh)] overflow-y-auto p-1">
           {flat.length === 0 && <p className="px-2 py-3 text-sm text-muted-foreground">No repo matches “{query}”.</p>}
-          {groups.map((g) => (
-            <div key={g.label} role="group" aria-label={g.label}>
-              <p aria-hidden="true" className="px-2 pb-1 pt-2 text-xs font-medium text-muted-foreground">{g.label}</p>
-              {g.items.map((o) => {
-                index += 1;
-                const i = index;
-                return (
-                  <div
-                    key={o.key} id={`repo-opt-${i}`} data-index={i} role="option" aria-selected={o.key === value}
-                    onMouseMove={() => { if (i !== at) setActive(i); }} onClick={() => pick(o.key)}
-                    className={cn("flex min-h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm", i === at && "bg-accent")}
-                  >
-                    <Check className={cn("size-4 shrink-0", o.key === value ? "" : "invisible")} aria-hidden="true" />
-                    <span className="min-w-0 flex-1 truncate">{o.repo.value === SOLO ? "No repo (claudeSolo)" : o.repo.value}</span>
-                    {o.repo.cloned && <span className="text-xs text-muted-foreground">cloned</span>}
-                  </div>
-                );
-              })}
+          {sections.map((section) => (
+            <div key={section.heading ?? ""} role="group" aria-label={section.heading ?? "Matches"}>
+              {section.heading && <p aria-hidden="true" className="mt-1 border-t px-2 pb-0.5 pt-2.5 text-xs font-semibold text-foreground/70">{section.heading}</p>}
+              {section.groups.map((g) => (
+                <div key={g.label} role="group" aria-label={g.label || section.heading || undefined}>
+                  {g.label && <p aria-hidden="true" className="px-2 pb-1 pt-2 text-xs font-medium text-muted-foreground">{groupLabel(g.label)}</p>}
+                  {g.items.map((o) => {
+                    index += 1;
+                    const i = index;
+                    return (
+                      <div
+                        key={o.key} id={`repo-opt-${i}`} data-index={i} role="option" aria-selected={o.key === value}
+                        onMouseMove={() => { if (i !== at) setActive(i); }} onClick={() => pick(o.key)}
+                        className={cn("flex min-h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm", i === at && "bg-accent")}
+                      >
+                        <Check className={cn("size-4 shrink-0", o.key === value ? "" : "invisible")} aria-hidden="true" />
+                        <span className="min-w-0 flex-1 truncate">{o.repo.value === SOLO ? "No repo (claudeSolo)" : marked(o.repo.value)}</span>
+                        {o.repo.cloned && <span className="text-xs text-muted-foreground">cloned</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
             </div>
           ))}
         </div>
@@ -382,7 +391,7 @@ function AgentMenu({ agent, disabled, onPick }: { agent: AgentName; disabled: bo
           className="h-8 min-w-0 max-w-56 shrink gap-1.5 rounded-full px-2.5 font-medium text-foreground/90 hover:bg-accent hover:text-foreground has-[>svg]:px-2.5 data-[state=open]:bg-accent data-[state=open]:text-foreground"
         >
           <AgentGlyph agent={agent} />
-          <span className="truncate max-sm:group-data-[chip=mark]/box:hidden">{profile.label}</span>
+          <span className="truncate">{profile.label}</span>
           <ChevronDown aria-hidden="true" className="size-3.5 opacity-50" />
         </Button>
       </DropdownMenuTrigger>

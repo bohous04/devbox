@@ -27,7 +27,7 @@ function textWidth(text: string, css: CSSStyleDeclaration): number {
  *  Images pasted, dropped or picked (at most 10) are scaled down (imageView.ts), previewed and go with the next message.
  *  While a run is active and nothing is typed, the round primary button stops the run; with text typed it sends
  *  (queues) and a separate stop button sits next to it. */
-export function Composer({ running, onSend, onStop, controls, notices, placeholder: placeholderText, start, onDraft, fieldOff, imagesOff }: {
+export function Composer({ running, onSend, onStop, controls, notices, placeholder: placeholderText, start, onDraft, fieldOff, imagesOff, card = false }: {
   running: boolean;
   /** Replaces the default placeholder (e.g. the new-session page's). */
   placeholder?: string;
@@ -37,6 +37,8 @@ export function Composer({ running, onSend, onStop, controls, notices, placehold
   onDraft?: (text: string) => void;
   /** Why this message cannot take text: the field is disabled while empty (typed text stays editable, to clear it). */
   fieldOff?: string;
+  /** Always the two-tier card, also on a phone at rest (the new-session page: a start screen with room for it). */
+  card?: boolean;
   /** Why this message cannot take images: attaching is disabled, a paste or drop says why. */
   imagesOff?: string;
   /** Inside the box, bottom right: the session's agent, model and account switchers. */
@@ -58,7 +60,7 @@ export function Composer({ running, onSend, onStop, controls, notices, placehold
   // attached; otherwise the two-tier card (the field on top across the full width, the toolbar below). Only the
   // container's classes change, never the textarea element, so focus, caret and the on-screen keyboard survive.
   const [twoTier, setTwoTier] = useState(false);
-  const oneRow = !twoTier && images.length === 0;
+  const oneRow = !card && !twoTier && images.length === 0;
   // The field's width in the one-row layout with text (the chip then shows only its mark), for the way back.
   const oneRowWidth = useRef(0);
   const [redecide, setRedecide] = useState(0);
@@ -238,7 +240,9 @@ export function Composer({ running, onSend, onStop, controls, notices, placehold
                 // Scrolled: the top 12px of the field fade out, inside the field, so nothing is cut hard at its edge.
                 scrolled && "[mask-image:linear-gradient(to_bottom,transparent,black_0.75rem)]",
                 // An empty phone row keeps the placeholder on its line instead of wrapping it.
-                text === "" && "max-sm:overflow-hidden max-sm:whitespace-nowrap",
+                text === "" && !card && "max-sm:overflow-hidden max-sm:whitespace-nowrap",
+                // The card on a phone rests two lines tall too, as it does from sm.
+                card && "min-h-[52px]",
               )}
               onScroll={(e) => setScrolled(e.currentTarget.scrollTop > 0)}
               value={text}

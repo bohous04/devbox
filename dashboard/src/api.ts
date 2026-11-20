@@ -539,7 +539,7 @@ export const api = {
   // (`d.mgr.openSolo`), see devd/src/api.ts.
   /** `prompt`: the session's first message (chat: its first turn; tmux: the agent's start prompt); devd refuses what it
    *  cannot deliver (InstaBox, a running terminal session, a terminal prompt starting with '-') instead of dropping it. */
-  openSession: (t: { folder: string; project: string; repo: string; cloneUrl?: string; agent?: AgentName; fresh?: boolean; runtime?: SessionRuntime; prompt?: string }) => j<OpenResult>("/api/sessions", post(t)),
+  openSession: (t: { folder: string; project: string; repo: string; cloneUrl?: string; agent?: AgentName; fresh?: boolean; runtime?: SessionRuntime; prompt?: string; sessionId?: string }) => j<OpenResult>("/api/sessions", post(t)),
   openSolo: (t: { folder: string; project: string; agent?: AgentName }) => j<OpenResult>("/api/sessions", post({ ...t, solo: true })),
   openInstabox: (t: { folder: string; project: string; repo: string; cloneUrl: string; agent?: AgentName; runtime?: "tmux" }) =>
     j<{ jobId: string; sessionId: string; runtime: "tmux"; runtimeNotice?: string }>("/api/sessions", post({ ...t, host: "instabox" })),
