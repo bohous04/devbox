@@ -402,6 +402,38 @@ test("T8: a live store from step 2 (no schema version) opens with its data uncha
   rmSync(dir, { recursive: true, force: true });
 });
 
+/** A schema 1 store as devd wrote it before the effort table (main 9db8072^ = before #91): step 2's tables plus
+ *  provider_threads, failure_reason and attachments, user_version 1. */
+function schema1WithoutEffort(dir: string): void {
+  step2Store(dir);
+  const db = new Database(ThreadStore.path(dir, "dev-a-b-1"));
+  db.run(`CREATE TABLE provider_threads (
+    harness TEXT NOT NULL, account TEXT, native_thread_id TEXT NOT NULL, covered_through_run TEXT,
+    last_used_at INTEGER NOT NULL, caps TEXT, resume_failed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (harness, native_thread_id))`);
+  db.run("ALTER TABLE runs ADD COLUMN failure_reason TEXT");
+  db.run("ALTER TABLE items ADD COLUMN attachments TEXT");
+  db.run("PRAGMA user_version = 1");
+  db.close();
+}
+
+test("T8: a schema 1 store from before the effort table opens, reads with no effort reported and takes an effort.state", () => {
+  const dir = mkdtempSync(join(tmpdir(), "threads-"));
+  schema1WithoutEffort(dir);
+  try {
+    const s = ThreadStore.open(dir, "dev-a-b-1");
+    expect(s.snapshot()).toMatchObject({ lastSeq: 3, effort: null });
+    expect(s.effort()).toBeNull();
+    expect(s.lastMessageText()).toBe("hi");
+    n = 3;
+    s.apply(ev({ type: "effort.state", model: "m", supported: ["low", "high"], effective: "high", chosen: null }));
+    expect(s.snapshot().effort).toEqual({ model: "m", supported: ["low", "high"], effective: "high", chosen: null });
+    s.close();
+    // Still schema 1, so a devd from before the effort table keeps opening it after a rollback.
+    expect(userVersion(dir)).toBe(1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("T8: a store written by a newer devd (higher schema version) is refused with an explicit error", () => {
   const dir = mkdtempSync(join(tmpdir(), "threads-"));
   ThreadStore.open(dir, "dev-a-b-1").close();

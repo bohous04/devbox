@@ -26,6 +26,8 @@ export interface ProviderThread {
  *  previous version in `open`; a store with a higher version (written by a newer devd) is refused, never guessed at. */
 export const THREAD_STORE_SCHEMA = 1;
 
+const EFFORT_TABLE = `CREATE TABLE IF NOT EXISTS effort (id INTEGER PRIMARY KEY CHECK (id = 1), state TEXT NOT NULL)`;
+
 /** Per-session conversation store: `<root>/_threads/<id>.sqlite`. Conversation data stays out of the
  *  main devd DB on purpose. Items are ordered by their own `id`; `seq` is the log seq of the event that created them (one event can create
  *  several items); `updated_seq`
@@ -53,6 +55,9 @@ export class ThreadStore {
       throw new Error(`thread store schema ${version} is newer than this devd's (${THREAD_STORE_SCHEMA}): ${ThreadStore.path(root, sessionId)}`);
     }
     if (version === 0) db.transaction(() => ThreadStore.createSchema1(db))();
+    // The effort table joined schema 1 after schema 1 shipped (#91), so a schema 1 store may lack it. Created here
+    // without raising the version: a devd from before it ignores the table and keeps opening the store on a rollback.
+    else db.run(EFFORT_TABLE);
     return new ThreadStore(db, opts.onNotice ?? (() => {}));
   }
 
@@ -78,7 +83,7 @@ export class ThreadStore {
     db.run(`CREATE TABLE IF NOT EXISTS native (
       id INTEGER PRIMARY KEY CHECK (id = 1), harness TEXT NOT NULL, native_thread_id TEXT NOT NULL,
       account TEXT, model TEXT)`);
-    db.run(`CREATE TABLE IF NOT EXISTS effort (id INTEGER PRIMARY KEY CHECK (id = 1), state TEXT NOT NULL)`);
+    db.run(EFFORT_TABLE);
     db.run(`CREATE TABLE IF NOT EXISTS provider_threads (
       harness TEXT NOT NULL, account TEXT, native_thread_id TEXT NOT NULL, covered_through_run TEXT,
       last_used_at INTEGER NOT NULL, caps TEXT, resume_failed INTEGER NOT NULL DEFAULT 0,
