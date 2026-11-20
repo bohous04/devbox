@@ -109,7 +109,7 @@ export interface SessionDeps {
   /** Drops the chat session's bridge link and closes its thread store. Runs inside the session lock: at the
    *  start of stop(), and in end() right before the archive, so no handle is open when end() archives
    *  `_threads/<id>.sqlite`. */
-  releaseThread?: (session: string) => void;
+  releaseThread?: (session: string, ended?: boolean) => void;
   /** Sidecar with its own docker daemon instead of the host socket. Opt-in. */
   dind?: boolean;
   /** Is the session shared or tainted (shareTaint.ts) RIGHT NOW, relative to the container that
@@ -1458,7 +1458,7 @@ export class SessionManager {
         this.d.revokePlaceholder?.(id);
         await this.killSshAgent(id);
         rmSync(this.controlDir(id), { recursive: true, force: true });
-        this.d.releaseThread?.(id);
+        this.d.releaseThread?.(id, true);
         this.keepChats(id);
         deleteGitStat(this.d.db, id);
         try { releaseLeasesForSession(this.d.db, id, this.now()); }
@@ -1488,7 +1488,7 @@ export class SessionManager {
       // _chat-archive instead of piling up under _claude-projects or being deleted.
       // The chat store is released only now: until the container is gone the bridge may still send events, and
       // the store takes them (isEnding keeps readers out). Closed here, it is archived with no handle open.
-      this.d.releaseThread?.(id);
+      this.d.releaseThread?.(id, true);
       this.keepChats(id);
       // Its chat images go only now (S5-R23): the bridge that read them is gone with the container. A failure leaves
       // them on disk (logged) and must not leave the session row behind, like the lease release below.

@@ -131,7 +131,8 @@ function parseServerFrame(line: string): ServerFrame {
       if (f.awaitingTarget !== undefined && typeof f.awaitingTarget !== "boolean") throw new MalformedFrame("ready with a non-boolean awaitingTarget");
       return f as ServerFrame;
     default:
-      throw new MalformedFrame(`unknown frame type ${String(f.t)}`);
+      // The type is repeated (log, thread notice) only when it looks like one: a bridge's text must not forge lines.
+      throw new MalformedFrame(typeof f.t === "string" && /^[a-z_]{1,16}$/.test(f.t) ? `unknown frame type ${f.t}` : "unknown frame type");
   }
 }
 
@@ -247,6 +248,11 @@ export class BridgeLinks {
     link.socket?.end();
     link.socket = null;
     this.failPending(link, "link dropped");
+  }
+
+  /** The session ended: a later session that reuses the id starts without its refusal rate limit. */
+  forget(sessionId: string): void {
+    this.refusedNotifiedAt.delete(sessionId);
   }
 
   status(sessionId: string): LinkStatus {
@@ -540,8 +546,7 @@ export class BridgeLinks {
       } catch (err) {
         // Before the bind nothing is this session's yet: no poison counting, no skipped event, just a refusal.
         if (link.nonce !== null) {
-          const what = err instanceof MalformedFrame ? err.message : "unreadable";
-          this.refuse(sessionId, link, `devd refused the agent bridge of ${sessionId}: the agent bridge did not prove its session (its first frame was malformed: ${what}). devd keeps retrying; if this stays, end and reopen the session.`);
+          this.refuse(sessionId, link, `devd refused the agent bridge of ${sessionId}: the agent bridge did not prove its session (its first frame was malformed). devd keeps retrying; if this stays, end and reopen the session.`);
           return;
         }
         // A malformed frame or a store write error: drop this connection (onClose logs why); the reconnect's

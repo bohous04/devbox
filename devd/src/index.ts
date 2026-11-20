@@ -525,8 +525,9 @@ reportPrunedFirstPrompts({ db, threads: threadStore, notify }, prunedFirstTurns)
   const legacy = legacyBridgeStartupLine(chatSessionsWithoutBridgeSecret(db), LEGACY_BRIDGE_UNTIL);
   if (legacy) console.error(legacy);
 }
-const releaseThread = (id: string) => {
+const releaseThread = (id: string, ended = false) => {
   bridgeLinks.drop(id);
+  if (ended) bridgeLinks.forget(id);
   chatHub.drop(id);
   chatSwitch.drop(id);
   threadStores.get(id)?.close();

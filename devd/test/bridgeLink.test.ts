@@ -843,3 +843,35 @@ test("binding: the user is notified at most once per 30 minutes per session, eve
   await flip({ session: ID, secret: SECRET }, () => links.status(ID) === "connected", "accepted again");
   await flip({ session: "dev-harbor-api", secret: SECRET }, () => refusals.length === 2, "notified again after 30 min");
 });
+
+test("binding: a forged frame type (with a newline) before the bind never reaches the log, the thread or the user", async () => {
+  const { links, store, serve, logs, refusals } = setup([], { secret: SECRET });
+  serve({ onHello: JSON.stringify({ t: "x\nforged line" }) + "\n" });
+  links.ensure(ID);
+  await waitFor(() => refusals.length === 1, "refusal");
+  expect(refusals[0]).toContain("its first frame was malformed");
+  for (const t of [...logs, ...notices(store), ...refusals]) expect(t).not.toContain("forged");
+});
+
+test("a forged frame type on a live link is not repeated in the log or the thread either", async () => {
+  const { links, store, serve, logs } = setup();
+  const b = serve();
+  links.ensure(ID);
+  await waitFor(() => links.status(ID) === "connected", "link");
+  b.raw(JSON.stringify({ t: "x\nforged line" }) + "\n");
+  await waitFor(() => logs.some((l) => l.includes("unknown frame type")), "drop logged");
+  for (const t of [...logs, ...notices(store)]) expect(t).not.toContain("forged");
+});
+
+test("binding: forget(id) after a session ended lets a session reusing the id be notified at once", async () => {
+  const { links, serve, refusals } = setup([], { secret: SECRET });
+  const b = serve({ binding: { session: "dev-harbor-api", secret: SECRET } });
+  links.ensure(ID);
+  await waitFor(() => refusals.length === 1, "first refusal");
+  links.drop(ID);
+  links.forget(ID);
+  b.close();
+  serve({ binding: { session: "dev-harbor-api", secret: SECRET } });
+  links.ensure(ID);
+  await waitFor(() => refusals.length === 2, "notified again for the new session");
+});
