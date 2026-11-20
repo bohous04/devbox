@@ -70,7 +70,7 @@ extension View {
     /// label's) and a dropdown arrow to an icon button; the iPhone draws only the label already.
     func labelOnlyMenu() -> some View {
         #if os(macOS)
-        menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
         #else
         self
         #endif

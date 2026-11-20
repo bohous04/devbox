@@ -264,6 +264,8 @@ private struct MacGroupHead: View {
                 Text("\(count)").monospacedDigit().foregroundStyle(Theme.C.mutedForeground)
             }
             .font(.system(size: 12, weight: .semibold))
+            // A section header runs wider than the rows; the inset ends the count where the rows' text ends.
+            .padding(.trailing, 14)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
