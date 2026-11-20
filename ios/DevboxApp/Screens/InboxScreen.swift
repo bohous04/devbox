@@ -54,127 +54,306 @@ struct InboxScreen: View {
 
     @ViewBuilder
     private func content(_ g: InboxView.Groups) -> some View {
-        ScreenScroll {
-            if store.paused || store.badFrame != nil {
-                Text(store.paused ? "Live updates paused — refreshing every 5 s\(store.loadError.map { " (last refresh failed: \($0))" } ?? "")"
-                     : "Live update dropped: \(store.badFrame ?? "")")
-                    .font(Theme.F.meta)
-                    .foregroundStyle(Theme.C.warnText)
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Theme.C.warn.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.R.md))
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                SectionHeader("Needs you · \(g.needsYou.count)")
-                if g.needsYou.isEmpty {
-                    EmptyState("Nothing waiting for you", systemImage: "checkmark.circle")
-                } else {
-                    rows(g.needsYou)
-                }
-            }
-            shelf("Working", g.working)
-            VStack(alignment: .leading, spacing: 8) {
-                SectionHeader("Idle · \(g.idle.count)")
-                if !g.idle.isEmpty { rows(g.idle) }
-            }
-            shelf("Snoozed", g.snoozed)
-            shelf("Settled", g.settled)
-        }
-        .refreshable { await store.load() }
-    }
-
-    /// A section that starts collapsed (Working, Snoozed, Settled).
-    @ViewBuilder
-    private func shelf(_ label: String, _ items: [InboxItem]) -> some View {
-        let open = openShelves.contains(label)
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                SectionHeader("\(label) · \(items.count)")
-                if !items.isEmpty {
-                    Button(open ? "hide" : "show") {
-                        if open { openShelves.remove(label) } else { openShelves.insert(label) }
+        let split = InboxView.splitNeedsYou(g.needsYou)
+        ScrollViewReader { proxy in
+        ScrollView {
+            // Relative times tick every 15 s, as the dashboard's.
+            TimelineView(.periodic(from: .now, by: 15)) { context in
+                let now = InboxView.ms(context.date)
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if store.paused || store.badFrame != nil {
+                        Text(store.paused ? "Live updates paused — refreshing every 5 s\(store.loadError.map { " (last refresh failed: \($0))" } ?? "")"
+                             : "Live update dropped: \(store.badFrame ?? "")")
+                            .font(Theme.F.meta)
+                            .foregroundStyle(Theme.C.warnText)
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Theme.C.warn.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.R.md))
+                            .padding(.horizontal, 4)
+                            .padding(.bottom, 12)
                     }
-                    .font(Theme.F.meta)
-                    .foregroundStyle(Theme.C.mutedForeground)
-                    .accessibilityLabel(open ? "Hide \(label)" : "Show \(label)")
+                    if split.action.isEmpty {
+                        Label { Text("Nothing waiting for you") } icon: { Image(systemName: "checkmark.circle").foregroundStyle(InboxTone.doneIcon) }
+                            .font(.subheadline)
+                            .foregroundStyle(Theme.C.mutedForeground)
+                            .frame(minHeight: 44)
+                            .padding(.horizontal, 12)
+                            .padding(.bottom, 12)
+                    }
+                    group("Needs you", split.action, now: now, preview: true)
+                    group("Finished", split.finished, now: now, preview: false, cap: 5)
+                    group("Idle", g.idle, now: now, preview: false)
+                    if g.working.count + g.snoozed.count + g.settled.count > 0 {
+                        Divider().padding(.horizontal, 12).padding(.bottom, 4)
+                        shelf("Working", g.working, now: now, preview: true)
+                        shelf("Snoozed", g.snoozed, now: now, preview: true)
+                        shelf("Settled", g.settled, now: now, preview: false)
+                    }
                 }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 8)
             }
-            if open && !items.isEmpty { rows(items) }
+            Color.clear.frame(height: 1).id(Self.bottomId)
+        }
+        .background(Theme.C.background)
+        .refreshable { await store.load() }
+        #if DEBUG
+        .task {
+            // Screenshot mode only (Support/Fixtures): show the end of the list, once per launch.
+            guard FixtureMode.scrollToBottom, !Self.scrolledToBottom else { return }
+            Self.scrolledToBottom = true
+            try? await Task.sleep(for: .milliseconds(300))
+            proxy.scrollTo(Self.bottomId, anchor: .bottom)
+        }
+        #endif
         }
     }
 
-    private func rows(_ items: [InboxItem]) -> some View {
-        VStack(spacing: 0) {
+    private static let bottomId = "inbox-bottom"
+    #if DEBUG
+    @MainActor private static var scrolledToBottom = false
+    #endif
+
+    /// An open group, not shown while empty. With `cap`, rows past it hide behind a counted "N more" toggle.
+    @ViewBuilder
+    private func group(_ label: String, _ items: [InboxItem], now: Int, preview: Bool, cap: Int? = nil) -> some View {
+        if !items.isEmpty {
+            let all = openShelves.contains(label)
+            let shown = cap.map { all ? items : Array(items.prefix($0)) } ?? items
+            VStack(alignment: .leading, spacing: 2) {
+                InboxGroupHead(label: label, count: items.count)
+                rows(shown, now: now, preview: preview)
+                if let cap, items.count > cap {
+                    Button { toggle(label) } label: {
+                        HStack(spacing: 4) {
+                            Text(all ? "Show fewer" : "\(items.count - cap) more")
+                            Image(systemName: "chevron.down").font(.caption2.weight(.semibold)).rotationEffect(.degrees(all ? 180 : 0))
+                        }
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.C.mutedForeground)
+                        .frame(minHeight: 44)
+                        .padding(.horizontal, 12)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityValue(all ? "expanded" : "collapsed")
+                }
+            }
+            .padding(.bottom, 16)
+        }
+    }
+
+    /// A group that starts collapsed (Working, Snoozed, Settled); not shown while empty.
+    @ViewBuilder
+    private func shelf(_ label: String, _ items: [InboxItem], now: Int, preview: Bool) -> some View {
+        if !items.isEmpty {
+            let open = openShelves.contains(label)
+            VStack(alignment: .leading, spacing: 2) {
+                Button { toggle(label) } label: {
+                    InboxGroupHead(label: label, count: items.count, open: open)
+                }
+                .buttonStyle(InboxPressStyle())
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityLabel("\(label), \(items.count)")
+                .accessibilityValue(open ? "expanded" : "collapsed")
+                .accessibilityHint(open ? "Hides these sessions" : "Shows these sessions")
+                if open { rows(items, now: now, preview: preview).padding(.bottom, 8) }
+            }
+        }
+    }
+
+    private func toggle(_ label: String) {
+        if openShelves.contains(label) { openShelves.remove(label) } else { openShelves.insert(label) }
+    }
+
+    private func rows(_ items: [InboxItem], now: Int, preview: Bool) -> some View {
+        VStack(spacing: 2) {
             ForEach(items) { item in
                 HStack(alignment: .top, spacing: 0) {
                     NavigationLink(value: item.runtime == .chat ? InboxRoute.thread(item.sessionId) : InboxRoute.session(item.sessionId)) {
-                        InboxRow(item: item)
+                        InboxRow(item: item, now: now, preview: preview)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(InboxPressStyle())
                     Button { actionsFor = item } label: {
                         Image(systemName: "ellipsis")
                             .frame(width: 44, height: 44)
                             .foregroundStyle(Theme.C.mutedForeground)
+                            .contentShape(Rectangle())
                     }
-                    .accessibilityLabel("Actions for \(item.title)")
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Actions for \(InboxView.rowTitle(item).text)")
                 }
-                if item.id != items.last?.id { Divider() }
             }
         }
-        .background(Theme.C.card, in: RoundedRectangle(cornerRadius: Theme.R.xl))
-        .overlay(RoundedRectangle(cornerRadius: Theme.R.xl).strokeBorder(Theme.C.border))
     }
 }
 
-struct InboxRow: View {
-    let item: InboxItem
+/// A quiet group heading: name, count, and for the shelves a chevron.
+private struct InboxGroupHead: View {
+    let label: String
+    let count: Int
+    var open: Bool?
 
-    private var tone: StatusTone {
-        if InboxView.isProblem(item.attention.reason) { return .danger }
-        switch item.attention.section {
-        case .needsYou: return .warn
-        case .working: return .ok
-        case .idle, .snoozed, .settled, .unknown: return .idle
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(label).font(.subheadline.weight(.semibold)).foregroundStyle(Theme.C.foreground.opacity(0.9))
+            Text("\(count)").font(.subheadline.monospacedDigit()).foregroundStyle(Theme.C.mutedForeground)
+            if let open {
+                Spacer()
+                Image(systemName: "chevron.down")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.C.mutedForeground)
+                    .rotationEffect(.degrees(open ? 180 : 0))
+            }
+        }
+        // A shelf's head is its toggle: a full touch target.
+        .frame(minHeight: open == nil ? 36 : 44)
+        .padding(.horizontal, 12)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// A pressed row tints like the dashboard's hovered row.
+private struct InboxPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(Theme.C.muted.opacity(configuration.isPressed ? 0.9 : 0), in: RoundedRectangle(cornerRadius: Theme.R.lg, style: .continuous))
+    }
+}
+
+/// The dashboard's status tones (inboxView.ts `StatusTone`, Inbox.tsx `TONE`) and project-badge tints.
+enum InboxTone {
+    static let action = Color(light: 0xB45309, dark: 0xFCD34D)
+    static let danger = Color(light: 0xDC2626, dark: 0xF87171)
+    static let doneIcon = Color(light: 0x059669, dark: 0x34D399)
+    static let busy = Color(light: 0x0369A1, dark: 0x7DD3FC)
+
+    static func text(_ t: InboxView.Tone) -> Color {
+        switch t {
+        case .action: return action
+        case .danger: return danger
+        case .busy: return busy
+        case .done, .quiet: return Theme.C.mutedForeground
         }
     }
 
-    private var meta: String {
-        let a = item.attention
-        let repo = "\(item.project)/\(item.repo)"
-        return [a.until.map { "snoozed until \(InboxRow.untilLabel($0))" } ?? "", InboxView.reasonLabel(a.reason), item.title == repo ? "" : repo]
-            .filter { !$0.isEmpty }.joined(separator: " · ")
+    static func icon(_ t: InboxView.Tone) -> String {
+        switch t {
+        case .action: return "questionmark.bubble"
+        case .danger: return "exclamationmark.circle"
+        case .done: return "checkmark.circle"
+        case .busy: return "circle.dotted"
+        case .quiet: return "alarm"
+        }
     }
+
+    /// Badge slots: rose, amber, emerald, sky, violet, fuchsia (500 at 15% behind 800 / 300 text).
+    static let badge: [(fill: Color, text: Color)] = [
+        (Color(light: 0xF43F5E, dark: 0xF43F5E), Color(light: 0xBE123C, dark: 0xFDA4AF)),
+        (Color(light: 0xF59E0B, dark: 0xF59E0B), Color(light: 0x92400E, dark: 0xFCD34D)),
+        (Color(light: 0x10B981, dark: 0x10B981), Color(light: 0x065F46, dark: 0x6EE7B7)),
+        (Color(light: 0x0EA5E9, dark: 0x0EA5E9), Color(light: 0x075985, dark: 0x7DD3FC)),
+        (Color(light: 0x8B5CF6, dark: 0x8B5CF6), Color(light: 0x5B21B6, dark: 0xC4B5FD)),
+        (Color(light: 0xD946EF, dark: 0xD946EF), Color(light: 0x86198F, dark: 0xF0ABFC)),
+    ]
+}
+
+/// One row, the dashboard's shape: a meta line (project badge and path, state, time, agent), the title, and in
+/// groups where the latest message is the point (Needs you, Working, Snoozed) a dimmer preview line.
+struct InboxRow: View {
+    let item: InboxItem
+    let now: Int
+    let preview: Bool
+    /// The project badge's letters: small, but they grow with Dynamic Type.
+    @ScaledMetric(relativeTo: .caption2) private var badgeText: CGFloat = 9
 
     static func untilLabel(_ ms: Int) -> String {
         Date(timeIntervalSince1970: Double(ms) / 1000).formatted(.dateTime.weekday(.abbreviated).hour().minute())
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            StatusDot(tone, pulse: item.attention.section == .working).padding(.top, 6)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(item.title).font(Theme.F.body.weight(.medium)).lineLimit(1)
-                    Badge(AgentProfiles.profile(for: AgentName(rawValue: item.agent)).short, variant: .secondary)
-                    if item.runtime == .tmux { Badge("tmux", variant: .outline) }
+        let a = item.attention
+        let title = InboxView.rowTitle(item)
+        let message = item.lastText.flatMap { title.fromMessage ? nil : InboxView.plainPreview($0) } ?? ""
+        let detail = message.isEmpty ? InboxView.reasonLabel(a.reason) : message
+        let parts = InboxView.statusParts(item, now: now, compact: !preview)
+        let badge = InboxView.projectBadge(item.project)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 5) {
+                Text(badge.letters)
+                    .font(.system(size: badgeText, weight: .bold))
+                    .tracking(0.3)
+                    .foregroundStyle(InboxTone.badge[badge.slot].text)
+                    .frame(minWidth: badgeText * 2.2, minHeight: badgeText * 1.8)
+                    .padding(.horizontal, 2)
+                    .background(InboxTone.badge[badge.slot].fill.opacity(0.15), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                (Text(item.project) + Text(" / ").foregroundColor(Theme.C.mutedForeground.opacity(0.6)) + Text(item.repo))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .layoutPriority(-1)
+                dot
+                if let parts {
+                    status(parts)
+                    dot
                 }
-                if !meta.isEmpty {
-                    Text(meta).font(Theme.F.meta).foregroundStyle(Theme.C.mutedForeground).lineLimit(1)
-                }
-                if let last = item.lastText {
-                    Text(last).font(Theme.F.meta).foregroundStyle(Theme.C.mutedForeground.opacity(0.9)).lineLimit(1)
+                ForEach(Array(InboxView.metaTail(item).enumerated()), id: \.offset) { n, part in
+                    if n > 0 { dot }
+                    Text(part).fixedSize()
                 }
             }
-            Spacer(minLength: 4)
-            if item.attention.since > 0 {
-                Text(Format.agoLabel(Date().timeIntervalSince1970 * 1000 - Double(item.attention.since)))
-                    .font(Theme.F.meta.monospacedDigit())
-                    .foregroundStyle(Theme.C.mutedForeground)
+            .font(.caption)
+            .foregroundStyle(Theme.C.mutedForeground)
+            Text(title.text)
+                .font(.subheadline.weight(preview && !title.fromMessage ? .medium : .regular))
+                .foregroundStyle(title.fromMessage ? Theme.C.mutedForeground : preview ? Theme.C.foreground : Theme.C.foreground.opacity(0.85))
+                .lineLimit(1)
+            if preview && !detail.isEmpty {
+                Text(detail)
+                    .font(.footnote)
+                    .foregroundStyle(Theme.C.mutedForeground.opacity(0.8))
+                    .lineLimit(1)
             }
         }
-        .padding(.vertical, 12)
-        .padding(.leading, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 9)
+        .padding(.leading, 12)
         .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityText(title: title.text, detail: preview ? detail : ""))
+    }
+
+    private var dot: some View { Text("·").opacity(0.5).accessibilityHidden(true) }
+
+    @ViewBuilder
+    private func status(_ parts: InboxView.StatusParts) -> some View {
+        let when = parts.until.map { "until \(Self.untilLabel($0))" } ?? parts.ago
+        HStack(spacing: 3) {
+            if let mark = parts.mark {
+                Image(systemName: InboxTone.icon(mark.tone))
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(mark.tone == .done ? InboxTone.doneIcon : InboxTone.text(mark.tone))
+                if parts.showLabel {
+                    Text(mark.label).fontWeight(.medium).foregroundStyle(InboxTone.text(mark.tone))
+                }
+            }
+            if !when.isEmpty {
+                Text(when).monospacedDigit()
+                    .foregroundStyle(parts.mark.map { InboxTone.text($0.tone).opacity(0.75) } ?? Theme.C.mutedForeground)
+            }
+        }
+        .fixedSize()
+    }
+
+    /// One spoken line per row: title, state in words, when, where, which agent.
+    private func accessibilityText(title: String, detail: String) -> String {
+        let a = item.attention
+        let state = InboxView.reasonLabel(a.reason)
+        let when = a.until.map { "snoozed until \(Self.untilLabel($0))" } ?? (a.since > 0 ? Format.agoLabel(Double(now - a.since)) : "")
+        let agent = AgentProfiles.profile(for: AgentName(rawValue: item.agent)).short
+        return [title, state, when, "\(item.project)/\(item.repo)", agent, item.runtime == .tmux ? "tmux" : "", detail == state ? "" : detail]
+            .filter { !$0.isEmpty }.joined(separator: ", ")
     }
 }
 
