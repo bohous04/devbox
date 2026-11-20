@@ -85,7 +85,8 @@ import { parseMeminfo, resourceBreakdown } from "./resources";
 import { classifyClaudeState, collectDiskUsage, collectDockerStatsAsync, collectGitStats, collectSessionGitStat, type DockerStat, type Runner } from "./stats";
 import { createTmuxProbe } from "./tmux";
 import { barePath, buildTree, ghLister, giteaLister, sessionWorkdir } from "./tree";
-import { setAgentGitRoots, setUntrustedGitRoots } from "./safeGit";
+import { AGENT_UID, setAgentGitRoots, setUntrustedGitRoots } from "./safeGit";
+import { ownershipHints } from "./agentRepos";
 import { memoAsync, memoAsyncStrict } from "./cache";
 import { selfUpdateStatus, startSelfUpdate, type SelfUpdateDeps } from "./selfUpdate";
 import { buildUnpushedReport, unpushedOps } from "./unpushed";
@@ -1038,6 +1039,14 @@ setUntrustedGitRoots(restrictedGitRoots);
 // Every agent-writable repo (workspaces, bare clones, session worktrees) lives under `root`:
 // host git over them runs as the container uid (safeGit.ts layer 4).
 setAgentGitRoots(() => [root]);
+// Repos root's git wrote into before that switch can hold root-owned files git as the agent uid
+// cannot rewrite (fetch/pull then fail). Say which; the fix is tools/own-agent-repos.ts.
+if (process.getuid?.() === 0) {
+  try {
+    const stale = ownershipHints(root);
+    if (stale.length) console.error(`${stale.length} agent repos have git files not owned by uid ${AGENT_UID} (host git may fail there; run tools/own-agent-repos.ts): ${stale.join(", ")}`);
+  } catch (e) { console.error("agent repo ownership check failed:", (e as Error).message); }
+}
 const syncShareFirewallSoon = () => {
   if (shareFirewall) void shareFirewall.sync().catch((e) => console.error(`share firewall: ${(e as Error).message}`));
 };

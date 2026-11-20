@@ -90,6 +90,15 @@ export function setAgentGitRoots(fn: (() => string[]) | null): void {
   agentRoots = fn ?? (() => []);
 }
 
+/** Where a git target (canonical path) sits relative to an agent root: "agent" = a repo or a
+ *  `_sessions/<id>` worktree (git runs as AGENT_UID), "own" = devd's other `_`-dirs (inbox, threads,
+ *  archives, recovery copies; never git targets, so git there is refused), "outside" = not under it. */
+export function classifyGitTarget(target: string, root: string): "agent" | "own" | "outside" {
+  if (!within(target, root)) return "outside";
+  const top = relative(root, target).split(sep)[0]!;
+  return top.startsWith("_") && top !== "_sessions" ? "own" : "agent";
+}
+
 /** Environment of git running as the agent uid: nothing from devd's process env (secrets, root's
  *  HOME/gitconfig/gh), no global or system config. Auth comes only from the caller's explicit env. */
 const AGENT_GIT_ENV: Readonly<Record<string, string>> = {
@@ -215,13 +224,9 @@ export async function hardenGit(cmd: string[], opts: RunOpts, raw: Raw, uid: num
   // (`_sessions/<id>`) are agent-writable git targets. devd's other `_`-dirs (inbox, threads,
   // archives, recovery copies) are never git targets, so git there is refused rather than run.
   const agent = agentRoots().filter(Boolean).map(canon);
-  const own = targets.some((t) => agent.some((r) => {
-    if (!within(t, r)) return false;
-    const top = relative(r, t).split(sep)[0]!;
-    return top.startsWith("_") && top !== "_sessions";
-  }));
-  if (own) return { result: refused("target is devd's own directory, not a repo") };
-  const dropToAgent = uid === 0 && targets.some((t) => agent.some((r) => within(t, r)));
+  const classes = targets.flatMap((t) => agent.map((r) => classifyGitTarget(t, r)));
+  if (classes.includes("own")) return { result: refused("target is devd's own directory, not a repo") };
+  const dropToAgent = uid === 0 && classes.includes("agent");
   const env = dropToAgent ? { ...(opts.env ?? {}), ...AGENT_GIT_ENV, ...SAFE_GIT_ENV } : { ...(opts.env ?? {}), ...SAFE_GIT_ENV };
   const unsetEnv = [...(opts.unsetEnv ?? []), ...UNSAFE_GIT_ENV];
   const envOpts = dropToAgent ? { env, unsetEnv, inheritEnv: false as const } : { env, unsetEnv };
