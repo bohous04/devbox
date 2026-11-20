@@ -212,10 +212,13 @@ test("unpushedOps.createPr works out the remote and base and passes them to the 
   expect(argv.slice(0, 9)).toEqual(["gh", "pr", "create", "--repo", "o/n", "--head", "main", "--base", "main"]);
 });
 
-test("gh pr create / pr list never run in the agent's repo (gh runs its own git there as root): cwd is /", async () => {
-  const cwds: string[] = [];
-  const ghRun = async (cwd: string) => { cwds.push(cwd); return { code: 0, stdout: "[]", stderr: "" }; };
-  await createPr({ dir: "/srv/dev/harbor/api", branch: "f", base: "main", title: "T", body: "", remote: gh, giteaToken: undefined, ghRun }).catch(() => {});
+test("gh pr create / pr list: full argv, and never run in the agent's repo (gh runs its own git there as root): cwd is /", async () => {
+  const calls: { cwd: string; argv: string[] }[] = [];
+  const ghRun = async (cwd: string, ...argv: string[]) => { calls.push({ cwd, argv }); return { code: 0, stdout: "[]", stderr: "" }; };
+  await createPr({ dir: "/srv/dev/harbor/api", branch: "f", base: "main", title: "T", body: "B", remote: gh, giteaToken: undefined, ghRun }).catch(() => {});
   await findPr({ dir: "/srv/dev/harbor/api", branch: "f", remote: gh, giteaToken: undefined, ghRun } as Parameters<typeof findPr>[0]).catch(() => {});
-  expect(cwds).toEqual(["/", "/"]);
+  expect(calls).toEqual([
+    { cwd: "/", argv: ["gh", "pr", "create", "--repo", "o/n", "--head", "f", "--base", "main", "--title", "T", "--body", "B"] },
+    { cwd: "/", argv: ["gh", "pr", "list", "--repo", "o/n", "--head", "f", "--state", "all", "--limit", "1", "--json", "number,url,state,mergedAt,statusCheckRollup,headRefOid"] },
+  ]);
 });
