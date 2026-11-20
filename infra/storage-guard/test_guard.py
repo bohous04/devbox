@@ -255,6 +255,37 @@ class Safety(unittest.TestCase):
         self.assertTrue(other.exists(), 'registrations of other worktrees stay')
         self.assertEqual(guard.read(self.g.state/'registry.json')['broken']['archive'],'arch')
 
+    def container_worktrees(self):
+        """Two sessions that each added /workspace/.worktrees/w: git names their registrations w and w1."""
+        git=lambda *a,cwd:subprocess.run(['git','-c','user.name=t','-c','user.email=t@t','-c','init.defaultBranch=main',*a],cwd=cwd,check=True,capture_output=True)
+        src=self.root/'src';src.mkdir();git('init',cwd=src);(src/'a').write_text('a')
+        git('add','.',cwd=src);git('commit','-m','a',cwd=src)
+        bare=self.root/'fivem'/'repo.git';git('clone','--bare',str(src),str(bare),cwd=self.root)
+        owners=[self.root/'_sessions'/n for n in ('dev-owner','dev-other')]
+        for o in owners:git('worktree','add','--detach',str(o/'.worktrees'/'w'),cwd=bare)
+        for name in ('w','w1'):(bare/'worktrees'/name/'gitdir').write_text('/workspace/.worktrees/w/.git\n')
+        return bare,owners
+
+    def test_worktree_registered_from_the_container_is_removed(self):
+        # A worktree added inside the container is registered as /workspace/...; the host path
+        # never matched it, so `worktree remove` failed with "is not a working tree" and
+        # released worktrees (192 GB) stayed on disk.
+        bare,(owner,other)=self.container_worktrees()
+        self.g.remove_worktree(owner/'.worktrees'/'w',owner)
+        self.assertFalse((owner/'.worktrees'/'w').exists());self.assertFalse((bare/'worktrees'/'w').exists())
+        self.assertEqual((bare/'worktrees'/'w1'/'gitdir').read_text(),'/workspace/.worktrees/w/.git\n',
+                         'the other session keeps its registration')
+        self.assertTrue((other/'.worktrees'/'w'/'a').exists())
+
+    def test_registration_of_another_session_is_never_taken_over(self):
+        # The agent controls `.git`: pointed at the other session's registration, removing it
+        # would also unregister that session's live worktree.
+        bare,(owner,other)=self.container_worktrees()
+        w=owner/'.worktrees'/'w';(w/'.git').write_text(f'gitdir: {bare}/worktrees/w1\n')
+        with self.assertRaises(RuntimeError):self.g.remove_worktree(w,owner)
+        self.assertTrue(w.exists())
+        self.assertEqual((bare/'worktrees'/'w1'/'gitdir').read_text(),'/workspace/.worktrees/w/.git\n')
+
     def test_other_git_failure_is_kept_for_review(self):
         bare=self.root/'fivem'/'repo.git';(bare/'worktrees'/'w').mkdir(parents=True);(bare/'objects').mkdir()
         w=self.released('w')['w'];self.git(w,f'gitdir: {bare}/worktrees/w\n')   # registered, git just failed

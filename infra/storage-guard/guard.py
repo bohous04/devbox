@@ -851,7 +851,7 @@ class Guard:
                     report.append(dict(path=str(p),owner=e.get('session'),reason='In use or changed before removal; kept'))
                     continue
                 pinned=self.pin_history(p)
-                run(['/usr/bin/git','-c','safe.directory=*','-C',p,'worktree','remove','--force','--force',str(p)])
+                self.remove_worktree(p,self.root/'_sessions'/e['session'])
             except (RuntimeError,OSError,subprocess.SubprocessError) as err:
                 # Not removed: fall back to the archive path instead of retrying this forever.
                 if p.exists():
@@ -877,14 +877,17 @@ class Guard:
                 break
         atomic(self.state/'review.json',dict(time=time.time(),candidates=report))
 
-    def owner_git(self, p, args, input=None):
-        """Git in an agent-writable repo runs as the worktree's owner: `status` executes
-        repo-configured fsmonitor/clean filters, which must never run as root."""
+    def as_owner(self, p):
+        """Command prefix that drops root to the owner of p; refuses root-owned paths."""
         s=Path(p).stat()
         if os.geteuid()==0 and not s.st_uid:
             raise RuntimeError('Root-owned worktree: repo filters would run as root')
-        drop=['setpriv',f'--reuid={s.st_uid}',f'--regid={s.st_gid}','--clear-groups'] if os.geteuid()==0 else []
-        return run(drop+['/usr/bin/git','-c','safe.directory=*','-c','core.fsmonitor=false','-C',p,*args],
+        return ['setpriv',f'--reuid={s.st_uid}',f'--regid={s.st_gid}','--clear-groups'] if os.geteuid()==0 else []
+
+    def owner_git(self, p, args, input=None):
+        """Git in an agent-writable repo runs as the worktree's owner: `status` executes
+        repo-configured fsmonitor/clean filters, which must never run as root."""
+        return run(self.as_owner(p)+['/usr/bin/git','-c','safe.directory=*','-c','core.fsmonitor=false','-C',p,*args],
                    timeout=600,env={**os.environ,'HOME':'/nonexistent'},input=input)
 
     def in_git(self, p):
@@ -986,8 +989,7 @@ class Guard:
                     report.append(dict(path=str(p),owner=e.get('session'),reason='Changed or in use during archive; kept'))
                     continue
                 if common is not None:
-                    # Git manages its registration. Double force: agents lock some of theirs.
-                    run(['/usr/bin/git','-c','safe.directory=*','-C',p,'worktree','remove','--force','--force',str(p)])
+                    self.remove_worktree(p,self.root/'_sessions'/e['session'])
                 else:
                     self.remove_unregistered(p,self.root/'_sessions'/e['session'])
             except (RuntimeError,OSError,subprocess.SubprocessError) as err:
@@ -1040,6 +1042,25 @@ class Guard:
             return None
         admin=owner/admin[len('/workspace/'):] if admin.startswith('/workspace/') else Path(admin)
         return admin if admin.parent.name=='worktrees' and beneath(admin,self.root) else None
+
+    def remove_worktree(self, p, owner):
+        """Git removes the worktree and its registration. A worktree added inside the container
+        is registered as /workspace/..., which `worktree remove <host path>` never matches
+        ("is not a working tree"): point that one registration at the host path first.
+        Double force: agents lock some of theirs."""
+        admin=self.admin_dir(p,owner)
+        gitdir=admin/'gitdir' if admin else None
+        target=gitdir.read_text().strip() if gitdir and gitdir.is_file() else ''
+        if target.startswith('/workspace/') and owner/target[len('/workspace/'):]==p/'.git':
+            # Sessions share the bare repo and reuse names: refuse a registration that another
+            # session's worktree at the same relative path still points to.
+            rel=target[len('/workspace/'):-len('/.git')]
+            if any(s!=owner and self.admin_dir(s/rel,s)==admin for s in (self.root/'_sessions').iterdir()):
+                raise RuntimeError(f'Registration {admin} is also claimed by another session')
+            # As the owner: agents control the admin dir, root must not write through their symlinks.
+            run(self.as_owner(p)+['/usr/bin/tee',gitdir],input=f'{p}/.git\n'.encode())
+            self.audit('worktree-registration-rewritten',path=str(p),admin=str(admin),was=target)
+        run(['/usr/bin/git','-c','safe.directory=*','-C',p,'worktree','remove','--force','--force',str(p)])
 
     def keep_detached_head(self, p):
         """Commits reachable only from a detached HEAD (agent mid-rebase or on a bare sha) would
