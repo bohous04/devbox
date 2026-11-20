@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, FileDiff as FileDiffIcon, Folder, RotateCw } from "lucide-react";
 import { api, type SessionChanges, type SessionFileDiff } from "@/api";
 import { cn } from "@/lib/utils";
-import { CHANGES_OPEN_MAX, changesError, changesTitle, fileStat, groupByFolder, splitPath, statusLetter } from "../../changesView";
+import { CHANGES_OPEN_MAX, changesError, changesTitle, countsIncomplete, fileStat, groupByFolder, splitPath, statusLetter } from "../../changesView";
 import { Collapse } from "../primitives";
 import { FileDiff } from "./FileDiff";
 import { limiter, OPEN_ALL_MAX } from "../../diffView";
@@ -51,6 +51,7 @@ export function ChangesCard({ sessionId, refreshKey, onLayout }: {
   useEffect(() => { onLayout?.(); }, [changes, error, onLayout]);
 
   // One cache per /changes result: a new result (the run ended, a retry) drops every diff fetched before it.
+  // `changes` is in the dependencies for exactly that reason, though the function never reads it.
   // A failed fetch is not kept, so Retry asks again. At most 4 requests run at once.
   const fetchDiff = useMemo(() => {
     const run = limiter(4);
@@ -95,6 +96,10 @@ export function ChangesCard({ sessionId, refreshKey, onLayout }: {
         <FileDiffIcon className="size-4 flex-none text-muted-foreground" aria-hidden="true" />
         <span className="flex-none font-medium text-foreground">{changesTitle(changes)}</span>
         <Stat added={changes.totals.added} removed={changes.totals.removed} />
+        {/* devd left some untracked files' lines out of the totals: say so rather than show them as complete. */}
+        {countsIncomplete(changes) && (
+          <span className="flex-none text-xs text-amber-700 dark:text-amber-400" title="Some untracked files were not read, so their lines are missing from these totals">counts incomplete</span>
+        )}
         {/* A phone has no room for the base: it is in the header's title there. */}
         <span className="hidden min-w-0 truncate text-xs text-muted-foreground sm:inline">vs {changes.base}</span>
         <ChevronDown className={cn("ml-auto size-4 flex-none text-muted-foreground transition-transform", open && "rotate-180")} aria-hidden="true" />
@@ -119,21 +124,23 @@ export function ChangesCard({ sessionId, refreshKey, onLayout }: {
               <ul>
                 {g.files.map((f) => {
                   const stat = fileStat(f);
-                  const full = f.oldPath ? `${f.oldPath} → ${f.path}` : f.path;
+                  const full = (f.oldPath ? `${f.oldPath} → ${f.path}` : f.path) + (f.nameNotUtf8 ? " (name is not valid UTF-8)" : "");
                   return (
                     <li key={`${f.status}:${f.path}`}>
                       <button type="button" title={full} aria-expanded={shown.has(f.path)} onClick={() => toggleFile(f.path)}
                         className={cn("group flex w-full min-w-0 items-center gap-2 py-1 pr-3 text-left transition-colors hover:bg-muted/50 aria-expanded:bg-muted/30", g.dir ? "pl-8" : "pl-3")}>
-                        <span className={cn("w-3 flex-none text-center font-semibold", STATUS_COLOR[f.status])} title={f.status} aria-label={f.status}>{statusLetter(f.status)}</span>
+                        <span className={cn("w-3 flex-none text-center font-semibold", STATUS_COLOR[f.status])} title={f.status}>
+                          <span aria-hidden="true">{statusLetter(f.status)}</span><span className="sr-only">{f.status}</span>
+                        </span>
                         <span className="min-w-0 flex-1 truncate text-foreground/90 group-hover:text-foreground">
                           {f.oldPath && <span className="text-muted-foreground">{splitPath(f.oldPath).name} → </span>}
                           {splitPath(f.path).name}
                         </span>
-                        {stat === "binary" ? <span className="flex-none text-muted-foreground">binary</span> : <Stat {...stat} />}
+                        {stat === "not counted" ? <span className="flex-none text-muted-foreground">not counted</span> : <Stat {...stat} />}
                         <ChevronRight className="size-3.5 flex-none text-muted-foreground transition-transform group-aria-expanded:rotate-90" aria-hidden="true" />
                       </button>
                       <Collapse open={shown.has(f.path)}>
-                        <FileDiff path={f.path} fetchDiff={fetchDiff} onLayout={onLayout} />
+                        <FileDiff path={f.path} fetchDiff={fetchDiff} />
                       </Collapse>
                     </li>
                   );

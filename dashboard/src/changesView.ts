@@ -1,5 +1,6 @@
 import type { RunRow, ThreadItem } from "../../shared/thread";
-import { ApiError, type ChangedFile, type ChangedFileStatus, type SessionChanges } from "./api";
+import type { ChangedFile, ChangeStatus, SessionChanges } from "../../shared/changes";
+import { ApiError } from "./api";
 
 // The changed-files card under the thread's latest answer: what it says and when it refetches. It shows the
 // worktree's current state against a base, not one turn's changes, so its label names the base.
@@ -10,13 +11,17 @@ export function changesTitle(c: SessionChanges): string {
   return `${n} changed ${n === 1 ? "file" : "files"}`;
 }
 
-/** A file's line counts: "+12 −3", "binary" when git has no line counts for it. */
-export function fileStat(f: ChangedFile): { added: number; removed: number } | "binary" {
-  return f.added === null || f.removed === null ? "binary" : { added: f.added, removed: f.removed };
+/** A file's line counts: "+12 −3", or "not counted" when devd has none. That is a binary file, or an untracked one
+ *  devd did not read (too large, over its cap, not a regular file): which of the two only its diff tells. */
+export function fileStat(f: ChangedFile): { added: number; removed: number } | "not counted" {
+  return f.added === null || f.removed === null ? "not counted" : { added: f.added, removed: f.removed };
 }
 
-const STATUS_LETTER: Record<ChangedFileStatus, string> = { added: "A", modified: "M", deleted: "D", renamed: "R", untracked: "U" };
-export const statusLetter = (s: ChangedFileStatus): string => STATUS_LETTER[s];
+/** devd left some untracked files' lines out of the totals (its read cap, or the counter could not run). */
+export const countsIncomplete = (c: SessionChanges): boolean => c.countsCapped === true || c.countsUnavailable === true;
+
+const STATUS_LETTER: Record<ChangeStatus, string> = { added: "A", modified: "M", deleted: "D", renamed: "R", untracked: "U" };
+export const statusLetter = (s: ChangeStatus): string => STATUS_LETTER[s];
 
 /** Directory and name apart, so a long path truncates its directory and keeps the file name. */
 export function splitPath(path: string): { dir: string; name: string } {
@@ -34,12 +39,10 @@ export function changesAnchor(items: ThreadItem[], runs: RunRow[]): { item: Thre
   return item ? { item, endedSeq: last.endedSeq } : null;
 }
 
-/** The error line's text: devd's message when it sent one. */
-export function changesError(e: unknown): string {
-  if (e instanceof ApiError) {
-    const b = e.body as { message?: unknown } | null;
-    return typeof b?.message === "string" ? b.message : e.message;
-  }
+/** The error line's text, or null for no card at all: a repository without commits has nothing to compare, which
+ *  is not a failure (devd answers 409 with this exact message). */
+export function changesError(e: unknown): string | null {
+  if (e instanceof ApiError && e.status === 409 && e.message === "repository has no commits yet") return null;
   return (e as Error).message;
 }
 

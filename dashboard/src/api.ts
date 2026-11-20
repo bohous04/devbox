@@ -280,23 +280,13 @@ export interface CcRunResult {
   latest: string | null; built: boolean; updated: string[]; restarted: string[]; skipped: string[];
 }
 
+// The changes endpoints' shapes are devd's own (shared/changes.ts).
+export type { ChangedFile, ChangeStatus, FileDiff as SessionFileDiff, SessionChanges } from "../../shared/changes";
+import type { FileDiff as SessionFileDiff, SessionChanges } from "../../shared/changes";
+
 // Carries the HTTP status code next to the message — an optional endpoint (503 = "not configured")
 // can thus be told apart from a real error without parsing localized text. `body` is the parsed error
 // body (null when there was none), for endpoints whose errors carry more than `error`.
-/** GET /api/sessions/:id/changes — the session worktree's current changes against `base` (e.g. origin/main).
- *  `added`/`removed` are null for a binary file. */
-export type ChangedFileStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
-export interface ChangedFile { path: string; status: ChangedFileStatus; added: number | null; removed: number | null; oldPath?: string }
-export interface SessionChanges {
-  base: string;
-  files: ChangedFile[];
-  totals: { files: number; added: number; removed: number };
-  truncated?: boolean;
-}
-
-/** GET /api/sessions/:id/changes/diff?path= — one changed file's unified diff against `base`. */
-export interface SessionFileDiff { path: string; status: ChangedFileStatus; base: string; binary: boolean; truncated: boolean; diff: string }
-
 export class ApiError extends Error {
   constructor(message: string, public readonly status: number, public readonly body: unknown = null) { super(message); }
 }

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from "react";
 import { Loader2, RotateCw } from "lucide-react";
 import type { SessionFileDiff } from "@/api";
 import { cn } from "@/lib/utils";
-import { changesError } from "../../changesView";
 import { escapeInvisible, parseUnifiedDiff, type DiffLine } from "../../diffView";
 
 const LINE: Record<DiffLine["kind"], string> = {
@@ -22,11 +21,11 @@ function DiffText({ text }: { text: string }) {
 }
 
 /** One changed file's diff, fetched when it is opened. Long lines scroll sideways inside the block, not the page. */
-export function FileDiff({ path, fetchDiff, onLayout }: {
+// No onLayout: the reader opened this diff, so the page must not scroll it away to keep the thread's end in view.
+export function FileDiff({ path, fetchDiff }: {
   path: string;
   /** The card's cached, rate-limited fetch. */
   fetchDiff: (path: string) => Promise<SessionFileDiff>;
-  onLayout?: () => void;
 }) {
   const [diff, setDiff] = useState<SessionFileDiff | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -35,12 +34,11 @@ export function FileDiff({ path, fetchDiff, onLayout }: {
     setError(null); setDiff(null);
     fetchDiff(path).then(
       (d) => { if (alive) setDiff(d); },
-      (e) => { if (alive) setError(changesError(e)); },
+      (e) => { if (alive) setError((e as Error).message); },
     );
     return () => { alive = false; };
   }, [fetchDiff, path]);
   useEffect(() => load(), [load]);
-  useEffect(() => { onLayout?.(); }, [diff, error, onLayout]);
 
   const note = "px-3 py-2 font-sans text-xs text-muted-foreground";
   if (error !== null) {

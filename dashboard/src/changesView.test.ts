@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { RunRow, ThreadItem } from "../../shared/thread";
 import { ApiError, type SessionChanges } from "./api";
-import { changesAnchor, changesError, changesTitle, fileStat, groupByFolder, splitPath, statusLetter } from "./changesView";
+import { changesAnchor, changesError, changesTitle, countsIncomplete, fileStat, groupByFolder, splitPath, statusLetter } from "./changesView";
 
 const changes = (n: number, truncated?: boolean): SessionChanges =>
   ({ base: "origin/main", files: [], totals: { files: n, added: 0, removed: 0 }, ...(truncated ? { truncated } : {}) });
@@ -14,7 +14,7 @@ test("changesTitle: count and plural from the totals", () => {
 
 test("fileStat, statusLetter, splitPath", () => {
   expect(fileStat({ path: "a", status: "modified", added: 12, removed: 3 })).toEqual({ added: 12, removed: 3 });
-  expect(fileStat({ path: "logo.png", status: "added", added: null, removed: null })).toBe("binary");
+  expect(fileStat({ path: "logo.png", status: "added", added: null, removed: null })).toBe("not counted");
   expect(statusLetter("untracked")).toBe("U");
   expect(splitPath("src/sync/queue.ts")).toEqual({ dir: "src/sync/", name: "queue.ts" });
   expect(splitPath("README.md")).toEqual({ dir: "", name: "README.md" });
@@ -35,8 +35,9 @@ test("changesAnchor: the latest finished run's last answer, none while a run is 
   expect(changesAnchor([], [])).toBeNull();
 });
 
-test("changesError: devd's message, else the error's", () => {
-  expect(changesError(new ApiError("HTTP 409", 409, { error: "not-a-git-worktree", message: "the worktree has no origin" }))).toBe("the worktree has no origin");
+test("changesError: the error's message; a repository without commits is no card, not an error", () => {
+  expect(changesError(new ApiError("repository has no commits yet", 409, { error: "repository has no commits yet" }))).toBeNull();
+  expect(changesError(new ApiError("session worktree is missing", 409, { error: "session worktree is missing" }))).toBe("session worktree is missing");
   expect(changesError(new ApiError("not found", 404, { error: "not found" }))).toBe("not found");
   expect(changesError(new Error("network down"))).toBe("network down");
 });
@@ -49,4 +50,11 @@ test("groupByFolder: first-seen folder order, summed counts, binary adds nothing
     { path: "src/sync/icon.png", status: "added", added: null, removed: null },
   ]);
   expect(groups.map((g) => [g.dir, g.added, g.removed, g.files.length])).toEqual([["src/sync/", 69, 2, 3], ["", 1, 1, 1]]);
+});
+
+test("countsIncomplete: either devd flag", () => {
+  const base = { base: "origin/main", files: [], totals: { files: 0, added: 0, removed: 0 } };
+  expect(countsIncomplete(base)).toBe(false);
+  expect(countsIncomplete({ ...base, countsCapped: true })).toBe(true);
+  expect(countsIncomplete({ ...base, countsUnavailable: true })).toBe(true);
 });
