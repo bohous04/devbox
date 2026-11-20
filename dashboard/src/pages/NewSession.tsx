@@ -297,11 +297,9 @@ function AskWhere({ session, what, takesPrompt, onPick }: {
   session: SessionLive; what: string; takesPrompt: boolean; onPick: (w: Where) => void;
 }) {
   const content = useRef<HTMLDivElement>(null);
-  // It unmounts when answered, so it hands focus back itself: to the box the send came from (the text stays there).
-  useEffect(() => {
-    const back = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    return () => { back?.focus(); };
-  }, []);
+  // It unmounts when answered, so it hands focus back itself, always to the message box where the text stays: the
+  // element focused before it opened can be the send button, disabled by then.
+  useEffect(() => () => { document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.focus(); }, []);
   const choice = "flex min-h-11 w-full flex-col items-start gap-0.5 rounded-lg border px-3.5 py-2.5 text-left text-sm transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 motion-reduce:transition-none";
   return (
     <Dialog.Root open onOpenChange={(next) => { if (!next) onPick(null); }}>
