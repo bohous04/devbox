@@ -75,3 +75,58 @@ test("memoAsyncStrict: after the TTL expires the underlying function is called a
   await new Promise((r) => setTimeout(r, 5));
   expect(await get()).toBe(2);
 });
+
+// ---------------------------------------------------------------- backgroundSnapshot
+
+test("backgroundSnapshot: the first peek starts the build and answers at once with nothing yet (scanning), never waiting", async () => {
+  const { backgroundSnapshot } = await import("../src/cache");
+  let release!: (v: number) => void;
+  const s = backgroundSnapshot(() => new Promise<number>((r) => { release = r; }), 60_000, () => 1000);
+  expect(s.peek()).toEqual({ value: null, at: null, scanning: true, error: null });
+  release(7);
+  await s.idle();
+  expect(s.peek()).toEqual({ value: 7, at: 1000, scanning: false, error: null });
+});
+
+test("backgroundSnapshot: a stale value is served with scanning=true while one rebuild runs; refresh() rebuilds even when fresh", async () => {
+  const { backgroundSnapshot } = await import("../src/cache");
+  let now = 0;
+  let n = 0;
+  const s = backgroundSnapshot(async () => ++n, 100, () => now);
+  s.peek(); await s.idle();
+  expect(s.peek()).toMatchObject({ value: 1, scanning: false });
+  now = 500;
+  expect(s.peek()).toMatchObject({ value: 1, scanning: true });
+  expect(s.peek()).toMatchObject({ value: 1, scanning: true });       // single flight
+  await s.idle();
+  expect(n).toBe(2);
+  s.refresh();
+  expect(s.peek()).toMatchObject({ value: 2, scanning: true });
+  await s.idle();
+  expect(s.peek()).toMatchObject({ value: 3, at: 500, scanning: false });
+});
+
+test("backgroundSnapshot: refresh() during a build queues exactly one more (the running one may predate the change)", async () => {
+  const { backgroundSnapshot } = await import("../src/cache");
+  let n = 0;
+  let release!: () => void;
+  const s = backgroundSnapshot(() => new Promise<number>((r) => { const k = ++n; release = () => r(k); }), 60_000, () => 0);
+  s.peek();
+  s.refresh(); s.refresh();
+  release(); await Bun.sleep(1);
+  expect(s.peek()).toMatchObject({ value: 1, scanning: true });
+  release(); await s.idle();
+  expect(n).toBe(2);
+  expect(s.peek()).toMatchObject({ value: 2, scanning: false });
+});
+
+test("backgroundSnapshot: a failed build keeps the last value and reports the error (not swallowed)", async () => {
+  const { backgroundSnapshot } = await import("../src/cache");
+  let fail = false;
+  const s = backgroundSnapshot(async () => { if (fail) throw new Error("disk gone"); return 1; }, 60_000, () => 0);
+  s.peek(); await s.idle();
+  fail = true; s.refresh(); await s.idle();
+  expect(s.peek()).toEqual({ value: 1, at: 0, scanning: false, error: "disk gone" });
+  fail = false; s.refresh(); await s.idle();
+  expect(s.peek().error).toBeNull();
+});

@@ -47,7 +47,7 @@ import { proxyContextRows } from "./proxyContext";
 import type { ConfigRepo } from "./configrepo";
 import { countEvents, diskHistoryEnds, distinctEventTypes, getHarvestState, getRepoAgent, getSession, insertMetrics, insertNotifyLog, isAgentName, lastMetricTs, listCriticReviews, listEvents, listNotifyLog, listRepoAgents, listSessions, logEvent, resetStats, sanitizeSessionName, setCritic, setHarvestState, setImportant, setNotifyVerdict, setSessionName, deleteSchedule, getSchedule, insertSchedule, listSchedules, updateSchedule, deleteAccount, getAccount, insertAccount, insertLease, isLeaseClient, leaseHistory, setAccountDisabled, setAccountLabel, setAccountOrgId, setAccountQuarantined, setAccountWeight, ackPushAlert, upsertPushDevice, type AgentName, type LeaseClient, type NotifyDecision, type NotifyVerdict, type ScheduleRow, type SessionRow, type SessionRuntime } from "./db";
 import { validCron } from "./cron";
-import { memoAsync } from "./cache";
+import { memoAsync, type Snapshot } from "./cache";
 import { GithubError, listOwners, listRepos, listSharedRepos, validOwner, type GithubOwner, type GithubRepo } from "./github";
 import { GiteaAuthError, GiteaError, GiteaUnknownInstanceError, type GiteaApi } from "./gitea";
 import { tmpdir } from "node:os";
@@ -267,12 +267,13 @@ export interface ApiDeps { mgr: SessionManager; db: Database; cfg: DevConfig; ro
    *  extra CIDRs/addresses added to the default loopback+tailnet list. Optional,
    *  empty array = no extension. */
   sshApprovalAllowExtra?: readonly string[];
-  /** Scan of unpushed commits across the whole workspace (unpushed.ts), wrapped in
-   *  `memoAsync` in index.ts — scanning dozens of repos takes seconds and the page is opened
-   *  repeatedly. `?fresh=1` drops the cache (Refresh button). Optional: route tests
+  /** Scan of unpushed commits across the whole workspace (unpushed.ts), built in the background
+   *  (`backgroundSnapshot` in index.ts) — a scan can take minutes and the API must never wait for
+   *  one. `?fresh=1` starts a rescan (Rescan button). Optional: route tests
    *  do not wire it and the route then returns 503. */
   unpushed?: {
-    get: () => Promise<UnpushedReport>; invalidate: () => void;
+    /** The last report without waiting for a scan (cache.ts backgroundSnapshot); `refresh` starts a rescan. */
+    peek: () => Snapshot<UnpushedReport>; refresh: () => void;
     /** Branch push / PR creation (unpushed.ts `unpushedOps`). `push` returns the git result
      *  (502 in the route), but input rejection (foreign path, unknown branch) THROWS → 400. */
     push?: (path: string, branch: string) => Promise<PushResult>;
@@ -2133,13 +2134,16 @@ export function createApp(d: ApiDeps): Hono {
   // access to a secret or to other sessions' data, and `srv` may want to check it too.
   app.get("/api/ssh-gate", (c) => c.json({ enabled: d.sshApprovalEnabled !== false }));
 
-  // Unpushed commits by folder (Work in progress page). `fresh=1` = Refresh
-  // in the UI: drops the cache and waits for the full scan; otherwise the cached value is returned (stale
-  // values are refreshed in the background, see memoAsync).
+  // Unpushed commits by folder (Work in progress page). `fresh=1` = Rescan in the UI: starts a new
+  // scan in the background (see backgroundSnapshot).
   app.get("/api/unpushed", async (c) => {
     if (!d.unpushed) return c.json({ error: "unpushed commit scan is not wired up" }, 503);
-    if (c.req.query("fresh") === "1") d.unpushed.invalidate();
-    return c.json(await d.unpushed.get());
+    if (c.req.query("fresh") === "1") d.unpushed.refresh();
+    // Never waits for a scan (a repo with thousands of branches takes long): the last report with
+    // its own `at`, whether a scan runs, and the last scan error. `report: null` = the first scan
+    // has not finished yet.
+    const s = d.unpushed.peek();
+    return c.json({ report: s.value, scanning: s.scanning, error: s.error });
   });
 
   // Push of one branch to origin. Body `{path, branch}`; the path is verified only in ops
@@ -2156,8 +2160,10 @@ export function createApp(d: ApiDeps): Hono {
     if (!path || !branch) return c.json({ error: "missing path or branch" }, 400);
     try {
       const r = await d.unpushed.push(path, branch);
-      d.unpushed.invalidate();
-      return r.ok ? c.json({ ok: true }) : c.json({ error: r.error }, 502);
+      // `at`: a report scanned after this (report.at is the scan's start) no longer has the branch.
+      const at = Date.now();
+      d.unpushed.refresh();
+      return r.ok ? c.json({ ok: true, at }) : c.json({ error: r.error }, 502);
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
     }
@@ -2172,9 +2178,10 @@ export function createApp(d: ApiDeps): Hono {
     if (!title) return c.json({ error: "missing PR title" }, 400);
     try {
       const pushed = await d.unpushed.push(path, branch);
-      d.unpushed.invalidate();
+      const at = Date.now();                             // see /api/unpushed/push
+      d.unpushed.refresh();
       if (!pushed.ok) return c.json({ error: `push failed: ${pushed.error}` }, 502);
-      return c.json(await d.unpushed.createPr({ path, branch, title, body }));
+      return c.json({ ...(await d.unpushed.createPr({ path, branch, title, body })), at });
     } catch (e) {
       const msg = (e as Error).message;
       // Input rejection (foreign path, unknown branch) is 400; anything from the provider 502.

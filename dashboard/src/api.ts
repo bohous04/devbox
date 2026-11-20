@@ -323,11 +323,16 @@ export interface RemoteInfo { provider: "github" | "gitea" | "other"; url: strin
 export interface UnpushedRepo {
   folder: string; project: string; repo: string; path: string; bare: boolean; noRemote: boolean;
   count: number; branches: UnpushedBranch[]; error?: string;
+  // Too many unpushed commits for a per-branch breakdown: `count` is exact, `branches` empty.
+  detailsSkipped?: boolean;
   // Only for repos with something to push: origin (for Create PR) and the remote's default branch.
   remote?: RemoteInfo | null; base?: string;
 }
 export interface UnpushedFolder { folder: string; count: number; repos: UnpushedRepo[] }
 export interface UnpushedReport { at: number; total: number; scanned: number; folders: UnpushedFolder[] }
+/** GET /api/unpushed never waits for a scan: the last report (null before the first one finished),
+ *  whether a scan runs now, and the last scan's error. */
+export interface UnpushedStatus { report: UnpushedReport | null; scanning: boolean; error: string | null }
 
 // Mirror of SshApprovalRow from devd/src/sshApprovals.ts. `revoked` is a terminal state
 // set by revokeGrant alongside clearing grant_until — separate from `expired`
@@ -672,10 +677,11 @@ export const api = {
     j<{ id: string }>("/api/ssh-scope-grants", post({ title, ...scope, grantMinutes, ...(grantPermanent ? { grantPermanent: true } : {}) })),
   sshRevokeScopeGrant: (id: string) => j<{ ok: true }>(`/api/ssh-scope-grants/${id}`, { method: "DELETE" }),
   sshGate: () => j<{ enabled: boolean }>("/api/ssh-gate"),
-  // `fresh` = Refresh in the UI: the server drops the cache and waits for a full scan.
-  unpushed: (fresh = false) => j<UnpushedReport>(fresh ? "/api/unpushed?fresh=1" : "/api/unpushed"),
-  unpushedPush: (path: string, branch: string) => j<{ ok: true }>("/api/unpushed/push", post({ path, branch })),
+  // `fresh` = Rescan in the UI: the server starts a scan in the background and answers at once.
+  unpushed: (fresh = false) => j<UnpushedStatus>(fresh ? "/api/unpushed?fresh=1" : "/api/unpushed"),
+  // `at`: server time after the push; the page hides the branch until a report scanned after it arrives.
+  unpushedPush: (path: string, branch: string) => j<{ ok: true; at: number }>("/api/unpushed/push", post({ path, branch })),
   // The server pushes first, then creates the PR — one click from the UI.
   unpushedPr: (path: string, branch: string, title: string, body: string) =>
-    j<{ url: string; number: number | null }>("/api/unpushed/pr", post({ path, branch, title, body })),
+    j<{ url: string; number: number | null; at: number }>("/api/unpushed/pr", post({ path, branch, title, body })),
 };

@@ -124,7 +124,7 @@ async function api(req: Request, url: URL): Promise<Response> {
       case "/api/subscriptions/codex": return json({ codex: { state: "ok", planType: "pro", windows: [{ kind: "primary", usedPct: 18, windowMinutes: 300, resetsAt: Date.now() + 3 * 3_600_000 }, { kind: "secondary", usedPct: 37, windowMinutes: 10080, resetsAt: Date.now() + 4 * 86_400_000 }], credits: null, limitReached: null, fetchedAt: Date.now() - 120_000, error: null } });
       case "/api/subscriptions/grok": return json({ grok: { state: "ok", tier: "SuperGrok", usedPct: null, resetsAt: null, fetchedAt: Date.now() - 300_000, error: null } });
       case "/api/openrouter": return json({ hasKey: false, model: null });
-      case "/api/unpushed": return json({ at: Date.now(), total: 0, scanned: 7, folders: [] });
+      case "/api/unpushed": return json({ report: { at: Date.now(), total: 0, scanned: 7, folders: [] }, scanning: false, error: null });
       case "/api/local-env": return json({ profiles: [] });
     }
     if (seg[1] === "hardware" && seg[3] === "series") return json(D.hardwareSeries(seg[2], url.searchParams.get("range") ?? "24h"));

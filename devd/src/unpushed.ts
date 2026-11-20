@@ -16,7 +16,8 @@ import { run, timeoutFor, type RunResult } from "./proc";
  *
  *  Everything via `proc.run` (async, with a timeout): devd is single-threaded and a scan of dozens
  *  of repos with dozens of branches via `spawnSync` would block the whole HTTP server (same trap
- *  as with `/api/tree`, see cache.ts). The caller additionally wraps this in `memoAsync`. */
+ *  as with `/api/tree`, see cache.ts). The report is built only in the background (index.ts,
+ *  cache.ts backgroundSnapshot), so no request waits for a scan. */
 
 export interface UnpushedCommit { hash: string; subject: string; at: number; author: string }
 export interface UnpushedBranch {
@@ -38,6 +39,9 @@ export interface UnpushedRepo {
   noRemote: boolean;
   count: number;
   branches: UnpushedBranch[];
+  /** More than DETAILS_CAP unpushed commits (typically a repo without a remote): `count` is exact,
+   *  but the per-branch breakdown was not computed and `branches` is empty. The UI says so. */
+  detailsSkipped?: boolean;
   /** git does not work in that directory (broken worktree registration etc.). The counts are
    *  then zero, but the repo shows up in the report with an error instead of being silently omitted. */
   error?: string;
@@ -60,6 +64,8 @@ export interface UnpushedReport {
 export interface DiscoveredRepo { folder: string; project: string; repo: string; path: string; bare: boolean }
 
 const DEFAULT_LIMIT = 30;
+/** Above this many unpushed commits in one repo the per-branch breakdown is skipped (see detailsSkipped). */
+export const DETAILS_CAP = 50_000;
 
 /** Workspace layout: `<root>/<folder>/<repo>` (flat, project === folder) or
  *  `<root>/<folder>/<project>/<repo>`; a bare clone is `<repo>.git` in the same place
@@ -113,54 +119,108 @@ async function git(dir: string, ...args: string[]): Promise<RunResult> {
 
 /** Unpushed commits of one repo (workdir or bare). Never throws — a git error is
  *  returned in `error`, so one broken repo does not shoot down the whole report. */
-export async function unpushedInRepo(dir: string, opts: { limit?: number } = {}): Promise<Pick<UnpushedRepo, "noRemote" | "count" | "branches" | "error">> {
+export async function unpushedInRepo(dir: string, opts: { limit?: number; cap?: number } = {}): Promise<Pick<UnpushedRepo, "noRemote" | "count" | "branches" | "error" | "detailsSkipped">> {
   const limit = opts.limit ?? DEFAULT_LIMIT;
   // Cheap first query: most repos are clean and end here with a single git call.
   const total = await git(dir, "rev-list", "--count", "--branches", "--not", "--remotes");
   if (total.code !== 0) return { noRemote: false, count: 0, branches: [], error: (total.stderr || total.stdout).trim() || `git failed (${total.code})` };
-  if ((parseInt(total.stdout.trim(), 10) || 0) === 0) return { noRemote: false, count: 0, branches: [] };
+  const count = parseInt(total.stdout.trim(), 10) || 0;
+  if (count === 0) return { noRemote: false, count: 0, branches: [] };
 
   const remotes = await git(dir, "remote");
   const noRemote = remotes.code === 0 && remotes.stdout.trim() === "";
+  if (count > (opts.cap ?? DETAILS_CAP)) return { noRemote, count, branches: [], detailsSkipped: true };
 
-  const refs = await git(dir, "for-each-ref", "--sort=-committerdate", "--format=%(HEAD)%09%(refname)%09%(upstream:short)", "refs/heads");
+  const refs = await git(dir, "for-each-ref", "--sort=-committerdate", "--format=%(HEAD)%09%(refname)%09%(upstream:short)%09%(objectname)", "refs/heads");
   if (refs.code !== 0) return { noRemote, count: 0, branches: [], error: refs.stderr.trim() };
   const heads = refs.stdout.split("\n").filter(Boolean).map((l) => {
-    const [head, ref, upstream] = l.split("\t");
+    const [head, ref, upstream, tip] = l.split("\t");
     // Branch name from the full ref, not `%(refname:short)` — on a collision with a tag that returns
     // "heads/hotfix", and that is not the name the user knows it by.
-    return { head: head === "*", ref, branch: ref.replace(/^refs\/heads\//, ""), upstream: upstream || null, hashes: [] as string[] };
+    return { head: head === "*", ref, branch: ref.replace(/^refs\/heads\//, ""), upstream: upstream || null, tip };
   });
+  // ONE walk over every unpushed commit (all branches, not on any remote) with parents and details,
+  // instead of a rev-list and a log per branch: a bare clone with thousands of branches took
+  // over 15 minutes that way. A branch's unpushed commits are exactly the ones reachable from its
+  // tip without leaving this set (an ancestor of a pushed commit is pushed too). They are listed in
+  // the walk's order; `--date-order` keeps a parent after its child, so the order matches
+  // `rev-list <branch>` wherever commit dates are consistent (the sets and counts always match).
+  // The subject goes last: it is the one field that may contain the separator.
+  const walk = await git(dir, "log", "--date-order", "--branches", "--not", "--remotes", "--format=%H%x1f%P%x1f%ct%x1f%an%x1f%s", "--");
+  if (walk.code !== 0) return { noRemote, count: 0, branches: [], error: (walk.stderr || walk.stdout).trim() || `git log failed (${walk.code})` };
+  // Commits are indices in walk order; parents and visit marks live in flat arrays, so the per-branch
+  // walks below allocate nothing per commit (thousands of branches × tens of thousands of commits).
+  const lines = walk.stdout.split("\n").filter(Boolean);
+  const index = new Map<string, number>();
+  const commits: UnpushedCommit[] = [];
+  const parentHashes: string[][] = [];
+  for (const l of lines) {
+    const [hash, parents, ct, author, ...subject] = l.split("\x1f");
+    index.set(hash, commits.length);
+    commits.push({ hash, subject: subject.join("\x1f"), at: (parseInt(ct, 10) || 0) * 1000, author });
+    parentHashes.push(parents ? parents.split(" ") : []);
+  }
+  const n = commits.length;
+  const parentStart = new Int32Array(n + 1);
+  const parentList: number[] = [];
+  for (let i = 0; i < n; i++) {
+    parentStart[i] = parentList.length;
+    for (const p of parentHashes[i]!) { const j = index.get(p); if (j !== undefined) parentList.push(j); }
+  }
+  parentStart[n] = parentList.length;
+  const parents = Int32Array.from(parentList);
+  const mark = new Int32Array(n);           // last walk (1-based) that visited a commit
+  const stack = new Int32Array(n);
+  let walkNo = 0;
+  /** Visits every commit reachable from `tip` inside the set; `visit` sees each one once. */
+  const reach = (tip: number, visit: (i: number) => void) => {
+    walkNo++;
+    let top = 0;
+    stack[top++] = tip; mark[tip] = walkNo;
+    while (top) {
+      const c = stack[--top]!;
+      visit(c);
+      for (let k = parentStart[c]!; k < parentStart[c + 1]!; k++) {
+        const p = parents[k]!;
+        if (mark[p] !== walkNo) { mark[p] = walkNo; stack[top++] = p; }
+      }
+    }
+  };
+  // Pass 1: only the size per branch (a commit shared by several branches goes to the smallest).
+  // Yielding between branches keeps devd's event loop responsive during a long scan.
+  const sized: { h: (typeof heads)[number]; tip: number; size: number }[] = [];
   for (const h of heads) {
-    // Full ref, not the short name: for "hotfix" with a tag of the same name git would resolve the tag
-    // (refs/tags takes precedence) and the branch would look clean. `--` separates revisions from paths.
-    const list = await git(dir, "rev-list", h.ref, "--not", "--remotes", "--");
-    if (list.code === 0) h.hashes = list.stdout.split("\n").filter(Boolean);
+    const tip = index.get(h.tip);
+    if (tip === undefined) continue;                     // tip pushed (or reachable from a remote) → nothing
+    let size = 0;
+    reach(tip, () => { size++; });
+    sized.push({ h, tip, size });
+    await Bun.sleep(0);
   }
   // A commit shared by several branches is reported exactly once — and goes to the BASE, i.e. the branch
   // with the fewest unpushed commits (a feature on top of an unpushed main: main has 2, feature
   // 3 → main takes its two, feature reports only its own). If HEAD went first,
   // the in-progress feature branch would also show main's commits and main would look clean.
   // Equal count → HEAD first, then by age of the last commit (the order from for-each-ref).
-  heads.sort((a, b) => a.hashes.length - b.hashes.length || Number(b.head) - Number(a.head));
+  sized.sort((a, b) => a.size - b.size || Number(b.h.head) - Number(a.h.head));
 
-  const seen = new Set<string>();
+  // Pass 2: per branch, its commits not owned yet, in walk order; nothing is kept per branch.
+  const owned = new Uint8Array(n);
+  let seen = 0;
   const branches: UnpushedBranch[] = [];
-  for (const h of heads) {
-    const fresh = h.hashes.filter((x) => !seen.has(x));
-    if (!fresh.length) continue;
-    for (const x of fresh) seen.add(x);
-    const shown = fresh.slice(0, limit);
-    // `--no-walk`: details only for the selected hashes, without walking history. `=unsorted`
-    // keeps the order from rev-list (newest first).
-    const details = await git(dir, "log", "--no-walk=unsorted", "--format=%H%x1f%s%x1f%ct%x1f%an", ...shown);
-    const commits = details.code === 0 ? details.stdout.split("\n").filter(Boolean).map((l) => {
-      const [hash, subject, ct, author] = l.split("\x1f");
-      return { hash, subject, at: (parseInt(ct, 10) || 0) * 1000, author };
-    }) : shown.map((hash) => ({ hash, subject: "", at: 0, author: "" }));
-    branches.push({ branch: h.branch, upstream: h.upstream, count: fresh.length, commits, truncated: fresh.length > shown.length });
+  for (const { h, tip } of sized) {
+    const fresh: number[] = [];
+    reach(tip, (i) => { if (!owned[i]) fresh.push(i); });
+    if (fresh.length) {
+      for (const i of fresh) owned[i] = 1;
+      seen += fresh.length;
+      fresh.sort((a, b) => a - b);
+      const shown = fresh.slice(0, limit);
+      branches.push({ branch: h.branch, upstream: h.upstream, count: fresh.length, commits: shown.map((i) => commits[i]!), truncated: fresh.length > shown.length });
+    }
+    await Bun.sleep(0);
   }
-  return { noRemote, count: seen.size, branches };
+  return { noRemote, count: seen, branches };
 }
 
 // ---------------------------------------------------------------- remote / base
@@ -464,6 +524,9 @@ export function unpushedOps(root: string, deps: UnpushedOpsDeps) {
  *  only compete for the disk on a VPS with dozens of repos, fewer would needlessly drag out
  *  the first load. */
 export async function buildUnpushedReport(root: string, opts: { limit?: number; now?: number; concurrency?: number; giteaHosts?: string[] } = {}): Promise<UnpushedReport> {
+  // `at` is when the scan STARTED: what it reports is at least that fresh (a push after this moment may
+  // or may not be in it — the dashboard hides a pushed branch until a report starts after the push).
+  const at = opts.now ?? Date.now();
   const repos = discoverRepos(root);
   const results: UnpushedRepo[] = new Array(repos.length);
   let next = 0;
@@ -491,5 +554,5 @@ export async function buildUnpushedReport(root: string, opts: { limit?: number; 
     byFolder.set(r.folder, f);
   }
   const folders = [...byFolder.values()].sort((a, b) => a.folder.localeCompare(b.folder));
-  return { at: opts.now ?? Date.now(), total: folders.reduce((a, f) => a + f.count, 0), scanned: repos.length, folders };
+  return { at, total: folders.reduce((a, f) => a + f.count, 0), scanned: repos.length, folders };
 }

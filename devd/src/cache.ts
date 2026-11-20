@@ -49,3 +49,33 @@ export function memoAsyncStrict<T>(fn: () => Promise<T>, ttlMs: number): () => P
     return inFlight;
   };
 }
+
+export interface Snapshot<T> { value: T | null; at: number | null; scanning: boolean; error: string | null }
+
+/** A value built only in the background: no caller ever waits for a build. `peek()` returns the
+ *  last value (null before the first one finishes) with its time, starts a build when there is
+ *  none yet or it is older than `ttlMs`, and says whether one is running. Unlike memoAsync a build
+ *  error is kept and reported (the last value stays). `refresh()` forces a build; asked during a
+ *  build it queues exactly one more, since the running one may predate the change. */
+export function backgroundSnapshot<T>(fn: () => Promise<T>, ttlMs: number, now: () => number = Date.now): {
+  peek: () => Snapshot<T>; refresh: () => void; idle: () => Promise<void>;
+} {
+  let value: { v: T; at: number } | null = null;
+  let error: string | null = null;
+  let running: Promise<void> | null = null;
+  let again = false;
+  const start = () => {
+    running = fn()
+      .then((v) => { value = { v, at: now() }; error = null; })
+      .catch((e) => { error = e instanceof Error ? e.message : String(e); console.error("background build failed:", e); })
+      .finally(() => { running = null; if (again) { again = false; start(); } });
+  };
+  return {
+    peek: () => {
+      if (!running && (!value || now() - value.at >= ttlMs)) start();
+      return { value: value?.v ?? null, at: value?.at ?? null, scanning: running !== null, error };
+    },
+    refresh: () => { if (running) again = true; else start(); },
+    idle: async () => { while (running) await running; },
+  };
+}
