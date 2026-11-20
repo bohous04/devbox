@@ -229,6 +229,11 @@ export class BridgeLinks {
     if (this.status(sessionId) === "connected") this.sendFirstTurn(sessionId);
   }
 
+  /** Whether a first message is waiting for this session (in memory or persisted): a second one would replace it. */
+  hasFirstTurn(sessionId: string): boolean {
+    return this.firstTurns.has(sessionId) || (this.d.pendingTurns?.load(sessionId) ?? null) !== null;
+  }
+
   /** Forgets a first message that was not sent yet (memory and DB). True when there was one; false when it was
    *  already sent (or never queued), so the caller can tell a late discard from an effective one. */
   discardFirstTurn(sessionId: string): boolean {

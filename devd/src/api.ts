@@ -61,7 +61,7 @@ import { createScopeGrant, keyCovered, listScopeGrants, liveScopeGrant, revokeSc
 import { dbEntry, roUrl, entitledDbs, type Catalog, type Access, type DbEntry, type ServerRef } from "./prodDb";
 import { createProposal, listProposals, getProposal, setStatus, type WriteStatus, type WriteScope } from "./prodWrites";
 import type { ListenerClient } from "./listener";
-import { agentContextTokens, ExternalStartError, resolveAgent, RestartError, SessionBusyError, storedRuntime, type SessionManager } from "./sessions";
+import { agentContextTokens, ExternalStartError, FirstPromptRefused, MAX_FIRST_PROMPT_BYTES, resolveAgent, RestartError, SessionBusyError, storedRuntime, type SessionManager } from "./sessions";
 import { localEnvProfiles } from "./localEnv";
 import { parseOtlpMetrics, pointsToRows } from "./metrics";
 import { classifyClaudeState } from "./stats";
@@ -180,7 +180,8 @@ export interface ApiDeps { mgr: SessionManager; db: Database; cfg: DevConfig; ro
   ccUpkeep?: { status: () => Promise<CcStatus>; run: (only?: string[]) => Promise<UpkeepResult | null> };
   // Chat sessions (threadApi.ts): bridge links, per-session thread stores, the SSE bus and the inbox.
   // Optional like the other feature deps: without them the thread, inbox and stream routes answer 503.
-  links?: ThreadApiDeps["links"];
+  /** `hasFirstTurn`: POST /api/sessions never replaces a first message already waiting (BridgeLinks). */
+  links?: ThreadApiDeps["links"] & { hasFirstTurn: (sessionId: string) => boolean };
   threads?: ThreadApiDeps["threads"];
   bus?: ThreadApiDeps["bus"];
   inbox?: ThreadApiDeps["inbox"];
@@ -973,12 +974,23 @@ export function createApp(d: ApiDeps): Hono {
   // Link the bridge of an opened chat session now instead of at the next 5 s link sync in index.ts. The session
   // did open, so a failure here is logged, not answered: that sync retries. devd's prompt for the agent (a pull
   // conflict) reaches a chat session as its first message, as the prompt file does for tmux.
-  const linkOpenedChat = (r: { session: SessionRow; claudePrompt?: string }) => {
+  // `prompt`: the request's first prompt for a chat session; devd's own (a pull conflict) goes first, in the same turn.
+  // Its outcome is not lost: a refusal or timeout lands in the thread, the event log and a notification.
+  const linkOpenedChat = (r: { session: SessionRow; claudePrompt?: string }, prompt?: string) => {
     const s = r.session;
     try {
       if (storedRuntime(s) === "chat" && s.status === "running") {
         d.links?.ensure(s.id);
-        if (r.claudePrompt !== undefined) d.links?.startTurnWhenConnected(s.id, r.claudePrompt);
+        const first = r.claudePrompt !== undefined && prompt !== undefined ? `${r.claudePrompt}\n\n${prompt}` : r.claudePrompt ?? prompt;
+        const onDone = prompt === undefined ? undefined : (err: Error | null) => {
+          if (!err) return;
+          try {
+            logEvent(d.db, s.id, "first_prompt_failed", { error: err.message });
+            d.threads?.(s.id).addNotice(`Your first message was not delivered (${err.message}). Send it again.`, Date.now());
+            d.notify(`${s.project}/${s.repo}`, `First message to ${s.id} was not delivered: ${err.message}`, { session: { id: s.id, project: s.project, repo: s.repo, runtime: "chat" } });
+          } catch (e) { console.error(`reporting the failed first message of ${s.id} failed:`, e); }
+        };
+        if (first !== undefined) d.links?.startTurnWhenConnected(s.id, first, onDone);
       }
     }
     catch (e) { console.error(`bridge link of opened session ${s.id} failed:`, e); }
@@ -986,8 +998,32 @@ export function createApp(d: ApiDeps): Hono {
   };
   app.post("/api/sessions", async (c) => {
     noIdleTimeout(c);
-    const body = (await c.req.json().catch(() => null)) as { folder: string; project: string; repo?: string; cloneUrl?: string; solo?: boolean; agent?: string; fresh?: boolean; host?: string; sessionId?: string; runtime?: unknown } | null;
+    const body = (await c.req.json().catch(() => null)) as { folder: string; project: string; repo?: string; cloneUrl?: string; solo?: boolean; agent?: string; fresh?: boolean; host?: string; sessionId?: string; runtime?: unknown; prompt?: unknown } | null;
     if (!body) return c.json({ error: "invalid JSON body" }, 400);
+    // The optional first prompt (the dashboard's New session page). Text only, refused explicitly rather than cut or
+    // dropped; a chat session gets it as its first turn (linkOpenedChat), a tmux one through the prompt file.
+    // `null` is absent, as before the field existed. Control characters are refused, not stripped: what reaches the
+    // agent is exactly what was typed.
+    let prompt: string | undefined;
+    if (body.prompt !== undefined && body.prompt !== null) {
+      if (typeof body.prompt !== "string") return c.json({ error: "prompt must be a string" }, 400);
+      // eslint-disable-next-line no-control-regex -- the point of the check
+      if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(body.prompt)) return c.json({ error: "prompt must not contain control characters (other than tab and newlines)" }, 400);
+      const trimmed = body.prompt.trim();
+      if (Buffer.byteLength(trimmed, "utf8") > MAX_FIRST_PROMPT_BYTES) return c.json({ error: `prompt is larger than ${MAX_FIRST_PROMPT_BYTES} bytes` }, 413);
+      if (trimmed !== "") prompt = trimmed;
+    }
+    if (prompt !== undefined) {
+      // An agent in a container must not open sessions with instructions of its own: only the owner's devices may.
+      if (!isApprovalAllowed(d.remoteAddr?.(c), d.sshApprovalAllowExtra ?? [])) return c.json({ error: "a first prompt can only come from the dashboard or a trusted device, not from a container" }, 403);
+      if (body.host === "instabox") return c.json({ error: "InstaBox sessions do not take a first prompt" }, 400);
+      if (body.solo) return c.json({ error: "claudeSolo sessions do not take a first prompt" }, 400);
+      if (body.runtime !== "tmux" && body.runtime !== "chat") return c.json({ error: "a prompt needs an explicit runtime (tmux|chat)" }, 400);
+      // agent-launch passes the file as the agent CLI's last argument: a leading '-' would be parsed as an option.
+      if (body.runtime === "tmux" && prompt.startsWith("-")) return c.json({ error: "a terminal session's first prompt cannot start with '-' (the agent CLI would read it as an option)" }, 400);
+      // ...and a single word would be run as its subcommand (`logout`, `update`, `mcp`, `resume`, …).
+      if (body.runtime === "tmux" && !/\s/.test(prompt)) return c.json({ error: "a terminal session's first prompt must be more than one word (the agent CLI would run a single word as its subcommand)" }, 400);
+    }
     if (body.agent !== undefined && !isAgentName(body.agent))
       return c.json({ error: `invalid agent (${AGENT_IDS.join("|")})` }, 400);
     const agent = body.agent as AgentName | undefined;
@@ -1040,6 +1076,8 @@ export function createApp(d: ApiDeps): Hono {
         if (typeof body.sessionId !== "string" || body.fresh) return c.json({ error: "sessionId must be a string and cannot be combined with fresh" }, 400);
         const s = getSession(d.db, body.sessionId);
         if (!s || s.folder !== body.folder || s.project !== body.project || s.repo !== body.repo) return c.json({ error: `unknown session ${body.sessionId} for this repo` }, 404);
+        // The prompt goes the way the request's runtime says; a session of the other runtime would never get it.
+        if (prompt !== undefined && storedRuntime(s) !== runtime) return c.json({ error: `${s.id} is a ${storedRuntime(s)} session; the prompt was sent for ${runtime}` }, 400);
         // The stored runtime wins over the body: a chat session never gets an agent chat cannot run.
         if (s.runtime === "chat") {
           const blocked = chatRuntimeBlock(resolveAgent(agent, getRepoAgent(d.db, body.folder, body.project, body.repo)), "vps");
@@ -1047,8 +1085,17 @@ export function createApp(d: ApiDeps): Hono {
         }
       }
       if (runtime !== undefined || body.sessionId !== undefined) {
-        const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, runtime, fresh: body.fresh, sessionId: body.sessionId });
-        linkOpenedChat(r);
+        const firstPrompt = runtime === "tmux" ? prompt : undefined;
+        const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, runtime, fresh: body.fresh, sessionId: body.sessionId, ...(firstPrompt !== undefined ? { firstPrompt } : {}) });
+        // A joined chat session that is busy, or already has a first message waiting, keeps it: never overwritten.
+        if (runtime === "chat" && prompt !== undefined && !r.created) {
+          const busyRun = d.threads?.(r.session.id).snapshot({ limit: 0 }).runs.some((run) => run.status === "running" || run.status === "queued") ?? false;
+          if (busyRun || d.links?.hasFirstTurn(r.session.id)) {
+            linkOpenedChat(r);
+            return c.json({ error: `${r.session.id} ${busyRun ? "has a run in progress" : "already has a first message waiting"}, so your message was not sent: open it and send it there, or create another session` }, 409);
+          }
+        }
+        linkOpenedChat(r, runtime === "chat" ? prompt : undefined);
         return c.json(r, r.created ? 201 : 200);
       }
       // No runtime named: an existing session of either runtime is joined (one the agent can run in, the
@@ -1063,6 +1110,7 @@ export function createApp(d: ApiDeps): Hono {
       linkOpenedChat(r);
       return c.json(r.created && picked.notice ? { ...r, runtimeNotice: picked.notice } : r, r.created ? 201 : 200);
     } catch (e) {
+      if (e instanceof FirstPromptRefused) return c.json({ error: e.message }, 409);
       return busy(c, e) ?? c.json({ error: (e as Error).message }, 400);
     }
   });
