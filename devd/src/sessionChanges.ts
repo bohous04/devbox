@@ -1,26 +1,40 @@
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute, resolve, sep } from "node:path";
-import type { ChangedFile, ChangeStatus, SessionChanges } from "../../shared/changes";
+import type { ChangedFile, ChangeStatus, FileDiff, SessionChanges } from "../../shared/changes";
 import { sh } from "./git";
-import { countUntracked, RootOwnedError, type CounterDeps } from "./untrackedCounter";
+import { run, timeoutFor } from "./proc";
+import { countUntracked, readUntracked, RootOwnedError, type CounterDeps } from "./untrackedCounter";
 
 /** An explicit failure the route maps to its HTTP status — never an empty list in its place.
  *  The message goes to the client, so it carries no host paths or git stderr (those are logged). */
 export class ChangesError extends Error {
-  constructor(readonly status: 409 | 500, message: string) { super(message); }
+  constructor(readonly status: 400 | 404 | 409 | 500, message: string) { super(message); }
 }
 
 const MAX_FILES = 500;
 const MAX_UNTRACKED_BYTES = 1024 * 1024;
 // Upper bound on what all untracked files together may make devd read per request.
 const UNTRACKED_BUDGET = 32 * 1024 * 1024;
+/** Cap of one file's diff (characters). */
+export const MAX_DIFF = 256 * 1024;
 
 type Git = (...args: string[]) => ReturnType<typeof sh>;
+type Expected = { gitDir: string; commonDir: string };
+
+interface Repo {
+  ws: string;
+  git: Git;
+  must: (what: string, ...args: string[]) => Promise<string>;
+  /** "origin/<default>" or null (then everything is compared to HEAD). */
+  base: string | null;
+  /** What `git diff` compares the working tree to: the merge-base, or HEAD. */
+  rev: string;
+  gitDir: string;
+}
 
 /**
- * The worktree's changes against the merge-base with origin's default branch: committed (pushed
- * or not) + staged + unstaged (one `git diff <merge-base>` against the working tree covers all) +
- * untracked files, whose lines count as added.
+ * Opens the session repo for reading its changes against the merge-base with origin's default
+ * branch (else HEAD).
  *
  * The worktree is agent-controlled, hence:
  *  - every git goes through proc.run → safeGit.ts (untrusted config/attributes);
@@ -32,26 +46,12 @@ type Git = (...args: string[]) => ReturnType<typeof sh>;
  *    inside the registration lives in the bare clone, which the container mounts rw, so it could
  *    still be redirected after the check — the same class of race safeGit.ts already accepts for
  *    unrestricted sessions (only the agent itself can do it);
- *  - untracked files are counted by a child running as the worktree owner: see untrackedCounter.ts.
+ *  - untracked files are read by a child running as the worktree owner: see untrackedCounter.ts.
  */
-export async function collectChanges(
-  ws: string, expected: { gitDir: string; commonDir: string },
-  limits: { maxFiles?: number; maxUntrackedBytes?: number; untrackedBudget?: number } = {},
-  counterDeps?: CounterDeps,
-): Promise<SessionChanges> {
-  const maxFiles = limits.maxFiles ?? MAX_FILES;
+async function openRepo(ws: string, expected: Expected): Promise<Repo> {
   if (!isDir(ws)) throw new ChangesError(409, "session worktree is missing");
   // devd runs as root over a worktree owned by uid 1000 → safe.directory (same as collectGitStats).
   const discover: Git = (...args) => sh(ws, "git", "-c", `safe.directory=${ws}`, ...args);
-  const must = async (what: string, ...args: string[]): Promise<string> => {
-    const r = await git(...args);
-    if (r.code !== 0) {
-      console.error(`changes ${ws}: git ${args.join(" ")} failed: ${r.stderr.trim()}`);
-      throw new ChangesError(500, `${what} failed`);
-    }
-    return r.stdout;
-  };
-
   const dirs = await discover("rev-parse", "--git-dir", "--git-common-dir");
   if (dirs.code !== 0) {
     console.error(`changes ${ws}: git rev-parse failed: ${dirs.stderr.trim()}`);
@@ -63,27 +63,51 @@ export async function collectChanges(
     throw new ChangesError(409, "session worktree points to a different git repository");
   }
   const git: Git = (...args) => sh(ws, "git", "-c", `safe.directory=${ws}`, "--git-dir", gitDir, "--work-tree", ws, ...args);
+  const must = async (what: string, ...args: string[]): Promise<string> => {
+    const r = await git(...args);
+    if (r.code !== 0) {
+      console.error(`changes ${ws}: git ${args.join(" ")} failed: ${r.stderr.trim()}`);
+      throw new ChangesError(500, `${what} failed`);
+    }
+    return r.stdout;
+  };
   if ((await git("rev-parse", "--verify", "--quiet", "HEAD^{commit}")).code !== 0) throw new ChangesError(409, "repository has no commits yet");
-
   const base = await originDefault(git, gitDir, commonDir);
   const rev = base ? (await must(`merge-base with ${base}`, "merge-base", base, "HEAD")).trim() : "HEAD";
+  return { ws, git, must, base, rev, gitDir };
+}
 
-  // One git call for status and counts, so both describe the same moment.
-  const files: ChangedFile[] = parseDiff(await must("git diff", "diff", "-M", "--raw", "--numstat", "-z", rev));
+/** Tracked changes (status + counts in one git call, so both describe the same moment) and the
+ *  untracked paths. */
+async function listChanges(repo: Repo): Promise<{ tracked: ChangedFile[]; untracked: string[] }> {
+  const tracked = parseDiff(await repo.must("git diff", "diff", "-M", "--raw", "--numstat", "-z", repo.rev));
+  const untracked = (await repo.must("listing untracked files", "ls-files", "--others", "--exclude-standard", "-z")).split("\0").filter(Boolean);
+  return { tracked, untracked };
+}
 
-  const untracked = (await must("listing untracked files", "ls-files", "--others", "--exclude-standard", "-z")).split("\0").filter(Boolean);
+const rethrowRootOwned = (e: unknown): never => {
+  if (e instanceof RootOwnedError) throw new ChangesError(409, e.message);
+  throw e;
+};
+
+/** The worktree's changes: committed (pushed or not) + staged + unstaged (one `git diff <rev>`
+ *  against the working tree covers all) + untracked files, whose lines count as added. */
+export async function collectChanges(
+  ws: string, expected: Expected,
+  limits: { maxFiles?: number; maxUntrackedBytes?: number; untrackedBudget?: number } = {},
+  counterDeps?: CounterDeps,
+): Promise<SessionChanges> {
+  const maxFiles = limits.maxFiles ?? MAX_FILES;
+  const repo = await openRepo(ws, expected);
+  const { tracked: files, untracked } = await listChanges(repo);
+
   // A lossy-decoded name is not the file's real name — opening it could hit a different file.
   const countable = untracked.filter((p) => !p.includes("\uFFFD"));
   const toCount = countable.slice(0, maxFiles);
   let countsCapped = countable.length > toCount.length;
   let countsUnavailable = false;
-  let result;
-  try {
-    result = await countUntracked(ws, toCount, { maxBytes: limits.maxUntrackedBytes ?? MAX_UNTRACKED_BYTES, budget: limits.untrackedBudget ?? UNTRACKED_BUDGET }, counterDeps);
-  } catch (e) {
-    if (e instanceof RootOwnedError) throw new ChangesError(409, e.message);
-    throw e;
-  }
+  const result = await countUntracked(ws, toCount, { maxBytes: limits.maxUntrackedBytes ?? MAX_UNTRACKED_BYTES, budget: limits.untrackedBudget ?? UNTRACKED_BUDGET }, counterDeps)
+    .catch(rethrowRootOwned);
   const lines = new Map<string, number | null>();
   if ("unavailable" in result) {
     console.error(`changes ${ws}: untracked files not counted: ${result.unavailable}`);
@@ -101,11 +125,82 @@ export async function collectChanges(
   const totals = { files: files.length, added: 0, removed: 0 };
   for (const f of files) { totals.added += f.added ?? 0; totals.removed += f.removed ?? 0; }
   return {
-    base: base ?? "HEAD", files: files.slice(0, maxFiles), totals,
+    base: repo.base ?? "HEAD", files: files.slice(0, maxFiles), totals,
     ...(files.length > maxFiles ? { truncated: true as const } : {}),
     ...(countsCapped ? { countsCapped: true as const } : {}),
     ...(countsUnavailable ? { countsUnavailable: true as const } : {}),
   };
+}
+
+/** A repo-relative path as git lists it: no absolute path, no `.`/`..`/empty segment, no NUL,
+ *  no lossy-decoded name. */
+function validPath(path: string): boolean {
+  return !!path && !path.includes("\0") && !path.includes("\uFFFD") && !path.startsWith("/")
+    && path.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
+}
+
+/**
+ * One changed file's unified diff (3 lines of context) against the same base as collectChanges.
+ * Only a file in the current listing can be asked for. Tracked files go through the pinned,
+ * hardened git (`--literal-pathspecs`, path after `--`); untracked files are read by the owner
+ * child and rendered as a new-file diff. Capped at MAX_DIFF on a line boundary.
+ */
+export async function collectFileDiff(ws: string, expected: Expected, path: string, counterDeps?: CounterDeps): Promise<FileDiff> {
+  if (!validPath(path)) throw new ChangesError(400, "invalid path");
+  const repo = await openRepo(ws, expected);
+  const { tracked, untracked } = await listChanges(repo);
+  const base = repo.base ?? "HEAD";
+  const entry = tracked.find((f) => f.path === path);
+  if (entry) {
+    // numstat says `-` for what git treats as binary (incl. a `-diff` attribute).
+    if (entry.added === null) return { path, status: entry.status, base, binary: true, truncated: false, diff: "" };
+    const r = await run(["git", "-c", `safe.directory=${ws}`, "--git-dir", repo.gitDir, "--work-tree", ws, "--literal-pathspecs",
+      "diff", "-M", "--no-color", "-U3", "--src-prefix=a/", "--dst-prefix=b/", "-O/dev/null", repo.rev, "--", ...(entry.oldPath ? [entry.oldPath] : []), path],
+      { cwd: ws, timeoutMs: timeoutFor("LOCAL"), maxStdout: MAX_DIFF + 1 });
+    if (r.code !== 0 && !r.stdoutTruncated) {
+      console.error(`changes ${ws}: git diff -- ${path} failed: ${r.stderr.trim()}`);
+      throw new ChangesError(500, "git diff failed");
+    }
+    const cut = r.stdout.length > MAX_DIFF;
+    return { path, status: entry.status, base, binary: false, truncated: cut, diff: cut ? toLastLine(r.stdout.slice(0, MAX_DIFF)) : r.stdout };
+  }
+  if (!untracked.includes(path)) throw new ChangesError(404, "file is not among the session's changes");
+  const file = await readUntracked(ws, path, MAX_DIFF, counterDeps).catch(rethrowRootOwned);
+  if ("unavailable" in file) {
+    console.error(`changes ${ws}: reading untracked ${path} failed: ${file.unavailable}`);
+    throw new ChangesError(500, "reading the file failed");
+  }
+  if (!file.ok) throw new ChangesError(409, "file is not a readable regular file in the worktree");
+  if (file.binary) return { path, status: "untracked", base, binary: true, truncated: false, diff: "" };
+  return { path, status: "untracked", base, binary: false, ...newFileDiff(path, file.content, file, MAX_DIFF) };
+}
+
+const toLastLine = (s: string): string => s.slice(0, s.lastIndexOf("\n") + 1);
+
+/** `git diff` output for a new file with `content`, at most `cap` characters; a cut-off read
+ *  (`truncated`) drops its last partial line. The hunk header counts only included lines. */
+export function newFileDiff(path: string, content: string, read: { exec: boolean; truncated: boolean }, cap: number): { diff: string; truncated: boolean } {
+  let diff = `diff --git a/${path} b/${path}\nnew file mode ${read.exec ? "100755" : "100644"}\n`;
+  if (!content) return { diff, truncated: read.truncated };
+  const noEol = !content.endsWith("\n") && !read.truncated;
+  const lines = content.split("\n");
+  lines.pop(); // after the last "\n": "" or a partial line (kept only when it is the real end)
+  if (noEol) lines.push(content.slice(content.lastIndexOf("\n") + 1));
+  diff += `--- /dev/null\n+++ b/${path}\n`;
+  const tail = noEol ? "\\ No newline at end of file\n" : "";
+  // The hunk header is up to ~30 characters; reserve it before filling the body.
+  let room = cap - diff.length - 32 - tail.length;
+  let body = "";
+  let n = 0;
+  let truncated = read.truncated;
+  for (const l of lines) {
+    if (l.length + 2 > room) { truncated = true; break; }
+    body += `+${l}\n`;
+    room -= l.length + 2;
+    n++;
+  }
+  const endTail = n === lines.length ? tail : "";
+  return { diff: `${diff}@@ -0,0 +${n === 1 ? "1" : `1,${n}`} @@\n${body}${endTail}`, truncated };
 }
 
 /** "origin/<default>" or null when origin has no default branch here. */
