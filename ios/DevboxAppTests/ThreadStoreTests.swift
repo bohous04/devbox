@@ -68,6 +68,12 @@ final class ThreadStoreTests: XCTestCase {
         }
     }
 
+    func testSnapshotMergeTakesItsEffort() throws {
+        let json = #"{"afterSeq":0,"snapshot":{"lastSeq":0,"seenSeq":0,"runs":[],"items":[],"pending":[],"background":[],"native":null,"effort":{"model":"m","supported":["low"],"effective":null,"chosen":"low"}}}"#
+        let frame = try JSONDecoder().decode(ThreadSnapshotFrame.self, from: Data(json.utf8))
+        XCTAssertEqual(ThreadView.mergeSnapshot(.empty, frame).effort, ThreadEffort(model: "m", supported: ["low"], effective: nil, chosen: "low"))
+    }
+
     func testToolInputNullIsKeptAsAValue() throws {
         let json = #"{"seq":1,"ts":5,"event":{"type":"tool.started","runId":"r","itemId":"t","tool":"X","input":null}}"#
         let e = try JSONDecoder().decode(LoggedEvent.self, from: Data(json.utf8))
@@ -123,6 +129,14 @@ final class ThreadStoreLiveTests: XCTestCase {
         try await waitUntil { store.thread?.items.count == 2 }
         XCTAssertEqual(store.thread?.lastSeq, 6)
         XCTAssertEqual(store.thread?.items.map(\.text), ["hi", "Switched"])
+        // The agent's effort: its own event, no seq; null clears it.
+        let effort = #"{"model":"gpt-6.1-sol","supported":["low","high"],"effective":"high","chosen":"high"}"#
+        for l in ["event: thread-effort", "data: \(effort)", ""] { feed?.yield(l) }
+        try await waitUntil { store.thread?.effort != nil }
+        XCTAssertEqual(store.thread?.effort, ThreadEffort(model: "gpt-6.1-sol", supported: ["low", "high"], effective: "high", chosen: "high"))
+        XCTAssertEqual(store.thread?.lastSeq, 6)
+        for l in ["event: thread-effort", "data: null", ""] { feed?.yield(l) }
+        try await waitUntil { store.thread?.effort == nil }
         for l in ["event: thread", "data: {not json", ""] { feed?.yield(l) }
         try await waitUntil { store.badFrame != nil }
         store.stop()

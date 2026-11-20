@@ -55,6 +55,8 @@ enum ChatSwitch {
     static let sameModelAliases = ["mistral-medium-latest": "mistral-medium-3.5"]
     /// `ACP_MIN_BRIDGE_VERSION`.
     static let acpMinBridgeVersion = "1.2.0"
+    /// `EFFORT_MIN_BRIDGE_VERSION`: older bridges neither report nor take an effort (devd: 409 bridge-too-old).
+    static let effortMinBridgeVersion = "1.7.0"
 
     /// `version` (`x.y.z`) is `min` or newer; anything that is not `x.y.z` counts as older.
     static func versionAtLeast(_ version: String, _ min: String) -> Bool {
@@ -183,6 +185,41 @@ enum ChatSwitch {
             let disabled = chatRuntimeBlock(id) ?? (oldBridge && p.acp != nil ? "recreate the container to use \(p.label)" : nil)
             return Option(value: id, label: p.label, current: id == t.agent, disabled: disabled)
         }
+    }
+
+    /// Every level devd accepts (shared/effort.ts KNOWN_EFFORT_LEVELS), with its name.
+    static let effortLabels = ["none": "None", "minimal": "Minimal", "low": "Low", "medium": "Medium", "high": "High",
+                                       "xhigh": "Extra high", "max": "Max", "ultra": "Ultra"]
+    /// A level as the agent names it; one this list does not know shows as reported (switchView.ts effortLabel).
+    static func effortLabel(_ level: String) -> String { effortLabels[level] ?? level }
+
+    private static func effortBridge(_ t: ChatTarget) -> Bool {
+        t.bridgeVersion.map { versionAtLeast($0, effortMinBridgeVersion) } ?? false
+    }
+
+    /// The chip's level ("Opus 5.5 · High"): the level the agent reported running at, else the choice not yet run, else
+    /// "Default" (Claude says its level only with a reply). nil = no level part: an agent without levels, levels not
+    /// reported yet, or a bridge that cannot report them.
+    static func effortChipLabel(_ e: ThreadEffort?, _ t: ChatTarget) -> String? {
+        guard effortBridge(t), let e, e.supported?.isEmpty != true else { return nil }
+        return (e.effective ?? e.chosen).map(effortLabel) ?? "Default"
+    }
+
+    /// Why the Effort menu cannot be used. Not blocked by a run: the level applies from the next message.
+    static func effortMenuBlocked(_ e: ThreadEffort?, _ t: ChatTarget) -> String? {
+        if !effortBridge(t) { return "This session's agent bridge (\(t.bridgeVersion ?? "unknown version")) cannot change the effort: recreate the session's container" }
+        guard let e else { return "The agent has not reported its effort levels yet" }
+        guard let supported = e.supported else { return "The agent has not reported the effort levels of \(e.model ?? "this model")" }
+        if supported.isEmpty { return "\(e.model ?? "This model") has no effort levels" }
+        return nil
+    }
+
+    /// "Default" (value "": the model's own level, sent as null) and the levels the model lists.
+    static func effortOptions(_ e: ThreadEffort) -> [Option] {
+        let detail: String? = e.chosen != nil ? nil
+            : e.effective.map { "\(effortLabel($0)) for \(e.model ?? "this model")" } ?? "The level shows after the agent's first reply"
+        return [Option(value: "", label: "Default", detail: detail, current: e.chosen == nil)]
+            + (e.supported ?? []).map { Option(value: $0, label: effortLabel($0), current: e.chosen == $0) }
     }
 
     /// What the switchers show when devd refused or the bridge did not confirm; the code stays visible.

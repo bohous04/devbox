@@ -1102,8 +1102,20 @@ struct ThreadSnapshot: Codable, Equatable {
     var pending: [PendingRequest]
     var background: [BackgroundWork]
     var native: NativeThread?
+    /// The agent's reasoning effort as devd parsed it (bridge 1.7.0+); nil before one, and from a devd that predates it.
+    var effort: ThreadEffort? = nil
 
     static let empty = ThreadSnapshot(lastSeq: 0, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: nil)
+}
+
+/// shared/thread.ts ThreadEffort. `supported`: the levels the model takes ([] = none, nil = not known yet);
+/// `effective`: the level the agent runs at, nil when not known (Claude says it with a reply); `chosen`: the user's
+/// pick, nil = the model default. devd sends only levels it knows (shared/effort.ts).
+struct ThreadEffort: Codable, Equatable {
+    var model: String?
+    var supported: [String]?
+    var effective: String?
+    var chosen: String?
 }
 
 /// The agent bridge's events (image/agent-bridge/src/events.ts). A type this app does not know decodes to

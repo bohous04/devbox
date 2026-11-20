@@ -13,9 +13,11 @@ enum ThreadFixtures {
         "GET \(base)/thread": { _ in raw(thread) },
         "GET \(base)/thread/target": { _ in
             .json(["agent": "claude", "harness": "claude", "account": NSNull(), "model": "claude-opus-5-5",
-                   "awaitingTarget": false, "bridgeVersion": "1.5.0"])
+                   "awaitingTarget": false, "bridgeVersion": "1.7.0"])
         },
         "POST \(base)/thread/seen": { _ in .json([String: Any]()) },
+        // Taken; the level would come back over the stream, which is silent here.
+        "POST \(base)/thread/effort": { _ in FixtureResponse(status: 202, body: Data()) },
         // The chat header's place ("orchard / sync") comes from the live session list.
         "GET /api/stats/live": { _ in raw(live) },
         "GET /api/stats/sessions": { _ in .json([Any]()) },
@@ -94,6 +96,7 @@ enum ThreadFixtures {
 
     private static let thread = #"""
     {"lastSeq":40,"seenSeq":40,"pending":[],"background":[],"native":null,
+    "effort":{"model":"claude-opus-5-5","supported":["low","medium","high","xhigh","max"],"effective":"high","chosen":"high"},
     "runs":[
      {"runId":"run-1","origin":"user","status":"completed","harness":"claude","nativeThreadId":"n-1","model":"claude-opus-5-5",
       "queuedAt":null,"startedAt":1790000000000,"endedAt":1790000012000,"endedSeq":8,"usage":null,"error":null},

@@ -33,7 +33,14 @@ enum ThreadView {
             if let idx = runs.firstIndex(where: { $0.runId == r.runId }) { runs[idx] = r } else { runs.append(r) }
         }
         return ThreadSnapshot(lastSeq: max(t.lastSeq, s.lastSeq), seenSeq: s.seenSeq, runs: runs, items: items,
-                              pending: s.pending, background: s.background, native: s.native)
+                              pending: s.pending, background: s.background, native: s.native, effort: s.effort)
+    }
+
+    /// The agent's effort from the stream (`thread-effort`, devd's parsed value; no seq of its own).
+    static func applyEffort(_ t: ThreadSnapshot, _ effort: ThreadEffort?) -> ThreadSnapshot {
+        var n = t
+        n.effort = effort
+        return n
     }
 
     /// A devd notice (`thread-notice`): item id `notice:<n>`, no seq of its own, so lastSeq stays; the same notice
@@ -404,6 +411,7 @@ final class ThreadStore: ObservableObject {
             case "thread-snapshot": update(ThreadView.mergeSnapshot(t, try JSONDecoder().decode(ThreadSnapshotFrame.self, from: data)))
             case "thread": update(ThreadView.apply(t, try JSONDecoder().decode(LoggedEvent.self, from: data)))
             case "thread-notice": update(ThreadView.applyNotice(t, try JSONDecoder().decode(ThreadItem.self, from: data)))
+            case "thread-effort": update(ThreadView.applyEffort(t, try JSONDecoder().decode(ThreadEffort?.self, from: data)))
             case "inbox", "ping": break
             default: Self.logger.notice("thread stream: ignoring event \(e.name, privacy: .public)")
             }

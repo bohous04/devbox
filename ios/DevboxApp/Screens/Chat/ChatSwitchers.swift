@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Agent, model and account menus of a chat session (dashboard/src/components/chat/Switchers.tsx). devd applies a
+/// Agent, model, effort and account menus of a chat session (dashboard/src/components/chat/Switchers.tsx). devd applies a
 /// switch between turns and records it in the thread as a notice. The menus show the target devd plans the next
 /// switch from (GET thread/target), re-read when the thread announces a new native thread, a run ends or a notice
 /// arrives. Disabled options show their reason under the name (touch has no hover).
@@ -15,7 +15,7 @@ struct ChatSwitchers<Content: View>: View {
     let client: DevdClient
     @ViewBuilder let content: (_ chip: AnyView?, _ status: AnyView) -> Content
 
-    private enum Which: String { case harness, model, account }
+    private enum Which: String { case harness, model, effort, account }
 
     @State private var target: ChatTarget?
     @State private var targetError: String?
@@ -42,17 +42,27 @@ struct ChatSwitchers<Content: View>: View {
         let blocked = ChatSwitch.blocked(runs: thread.runs, target: target)
         let agent = AgentProfiles.profile(for: AgentName(rawValue: target.agent)).short
         let model = target.model.map(ChatSwitch.modelLabel) ?? "Default model"
+        let effort = ChatSwitch.effortChipLabel(thread.effort, target)
+        let effortBlocked = ChatSwitch.effortMenuBlocked(thread.effort, target)
         let accountTitle = target.harness == "codex" ? "Codex account" : "Claude account"
         return AnyView(Menu {
             menu(.harness, title: "Agent", label: agent, blocked: blocked, options: ChatSwitch.harnessOptions(target), loadError: nil)
             menu(.model, title: "Model", label: model, blocked: blocked ?? ChatSwitch.modelMenuBlocked(target),
                  options: ChatSwitch.modelOptions(target), loadError: nil)
+            // Not blocked by a run: the bridge applies the level from the next message. A blocked menu says why in
+            // its second line (a disabled submenu cannot be opened to read it).
+            menu(.effort, title: "Effort", label: effortBlocked ?? effort ?? "Default", blocked: effortBlocked,
+                 options: thread.effort.map(ChatSwitch.effortOptions), loadError: nil, footer: "Applies from your next message.")
             menu(.account, title: accountTitle, label: accounts?.first(where: \.current)?.label ?? target.account ?? "no account",
                  blocked: blocked ?? ChatSwitch.accountMenuBlocked(target), options: accounts, loadError: accountsError)
         } label: {
             HStack(spacing: 4) {
                 if busy != nil { ProgressView().controlSize(.mini) }
                 Text(model).lineLimit(1)
+                if let effort {
+                    Text("·").foregroundStyle(Theme.C.mutedForeground)
+                    Text(effort).fontWeight(.semibold).lineLimit(1)
+                }
                 Image(systemName: "chevron.down").font(.system(size: ChatType.s(10), weight: .semibold)).foregroundStyle(Theme.C.mutedForeground)
             }
             .font(.system(size: ChatType.s(14), weight: .medium))
@@ -63,8 +73,13 @@ struct ChatSwitchers<Content: View>: View {
         // The menu stays openable while switching is blocked, so the current choices stay visible; the submenus are
         // disabled then and the reason is in the status lines.
         .labelOnlyMenu()
+        // As written, also when it opens upward from the composer (iOS then reverses a menu by default): the effort
+        // levels low to high with "Applies from your next message." last, and the sections as on the web.
+        .menuOrder(.fixed)
+        // Its whole label before the field takes the row: the level must not cut the model's name short.
+        .layoutPriority(1)
         .disabled(busy != nil)
-        .accessibilityLabel("Model: \(model), agent \(agent)"))
+        .accessibilityLabel("Model: \(model)\(effort.map { ", effort \($0)" } ?? ""), agent \(agent)"))
     }
 
     @ViewBuilder
@@ -89,7 +104,8 @@ struct ChatSwitchers<Content: View>: View {
         Text(text).font(Theme.F.meta).foregroundStyle(color)
     }
 
-    private func menu(_ which: Which, title: String, label: String, blocked: String?, options: [ChatSwitch.Option]?, loadError: String?) -> some View {
+    private func menu(_ which: Which, title: String, label: String, blocked: String?, options: [ChatSwitch.Option]?, loadError: String?,
+                      footer: String? = nil) -> some View {
         Menu {
             Section(title) {
                 if let loadError {
@@ -109,11 +125,12 @@ struct ChatSwitchers<Content: View>: View {
                 } else {
                     Text("Loading…")
                 }
+                if let footer { Text(footer) }
             }
         } label: {
             // A submenu row: what it switches, and the current choice under it.
             Text(title)
-            Text(busy == which ? "Switching…" : label)
+            Text(busy == which ? (which == .effort ? "Changing…" : "Switching…") : label)
         }
         .disabled(blocked != nil || busy != nil)
         .accessibilityLabel("\(title): \(label)")
@@ -148,18 +165,35 @@ struct ChatSwitchers<Content: View>: View {
     private struct ModelBody: Encodable { let model: String }
     private struct AccountBody: Encodable { let accountId: String }
     private struct HarnessBody: Encodable { let agent: String }
+    /// `{"effort": null}` goes back to the model default: the key must be sent, so null is encoded, not left out.
+    private struct EffortBody: Encodable {
+        let effort: String?
+        private enum K: String, CodingKey { case effort }
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: K.self)
+            try c.encode(effort, forKey: .effort)
+        }
+    }
 
     private func pick(_ which: Which, _ o: ChatSwitch.Option) {
         busy = which
         error = nil
         note = nil
         Task {
+            if which == .effort {
+                // 202 once the bridge took it; the level comes back as the stream's thread-effort.
+                do { try await client.postVoid("\(base)/effort", body: EffortBody(effort: o.value.isEmpty ? nil : o.value)) }
+                catch { self.error = "Effort change to \(o.label) failed: \(ChatSwitch.errorText(error))" }
+                busy = nil
+                return
+            }
             do {
                 let r: ChatSwitchResult
                 switch which {
                 case .model: r = try await client.post("\(base)/model", body: ModelBody(model: o.value))
                 case .account: r = try await client.post("\(base)/account", body: AccountBody(accountId: o.value))
                 case .harness: r = try await client.post("\(base)/harness", body: HarnessBody(agent: o.value))
+                case .effort: preconditionFailure("an effort change is sent above")
                 }
                 note = ChatSwitch.resultText(r)
             } catch {

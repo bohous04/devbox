@@ -54,6 +54,22 @@ final class ChatScreenshotTests: XCTestCase {
             try save(app, "ios-\(appearance)-work")
         }
 
+        // The chip's menu, then its Effort submenu: the levels, the current one ticked, and when it applies.
+        let chip = app.buttons.containing(NSPredicate(format: "label BEGINSWITH 'Model:'")).firstMatch
+        if chip.waitForExistence(timeout: 3) {
+            chip.tap()
+            sleep(1)
+            try save(app, "ios-\(appearance)-model-menu")
+            let effort = app.buttons.containing(NSPredicate(format: "label BEGINSWITH 'Effort'")).firstMatch
+            if effort.waitForExistence(timeout: 3) {
+                effort.tap()
+                sleep(1)
+                try save(app, "ios-\(appearance)-effort-menu")
+            }
+            // Closes the submenu, then the menu: a tap above them, away from the composer.
+            for _ in 0..<2 { app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap(); sleep(1) }
+        }
+
         // The composer from its second line: two tiers, the field over the controls.
         let field = app.textFields["Message"].exists ? app.textFields["Message"] : app.textViews["Message"]
         if field.waitForExistence(timeout: 3) {
