@@ -192,9 +192,14 @@ struct MacInboxSidebar: View {
             .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(searching ? Theme.C.link.opacity(0.6) : .clear))
             .help("Search sessions (⌘F)")
             Button(action: newSession) {
-                Image(systemName: "square.and.pencil").font(.system(size: 14, weight: .medium)).frame(width: 28, height: 28)
+                // The field's twin: same height and fill, so the two read as one row of tools.
+                Image(systemName: "square.and.pencil").font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.C.foreground.opacity(0.8))
+                    .frame(width: 28, height: 28)
+                    .background(Theme.C.foreground.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+                    .contentShape(Rectangle())
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .help("New session (⌘N)")
             .accessibilityLabel("New session")
         }
@@ -318,9 +323,9 @@ private struct MacGroupHead: View {
 }
 
 /// A sidebar row: the title with its state on the right (one coloured word when the row needs you, otherwise how long
-/// ago, after a live dot while it works), and one muted line: where it runs and, in the groups about the latest
-/// message, that message, with the agent's mark at its end. The agent's name and "tmux" are left to the tooltip and
-/// the spoken label. (Inbox rows carry no branch, so the line cannot name one.)
+/// ago, after a live dot while it works, with the agent's glyph before it), and one muted line: the repo and its
+/// branch, or without a branch the latest message in the groups about it. The agent's name, "tmux" and the message
+/// are in the tooltip and the spoken label.
 struct MacInboxRow: View {
     let item: InboxItem
     let now: Int
@@ -340,16 +345,23 @@ struct MacInboxRow: View {
         }
     }
 
-    /// The agent's mark: its initial, two letters where one is taken (Claude C, Codex Co).
-    static func agentMark(_ agent: String) -> String {
+    /// The agent's glyph, the dashboard's (Switchers.tsx AgentGlyph) as SF Symbols with the same tints: Claude's
+    /// asterisk, Codex's hexagon, Grok's bolt, Antigravity's orbit, Vibe's wind.
+    static func agentGlyph(_ agent: String) -> (symbol: String, tint: Color) {
         switch AgentName(rawValue: agent) ?? .unknown {
-        case .claude, .claudeGemini, .claudeOpenrouter: return "C"
-        case .codex: return "Co"
-        case .grok: return "G"
-        case .antigravity: return "A"
-        case .vibe: return "V"
-        case .unknown: return "?"
+        case .claude, .claudeGemini, .claudeOpenrouter: return ("asterisk", Color(light: 0xEA580C, dark: 0xFB923C))
+        case .codex: return ("hexagon", Color(light: 0x0284C7, dark: 0x38BDF8))
+        case .grok: return ("bolt", Theme.C.foreground)
+        case .antigravity: return ("atom", Color(light: 0x7C3AED, dark: 0xA78BFA))
+        case .vibe, .unknown: return ("wind", Color(light: 0xD97706, dark: 0xFBBF24))
         }
+    }
+
+    /// The second line after the repo: the branch devd recorded, else (in the message groups) the latest message.
+    static func place(_ i: InboxItem, detail: String) -> String {
+        let place = "\(i.project)/\(i.repo)"
+        if let branch = i.branch, !branch.isEmpty { return "\(place)  ·  \(branch)" }
+        return detail.isEmpty ? place : "\(place)  ·  \(detail)"
     }
 
     /// Age, or for a snoozed row when it comes back.
@@ -370,6 +382,9 @@ struct MacInboxRow: View {
                     .foregroundStyle(Theme.C.foreground)
                     .lineLimit(1)
                 Spacer(minLength: 0)
+                let glyph = Self.agentGlyph(item.agent)
+                Image(systemName: glyph.symbol).font(.system(size: 9.5, weight: .bold)).foregroundStyle(glyph.tint)
+                    .accessibilityHidden(true)
                 if let word = Self.word(item) {
                     Text(word.text).font(.system(size: 11, weight: .semibold)).foregroundStyle(InboxTone.text(word.tone))
                 } else {
@@ -380,18 +395,10 @@ struct MacInboxRow: View {
                     }
                 }
             }
-            HStack(spacing: 6) {
-                (Text("\(item.project)/\(item.repo)") + Text(detail.isEmpty ? "" : "  ·  \(detail)"))
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(Theme.C.mutedForeground)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                Text(Self.agentMark(item.agent))
-                    .font(.system(size: 8.5, weight: .bold))
-                    .foregroundStyle(Theme.C.mutedForeground)
-                    .frame(minWidth: 16, minHeight: 14)
-                    .background(Theme.C.foreground.opacity(0.07), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-            }
+            Text(Self.place(item, detail: detail))
+                .font(.system(size: 11.5))
+                .foregroundStyle(Theme.C.mutedForeground)
+                .lineLimit(1)
         }
         .padding(.vertical, 5)
         .contentShape(Rectangle())
@@ -475,12 +482,15 @@ struct MacThreadDetail: View {
         }
         // The window names its thread, as the inbox row does, and where it runs.
         .navigationTitle(item.map { InboxView.rowTitle($0).text } ?? threadId)
-        .navigationSubtitle(item.map { "\($0.project) / \($0.repo)" } ?? "")
+        .navigationSubtitle(item.map(Self.place) ?? "")
+        .modifier(MacThreadHeading(title: item.map { InboxView.rowTitle($0).text } ?? threadId, place: item.map(Self.place)))
         // Opaque, as the thread fades out under it (ChatScreen).
         .toolbarBackground(Theme.C.background, for: .windowToolbar)
         .toolbarBackground(.visible, for: .windowToolbar)
         .toolbar {
-            // With the title and breadcrumb on the left, the changes and the view switch sit on the right.
+            // With the title and breadcrumb on the left, the changes and the view switch sit on the right; without
+            // the system title (MacThreadHeading) nothing else pushes them there.
+            if #available(macOS 26, *) { ToolbarSpacer(.flexible, placement: .primaryAction) }
             ToolbarItem(placement: .primaryAction) {
                 MacChangesChip(store: state.windows.store(for: threadId, client: client), client: client) {
                     tab = .chat
@@ -495,6 +505,42 @@ struct MacThreadDetail: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
             }
+        }
+    }
+}
+
+extension MacThreadDetail {
+    /// Where the thread runs: repo, and its branch when devd recorded one.
+    static func place(_ i: InboxItem) -> String {
+        "\(i.project) / \(i.repo)" + (i.branch.flatMap { $0.isEmpty ? nil : " · \($0)" } ?? "")
+    }
+}
+
+/// The header's title on macOS 15 and later: the window's own title is capped to a short width, so it is replaced
+/// by one that runs up to the controls on the right, the place under it legible. macOS 14 keeps the system title.
+private struct MacThreadHeading: ViewModifier {
+    let title: String
+    let place: String?
+
+    func body(content: Content) -> some View {
+        if #available(macOS 15, *) {
+            content
+                .toolbar(removing: .title)
+                .toolbar {
+                    ToolbarItem(placement: .navigation) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.C.foreground)
+                            if let place {
+                                Text(place).font(.system(size: 12)).foregroundStyle(Theme.C.mutedForeground)
+                            }
+                        }
+                        .lineLimit(1)
+                        .padding(.leading, 4)
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+        } else {
+            content
         }
     }
 }
