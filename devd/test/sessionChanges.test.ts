@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { sh } from "./helpers/sh";
 import { createApp } from "../src/api";
 import { insertSession, openDb, type SessionRow } from "../src/db";
-import { collectChanges, parseDiff, untrackedLines } from "../src/sessionChanges";
+import { collectChanges, parseDiff } from "../src/sessionChanges";
+import { countUntracked, type CounterDeps } from "../src/untrackedCounter";
 import { createShare } from "../src/shares";
 
 const dirs: string[] = [];
@@ -20,6 +21,9 @@ function git(cwd: string, ...args: string[]): string {
   if (r.code !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
   return r.stdout;
 }
+
+const plainGit = (ws: string) => ({ gitDir: join(ws, ".git"), commonDir: join(ws, ".git") });
+const LIMITS = { maxBytes: 1024, budget: 1024 * 1024 };
 
 /** origin (bare) with `main`. */
 function origin(): string {
@@ -64,7 +68,7 @@ test("lists committed (pushed or not), staged, unstaged and untracked changes ag
   writeFileSync(join(seed, "notes.md"), "n1\nn2\nn3");
   writeFileSync(join(seed, "debug.log"), "ignored\n");
 
-  expect(await collectChanges(seed, join(seed, ".git"))).toEqual({
+  expect(await collectChanges(seed, plainGit(seed))).toEqual({
     base: "origin/main",
     files: [
       { path: "committed.txt", status: "added", added: 2, removed: 0 },
@@ -93,7 +97,7 @@ test("a session worktree over a bare clone compares to origin's default branch e
   git(wt, "commit", "-qam", "work");
   git(wt, "push", "-qu", "origin", "session/harbor-1");
 
-  expect(await collectChanges(wt, bare)).toEqual({
+  expect(await collectChanges(wt, { gitDir: join(bare, "worktrees", "harbor-1"), commonDir: bare })).toEqual({
     base: "origin/main",
     files: [{ path: "keep.txt", status: "modified", added: 1, removed: 0 }],
     totals: { files: 1, added: 1, removed: 0 },
@@ -108,7 +112,7 @@ test("without origin's default branch it compares to HEAD (uncommitted only) and
   git(dir, "commit", "-qm", "init");
   writeFileSync(join(dir, "a.txt"), "1\n2\n");
 
-  expect(await collectChanges(dir, join(dir, ".git"))).toEqual({
+  expect(await collectChanges(dir, plainGit(dir))).toEqual({
     base: "HEAD",
     files: [{ path: "a.txt", status: "modified", added: 1, removed: 0 }],
     totals: { files: 1, added: 1, removed: 0 },
@@ -125,7 +129,7 @@ test("the file list is capped with truncated:true while totals cover every file;
   writeFileSync(join(dir, "c.txt"), "1\n2\n3\n");
   writeFileSync(join(dir, "big.txt"), "x\n".repeat(100));
 
-  const r = await collectChanges(dir, join(dir, ".git"), { maxFiles: 2, maxUntrackedBytes: 50 });
+  const r = await collectChanges(dir, plainGit(dir), { maxFiles: 2, maxUntrackedBytes: 50 });
   expect(r).toEqual({
     base: "HEAD",
     files: [
@@ -139,21 +143,73 @@ test("the file list is capped with truncated:true while totals cover every file;
   });
 });
 
-test("untracked line counting never follows a symlink: not the file, not a parent swapped after listing, not a FIFO", async () => {
+test("the counter subprocess never follows a symlink: not the file, not a parent swapped after listing, not a FIFO", async () => {
   const ws = tmp("changes-links-");
   const outside = tmp("changes-outside-");
   writeFileSync(join(outside, "secret"), "s1\ns2\n");
   mkdirSync(join(ws, "sub"));
   writeFileSync(join(ws, "sub", "secret"), "ok\n");
-  expect(await untrackedLines(ws, "sub/secret", 1024)).toEqual({ lines: 1, bytes: 3 });
+  writeFileSync(join(ws, "plain.txt"), "a\nb");
+  expect(await countUntracked(ws, ["sub/secret", "plain.txt"], LIMITS)).toEqual({ counts: [1, 2], capped: false });
   // The agent swaps the parent dir for a symlink to a host dir after `ls-files`.
   rmSync(join(ws, "sub"), { recursive: true });
   symlinkSync(outside, join(ws, "sub"));
-  expect(await untrackedLines(ws, "sub/secret", 1024)).toBeNull();
   symlinkSync(join(outside, "secret"), join(ws, "link"));
-  expect(await untrackedLines(ws, "link", 1024)).toBeNull();
   sh(ws, "mkfifo", "pipe");
-  expect(await untrackedLines(ws, "pipe", 1024)).toBeNull();
+  expect(await countUntracked(ws, ["sub/secret", "link", "pipe", "missing"], LIMITS)).toEqual({ counts: [null, null, null, null], capped: false });
+});
+
+test("the counter stops reading at the byte budget and says so", async () => {
+  const ws = tmp("changes-budget-");
+  writeFileSync(join(ws, "a"), "1\n2\n");
+  writeFileSync(join(ws, "b"), "3\n4\n");
+  expect(await countUntracked(ws, ["a", "b"], { maxBytes: 1024, budget: 6 })).toEqual({ counts: [2, null], capped: true });
+});
+
+const asRoot = (owner: { uid: number; gid: number }, run: CounterDeps["run"]): CounterDeps => ({ myUid: 0, ownerOf: () => owner, run });
+
+test("as root the counter runs under the worktree owner's uid/gid via setpriv", async () => {
+  const ws = tmp("changes-owner-");
+  const calls: string[][] = [];
+  const r = await countUntracked(ws, ["a"], LIMITS, asRoot({ uid: 1000, gid: 1001 }, async (cmd) => {
+    calls.push(cmd);
+    return { code: 0, stdout: JSON.stringify({ counts: [4], capped: false }), stderr: "", timedOut: false };
+  }));
+  expect(r).toEqual({ counts: [4], capped: false });
+  expect(calls[0]!.slice(0, 5)).toEqual(["setpriv", "--reuid=1000", "--regid=1001", "--clear-groups", process.execPath]);
+});
+
+test("as root a root-owned worktree is refused with an explicit 409", async () => {
+  const ws = tmp("changes-rootown-");
+  git(ws, "init", "-q");
+  writeFileSync(join(ws, "a.txt"), "1\n");
+  git(ws, "add", ".");
+  git(ws, "commit", "-qm", "init");
+  writeFileSync(join(ws, "new.txt"), "1\n");
+  const run: CounterDeps["run"] = async () => { throw new Error("must not spawn"); };
+  await expect(collectChanges(ws, plainGit(ws), {}, asRoot({ uid: 0, gid: 0 }, run))).rejects.toMatchObject({
+    status: 409, message: "session worktree is owned by root",
+  });
+});
+
+test("a counter that cannot run gives null counts and countsUnavailable, not zeros", async () => {
+  const ws = tmp("changes-nospawn-");
+  git(ws, "init", "-q");
+  writeFileSync(join(ws, "a.txt"), "1\n");
+  git(ws, "add", ".");
+  git(ws, "commit", "-qm", "init");
+  writeFileSync(join(ws, "a.txt"), "2\n");
+  writeFileSync(join(ws, "new.txt"), "1\n");
+  const failing = asRoot({ uid: 1000, gid: 1000 }, async () => ({ code: 127, stdout: "", stderr: "setpriv: not found", timedOut: false }));
+  expect(await collectChanges(ws, plainGit(ws), {}, failing)).toEqual({
+    base: "HEAD",
+    files: [
+      { path: "a.txt", status: "modified", added: 1, removed: 1 },
+      { path: "new.txt", status: "untracked", added: null, removed: null },
+    ],
+    totals: { files: 2, added: 1, removed: 1 },
+    countsUnavailable: true,
+  });
 });
 
 test("a worktree whose .git points to another repo is refused before any diff", async () => {
@@ -164,7 +220,8 @@ test("a worktree whose .git points to another repo is refused before any diff", 
   git(other, "commit", "-qm", "init");
   const ws = tmp("changes-hijack-");
   writeFileSync(join(ws, ".git"), `gitdir: ${join(other, ".git")}\n`);
-  await expect(collectChanges(ws, join(tmp("changes-bare-"), "harbor.git"))).rejects.toMatchObject({
+  const bare = join(tmp("changes-bare-"), "harbor.git");
+  await expect(collectChanges(ws, { gitDir: join(bare, "worktrees", "harbor-1"), commonDir: bare })).rejects.toMatchObject({
     status: 409, message: "session worktree points to a different git repository",
   });
 });

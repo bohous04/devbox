@@ -25,4 +25,7 @@ export interface SessionChanges {
   /** Present when devd stopped reading untracked files (per-request file or byte cap), so the
    *  totals miss their lines. */
   countsCapped?: true;
+  /** Present when untracked files could not be counted at all (the counter could not run); their
+   *  counts are null and the totals miss their lines. */
+  countsUnavailable?: true;
 }

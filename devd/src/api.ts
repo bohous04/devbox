@@ -50,7 +50,7 @@ import { memoAsync } from "./cache";
 import { GithubError, listOwners, listRepos, listSharedRepos, validOwner, type GithubOwner, type GithubRepo } from "./github";
 import { GiteaAuthError, GiteaError, GiteaUnknownInstanceError, type GiteaApi } from "./gitea";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { readUpload, UploadError } from "./uploads";
 import { InboxNameError, stageFile, stageShared } from "./inbox";
 import { registerThreadRoutes, type ThreadApiDeps } from "./threadApi";
@@ -1209,10 +1209,12 @@ export function createApp(d: ApiDeps): Hono {
     { const g = ibxOnly(c, s, "Changed files"); if (g) return g; }
     // safeGit would refuse anyway; this way the dashboard gets the same message as other routes.
     if (restricted(s.id)) return c.json({ error: SHARED_DENIED }, 403);
-    // The repo git must resolve to: the bare clone devd created for a worktree session, else <ws>/.git.
+    // The repo git must resolve to: the session's registration in the bare clone devd created
+    // (git and reregisterWorktree name it after the worktree dir), else <ws>/.git.
     const ws = sessionWorkdir(d.root, s);
-    const commonDir = s.worktree ? barePath(d.root, s.folder, s.project, s.repo) : join(ws, ".git");
-    try { return c.json(await collectChanges(ws, commonDir)); }
+    const bare = s.worktree ? barePath(d.root, s.folder, s.project, s.repo) : null;
+    const expected = bare ? { gitDir: join(bare, "worktrees", basename(ws)), commonDir: bare } : { gitDir: join(ws, ".git"), commonDir: join(ws, ".git") };
+    try { return c.json(await collectChanges(ws, expected)); }
     catch (e) { if (e instanceof ChangesError) return c.json({ error: e.message }, e.status); throw e; }
   });
 
