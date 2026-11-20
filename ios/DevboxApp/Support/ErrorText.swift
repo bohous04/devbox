@@ -45,6 +45,13 @@ func errorText(_ error: Error) -> String {
     return String(describing: error)
 }
 
+/// Error text for a write (push, upkeep run, operation decision). A timeout there is not a failure: devd got the
+/// request and is still working (writes are never retried, see `DevdClient.shouldFallback`), only the answer is late.
+func writeErrorText(_ error: Error) -> String {
+    if (error as? URLError)?.code == .timedOut { return "Still running on the server. Refresh to see the result." }
+    return errorText(error)
+}
+
 /// `URLError` (network layer) has its own message for selected codes; for anything else
 /// (`.cancelled`, `.badServerResponse`, …) the system's readable `localizedDescription` stays
 /// ("The request timed out." etc.) — definitely not a raw `String(describing:)` dump.

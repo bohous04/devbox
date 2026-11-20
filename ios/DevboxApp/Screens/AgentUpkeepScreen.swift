@@ -16,22 +16,17 @@ struct AgentUpkeepScreen: View {
     var body: some View {
         List {
             Section {
-                Picker("Agent runtime", selection: Binding(get: { store.provider }, set: { p in
-                    repo = ""
-                    Task { await store.select(p) }
-                })) {
-                    ForEach(UpkeepProvider.allCases, id: \.self) { Text(AgentUpkeepStore.title($0)).tag($0) }
+                // Segments where all four names fit (Mac), a menu otherwise (iPhone).
+                ViewThatFits(in: .horizontal) {
+                    providerPicker.pickerStyle(.segmented).labelsHidden().fixedSize()
+                    providerPicker.pickerStyle(.menu)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
                 .disabled(store.busy)
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: Theme.S.gridGap)], spacing: Theme.S.gridGap) {
-                    StatCard(label: "Latest stable", value: store.status.map { $0.latest ?? "Unknown" } ?? "—",
-                             caption: "\(AgentUpkeepStore.title(store.provider)) release")
-                    StatCard(label: "Base image", value: store.status.map { $0.image ?? "Unknown" } ?? "—", caption: "Version in new containers")
-                    StatCard(label: "Running sessions", value: store.status.map { "\($0.sessions.count)" } ?? "—",
-                             caption: AgentUpkeepStore.cadence(store.provider))
-                }
+                StatCardRow(items: [
+                    ("Latest stable", store.status.map { $0.latest ?? "Unknown" } ?? "—", "\(AgentUpkeepStore.title(store.provider)) release"),
+                    ("Base image", store.status.map { $0.image ?? "Unknown" } ?? "—", "Version in new containers"),
+                    ("Running sessions", store.status.map { "\($0.sessions.count)" } ?? "—", AgentUpkeepStore.cadence(store.provider)),
+                ])
                 Label { Text(AgentUpkeepStore.note(store.provider)) } icon: { Image(systemName: "checkmark.shield") }
                     .font(.caption).foregroundStyle(Theme.C.mutedForeground)
             }
@@ -58,6 +53,15 @@ struct AgentUpkeepScreen: View {
         .refreshable { await store.load() }
     }
 
+    private var providerPicker: some View {
+        Picker("Agent runtime", selection: Binding(get: { store.provider }, set: { p in
+            repo = ""
+            Task { await store.select(p) }
+        })) {
+            ForEach(UpkeepProvider.allCases, id: \.self) { Text(AgentUpkeepStore.title($0)).tag($0) }
+        }
+    }
+
     @ViewBuilder
     private var sessions: some View {
         let all = store.status?.sessions ?? []
@@ -69,7 +73,7 @@ struct AgentUpkeepScreen: View {
             } else if all.isEmpty {
                 EmptyState("No running sessions. Installed versions appear when a session is running.", systemImage: "terminal")
             } else {
-                HStack(spacing: 14) {
+                WrapLayout(spacing: 14) {
                     ForEach(AgentUpkeepStore.SessionState.allCases, id: \.self) { state in
                         HStack(spacing: 4) {
                             Image(systemName: icon(state)).foregroundStyle(tone(state))
@@ -103,7 +107,7 @@ struct AgentUpkeepScreen: View {
                 Spacer()
                 if AgentUpkeepStore.canUpdate(store.provider) {
                     Button("Update all sessions") { Task { await store.run() } }
-                        .buttonStyle(.borderedProminent).controlSize(.small).textCase(nil)
+                        .buttonStyle(.bordered).controlSize(.small).textCase(nil)
                         .disabled(store.busy || all.isEmpty)
                 }
             }
@@ -112,26 +116,36 @@ struct AgentUpkeepScreen: View {
 
     private func row(_ s: AgentUpkeepSession, latest: String?) -> some View {
         let state = AgentUpkeepStore.state(s, latest: latest)
-        return HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(s.repo).font(.subheadline.weight(.semibold))
-                Text("\(s.project) · \(s.id)").font(.caption).foregroundStyle(Theme.C.mutedForeground).lineLimit(1)
-            }
-            Spacer(minLength: 8)
-            VStack(alignment: .trailing, spacing: 2) {
+        let name = VStack(alignment: .leading, spacing: 2) {
+            Text(s.repo).font(.subheadline.weight(.semibold))
+            Text("\(s.project) · \(s.id)").font(.caption).foregroundStyle(Theme.C.mutedForeground).lineLimit(1)
+        }
+        let version = { (alignment: HorizontalAlignment) in
+            VStack(alignment: alignment, spacing: 2) {
                 Text(s.version ?? "Unknown").font(.system(.subheadline, design: .monospaced))
                 Text(s.running.map { "\($0) running \($0 == 1 ? "process" : "processes")" } ?? "Processes unknown")
                     .font(.caption).foregroundStyle(Theme.C.mutedForeground)
             }
-            Label(AgentUpkeepStore.label(state, provider: store.provider), systemImage: icon(state))
-                .font(.caption.weight(.medium)).foregroundStyle(tone(state)).lineLimit(1)
-                .padding(.horizontal, 8).padding(.vertical, 3)
-                .background(tone(state).opacity(0.12), in: Capsule())
+        }
+        let chip = Label(AgentUpkeepStore.label(state, provider: store.provider), systemImage: icon(state))
+            .font(.caption.weight(.medium)).foregroundStyle(tone(state))
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(tone(state).opacity(0.12), in: Capsule())
+        let update = Group {
             if AgentUpkeepStore.canUpdate(store.provider) {
                 Button("Update") { Task { await store.run(session: s.id) } }
                     .buttonStyle(.bordered).controlSize(.small)
                     .disabled(store.busy)
                     .accessibilityLabel("Update \(s.project)/\(s.repo) session \(s.id)")
+            }
+        }
+        // One line where it fits (Mac); on an iPhone the state and the version go under the name.
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) { name; Spacer(minLength: 8); version(.trailing); chip.lineLimit(1); update }
+            VStack(alignment: .leading, spacing: 6) {
+                name
+                chip
+                HStack { version(.leading); Spacer(minLength: 8); update }
             }
         }
     }

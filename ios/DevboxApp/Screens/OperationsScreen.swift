@@ -18,16 +18,20 @@ struct OperationsScreen: View {
 
     var body: some View {
         List {
-            if let error = actionError ?? store.error {
-                Section { Text(error).font(.caption).foregroundStyle(Theme.C.dangerText) }
+            // Both at once: a failed decision must not hide that loading fails too, or the other way round.
+            if actionError != nil || store.error != nil {
+                Section {
+                    if let actionError { Text(actionError).font(.caption).foregroundStyle(Theme.C.dangerText) }
+                    if let error = store.error { Text("Failed to load: \(error)").font(.caption).foregroundStyle(Theme.C.dangerText) }
+                }
             }
             Section {
                 let counts = store.rows.map(OperationsStore.counts)
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: Theme.S.gridGap)], spacing: Theme.S.gridGap) {
-                    StatCard(label: "Awaiting approval", value: counts.map { "\($0.pending)" } ?? "—")
-                    StatCard(label: "In progress", value: counts.map { "\($0.inProgress)" } ?? "—")
-                    StatCard(label: "Completed", value: counts.map { "\($0.completed)" } ?? "—")
-                }
+                StatCardRow(items: [
+                    ("Awaiting approval", counts.map { "\($0.pending)" } ?? "—", nil),
+                    ("In progress", counts.map { "\($0.inProgress)" } ?? "—", nil),
+                    ("Completed", counts.map { "\($0.completed)" } ?? "—", nil),
+                ])
             } footer: {
                 Text("Database requests are reviewed on the web dashboard.")
             }
@@ -141,7 +145,7 @@ struct OperationsScreen: View {
         busy = id
         actionError = nil
         Task {
-            do { try await operation() } catch { actionError = errorText(error) }
+            do { try await operation() } catch { actionError = writeErrorText(error) }
             busy = nil
         }
     }
@@ -163,44 +167,5 @@ private struct FlowFields: View {
             }
             Text(session).font(.caption).foregroundStyle(Theme.C.mutedForeground).padding(.vertical, 3)
         }
-    }
-}
-
-/// Lays children left to right and wraps to a new line when the width runs out.
-private struct WrapLayout: Layout {
-    var spacing: CGFloat
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let rows = arrange(width: proposal.width ?? .infinity, subviews)
-        return CGSize(width: proposal.width ?? rows.map(\.width).max() ?? 0, height: rows.last.map { $0.y + $0.height } ?? 0)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        for row in arrange(width: bounds.width, subviews) {
-            var x = bounds.minX
-            for i in row.items {
-                let size = subviews[i].sizeThatFits(.unspecified)
-                subviews[i].place(at: CGPoint(x: x, y: bounds.minY + row.y), proposal: ProposedViewSize(size))
-                x += size.width + spacing
-            }
-        }
-    }
-
-    private struct Row { var items: [Int] = []; var width: CGFloat = 0; var height: CGFloat = 0; var y: CGFloat = 0 }
-
-    private func arrange(width: CGFloat, _ subviews: Subviews) -> [Row] {
-        var rows = [Row()]
-        for (i, view) in subviews.enumerated() {
-            let size = view.sizeThatFits(.unspecified)
-            if !rows[rows.count - 1].items.isEmpty, rows[rows.count - 1].width + spacing + size.width > width {
-                let last = rows[rows.count - 1]
-                rows.append(Row(y: last.y + last.height + spacing))
-            }
-            let gap = rows[rows.count - 1].items.isEmpty ? 0 : spacing
-            rows[rows.count - 1].items.append(i)
-            rows[rows.count - 1].width += gap + size.width
-            rows[rows.count - 1].height = max(rows[rows.count - 1].height, size.height)
-        }
-        return rows
     }
 }

@@ -7,7 +7,7 @@ import SwiftUI
 struct UnpushedScreen: View {
     @StateObject private var store: UnpushedStore
     @State private var expanded: Set<String> = []
-    @State private var busy: String?
+    @State private var busy: Set<String> = []
     @State private var actionError: [String: String] = [:]
     @State private var prDraft: BranchRef?
     @State private var confirmPush: BranchRef?
@@ -129,14 +129,18 @@ struct UnpushedScreen: View {
 
     private func repoRow(_ repo: UnpushedRepo) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
+            let title = HStack(spacing: 8) {
                 StatusDot(repo.error == nil ? .warn : .danger)
                 Text(UnpushedStore.repoTitle(repo)).font(.system(.subheadline, design: .monospaced).weight(.semibold))
                 ForEach(UnpushedStore.repoFlags(repo), id: \.self) { Badge($0.uppercased(), variant: .outline) }
                 Text(UnpushedStore.commitsLabel(repo.count)).font(.caption).foregroundStyle(Theme.C.mutedForeground)
-                Spacer(minLength: 8)
-                Text(repo.path).font(.system(.caption2, design: .monospaced)).foregroundStyle(Theme.C.mutedForeground)
-                    .lineLimit(1).truncationMode(.head)
+            }
+            let path = Text(repo.path).font(.system(.caption2, design: .monospaced)).foregroundStyle(Theme.C.mutedForeground)
+                .lineLimit(1).truncationMode(.head)
+            // The path sits at the right where it fits (Mac), under the name otherwise (iPhone).
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { title; Spacer(minLength: 8); path }
+                VStack(alignment: .leading, spacing: 2) { title; path }
             }
             if let error = repo.error {
                 Text("git failed here: \(error)").font(.caption).foregroundStyle(Theme.C.dangerText)
@@ -151,34 +155,40 @@ struct UnpushedScreen: View {
     private func branchRow(_ repo: UnpushedRepo, _ branch: UnpushedBranch) -> some View {
         let key = BranchRef.key(repo, branch)
         let open = expanded.contains(key)
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Button {
-                    if open { expanded.remove(key) } else { expanded.insert(key) }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "chevron.right").font(.caption2.weight(.semibold))
-                            .rotationEffect(.degrees(open ? 90 : 0)).foregroundStyle(Theme.C.mutedForeground)
-                        Text(UnpushedStore.branchLabel(branch)).font(.system(.caption, design: .monospaced).weight(.semibold))
-                            .lineLimit(1).truncationMode(.middle)
-                        Text(UnpushedStore.commitsLabel(branch.count, shown: branch.truncated ? branch.commits.count : nil))
-                            .font(.caption).foregroundStyle(Theme.C.mutedForeground)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityValue(open ? "expanded" : "collapsed")
-                Spacer(minLength: 8)
-                if UnpushedStore.canPush(repo) {
-                    Button("Push") { confirmPush = BranchRef(repo: repo, branch: branch) }
-                        .buttonStyle(.bordered).controlSize(.small)
-                }
-                if UnpushedStore.canCreatePr(repo) {
-                    Button("Create PR") { prDraft = BranchRef(repo: repo, branch: branch) }
-                        .buttonStyle(.bordered).controlSize(.small)
-                }
+        let toggle = Button {
+            if open { expanded.remove(key) } else { expanded.insert(key) }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.right").font(.caption2.weight(.semibold))
+                    .rotationEffect(.degrees(open ? 90 : 0)).foregroundStyle(Theme.C.mutedForeground)
+                Text(UnpushedStore.branchLabel(branch)).font(.system(.caption, design: .monospaced).weight(.semibold))
+                    .lineLimit(1).truncationMode(.middle)
+                Text(UnpushedStore.commitsLabel(branch.count, shown: branch.truncated ? branch.commits.count : nil))
+                    .font(.caption).foregroundStyle(Theme.C.mutedForeground)
             }
-            .disabled(busy == key)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(open ? "expanded" : "collapsed")
+        let actions = HStack(spacing: 8) {
+            if UnpushedStore.canPush(repo) {
+                Button("Push") { confirmPush = BranchRef(repo: repo, branch: branch) }
+                    .buttonStyle(.bordered).controlSize(.small)
+                    .accessibilityLabel("Push \(branch.branch)")
+            }
+            if UnpushedStore.canCreatePr(repo) {
+                Button("Create PR") { prDraft = BranchRef(repo: repo, branch: branch) }
+                    .buttonStyle(.bordered).controlSize(.small)
+                    .accessibilityLabel("Create pull request for \(branch.branch)")
+            }
+        }
+        return VStack(alignment: .leading, spacing: 6) {
+            // The actions sit at the right where the branch name fits beside them (Mac), under it otherwise (iPhone).
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { toggle; Spacer(minLength: 8); actions }
+                VStack(alignment: .leading, spacing: 6) { toggle; actions }
+            }
+            .disabled(busy.contains(key))
             if let error = actionError[key] {
                 Text(error).font(.caption).foregroundStyle(Theme.C.dangerText)
             }
@@ -206,11 +216,11 @@ struct UnpushedScreen: View {
 
     private func push(_ repo: UnpushedRepo, _ branch: UnpushedBranch) {
         let key = BranchRef.key(repo, branch)
-        busy = key
+        busy.insert(key)
         actionError[key] = nil
         Task {
-            do { try await store.push(repo, branch) } catch { actionError[key] = errorText(error) }
-            busy = nil
+            do { try await store.push(repo, branch) } catch { actionError[key] = writeErrorText(error) }
+            busy.remove(key)
         }
     }
 }
@@ -290,7 +300,7 @@ private struct CreatePrSheet: View {
                 try await create(t)
                 dismiss()
             } catch {
-                self.error = errorText(error)
+                self.error = writeErrorText(error)
             }
             busy = false
         }

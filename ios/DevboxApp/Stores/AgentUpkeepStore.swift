@@ -35,7 +35,8 @@ final class AgentUpkeepStore: ObservableObject {
         let id = request
         error = nil
         do {
-            let data: AgentUpkeepStatus = try await client.get("/api/agent-upkeep?provider=\(provider.rawValue)")
+            // Probing every container takes a while (docker run plus an exec per session, agentUpkeep.ts).
+            let data: AgentUpkeepStatus = try await client.get("/api/agent-upkeep?provider=\(provider.rawValue)", timeout: 60)
             if id == request { status = data }
         } catch {
             if id == request { self.error = errorText(error) }
@@ -55,11 +56,12 @@ final class AgentUpkeepStore: ObservableObject {
         result = nil
         defer { busy = false }
         do {
-            let r: AgentUpkeepResult = try await client.post("/api/agent-upkeep/run", body: RunBody(provider: provider, session: session))
+            let r: AgentUpkeepResult = try await client.post("/api/agent-upkeep/run", body: RunBody(provider: provider, session: session),
+                                                             timeout: 600)
             result = Self.summary(r)
             await load()
         } catch {
-            self.error = errorText(error)
+            self.error = writeErrorText(error)
         }
     }
 

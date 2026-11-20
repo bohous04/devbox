@@ -380,4 +380,51 @@ final class DevdClientTests: XCTestCase {
         XCTAssertEqual(MockURLProtocol.capturedRequests.count, 2)
         XCTAssertNotEqual(MockURLProtocol.capturedRequests[1].timeoutInterval, 150)
     }
+
+    // MARK: - Slow requests (agent upkeep, operation approval)
+
+    // A GET with its own timeout is slow server work: a timeout must not start the same work again on the other
+    // path, and the request carries that timeout.
+    func testSlowGetTimeoutDoesNotFallBack() async {
+        MockURLProtocol.handler = { request in
+            request.url?.host == "cf.example.com" ? .init(statusCode: 0, error: URLError(.timedOut)) : self.okStub()
+        }
+        let endpoints = DevdEndpoints(cfBase: cfBase, cfId: "id-1", cfSecret: "secret-1", tailnetBase: tailnetBase)
+        let client = DevdClient(endpoints: endpoints, session: makeSession())
+
+        do {
+            _ = try await client.get("/api/agent-upkeep?provider=claude", timeout: 60) as [String: Bool]
+            XCTFail("expected the timeout")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .timedOut)
+        }
+        XCTAssertEqual(MockURLProtocol.capturedRequests.count, 1)
+        XCTAssertEqual(MockURLProtocol.capturedRequests[0].timeoutInterval, 60)
+    }
+
+    // A GET without one keeps the fallback after a timeout.
+    func testPlainGetTimeoutStillFallsBack() async throws {
+        MockURLProtocol.handler = { request in
+            request.url?.host == "cf.example.com" ? .init(statusCode: 0, error: URLError(.timedOut)) : self.okStub()
+        }
+        let endpoints = DevdEndpoints(cfBase: cfBase, cfId: "id-1", cfSecret: "secret-1", tailnetBase: tailnetBase)
+        let client = DevdClient(endpoints: endpoints, session: makeSession())
+
+        _ = try await client.get("/api/health") as [String: Bool]
+        XCTAssertEqual(MockURLProtocol.capturedRequests.count, 2)
+    }
+
+    func testPostCarriesItsOwnTimeout() async throws {
+        MockURLProtocol.handler = { _ in self.okStub() }
+        let endpoints = DevdEndpoints(cfBase: nil, cfId: nil, cfSecret: nil, tailnetBase: tailnetBase)
+        let client = DevdClient(endpoints: endpoints, session: makeSession())
+
+        try await client.postVoid("/api/operations/1/approve", body: nil, timeout: 600)
+        XCTAssertEqual(MockURLProtocol.capturedRequests[0].timeoutInterval, 600)
+    }
+
+    func testTimedOutWriteReadsAsStillRunning() {
+        XCTAssertEqual(writeErrorText(URLError(.timedOut)), "Still running on the server. Refresh to see the result.")
+        XCTAssertEqual(writeErrorText(URLError(.cannotConnectToHost)), errorText(URLError(.cannotConnectToHost)))
+    }
 }

@@ -86,18 +86,21 @@ actor DevdClient {
         active = endpoints.cfBase != nil ? .cf : .tailnet
     }
 
-    func get<T: Decodable>(_ path: String) async throws -> T {
-        let data = try await request(path: path, method: "GET", body: nil)
+    /// `timeout`: for a request devd answers slowly on purpose (agent upkeep probes every container, an approved
+    /// operation runs before it answers). Such a request is not repeated on the other path after a timeout: the
+    /// server got it and is still working, so a retry would only start the same work again.
+    func get<T: Decodable>(_ path: String, timeout: TimeInterval? = nil) async throws -> T {
+        let data = try await request(path: path, method: "GET", body: nil, timeout: timeout)
         return try JSONDecoder().decode(T.self, from: data)
     }
 
-    func post<T: Decodable>(_ path: String, body: (any Encodable)?) async throws -> T {
-        let data = try await request(path: path, method: "POST", body: body)
+    func post<T: Decodable>(_ path: String, body: (any Encodable)?, timeout: TimeInterval? = nil) async throws -> T {
+        let data = try await request(path: path, method: "POST", body: body, timeout: timeout)
         return try JSONDecoder().decode(T.self, from: data)
     }
 
-    func postVoid(_ path: String, body: (any Encodable)?) async throws {
-        _ = try await request(path: path, method: "POST", body: body)
+    func postVoid(_ path: String, body: (any Encodable)?, timeout: TimeInterval? = nil) async throws {
+        _ = try await request(path: path, method: "POST", body: body, timeout: timeout)
     }
 
     /// PUT — so far only `updateSchedule` (dashboard/src/api.ts) needs it (partial patch, the server
@@ -324,12 +327,13 @@ actor DevdClient {
     /// request — HTTP 403 (the CF Access gate rejected the app before reaching devd) or a connect-phase
     /// `URLError` (the connection was never established). `.timedOut` and anything else (the request may have
     /// arrived and only the response got lost/delayed) MUST NOT trigger the fallback — a second attempt could
-    /// perform the action twice (double mutation, see review).
-    private func shouldFallback(_ error: Error, method: String) -> Bool {
+    /// perform the action twice (double mutation, see review). A GET with its own `timeout` (slow server work)
+    /// follows the same rule.
+    private func shouldFallback(_ error: Error, method: String, slow: Bool = false) -> Bool {
         if let httpError = error as? DevdHTTPError {
             return httpError.statusCode == 403
         }
-        guard method != "GET" else { return true }
+        guard method != "GET" || slow else { return true }
         guard let urlError = error as? URLError else { return false }
         switch urlError.code {
         case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed, .notConnectedToInternet:
@@ -339,16 +343,18 @@ actor DevdClient {
         }
     }
 
-    private func request(path: String, method: String, body: (any Encodable)?, rawBody: Data? = nil) async throws -> Data {
+    private func request(path: String, method: String, body: (any Encodable)?, rawBody: Data? = nil,
+                         timeout: TimeInterval? = nil) async throws -> Data {
         do {
-            return try await perform(on: active, urlPath: path, method: method, body: body, rawBody: rawBody)
+            return try await perform(on: active, urlPath: path, method: method, body: body, rawBody: rawBody, timeout: timeout)
         } catch let firstError {
             let fallback = otherPath(than: active)
-            guard shouldFallback(firstError, method: method), baseURL(for: fallback) != nil else {
+            guard shouldFallback(firstError, method: method, slow: timeout != nil), baseURL(for: fallback) != nil else {
                 throw firstError
             }
             do {
-                let data = try await perform(on: fallback, urlPath: path, method: method, body: body, rawBody: rawBody)
+                let data = try await perform(on: fallback, urlPath: path, method: method, body: body, rawBody: rawBody,
+                                             timeout: timeout)
                 active = fallback
                 return data
             } catch let secondError {
@@ -360,14 +366,17 @@ actor DevdClient {
         }
     }
 
-    private func perform(on path: Path, urlPath: String, method: String, body: (any Encodable)?, rawBody: Data? = nil) async throws -> Data {
+    private func perform(on path: Path, urlPath: String, method: String, body: (any Encodable)?, rawBody: Data? = nil,
+                         timeout: TimeInterval? = nil) async throws -> Data {
         guard let base = baseURL(for: path) else {
             // User-visible (Settings renders it) — must be in English.
             throw DevdClientError(description: "\(label(path)) not configured", underlying: [])
         }
         var urlRequest = URLRequest(url: try Self.resolve(urlPath, against: base))
         urlRequest.httpMethod = method
-        if urlPath.hasPrefix("/api/live-activities/") {
+        if let timeout {
+            urlRequest.timeoutInterval = timeout
+        } else if urlPath.hasPrefix("/api/live-activities/") {
             // Live Activity token registration/unregistration is idempotent and must not delay a
             // configuration change behind the long timeout reserved for agent actions.
             urlRequest.timeoutInterval = 8

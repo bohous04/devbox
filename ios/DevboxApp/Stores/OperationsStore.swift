@@ -51,7 +51,8 @@ final class OperationsStore: ObservableObject {
     }
 
     func approve(_ id: Int) async throws {
-        try await client.postVoid("/api/operations/\(id)/approve", body: nil)
+        // devd runs the operation before it answers (execOperation), which can take minutes.
+        try await client.postVoid("/api/operations/\(id)/approve", body: nil, timeout: 600)
         await load()
     }
 
