@@ -158,13 +158,28 @@ struct UnpushedScreen: View {
         let toggle = Button {
             if open { expanded.remove(key) } else { expanded.insert(key) }
         } label: {
-            HStack(spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Image(systemName: "chevron.right").font(.caption2.weight(.semibold))
                     .rotationEffect(.degrees(open ? 90 : 0)).foregroundStyle(Theme.C.mutedForeground)
-                Text(UnpushedStore.branchLabel(branch)).font(.system(.caption, design: .monospaced).weight(.semibold))
-                    .lineLimit(1).truncationMode(.middle)
-                Text(UnpushedStore.commitsLabel(branch.count, shown: branch.truncated ? branch.commits.count : nil))
+                let mono = Font.system(.caption, design: .monospaced).weight(.semibold)
+                let count = Text(UnpushedStore.commitsLabel(branch.count, shown: branch.truncated ? branch.commits.count : nil))
                     .font(.caption).foregroundStyle(Theme.C.mutedForeground)
+                // "branch → upstream" on one line where it fits; otherwise the branch first and its upstream under
+                // it, so neither the arrow nor the upstream is truncated away.
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(UnpushedStore.branchLabel(branch)).font(mono)
+                        count
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(branch.branch).font(mono).lineLimit(1).truncationMode(.middle)
+                            count
+                        }
+                        Text(UnpushedStore.upstreamLabel(branch)).font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(Theme.C.mutedForeground)
+                    }
+                }
             }
             .contentShape(Rectangle())
         }

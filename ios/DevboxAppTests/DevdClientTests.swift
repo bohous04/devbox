@@ -427,4 +427,22 @@ final class DevdClientTests: XCTestCase {
         XCTAssertEqual(writeErrorText(URLError(.timedOut)), "Still running on the server. Refresh to see the result.")
         XCTAssertEqual(writeErrorText(URLError(.cannotConnectToHost)), errorText(URLError(.cannotConnectToHost)))
     }
+
+    // CF unreachable (devd never got it), then the tailnet attempt times out: devd has it and is still working.
+    func testFallbackWriteTimeoutReadsAsStillRunning() async {
+        MockURLProtocol.handler = { request in
+            .init(statusCode: 0, error: URLError(request.url?.host == "cf.example.com" ? .cannotConnectToHost : .timedOut))
+        }
+        let endpoints = DevdEndpoints(cfBase: cfBase, cfId: "id-1", cfSecret: "secret-1", tailnetBase: tailnetBase)
+        let client = DevdClient(endpoints: endpoints, session: makeSession())
+
+        do {
+            try await client.postVoid("/api/operations/1/approve", body: nil, timeout: 600)
+            XCTFail("expected the timeout")
+        } catch {
+            XCTAssertTrue(error is DevdClientError)
+            XCTAssertEqual(writeErrorText(error), "Still running on the server. Refresh to see the result.")
+        }
+        XCTAssertEqual(MockURLProtocol.capturedRequests.count, 2)
+    }
 }

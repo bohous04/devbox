@@ -113,6 +113,11 @@ final class UnpushedStore: ObservableObject {
         b.upstream.map { "\(b.branch) → \($0)" } ?? "\(b.branch) · no upstream"
     }
 
+    /// The second half of `branchLabel`, for a line of its own under the branch.
+    nonisolated static func upstreamLabel(_ b: UnpushedBranch) -> String {
+        b.upstream.map { "→ \($0)" } ?? "no upstream"
+    }
+
     nonisolated static func canPush(_ r: UnpushedRepo) -> Bool { !r.noRemote && r.error == nil }
 
     nonisolated static func canCreatePr(_ r: UnpushedRepo) -> Bool {

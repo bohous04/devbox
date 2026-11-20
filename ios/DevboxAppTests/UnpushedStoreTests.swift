@@ -95,6 +95,8 @@ final class UnpushedStoreTests: XCTestCase {
         XCTAssertEqual(UnpushedStore.shortHash("abcdef1234"), "abcdef1")
         XCTAssertEqual(UnpushedStore.branchLabel(branch("a", count: 1, upstream: "origin/a")), "a → origin/a")
         XCTAssertEqual(UnpushedStore.branchLabel(branch("a", count: 1)), "a · no upstream")
+        XCTAssertEqual(UnpushedStore.upstreamLabel(branch("a", count: 1, upstream: "origin/a")), "→ origin/a")
+        XCTAssertEqual(UnpushedStore.upstreamLabel(branch("a", count: 1)), "no upstream")
         XCTAssertEqual(UnpushedStore.commitsLabel(1), "1 commit")
         XCTAssertEqual(UnpushedStore.commitsLabel(5, shown: 3), "5 commits · showing 3")
         XCTAssertEqual(UnpushedStore.commitsLabel(3, shown: 3), "3 commits")
