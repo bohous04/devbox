@@ -135,17 +135,26 @@ function ChatPage({ id }: { id: string }) {
             )}
             <div ref={bottom} />
           </div>
-          {/* Above the mobile bottom bar (h-16); from lg there is none. */}
-          <div className="sticky bottom-16 z-10 -mx-4 mt-4 border-t bg-background/95 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6 lg:bottom-0 lg:-mx-10 lg:px-10">
-            <Composer
-              running={running} onStop={() => api.interrupt(id)}
-              onSend={async (text, images) => {
-                const paths: string[] = [];
-                for (const image of images) paths.push((await api.uploadThreadImage(id, image)).path);
-                await api.sendMessage(id, text, paths);
-              }}
-              toolbar={<Switchers sessionId={id} thread={thread} />}
-            />
+          {/* Above the mobile bottom bar (h-16); from lg there is none. The transcript fades into the dock in the strip
+              above it; in dark the dock is a faintly tinted band (one floor for the box), in light the page itself.
+              The negative bottom margin cancels main's bottom padding (App.tsx pb-24 / lg:pb-10), which would otherwise
+              leave a gap under the dock at the end of the thread. */}
+          <div className="sticky bottom-16 z-10 -mx-4 -mb-8 mt-8 bg-[var(--dock)] px-4 pb-3 pt-3 [--dock:var(--background)] before:pointer-events-none before:absolute before:inset-x-0 before:-top-8 before:h-8 before:bg-gradient-to-t before:from-[var(--dock)] before:to-transparent sm:-mx-6 sm:px-6 lg:bottom-0 lg:-mx-10 lg:-mb-10 lg:px-10 lg:pb-5 dark:[--dock:color-mix(in_oklab,var(--muted)_35%,var(--background))]">
+            <div className="mx-auto w-full max-w-[42rem]">
+              <Switchers sessionId={id} thread={thread}>
+                {({ menus, status }) => (
+                  <Composer
+                    running={running} onStop={() => api.interrupt(id)}
+                    onSend={async (text, images) => {
+                      const paths: string[] = [];
+                      for (const image of images) paths.push((await api.uploadThreadImage(id, image)).path);
+                      await api.sendMessage(id, text, paths);
+                    }}
+                    controls={menus} notices={status}
+                  />
+                )}
+              </Switchers>
+            </div>
           </div>
         </>
       )}

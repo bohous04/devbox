@@ -102,5 +102,6 @@
 /* Consistent controls across the dashboard, including older settings forms. */
 input:not([type="checkbox"]):not([type="radio"]), select, textarea { font-size: 1rem; }
 button:not([data-slot="button"]):focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
-@media (max-width: 640px) { button, select, input { min-height: 44px; } }
+/* Below Tailwind's sm (40rem), the same query as the phone layout in Composer.tsx. */
+@media (max-width: 639.98px) { button, select, input { min-height: 44px; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; } }
