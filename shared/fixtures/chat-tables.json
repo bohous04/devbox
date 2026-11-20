@@ -98,5 +98,16 @@
   "sameModelAliases": {
     "mistral-medium-latest": "mistral-medium-3.5"
   },
-  "acpMinBridgeVersion": "1.2.0"
+  "acpMinBridgeVersion": "1.2.0",
+  "effortMinBridgeVersion": "1.7.0",
+  "effortLevels": [
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra"
+  ]
 }

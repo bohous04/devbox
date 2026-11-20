@@ -1102,8 +1102,41 @@ struct ThreadSnapshot: Codable, Equatable {
     var pending: [PendingRequest]
     var background: [BackgroundWork]
     var native: NativeThread?
+    /// The agent's reasoning effort as devd parsed it (bridge 1.7.0+); nil before one, and from a devd that predates it.
+    var effort: ThreadEffort? = nil
 
     static let empty = ThreadSnapshot(lastSeq: 0, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: nil)
+}
+
+extension ThreadSnapshot {
+    /// The effort decodes on its own: an effort of an unexpected shape is logged and read as not reported, never a
+    /// thread that fails to load.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        lastSeq = try c.decode(Int.self, forKey: .lastSeq)
+        seenSeq = try c.decode(Int.self, forKey: .seenSeq)
+        runs = try c.decode([RunRow].self, forKey: .runs)
+        items = try c.decode([ThreadItem].self, forKey: .items)
+        pending = try c.decode([PendingRequest].self, forKey: .pending)
+        background = try c.decode([BackgroundWork].self, forKey: .background)
+        native = try c.decodeIfPresent(NativeThread.self, forKey: .native)
+        do {
+            effort = try c.decodeIfPresent(ThreadEffort.self, forKey: .effort)
+        } catch {
+            modelsLogger.error("unreadable thread effort from devd, read as not reported: \(String(describing: error), privacy: .public)")
+            effort = nil
+        }
+    }
+}
+
+/// shared/thread.ts ThreadEffort. `supported`: the levels the model takes ([] = none, nil = not known yet);
+/// `effective`: the level the agent runs at, nil when not known (Claude says it with a reply); `chosen`: the user's
+/// pick, nil = the model default. devd sends only levels it knows (shared/effort.ts).
+struct ThreadEffort: Codable, Equatable {
+    var model: String?
+    var supported: [String]?
+    var effective: String?
+    var chosen: String?
 }
 
 /// The agent bridge's events (image/agent-bridge/src/events.ts). A type this app does not know decodes to

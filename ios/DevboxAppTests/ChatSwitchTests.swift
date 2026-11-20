@@ -12,6 +12,8 @@ final class ChatSwitchTests: XCTestCase {
         let chatModels: [String: [String]]
         let sameModelAliases: [String: String]
         let acpMinBridgeVersion: String
+        let effortMinBridgeVersion: String
+        let effortLevels: [String]
     }
 
     /// The tables are copies of the dashboard's and shared/'s; the JSON is checked against those by
@@ -26,6 +28,8 @@ final class ChatSwitchTests: XCTestCase {
         XCTAssertEqual(ChatSwitch.chatModels, t.chatModels)
         XCTAssertEqual(ChatSwitch.sameModelAliases, t.sameModelAliases)
         XCTAssertEqual(ChatSwitch.acpMinBridgeVersion, t.acpMinBridgeVersion)
+        XCTAssertEqual(ChatSwitch.effortMinBridgeVersion, t.effortMinBridgeVersion)
+        XCTAssertEqual(Set(ChatSwitch.effortLabels.keys), Set(t.effortLevels))
     }
 
     private func target(agent: String = "claude", harness: String = "claude", account: String? = "a1", model: String? = "claude-opus-5-5",
@@ -105,5 +109,47 @@ final class ChatSwitchTests: XCTestCase {
         XCTAssertTrue(o[0].current)
         XCTAssertEqual(o[1].disabled, "Quarantined: sign in again on the Auth page")
         XCTAssertEqual(o[2].disabled, "Login expired or unusable (HTTP 401)")
+    }
+
+    // MARK: effort (bridge 1.7.0, dashboard/src/switchView.ts)
+
+    private func effort(model: String? = "claude-opus-5-5", supported: [String]? = ["low", "medium", "high", "xhigh", "max"],
+                        effective: String? = nil, chosen: String? = nil) -> ThreadEffort {
+        ThreadEffort(model: model, supported: supported, effective: effective, chosen: chosen)
+    }
+
+    func testEffortChip() {
+        let new = target(bridge: "1.7.0")
+        XCTAssertEqual(ChatSwitch.effortChipLabel(effort(effective: "high", chosen: "max"), new), "High")
+        XCTAssertEqual(ChatSwitch.effortChipLabel(effort(chosen: "xhigh"), new), "Extra high")
+        XCTAssertEqual(ChatSwitch.effortChipLabel(effort(), new), "Default")
+        XCTAssertNil(ChatSwitch.effortChipLabel(effort(supported: []), new))
+        XCTAssertNil(ChatSwitch.effortChipLabel(nil, new))
+        XCTAssertNil(ChatSwitch.effortChipLabel(effort(chosen: "high"), target(bridge: "1.6.0")))
+    }
+
+    func testEffortMenu() {
+        let o = ChatSwitch.effortOptions(effort(effective: "high", chosen: "high"))
+        XCTAssertEqual(o.map(\.value), ["", "low", "medium", "high", "xhigh", "max"])
+        XCTAssertEqual(o.map(\.label), ["Default", "Low", "Medium", "High", "Extra high", "Max"])
+        XCTAssertEqual(o.filter(\.current).map(\.value), ["high"])
+        XCTAssertEqual(ChatSwitch.effortOptions(effort()).filter(\.current).map(\.value), [""])
+        XCTAssertEqual(ChatSwitch.effortOptions(effort(model: "gpt-6.1-sol", supported: ["low", "medium"], effective: "medium"))[0].detail, "Medium for gpt-6.1-sol")
+        XCTAssertEqual(ChatSwitch.effortOptions(effort())[0].detail, "The level shows after the agent's first reply")
+    }
+
+    func testEffortBodySendsNullForDefault() throws {
+        XCTAssertEqual(String(decoding: try JSONEncoder().encode(ChatSwitch.EffortBody(effort: nil)), as: UTF8.self), #"{"effort":null}"#)
+        XCTAssertEqual(String(decoding: try JSONEncoder().encode(ChatSwitch.EffortBody(effort: "high")), as: UTF8.self), #"{"effort":"high"}"#)
+    }
+
+    func testEffortMenuBlocked() {
+        XCTAssertEqual(ChatSwitch.effortMenuBlocked(effort(), target(bridge: "1.6.0")), "This session's agent bridge (1.6.0) cannot change the effort: recreate the session's container")
+        XCTAssertEqual(ChatSwitch.effortMenuBlocked(effort(), target(bridge: nil)), "This session's agent bridge (unknown version) cannot change the effort: recreate the session's container")
+        let new = target(bridge: "1.7.0")
+        XCTAssertEqual(ChatSwitch.effortMenuBlocked(nil, new), "The agent has not reported its effort levels yet")
+        XCTAssertEqual(ChatSwitch.effortMenuBlocked(effort(supported: nil), new), "The agent has not reported the effort levels of claude-opus-5-5")
+        XCTAssertEqual(ChatSwitch.effortMenuBlocked(effort(supported: []), new), "claude-opus-5-5 has no effort levels")
+        XCTAssertNil(ChatSwitch.effortMenuBlocked(effort(), new))
     }
 }

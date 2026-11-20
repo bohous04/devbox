@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { ACP_MIN_BRIDGE_VERSION } from "../../shared/bridgeVersion";
+import { ACP_MIN_BRIDGE_VERSION, EFFORT_MIN_BRIDGE_VERSION } from "../../shared/bridgeVersion";
+import { KNOWN_EFFORT_LEVELS } from "../../shared/effort";
 import { CHAT_MODELS, SAME_MODEL_ALIASES } from "../../shared/chatModels";
 import tables from "../../shared/fixtures/chat-tables.json";
 import { AGENT_IDS, AGENT_PROFILES } from "./newSession";
@@ -17,6 +18,8 @@ test("shared/fixtures/chat-tables.json matches the tables the iOS app copies", (
     chatModels: CHAT_MODELS,
     sameModelAliases: SAME_MODEL_ALIASES,
     acpMinBridgeVersion: ACP_MIN_BRIDGE_VERSION,
+    effortMinBridgeVersion: EFFORT_MIN_BRIDGE_VERSION,
+    effortLevels: KNOWN_EFFORT_LEVELS,
   };
   expect(tables).toEqual(JSON.parse(JSON.stringify(actual)));
 });
