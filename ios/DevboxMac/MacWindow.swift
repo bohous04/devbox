@@ -80,6 +80,10 @@ struct MacWindowContent: View {
                 } else {
                     ContentUnavailableView("No thread selected", systemImage: "bubble.left.and.bubble.right",
                                            description: Text("Pick a session in the inbox."))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Theme.C.background)
+                        .toolbarBackground(Theme.C.background, for: .windowToolbar)
+                        .toolbarBackground(.visible, for: .windowToolbar)
                 }
             }
             .environmentObject(live)
@@ -361,7 +365,7 @@ struct MacInboxRow: View {
     /// the point of the row. Any other row says where it runs: the repo and the branch devd recorded, else the
     /// latest message in the groups about it.
     static func secondLine(_ i: InboxItem, detail: String) -> String {
-        if word(i) != nil, !detail.isEmpty { return detail }
+        if word(i) != nil, !detail.isEmpty { return "\(i.repo)  ·  \(detail)" }
         let place = "\(i.project)/\(i.repo)"
         if let branch = i.branch, !branch.isEmpty { return "\(place)  ·  \(branch)" }
         return detail.isEmpty ? place : "\(place)  ·  \(detail)"

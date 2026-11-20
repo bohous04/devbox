@@ -61,8 +61,15 @@ final class MacAppTests: XCTestCase {
         XCTAssertEqual(MacInboxRow.secondLine(try item("idle", reason: nil, branch: "retry-queue"), detail: "msg"), "p/r  ·  retry-queue")
         XCTAssertEqual(MacInboxRow.secondLine(try item("idle", reason: nil), detail: "msg"), "p/r  ·  msg")
         XCTAssertEqual(MacInboxRow.secondLine(try item("idle", reason: nil), detail: ""), "p/r")
-        XCTAssertEqual(MacInboxRow.secondLine(try item("needs_you", reason: "request", branch: "b"), detail: "May I run it?"), "May I run it?",
-                       "a row that needs you says what it asks")
+        XCTAssertEqual(MacInboxRow.secondLine(try item("needs_you", reason: "request", branch: "b"), detail: "May I run it?"), "r  ·  May I run it?",
+                       "a row that needs you names its repo and says what it asks")
+    }
+
+    func testCutLinksNameTheFullAddress() {
+        let long = "https://example.com/docs/guides/offline-sync/retry-queue/configuration-reference-page"
+        XCTAssertEqual(ChatInline.cutLinks("See \(long) for more."), long)
+        XCTAssertNil(ChatInline.cutLinks("See https://example.com/a for more."), "a link shown whole needs no tooltip")
+        XCTAssertNil(ChatInline.cutLinks("No links here."))
     }
 
     func testSidebarAgentGlyphAndConnection() {

@@ -23,10 +23,10 @@ struct ChatMarkdown: View {
     @ViewBuilder
     private func block(_ b: MdBlock) -> some View {
         switch b {
-        case .paragraph(let s): ChatInline.text(s)
-        case .heading(let level, let s): ChatInline.text(s).font(.system(size: ChatType.s(level <= 2 ? 18 : 16), weight: .semibold))
+        case .paragraph(let s): ChatInline.text(s).cutLinkHelp(s)
+        case .heading(let level, let s): ChatInline.text(s).cutLinkHelp(s).font(.system(size: ChatType.s(level <= 2 ? 18 : 16), weight: .semibold))
         case .quote(let s):
-            ChatInline.text(s).foregroundStyle(Theme.C.mutedForeground)
+            ChatInline.text(s).cutLinkHelp(s).foregroundStyle(Theme.C.mutedForeground)
                 .padding(.leading, 12)
                 .overlay(alignment: .leading) { Rectangle().fill(Theme.C.border).frame(width: 3) }
         case .bullets(let items): list(items.map { ("•", $0) })
@@ -52,7 +52,7 @@ struct ChatMarkdown: View {
             ForEach(Array(items.enumerated()), id: \.offset) { _, it in
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(it.0).foregroundStyle(Theme.C.mutedForeground).frame(minWidth: 10, alignment: .leading)
-                    ChatInline.text(it.1).frame(maxWidth: .infinity, alignment: .leading)
+                    ChatInline.text(it.1).cutLinkHelp(it.1).frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
@@ -60,19 +60,13 @@ struct ChatMarkdown: View {
 
     #if os(macOS)
     /// A Mac window has room for columns: plain rules, no box (the header over a hairline, rows apart by hairlines),
-    /// within the thread's column. Columns share the width by their content (TableColumns); a command or path stays
-    /// on one line, cut at its end only when its column has to give way (the whole text in its tooltip).
+    /// within the thread's column. Columns share the width by their content (TableColumns); a cell that has to give
+    /// way wraps, a command or path after its separators, so nothing in a table is cut.
     private func grid(_ header: [String], _ rows: [[String]]) -> some View {
         let columns = max(header.count, rows.map(\.count).max() ?? 0)
         let hasHeader = !header.allSatisfy { $0.trimmingCharacters(in: .whitespaces).isEmpty }
-        @ViewBuilder
         func cell(_ s: String) -> some View {
-            if ChatMarkdownParse.isCodeOnly(s) {
-                ChatInline.text(s).lineLimit(1).truncationMode(.tail).help(s)
-                    .padding(.trailing, 16).padding(.vertical, 6)
-            } else {
-                ChatInline.text(s).padding(.trailing, 16).padding(.vertical, 6)
-            }
+            ChatInline.text(s).cutLinkHelp(s).padding(.trailing, 16).padding(.vertical, 6)
         }
         return TableColumns(columns: columns, hasHeader: hasHeader) {
             if hasHeader {
@@ -182,6 +176,34 @@ enum ChatInline {
     private static func icon(_ s: ChatMarkdownParse.Inline.Status) -> Text {
         let m = StatusMark(s)
         return Text(Image(systemName: m.symbol)).foregroundColor(m.color)
+    }
+}
+
+extension View {
+    /// A Mac tooltip with the full address of every link the text shows cut (`ChatMarkdownParse.shortURL`). A run of
+    /// text has no tooltip of its own, so the paragraph carries it.
+    @ViewBuilder
+    func cutLinkHelp(_ s: String) -> some View {
+        #if os(macOS)
+        if let urls = ChatInline.cutLinks(s) { help(urls) } else { self }
+        #else
+        self
+        #endif
+    }
+}
+
+extension ChatInline {
+    /// The full addresses of the links whose shown text is cut, one per line; nil when none is.
+    static func cutLinks(_ s: String) -> String? {
+        guard s.contains("://") else { return nil }
+        let a = attributed(s)
+        var urls: [String] = []
+        for run in a.runs {
+            if let url = run.link?.absoluteString, String(a[run.range].characters).contains("…"), !urls.contains(url) {
+                urls.append(url)
+            }
+        }
+        return urls.isEmpty ? nil : urls.joined(separator: "\n")
     }
 }
 
