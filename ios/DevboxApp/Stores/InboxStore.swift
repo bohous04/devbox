@@ -169,6 +169,15 @@ enum InboxView {
         ("`+", ""), (#"\*\*(.+?)\*\*"#, "$1"), (#"(?<=^|\s)__(\S(?:.*?\S)?)__(?=$|\s|[,;:!?)])"#, "$1"), (#"^#+\s+"#, ""), (#"\s+"#, " "),
     ].map { (try! NSRegularExpression(pattern: $0.0), $0.1) }
 
+    /// The Mac sidebar's search: every word of `query` in the row's title, project, repo or last message, ignoring
+    /// case and diacritics. An empty query matches every row.
+    static func matches(_ i: InboxItem, _ query: String) -> Bool {
+        let words = query.split(whereSeparator: \.isWhitespace)
+        guard !words.isEmpty else { return true }
+        let hay = [i.title, i.project, i.repo, i.lastText ?? ""].joined(separator: " ")
+        return words.allSatisfy { hay.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
+    }
+
     /// A message preview as plain text: markdown's code ticks, emphasis and heading marks would show raw in one line.
     /// `__x__` only between spaces or line edges, so names like `__init__.py` stay whole.
     static func plainPreview(_ t: String) -> String {
@@ -180,15 +189,6 @@ enum InboxView {
     /// What a row names the session by. A custom name wins; a session still named after its repo path takes its
     /// newest message instead, or with none (tmux) the repo and the session's number from its id ("api #14").
     /// `fromMessage` tells the row not to repeat that message as its preview.
-    /// The Mac sidebar's search: every word of `query` in the row's title, project, repo or last message, ignoring
-    /// case and diacritics. An empty query matches every row.
-    static func matches(_ i: InboxItem, _ query: String) -> Bool {
-        let words = query.split(whereSeparator: \.isWhitespace)
-        guard !words.isEmpty else { return true }
-        let hay = [i.title, i.project, i.repo, i.lastText ?? ""].joined(separator: " ")
-        return words.allSatisfy { hay.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
-    }
-
     static func rowTitle(_ i: InboxItem) -> (text: String, fromMessage: Bool) {
         if i.title != "\(i.project)/\(i.repo)" { return (i.title, false) }
         // A message of only whitespace or markdown marks names nothing: the repo fallback below takes over.
