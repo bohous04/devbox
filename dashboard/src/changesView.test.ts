@@ -35,9 +35,12 @@ test("changesAnchor: the latest finished run's last answer, none while a run is 
   expect(changesAnchor([], [])).toBeNull();
 });
 
-test("changesError: the error's message; a repository without commits is no card, not an error", () => {
-  expect(changesError(new ApiError("repository has no commits yet", 409, { error: "repository has no commits yet" }))).toBeNull();
-  expect(changesError(new ApiError("session worktree is missing", 409, { error: "session worktree is missing" }))).toBe("session worktree is missing");
+test("changesError: the error's message; a repository without commits (code no_commits) is no card, not an error", () => {
+  expect(changesError(new ApiError("repository has no commits yet", 409, { error: "repository has no commits yet", code: "no_commits" }))).toBeNull();
+  // The code decides, not the wording.
+  expect(changesError(new ApiError("reworded: nothing committed", 409, { error: "reworded: nothing committed", code: "no_commits" }))).toBeNull();
+  expect(changesError(new ApiError("repository has no commits yet", 409, { error: "repository has no commits yet" }))).toBe("repository has no commits yet");
+  expect(changesError(new ApiError("session worktree is missing", 409, { error: "session worktree is missing", code: "worktree_missing" }))).toBe("session worktree is missing");
   expect(changesError(new ApiError("not found", 404, { error: "not found" }))).toBe("not found");
   expect(changesError(new Error("network down"))).toBe("network down");
 });

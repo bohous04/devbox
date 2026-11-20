@@ -331,28 +331,37 @@ test("GET /api/sessions/:id/changes: 404 for an unknown session", async () => {
   const { root, ws } = layout();
   const res = await changes(app(root, { worktree: ws }), "dev-nope");
   expect(res.status).toBe(404);
-  expect(await res.json()).toEqual({ error: "unknown session" });
+  expect(await res.json()).toEqual({ error: "unknown session", code: "unknown_session" });
 });
 
 test("GET /api/sessions/:id/changes: a missing worktree is a 409 with a message, not an empty list", async () => {
   const { root, ws } = layout();
   const res = await changes(app(root, { worktree: join(ws, "harbor-missing") }));
   expect(res.status).toBe(409);
-  expect(await res.json()).toEqual({ error: "session worktree is missing" });
+  expect(await res.json()).toEqual({ error: "session worktree is missing", code: "worktree_missing" });
 });
 
 test("GET /api/sessions/:id/changes: a directory that is not a git repo is a 409 without host paths", async () => {
   const { root } = layout();
   const res = await changes(app(root, { worktree: tmp("changes-api-") }));
   expect(res.status).toBe(409);
-  expect(await res.json()).toEqual({ error: "session worktree is not a readable git repository" });
+  expect(await res.json()).toEqual({ error: "session worktree is not a readable git repository", code: "not_a_repo" });
 });
 
 test("GET /api/sessions/:id/changes: a worktree pointing at another session's bare clone is a 409", async () => {
   const { root, ws } = layout();
   const res = await changes(app(root, { worktree: ws, repo: "web" }));
   expect(res.status).toBe(409);
-  expect(await res.json()).toEqual({ error: "session worktree points to a different git repository" });
+  expect(await res.json()).toEqual({ error: "session worktree points to a different git repository", code: "foreign_git_dir" });
+});
+
+test("GET /api/sessions/:id/changes: a repository without commits is a 409 the dashboard knows by its code", async () => {
+  const { root, ws } = layout(true);
+  rmSync(ws, { recursive: true, force: true });
+  git(root, "init", "-q", ws);
+  const res = await changes(app(root, { worktree: null }));
+  expect(res.status).toBe(409);
+  expect(await res.json()).toEqual({ error: "repository has no commits yet", code: "no_commits" });
 });
 
 test("GET /api/sessions/:id/changes: a shared session is 403", async () => {
@@ -366,7 +375,7 @@ test("GET /api/sessions/:id/changes: an InstaBox session is 409", async () => {
   const { root, ws } = layout();
   const res = await changes(app(root, { worktree: ws, host: "instabox" }));
   expect(res.status).toBe(409);
-  expect(await res.json()).toEqual({ error: "Changed files is VPS-only (InstaBox session)" });
+  expect(await res.json()).toEqual({ error: "Changed files is VPS-only (InstaBox session)", code: "instabox" });
 });
 
 test("diff output pairs status and counts by position, so names that are not UTF-8 cannot collide", () => {

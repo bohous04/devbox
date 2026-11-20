@@ -1,5 +1,5 @@
 import type { RunRow, ThreadItem } from "../../shared/thread";
-import type { ChangedFile, ChangeStatus, SessionChanges } from "../../shared/changes";
+import type { ChangedFile, ChangesErrorBody, ChangeStatus, SessionChanges } from "../../shared/changes";
 import { ApiError } from "./api";
 
 // The changed-files card under the thread's latest answer: what it says and when it refetches. It shows the
@@ -40,9 +40,9 @@ export function changesAnchor(items: ThreadItem[], runs: RunRow[]): { item: Thre
 }
 
 /** The error line's text, or null for no card at all: a repository without commits has nothing to compare, which
- *  is not a failure (devd answers 409 with this exact message). */
+ *  is not a failure (devd's `no_commits` code, shared/changes.ts). */
 export function changesError(e: unknown): string | null {
-  if (e instanceof ApiError && e.status === 409 && e.message === "repository has no commits yet") return null;
+  if (e instanceof ApiError && (e.body as Partial<ChangesErrorBody> | null)?.code === "no_commits") return null;
   return (e as Error).message;
 }
 

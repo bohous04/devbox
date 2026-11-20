@@ -243,11 +243,15 @@ test("GET /api/sessions/:id/changes/diff returns one file's diff", async () => {
 test("GET /api/sessions/:id/changes/diff: missing path 400, traversal 400, unlisted 404, unknown session 404", async () => {
   const { root, ws } = layout();
   const a = app(root, { worktree: ws });
-  expect((await diff(a, null)).status).toBe(400);
-  expect((await diff(a, "../../seed/a.txt")).status).toBe(400);
+  const missing = await diff(a, null);
+  expect(missing.status).toBe(400);
+  expect(await missing.json()).toEqual({ error: "path required", code: "invalid_path" });
+  const traversal = await diff(a, "../../seed/a.txt");
+  expect(traversal.status).toBe(400);
+  expect(await traversal.json()).toEqual({ error: "invalid path", code: "invalid_path" });
   const unlisted = await diff(a, "nope.txt");
   expect(unlisted.status).toBe(404);
-  expect(await unlisted.json()).toEqual({ error: "file is not among the session's changes" });
+  expect(await unlisted.json()).toEqual({ error: "file is not among the session's changes", code: "not_changed" });
   expect((await diff(a, "a.txt", "dev-nope")).status).toBe(404);
 });
 
@@ -257,7 +261,7 @@ test("GET /api/sessions/:id/changes/diff: restricted 403, InstaBox 409, foreign 
   expect((await diff(app(root, { worktree: ws, host: "instabox" }), "a.txt")).status).toBe(409);
   const foreign = await diff(app(root, { worktree: ws, repo: "web" }), "a.txt");
   expect(foreign.status).toBe(409);
-  expect(await foreign.json()).toEqual({ error: "session worktree points to a different git repository" });
+  expect(await foreign.json()).toEqual({ error: "session worktree points to a different git repository", code: "foreign_git_dir" });
 });
 
 test("the base is pinned to a commit id: HEAD moving to a huge blob mid-request changes nothing", async () => {
