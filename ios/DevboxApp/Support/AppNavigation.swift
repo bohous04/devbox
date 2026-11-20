@@ -75,8 +75,11 @@ enum MoreMenu {
         case hardware
         case folders
         case subscriptions
+        case unpushed
         case schedules
+        case upkeep
         case prodWrites
+        case operations
         case sshKeys
         case activity
         case notifications
@@ -105,10 +108,13 @@ enum MoreMenu {
         Section(title: "Workspace", items: [
             Item(title: "Folders", systemImage: "folder", destination: .folders),
             Item(title: "AI limits & accounts", systemImage: "gauge.with.dots.needle.33percent", destination: .subscriptions),
+            Item(title: "Unpushed", systemImage: "arrow.up.circle", destination: .unpushed),
         ]),
         Section(title: "Operations", items: [
             Item(title: "Schedules", systemImage: "calendar.badge.clock", destination: .schedules),
+            Item(title: "Agent upkeep", systemImage: "arrow.triangle.2.circlepath", destination: .upkeep),
             Item(title: "Production writes", systemImage: "checklist", destination: .prodWrites),
+            Item(title: "Operations", systemImage: "paperplane", destination: .operations),
             Item(title: "SSH keys", systemImage: "key", destination: .sshKeys),
         ]),
         Section(title: "System", items: [

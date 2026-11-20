@@ -1314,3 +1314,105 @@ struct CodexAccountView: Decodable {
 struct CodexAccountsResponse: Decodable {
     let accounts: [CodexAccountView]
 }
+
+// MARK: - Unpushed commits (mirror of dashboard/src/api.ts UnpushedStatus)
+
+struct UnpushedCommit: Decodable, Equatable {
+    let hash: String
+    let subject: String
+    let at: Int
+    let author: String
+}
+
+struct UnpushedBranch: Decodable, Equatable {
+    let branch: String
+    let upstream: String?
+    let count: Int
+    let commits: [UnpushedCommit]
+    let truncated: Bool
+}
+
+struct UnpushedRemote: Decodable, Equatable {
+    let provider: String
+    let owner: String
+    let name: String
+}
+
+struct UnpushedRepo: Decodable, Equatable {
+    let folder: String
+    let project: String
+    let repo: String
+    let path: String
+    let bare: Bool
+    let noRemote: Bool
+    var count: Int
+    var branches: [UnpushedBranch]
+    let error: String?
+    let detailsSkipped: Bool?
+    let remote: UnpushedRemote?
+    let base: String?
+}
+
+struct UnpushedFolder: Decodable, Equatable {
+    let folder: String
+    var count: Int
+    var repos: [UnpushedRepo]
+}
+
+struct UnpushedReport: Decodable, Equatable {
+    let at: Int
+    var total: Int
+    let scanned: Int
+    var folders: [UnpushedFolder]
+}
+
+struct UnpushedStatus: Decodable {
+    let report: UnpushedReport?
+    let scanning: Bool
+    let error: String?
+}
+
+// MARK: - Agent upkeep (mirror of shared/agentUpkeep.ts)
+
+enum UpkeepProvider: String, CaseIterable, Encodable {
+    case claude, codex, grok, agy
+}
+
+struct AgentUpkeepSession: Decodable, Equatable {
+    let id: String
+    let project: String
+    let repo: String
+    let version: String?
+    let running: Int?
+    let restartRequired: Bool?
+}
+
+struct AgentUpkeepStatus: Decodable {
+    let latest: String?
+    let image: String?
+    let sessions: [AgentUpkeepSession]
+}
+
+struct AgentUpkeepResult: Decodable {
+    let updated: [String]
+    let restarted: [String]
+    let deferred: [String]
+    let failed: [String]
+    let unchanged: [String]
+    let built: Bool
+    let error: String?
+}
+
+// MARK: - Operations (mirror of dashboard/src/operationsView.ts OpRow)
+
+struct OperationRow: Decodable, Equatable {
+    let id: Int
+    let ts: Int
+    let session_id: String?
+    let op: String
+    /// A JSON object encoded as a string; see `OperationsStore.review`.
+    let params: String
+    let status: String
+    let result: String?
+    let error: String?
+}

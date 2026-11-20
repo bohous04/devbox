@@ -1,11 +1,11 @@
 import SwiftUI
 
 /// The window's dashboard mode (⌘D, or the Dashboard button under the inbox): the sidebar becomes the web dashboard's
-/// navigation (`dashboard/src/nav.ts` NAV_GROUPS) and the detail shows the native screen for the picked page. Only
-/// pages with a native screen are listed: the web's Unpushed, Agent upkeep and Operations have none yet.
+/// navigation (`dashboard/src/nav.ts` NAV_GROUPS) and the detail shows the native screen for the picked page.
+/// Settings is the app's Settings window (⌘,), and Notifications is left out like in the mockup.
 enum MacDashboardPage: String, CaseIterable, Hashable {
-    case overview, sessions, folders, stats, subscriptions
-    case schedules, prodWrites, sshKeys
+    case overview, sessions, folders, stats, subscriptions, unpushed
+    case schedules, upkeep, prodWrites, operations, sshKeys
     case hardware, activity
 
     /// The page the mode opens on.
@@ -16,10 +16,10 @@ enum MacDashboardPage: String, CaseIterable, Hashable {
         let pages: [MacDashboardPage]
     }
 
-    /// The web's groups and order, minus the Inbox (the sessions mode) and the pages without a native screen.
+    /// The web's groups and order, minus the Inbox (the sessions mode), Notifications and Settings.
     static let sections: [Section] = [
-        Section(title: "Workspace", pages: [.overview, .sessions, .folders, .stats, .subscriptions]),
-        Section(title: "Operations", pages: [.schedules, .prodWrites, .sshKeys]),
+        Section(title: "Workspace", pages: [.overview, .sessions, .folders, .stats, .subscriptions, .unpushed]),
+        Section(title: "Operations", pages: [.schedules, .upkeep, .prodWrites, .operations, .sshKeys]),
         Section(title: "System", pages: [.hardware, .activity]),
     ]
 
@@ -31,8 +31,11 @@ enum MacDashboardPage: String, CaseIterable, Hashable {
         case .folders: return "Folders"
         case .stats: return "Statistics"
         case .subscriptions: return "AI limits"
+        case .unpushed: return "Unpushed"
         case .schedules: return "Schedules"
+        case .upkeep: return "Agent upkeep"
         case .prodWrites: return "Production writes"
+        case .operations: return "Operations"
         case .sshKeys: return "SSH keys"
         case .hardware: return "Hardware"
         case .activity: return "Activity"
@@ -47,8 +50,11 @@ enum MacDashboardPage: String, CaseIterable, Hashable {
         case .folders: return "folder"
         case .stats: return "chart.bar"
         case .subscriptions: return "gauge.with.dots.needle.33percent"
+        case .unpushed: return "arrow.up.circle"
         case .schedules: return "calendar.badge.clock"
+        case .upkeep: return "arrow.triangle.2.circlepath"
         case .prodWrites: return "checklist"
+        case .operations: return "paperplane"
         case .sshKeys: return "key"
         case .hardware: return "cpu"
         case .activity: return "list.bullet"
@@ -140,8 +146,11 @@ struct MacDashboardDetail: View {
         case .folders: FoldersScreen(client: client)
         case .stats: StatsScreen(client: client)
         case .subscriptions: SubscriptionsScreen(client: client)
+        case .unpushed: UnpushedScreen(client: client)
         case .schedules: CronScreen(client: client)
+        case .upkeep: AgentUpkeepScreen(client: client)
         case .prodWrites: ProdWritesScreen(client: client)
+        case .operations: OperationsScreen(client: client)
         case .sshKeys: SshApprovalsScreen(client: client)
         case .hardware: HardwareScreen(client: client)
         case .activity: LogScreen(client: client)

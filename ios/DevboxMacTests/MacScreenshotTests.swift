@@ -37,7 +37,9 @@ final class MacScreenshotTests: XCTestCase {
 
     /// Dashboard mode on a few of its native screens.
     func testDashboard() throws {
-        for (page, look) in [(MacDashboardPage.sessions, "dark"), (.folders, "light"), (.schedules, "dark")] {
+        for (page, look) in [(MacDashboardPage.sessions, "dark"), (.folders, "light"), (.schedules, "dark"),
+                             (.unpushed, "light"), (.unpushed, "dark"), (.upkeep, "light"), (.upkeep, "dark"),
+                             (.operations, "light"), (.operations, "dark")] {
             try shoot(name: "dashboard-\(page.rawValue)-\(look)", look: look, thread: nil, page: page)
         }
     }
