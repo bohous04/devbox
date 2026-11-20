@@ -33,7 +33,7 @@
 // allowed (tests and local bare clones use it) — it runs nothing, but pull/push
 // would touch a different repo on the host.
 import { realpathSync } from "node:fs";
-import { basename, isAbsolute, resolve } from "node:path";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import type { RunOpts, RunResult } from "./proc";
 
 /** Env for every host git. Overrides the caller's env. */
@@ -79,6 +79,60 @@ let untrustedRoots: () => string[] = () => [];
 export function setUntrustedGitRoots(fn: (() => string[]) | null): void {
   untrustedRoots = fn ?? (() => []);
 }
+
+/** The container user: owner of every agent-writable repo. */
+export const AGENT_UID = 1000;
+
+let agentRoots: () => string[] = () => [];
+/** Roots that hold agent-writable repos (devd's workspace root: workspaces, bare clones, session
+ *  worktrees). Used to refuse git in devd's own `_`-dirs there (see classifyGitTarget). */
+export function setAgentGitRoots(fn: (() => string[]) | null): void {
+  agentRoots = fn ?? (() => []);
+}
+
+let trustedRoots: () => string[] = () => [];
+/** The only repos host git may touch as root: devd's own (config repo, its checkout). When devd is
+ *  root, EVERY other git runs as AGENT_UID (layer 4) — the default is the agent, not root, so a
+ *  path that only looks like ours (a symlink out of the agent root) cannot get root's git. */
+export function setTrustedGitRoots(fn: (() => string[]) | null): void {
+  trustedRoots = fn ?? (() => []);
+}
+
+let agentIdentity: { name: string; email: string } | null = null;
+/** Identity for commits host git makes as the agent uid (pull --rebase rewrites committers,
+ *  --autostash commits). It has no global config there; null = none configured, and such a
+ *  command fails with git's own "empty ident" error. */
+export function setAgentGitIdentity(id: { name: string; email: string } | null): void {
+  agentIdentity = id;
+}
+
+/** Where a git target (canonical path) sits relative to an agent root: "agent" = a repo or a
+ *  `_sessions/<id>` worktree (git runs as AGENT_UID), "own" = devd's other `_`-dirs (inbox, threads,
+ *  archives, recovery copies; never git targets, so git there is refused), "outside" = not under it. */
+export function classifyGitTarget(target: string, root: string): "agent" | "own" | "outside" {
+  if (!within(target, root)) return "outside";
+  const top = relative(root, target).split(sep)[0]!;
+  return top.startsWith("_") && top !== "_sessions" ? "own" : "agent";
+}
+
+/** Environment of git running as the agent uid: nothing from devd's process env (secrets, root's
+ *  HOME/gitconfig/gh), no global or system config. Auth comes only from the caller's explicit env. */
+const AGENT_GIT_ENV: Readonly<Record<string, string>> = {
+  PATH: "/usr/local/bin:/usr/bin:/bin",
+  HOME: "/nonexistent",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+};
+export const asAgent = (cmd: string[]): string[] =>
+  ["setpriv", `--reuid=${AGENT_UID}`, `--regid=${AGENT_UID}`, "--clear-groups", "--no-new-privs", "--inh-caps=-all", ...cmd];
+const identityEnv = (): Record<string, string> => agentIdentity ? {
+  GIT_AUTHOR_NAME: agentIdentity.name, GIT_AUTHOR_EMAIL: agentIdentity.email,
+  GIT_COMMITTER_NAME: agentIdentity.name, GIT_COMMITTER_EMAIL: agentIdentity.email,
+} : {};
+
+/** Repo-scoped keys that redirect or weaken the transport (proxy, TLS checks, resolve, extra
+ *  headers that would carry devd's auth elsewhere). Refused for network commands only. */
+const NET_KEY = /^(http\.(.+\.)?(proxy|proxyauthmethod|proxysslcert|proxysslkey|proxysslcainfo|sslverify|sslcainfo|sslcapath|sslcert|sslkey|sslbackend|pinnedpubkey|curloptresolve|extraheader|cookiefile|followredirects)|remote\..+\.proxy)$/;
+const NET_CMDS = new Set(["clone", "fetch", "pull", "push", "ls-remote"]);
 
 export const isGitArgv = (cmd: readonly string[]): boolean => cmd.length > 0 && basename(cmd[0]!) === "git";
 
@@ -171,23 +225,48 @@ export function repoOverrides(entries: ConfigEntry[]): { args: string[] } | { re
 const refused = (why: string): RunResult => ({ code: 128, stdout: "", stderr: `devd: host git refused — ${why}`, timedOut: false });
 
 /** Secures one host git command. Returns the adjusted argv/opts, or a refusal result. */
-export async function hardenGit(cmd: string[], opts: RunOpts, raw: Raw): Promise<{ cmd: string[]; opts: RunOpts } | { result: RunResult }> {
+/** `uid` = devd's own uid (injectable for tests). */
+export async function hardenGit(cmd: string[], opts: RunOpts, raw: Raw, uid: number = process.getuid?.() ?? -1): Promise<{ cmd: string[]; opts: RunOpts } | { result: RunResult }> {
   const sub = subcommandIndex(cmd);
   const globals = cmd.slice(1, sub < 0 ? cmd.length : sub);
   const rest = sub < 0 ? [] : cmd.slice(sub);
   // Directory git will run in: cwd + an optional -C.
   let dir = resolve(opts.cwd ?? process.cwd());
   for (let i = 0; i < globals.length; i++) if (globals[i] === "-C" && globals[i + 1] !== undefined) dir = resolve(dir, globals[++i]!);
-  const env = { ...(opts.env ?? {}), ...SAFE_GIT_ENV };
-  const unsetEnv = [...(opts.unsetEnv ?? []), ...UNSAFE_GIT_ENV];
-
   const roots = untrustedRoots().filter(Boolean).map(canon);
   const target = canon(dir);
   if (roots.some((r) => within(target, r))) return { result: refused("repo belongs to a restricted (shared/tainted) session") };
 
+  // Layer 4: when devd is root, git runs as the agent uid unless EVERY target (cwd/-C, --git-dir,
+  // --work-tree) is in a trusted root — whatever a repo manages to run despite layers 1-3 then runs
+  // with the agent's own rights, not root's.
+  // Both the path as given (resolved) and its realpath: trusted only when both are.
+  const given = [dir];
+  for (let i = 0; i < globals.length; i++) {
+    const a = globals[i]!;
+    if ((a === "--git-dir" || a === "--work-tree") && globals[i + 1] !== undefined) given.push(resolve(dir, globals[++i]!));
+    else if (a.startsWith("--git-dir=") || a.startsWith("--work-tree=")) given.push(resolve(dir, a.slice(a.indexOf("=") + 1)));
+  }
+  const targets = given.map(canon);
+  // Classification under an agent root: repos (`<folder>/<project>/…`) and session worktrees
+  // (`_sessions/<id>`) are agent-writable git targets. devd's other `_`-dirs (inbox, threads,
+  // archives, recovery copies) are never git targets, so git there is refused rather than run.
+  const agent = agentRoots().filter(Boolean).map(canon);
+  const classes = targets.flatMap((t) => agent.map((r) => classifyGitTarget(t, r)));
+  if (classes.includes("own")) return { result: refused("target is devd's own directory, not a repo") };
+  const trustedRaw = trustedRoots().filter(Boolean).map((r) => resolve(r));
+  const trustedReal = trustedRaw.map(canon);
+  const inTrusted = targets.every((t) => trustedReal.some((r) => within(t, r)))
+    && given.every((g) => [...trustedRaw, ...trustedReal].some((r) => within(g, r)));
+  const dropToAgent = uid === 0 && !inTrusted;
+  const env = dropToAgent ? { ...identityEnv(), ...(opts.env ?? {}), ...AGENT_GIT_ENV, ...SAFE_GIT_ENV } : { ...(opts.env ?? {}), ...SAFE_GIT_ENV };
+  const unsetEnv = [...(opts.unsetEnv ?? []), ...UNSAFE_GIT_ENV];
+  const envOpts = dropToAgent ? { env, unsetEnv, inheritEnv: false as const } : { env, unsetEnv };
+  const wrap = dropToAgent ? asAgent : (c: string[]) => c;
+
   // Layer 2: the repo config up front. The probe itself is git, but `config --list` runs nothing.
-  const probe = await raw(["git", ...SAFE_GIT_CONFIG.flatMap((c) => ["-c", c]), ...globals, "config", "--list", "--show-scope", "--show-origin", "-z"],
-    { cwd: opts.cwd, env, unsetEnv, timeoutMs: Math.min(opts.timeoutMs, 30_000) });
+  const probe = await raw(wrap(["git", ...SAFE_GIT_CONFIG.flatMap((c) => ["-c", c]), ...globals, "config", "--list", "--show-scope", "--show-origin", "-z"]),
+    { cwd: opts.cwd, ...envOpts, timeoutMs: Math.min(opts.timeoutMs, 30_000) });
   if (probe.timedOut) return { result: refused("reading git config timed out") };
   if (probe.code !== 0) return { result: { ...probe, stderr: probe.stderr || refused("git config failed").stderr } };
   const entries = parseConfigList(probe.stdout);
@@ -197,6 +276,10 @@ export async function hardenGit(cmd: string[], opts: RunOpts, raw: Raw): Promise
     const file = canon(isAbsolute(f) ? f : resolve(dir, f));
     if (roots.some((r) => within(file, r))) return { result: refused("repo config lives in a restricted (shared/tainted) session") };
   }
+  if (rest.length && NET_CMDS.has(rest[0]!)) {
+    const net = entries.find((e) => REPO_SCOPES.has(e.scope) && NET_KEY.test(e.key.toLowerCase()));
+    if (net) return { result: refused(`repo config sets ${net.key} for a network command`) };
+  }
   const dyn = repoOverrides(entries);
   if ("refuse" in dyn) return { result: refused(`config repa nastavuje ${dyn.refuse}`) };
 
@@ -204,5 +287,5 @@ export async function hardenGit(cmd: string[], opts: RunOpts, raw: Raw): Promise
   const tail = rest.length && DIFF_CMDS.has(rest[0]!) ? [rest[0]!, "--no-ext-diff", "--no-textconv", ...rest.slice(1)] : rest;
   // Order: fixed and dynamic overrides BEFORE the caller's global options (safe.directory,
   // credential.helper for InstaBox…), so the caller can deliberately override e.g. the helper.
-  return { cmd: [cmd[0]!, ...fixed, ...dyn.args, ...globals, ...tail], opts: { ...opts, env, unsetEnv } };
+  return { cmd: wrap([cmd[0]!, ...fixed, ...dyn.args, ...globals, ...tail]), opts: { ...opts, ...envOpts } };
 }

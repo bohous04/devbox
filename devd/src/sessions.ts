@@ -17,7 +17,8 @@ import { deleteGitStat, deleteSession, getRepoAgent, getSession, insertSession, 
 import { containerEnv, containerMountDestinations, containerState, execInContainer, removeContainer, runContainer, startContainer, stopContainer, type RunOpts } from "./docker";
 import { dockerArgv } from "./dockerTarget";
 import { inspectCanonicalWorkspace, removeStoppedWorkspaceContainer, type CanonicalWorkspaceContainer } from "./canonicalWorkspace";
-import { archiveBranch, cloneBare, cloneRepo, conflictPrompt, type CloneProgress, defaultBranch, ensureWorktree, fetchBare, pullWithRebase, removeWorktree, sh, trackRemote, worktreeBranch, type PullResult } from "./git";
+import { agentOwnedDir, archiveBranch, cloneBare, cloneRepo, conflictPrompt, type CloneProgress, defaultBranch, ensureWorktree, fetchBare, pullWithRebase, removeWorktree, sh, trackRemote, worktreeBranch, type PullResult } from "./git";
+import { agentChownArgv } from "./agentRepos";
 import { contextLengthCached } from "./openrouterModels";
 import { allocatePortBase } from "./ports";
 import { barePath, isBareLayout, workspacePath } from "./tree";
@@ -116,7 +117,7 @@ export interface SessionDeps {
   shareRestricted?: (session: string) => Promise<boolean>;
   // Per-repo git auth env keyed by clone URL (see giteaAuthEnv): host git has no
   // gitea credential helper, so clone/pull of a private gitea repo would otherwise fail.
-  credentials?: (url: string) => Record<string, string>;
+  credentials?: (url: string) => Record<string, string> | Promise<Record<string, string>>;
   notify?: (title: string, message: string) => void;
   // Account profile mounts. A FUNCTION, not an array: accounts are added while devd runs, so the list
   // must be computed when the container is created, not once at startup.
@@ -655,7 +656,7 @@ export class SessionManager {
     const dir = this.claudeProjectsDir(id);
     try {
       mkdirSync(dir, { recursive: true });
-      if (statSync(dir).uid !== 1000) await sh(dir, "chown", "-R", "1000:1000", dir);
+      if (statSync(dir).uid !== 1000) await sh("/", ...agentChownArgv(dir));
     } catch (e) { console.error(`claude projects dir ${dir} failed:`, e); }
     return dir;
   }
@@ -699,7 +700,7 @@ export class SessionManager {
   // (cheap: one stat); devd runs as root, so the chown goes through.
   private async ensureOwned(ws: string): Promise<void> {
     try {
-      if (statSync(ws).uid !== 1000) await sh(ws, "chown", "-R", "1000:1000", ws);
+      if (statSync(ws).uid !== 1000) await sh("/", ...agentChownArgv(ws)); // -h -R -P: never through a link
     } catch (e) { console.error(`chown workspace ${ws} failed:`, e); }
   }
 
@@ -709,11 +710,13 @@ export class SessionManager {
   // to the dev user?" would be BROKEN here: after the first session `app.git` belongs to the dev user,
   // but the second session's directory under it is freshly root-owned and the second session could not
   // commit. Hence the whole tree — and only when the worktree is created, not on every open.
-  // Only entries NOT yet owned by uid 1000 are changed: `chown -R` touched every inode of a
-  // 54 GB / 620k-entry clone (2.9 s), a `find` that only stats them takes half of that.
+  // `chown -R -P -h`, not `find ! -uid 1000 -exec chown {}`: the tree is the agent's, and find hands
+  // chown paths it resolves again — a parent swapped for a symlink in between would let root chown
+  // any host file. It touches every inode (2.9 s on a 54 GB / 620k-entry clone vs ~1.5 s for find),
+  // only when a worktree is created.
   private async ownBare(bare: string): Promise<void> {
     try {
-      const r = await sh(bare, "find", bare, "!", "-uid", "1000", "-exec", "chown", "-h", "1000:1000", "{}", "+");
+      const r = await sh("/", ...agentChownArgv(bare));
       if (r.code !== 0) console.error(`chown bare ${bare} failed: ${r.stderr.trim()}`);
     } catch (e) { console.error(`chown bare ${bare} failed:`, e); }
   }
@@ -951,8 +954,8 @@ export class SessionManager {
     if (existing) setAutoEnd(this.d.db, id, 0);
 
     // Auth for host git (both the clone and the subsequent pull) against a private gitea instance;
-    // empty for github/local. Without a URL (existing repo without cloneUrl) → no auth.
-    const authEnv = t.cloneUrl ? (this.d.credentials?.(t.cloneUrl) ?? {}) : {};
+    // github.com (token from gh) as well. Empty for local. Without a URL (existing repo without cloneUrl) → no auth.
+    const authEnv = t.cloneUrl ? ((await this.d.credentials?.(t.cloneUrl)) ?? {}) : {};
 
     // Repo form. An existing session CARRIES it in the `worktree` column and it is not re-derived
     // from disk: a bare clone can appear next to the old repo at any time and the old session would
@@ -1122,7 +1125,7 @@ export class SessionManager {
       const id = `dev-${project}-${repo}`;
       return this.locked([id], "open", async () => {
         const ws = workspacePath(this.d.root, folder, project, repo);
-        mkdirSync(ws, { recursive: true });
+        agentOwnedDir(ws); // git init runs as the agent uid (safeGit.ts layer 4)
         await sh(ws, "git", "init");
         // claudeSolo is remembered under the generic repo "claudeSolo" (not claudeSolo-3) —
         // the same key the tree and the pickers offer.

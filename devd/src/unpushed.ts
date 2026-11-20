@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { run, timeoutFor, type RunResult } from "./proc";
 
@@ -90,7 +90,8 @@ function listDirs(dir: string): string[] {
   try { names = readdirSync(dir); } catch { return []; }
   return names
     .filter((n) => !n.startsWith("_") && !n.startsWith("."))
-    .filter((n) => { try { return statSync(join(dir, n)).isDirectory(); } catch { return false; } })
+    // lstat: a symlink (e.g. one the agent made inside its workspace) is never a repo or folder of ours.
+    .filter((n) => { try { return lstatSync(join(dir, n)).isDirectory(); } catch { return false; } })
     .sort();
 }
 
@@ -252,7 +253,9 @@ export interface CreatePrOpts {
 export async function createPr(o: CreatePrOpts): Promise<{ url: string; number: number | null }> {
   if (o.remote.provider === "github") {
     const runner = o.ghRun ?? defaultGhRun;
-    const r = await runner(o.dir, "gh", "pr", "create", "--repo", `${o.remote.owner}/${o.remote.name}`, "--head", o.branch, "--base", o.base, "--title", o.title, "--body", o.body);
+    // cwd "/": gh runs its own git in its cwd, as root and unhardened — never in the agent's repo.
+    // --repo/--head/--base say everything gh would otherwise read from it.
+    const r = await runner("/", "gh", "pr", "create", "--repo", `${o.remote.owner}/${o.remote.name}`, "--head", o.branch, "--base", o.base, "--title", o.title, "--body", o.body);
     if (r.timedOut) throw new Error(`gh pr create timed out after ${Math.round(timeoutFor("NET_CLI") / 1000)} s`);
     if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || "gh pr create failed");
     const url = r.stdout.trim().split("\n").map((l) => l.trim()).filter((l) => /^https?:\/\//.test(l)).pop() ?? r.stdout.trim();
@@ -364,7 +367,8 @@ export interface FindPrOpts {
 export async function findPr(o: FindPrOpts): Promise<FoundPr | null> {
   if (o.remote.provider === "github") {
     const runner = o.ghRun ?? defaultGhRun;
-    const r = await runner(o.dir, "gh", "pr", "list", "--repo", `${o.remote.owner}/${o.remote.name}`, "--head", o.branch,
+    // cwd "/": see createPr.
+    const r = await runner("/", "gh", "pr", "list", "--repo", `${o.remote.owner}/${o.remote.name}`, "--head", o.branch,
       "--state", "all", "--limit", "1", "--json", "number,url,state,mergedAt,statusCheckRollup,headRefOid");
     if (r.timedOut) throw new Error(`gh pr list timed out after ${Math.round(timeoutFor("NET_CLI") / 1000)} s`);
     if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || "gh pr list failed");
@@ -410,8 +414,8 @@ export async function findPr(o: FindPrOpts): Promise<FoundPr | null> {
 }
 
 export interface UnpushedOpsDeps {
-  /** Git auth env by origin URL (Gitea Basic auth from the token; GitHub goes through the gh helper). */
-  authFor: (url: string) => Record<string, string>;
+  /** Git auth env by origin URL (Basic auth from the Gitea token or from gh for github.com). */
+  authFor: (url: string) => Record<string, string> | Promise<Record<string, string>>;
   /** Token of the Gitea instance for the origin's host. */
   giteaToken: (host: string) => string | undefined;
   /** URLs of the configured Gitea instances (provider detection + API base). */
@@ -440,7 +444,7 @@ export function unpushedOps(root: string, deps: UnpushedOpsDeps) {
       await checkBranch(r.path, branch);
       const remote = await remoteInfo(r.path, deps.giteaUrls());
       if (!remote) return { ok: false, error: "repo has no remote — nowhere to push" };
-      return pushBranch(r.path, branch, deps.authFor(remote.url));
+      return pushBranch(r.path, branch, await deps.authFor(remote.url));
     },
     async createPr(p: { path: string; branch: string; title: string; body: string }): Promise<{ url: string; number: number | null }> {
       const r = repoAt(p.path);

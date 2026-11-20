@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import type { ChangedFile, ChangesErrorCode, ChangeStatus, FileDiff, SessionChanges } from "../../shared/changes";
@@ -229,9 +229,12 @@ async function baseBlob(repo: Repo, path: string): Promise<string | null> {
  *  root-owned temp dir — git sees only those two files, never the worktree or its config. */
 async function unifiedHunks(ws: string, old: string, cur: string): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), "devd-diff-"));
+  // Host git runs as the agent uid (safeGit.ts layer 4): the dir stays root's (nobody else can
+  // put anything in it), 0711 only lets that git enter it and read the two 0644 files by name.
+  chmodSync(dir, 0o711);
   try {
-    writeFileSync(join(dir, "a"), old);
-    writeFileSync(join(dir, "b"), cur);
+    writeFileSync(join(dir, "a"), old, { mode: 0o644 });
+    writeFileSync(join(dir, "b"), cur, { mode: 0o644 });
     // GIT_CEILING_DIRECTORIES: git must not discover a repo above the temp dir.
     const r = await run(["git", "diff", "--no-index", "--no-color", "-U3", "--", "a", "b"],
       { cwd: dir, env: { GIT_CEILING_DIRECTORIES: tmpdir() }, timeoutMs: timeoutFor("LOCAL"), maxStdout: MAX_DIFF + 1 });

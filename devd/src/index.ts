@@ -37,7 +37,7 @@ import { switchAgent, type SwitchAgentDeps } from "./agentSwitch";
 import { giteaTokensByHost, loadConfig, loadSecrets, materializeGiteaTokens, materializeMcpServers, readKeyFile, resolveAccountPool, resolveInstaboxSettings, saveGiteaTokens, writeKeyFile, type Secrets } from "./config";
 import { createConfigRepo } from "./configrepo";
 import { createGiteaApi } from "./gitea";
-import { giteaAuthEnv } from "./git";
+import { giteaAuthEnv, githubAuthEnv, sshRemote } from "./git";
 import {
   activeLeases, diskHistoryEnds, failRunningCloneJobs, getSession, getSessionPr, type SessionRow, insertDiskTotal, lastMetricTs, listAccounts, listSessions, logEvent,
   getRepoAgent, applyPendingRestore, checkpointFully, savePendingFirstTurn, prunePendingFirstTurns, getPendingFirstTurn, deletePendingFirstTurn, openDb, startCheckpointer, pruneAccountLeases, pruneCriticReviews, pruneDiskStats, pruneEvents, pruneNotifyLog, prunePushAlerts,
@@ -85,7 +85,8 @@ import { parseMeminfo, resourceBreakdown } from "./resources";
 import { classifyClaudeState, collectDiskUsage, collectDockerStatsAsync, collectGitStats, collectSessionGitStat, type DockerStat, type Runner } from "./stats";
 import { createTmuxProbe } from "./tmux";
 import { barePath, buildTree, ghLister, giteaLister, sessionWorkdir } from "./tree";
-import { setUntrustedGitRoots } from "./safeGit";
+import { AGENT_UID, setAgentGitIdentity, setAgentGitRoots, setTrustedGitRoots, setUntrustedGitRoots } from "./safeGit";
+import { ownershipHints, untraversableForAgent } from "./agentRepos";
 import { memoAsync, memoAsyncStrict } from "./cache";
 import { selfUpdateStatus, startSelfUpdate, type SelfUpdateDeps } from "./selfUpdate";
 import { buildUnpushedReport, unpushedOps } from "./unpushed";
@@ -109,7 +110,7 @@ import { BaseBuilder, localImageDigest } from "./instabox/base";
 import { createStatusCache, killOrphan, reconcile } from "./instabox/reconcile";
 import { IBX_PATHS } from "./instabox/runOpts";
 import { readHostLoad } from "./placement";
-import { run, timeoutFor } from "./proc";
+import { redactArgv, run, timeoutFor } from "./proc";
 import { COMMIT } from "./version";
 import { createScheduler, scheduledNotifySession } from "./scheduler";
 import { ccStatus, dueForCheck, inWindow, resolveCcUpkeep, runCcUpkeep, type UpkeepDeps, type UpkeepResult } from "./ccUpkeep";
@@ -389,9 +390,20 @@ const getGiteaInstances = () => freshCfg().giteaInstances ?? [];
 // fail with "could not read Username". Map clone URL → gitea instance (by
 // host) → token → git auth env. Shared by CloneQueue and SessionManager.
 const hostOf = (u: string): string | null => { try { return new URL(u).host; } catch { return null; } };
-const credentialsForUrl = (url: string): Record<string, string> => {
+// github.com: host git runs as the agent uid without root's gitconfig (safeGit.ts layer 4), so
+// root's gh credential helper no longer applies; the token is read from gh here, per call.
+// Not logged in (or gh failing) = no auth, as before for a repo without credentials, but said in the log.
+const githubToken = async (): Promise<string | undefined> => {
+  const r = await run(["gh", "auth", "token", "--hostname", "github.com"], { timeoutMs: 10_000 });
+  const token = r.stdout.trim();
+  if (r.code !== 0 || !token) { console.error(`gh auth token failed (${r.code}): ${r.stderr.trim().slice(0, 200)}`); return undefined; }
+  return token;
+};
+const credentialsForUrl = async (url: string): Promise<Record<string, string>> => {
+  if (sshRemote(url)) throw new Error(`SSH remote ${redactArgv([url])[0]} is not supported: host git runs as the container user without SSH keys; use the https URL`);
   const host = hostOf(url);
   if (!host) return {};
+  if (host === "github.com" && url.startsWith("https://")) return githubAuthEnv(await githubToken());
   return giteaAuthEnv(url, giteaTokensByHost(getGiteaInstances(), giteaTokens)[host]);
 };
 
@@ -1024,6 +1036,23 @@ const restrictedGitRoots = (): string[] => [...restrictedView.current()].flatMap
   return !s || s.host === "instabox" ? [] : sessionGitRoots(s);
 });
 setUntrustedGitRoots(restrictedGitRoots);
+// Every agent-writable repo (workspaces, bare clones, session worktrees) lives under `root`:
+// host git over them runs as the container uid (safeGit.ts layer 4).
+setAgentGitRoots(() => [root]);
+// devd's own repos (config repo, its checkout for self-update) are the only ones host git touches as root.
+setTrustedGitRoots(() => [configDir, join(import.meta.dir, "..", "..")]);
+setAgentGitIdentity(cfg.settings.hostGitIdentity ?? null);
+if (!cfg.settings.hostGitIdentity) console.error("config.settings.hostGitIdentity is not set: host git (pull --rebase/--autostash) has no committer identity and fails where it needs one");
+// Repos root's git wrote into before that switch can hold root-owned files git as the agent uid
+// cannot rewrite (fetch/pull then fail). Say which; the fix is tools/own-agent-repos.ts.
+if (process.getuid?.() === 0) {
+  try {
+    const blocked = untraversableForAgent(root);
+    if (blocked.length) console.error(`${root} or a parent is not traversable by uid ${AGENT_UID} (host git runs as that uid and fails): ${blocked.join(", ")}`);
+    const stale = ownershipHints(root);
+    if (stale.length) console.error(`${stale.length} agent repos have git files not owned by uid ${AGENT_UID} (host git may fail there; run tools/own-agent-repos.ts): ${stale.join(", ")}`);
+  } catch (e) { console.error("agent repo ownership check failed:", (e as Error).message); }
+}
 const syncShareFirewallSoon = () => {
   if (shareFirewall) void shareFirewall.sync().catch((e) => console.error(`share firewall: ${(e as Error).message}`));
 };

@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { withDir, writeFileAt } from "./noFollowFs";
+import { chownSync, existsSync, fchownSync, lstatSync, rmdirSync, type Stats, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { type DirHandle, withDir, writeFileAt } from "./noFollowFs";
 import { basename, dirname, join } from "node:path";
 import { redactArgv, run, timeoutFor, type RunResult } from "./proc";
+import { AGENT_UID } from "./safeGit";
 
 // Network git subcommands get a longer cap (cloning a large repo takes minutes).
 const NET = new Set(["clone", "fetch", "pull", "push", "ls-remote"]);
@@ -53,7 +54,25 @@ export function giteaAuthEnv(url: string, token: string | undefined): Record<str
   let base: string;
   try { const u = new URL(url); base = `${u.protocol}//${u.host}/`; }
   catch { return {}; } // unparseable URL → better without auth than throwing
-  const b64 = Buffer.from(`devbox:${token}`).toString("base64");
+  return basicAuthEnv(base, "devbox", token);
+}
+
+/** The same for github.com. Host git runs as the agent uid with no global config (safeGit.ts
+ *  layer 4), so root's gh credential helper is out of reach; devd reads the token from gh itself and
+ *  hands it to that one network call. */
+export function githubAuthEnv(token: string | undefined): Record<string, string> {
+  return token ? basicAuthEnv("https://github.com/", "x-access-token", token) : {};
+}
+
+/** An SSH remote (`ssh://…`, `git+ssh://…` or scp-form `host:path`). Host git runs as the agent
+ *  uid without root's keys, so such a remote is an explicit error, never a root fallback. */
+export function sshRemote(url: string): boolean {
+  if (/^(ssh|git\+ssh|ssh\+git):\/\//.test(url)) return true;
+  return !url.includes("://") && /^[^/:]+:/.test(url);
+}
+
+function basicAuthEnv(base: string, user: string, token: string): Record<string, string> {
+  const b64 = Buffer.from(`${user}:${token}`).toString("base64");
   return {
     GIT_CONFIG_COUNT: "1",
     GIT_CONFIG_KEY_0: `http.${base}.extraHeader`,
@@ -103,10 +122,12 @@ export async function cloneRepo(url: string, dest: string, authEnv: Record<strin
 async function gitClone(args: string[], url: string, dest: string, authEnv: Record<string, string>, label: string, onProgress?: (p: CloneProgress) => void): Promise<void> {
   const partial = `${dest}.partial`;
   rmSync(partial, { recursive: true, force: true }); // leftover from an earlier interruption
+  agentOwnedDir(partial);
   const cmd = ["git", "clone", ...args, ...(onProgress ? ["--progress"] : []), "--", url, partial];
   const ms = timeoutFor("GIT_CLONE");
   const r = await run(cmd, {
-    cwd: process.cwd(),
+    // The clone's own parent, not devd's cwd (its checkout, a trusted root for safeGit).
+    cwd: dirname(partial),
     env: Object.keys(authEnv).length ? authEnv : undefined,
     timeoutMs: ms,
     onStderr: onProgress ? cloneProgressSink(onProgress) : undefined,
@@ -118,6 +139,15 @@ async function gitClone(args: string[], url: string, dest: string, authEnv: Reco
     throw new Error(`${label} failed: ${why}`);
   }
   renameSync(partial, dest);
+}
+
+/** An empty directory for host git running as the agent uid (safeGit.ts layer 4) to fill: its
+ *  parent is root-owned, so that git could not create it itself. Clone and `worktree add` accept an
+ *  existing empty directory. A no-op chown when devd is not root (then git runs as devd anyway). */
+export function agentOwnedDir(path: string, uid: number = process.getuid?.() ?? -1): void {
+  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(path);
+  if (uid === 0) chownSync(path, AGENT_UID, AGENT_UID);
 }
 
 export async function cloneRepoAsync(url: string, dest: string, authEnv: Record<string, string> = {}): Promise<void> {
@@ -337,9 +367,15 @@ export async function reregisterWorktree(bare: string, dest: string, head: strin
   const admin = join(bare, "worktrees", basename(dest));
   // Both the bare clone and the worktree are agent-writable and devd runs as root: written without
   // following any symlink, a planted link is replaced (noFollowFs.ts).
-  const file = { mode: 0o644, replace: true };
+  // As root, everything written here belongs to the agent uid: host git runs as that uid (safeGit.ts
+  // layer 4) and the `git reset` below must be able to write the index next to these files.
+  const owner = process.getuid?.() === 0 ? { uid: AGENT_UID, gid: AGENT_UID } : undefined;
+  const file = { mode: 0o644, replace: true, owner };
+  const own = (d: DirHandle) => { if (owner) fchownSync(d.fd, owner.uid, owner.gid); };
   try {
+    withDir(bare, ["worktrees"], true, own);
     withDir(bare, ["worktrees", basename(dest)], true, (d) => {
+      own(d);
       writeFileAt(d, "commondir", "../..\n", file);
       writeFileAt(d, "gitdir", `${join(dest, ".git")}\n`, file);
       writeFileAt(d, "HEAD", `${head}\n`, file);
@@ -351,7 +387,10 @@ export async function reregisterWorktree(bare: string, dest: string, head: strin
   }
   if (!await worktreeHealthy(dest)) return false;
   const r = await sh(dest, "git", "-c", `safe.directory=${dest}`, "reset", "-q");
-  if (r.code !== 0) console.error(`could not rebuild the index of worktree ${dest}: ${r.stderr.trim()}`);
+  if (r.code !== 0) {
+    console.error(`could not rebuild the index of worktree ${dest}: ${r.stderr.trim()}`);
+    return false;
+  }
   return true;
 }
 
@@ -467,6 +506,7 @@ export async function addWorktree(bare: string, dest: string, branch: string | n
   // --progress` — on a 9.6 GB tree that is ~20 s the CLI would otherwise show as a frozen spinner.
   // An unborn branch has nothing to check out.
   const add = ["-C", bare, ...safe, "worktree", "add", ...(unborn ? [] : ["--no-checkout"])];
+  if (!existsSync(dest)) agentOwnedDir(dest);
   const args = branch && await has(`refs/heads/${branch}`)
     ? [...add, dest, branch]
     : unborn
@@ -531,6 +571,13 @@ export async function removeWorktree(bare: string, dest: string): Promise<void> 
     // Non-critical: the container is already gone, an orphaned directory must not prevent deleting the row.
     console.error(`git worktree remove ${dest} failed: ${r.stderr.trim()}`);
   }
+  // Git runs as the agent uid (safeGit.ts layer 4) and cannot remove `dest` itself from the
+  // root-owned `_sessions`; the emptied dir is removed here. rmdir only: never recursive, and a
+  // symlink or a non-empty dir stays (and is logged).
+  let st: Stats;
+  try { st = lstatSync(dest); } catch { return; }
+  if (!st.isDirectory()) { console.error(`worktree ${dest} is not a directory after remove, left alone`); return; }
+  try { rmdirSync(dest); } catch (e) { console.error(`removing the emptied worktree dir ${dest} failed: ${(e as Error).message}`); }
 }
 
 // The prompt reaches a terminal agent as one argv word (Linux caps one at 128 KiB) together with a first prompt of up

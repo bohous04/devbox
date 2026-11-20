@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { addWorktree, archiveBranch, cloneBare, defaultBranch, ensureWorktree, fetchBare, pullWithRebase, removeWorktree, trackRemote, worktreeBranch, worktreeChanges, worktreeHealthy } from "../src/git";
@@ -534,4 +534,44 @@ test("creating a worktree reports checkout progress and still checks out every f
   expect(existsSync(join(wt, "f.txt"))).toBe(true);
   expect(sh(wt, "git", "status", "--porcelain").stdout.trim()).toBe("");
   expect(branchOf(wt)).toBe("session/app-2");
+});
+
+test("reregisterWorktree: a failed index rebuild (git reset) is a failure, not a revived worktree", async () => {
+  const { reregisterWorktree } = await import("../src/git");
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "rereg-")));
+  const bare = join(base, "app.git");
+  const seed = join(base, "seed");
+  sh(base, "git", "init", "-q", "-b", "main", seed);
+  writeFileSync(join(seed, "a.txt"), "1\n");
+  sh(seed, "git", "-c", "user.name=t", "-c", "user.email=t@example.com", "add", ".");
+  sh(seed, "git", "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "init");
+  sh(base, "git", "clone", "-q", "--bare", seed, bare);
+  const dest = join(base, "harbor-1");
+  sh(base, "git", "-C", bare, "worktree", "add", "-q", dest, "main");
+  rmSync(join(bare, "worktrees", "harbor-1"), { recursive: true, force: true });  // registration gone
+  mkdirSync(join(bare, "worktrees", "harbor-1"), { recursive: true });
+  writeFileSync(join(bare, "worktrees", "harbor-1", "index.lock"), "");            // reset cannot write the index
+  expect(await reregisterWorktree(bare, dest, "ref: refs/heads/main")).toBe(false);
+  rmSync(join(bare, "worktrees", "harbor-1", "index.lock"));
+  expect(await reregisterWorktree(bare, dest, "ref: refs/heads/main")).toBe(true);
+});
+
+test("removeWorktree removes a dir git left empty (git as the agent uid cannot rmdir in root-owned _sessions), never a symlink or a non-empty dir", async () => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "rmwt-")));
+  const bare = join(base, "app.git");
+  sh(base, "git", "init", "-q", "--bare", bare);
+  const empty = join(base, "_sessions", "dev-a");
+  mkdirSync(empty, { recursive: true });
+  await removeWorktree(bare, empty);
+  expect(existsSync(empty)).toBe(false);
+  const full = join(base, "_sessions", "dev-b");
+  mkdirSync(full);
+  writeFileSync(join(full, "keep.txt"), "x");
+  await removeWorktree(bare, full);
+  expect(existsSync(join(full, "keep.txt"))).toBe(true);
+  const target = join(base, "elsewhere");
+  mkdirSync(target);
+  symlinkSync(target, join(base, "_sessions", "dev-c"));
+  await removeWorktree(bare, join(base, "_sessions", "dev-c"));
+  expect(existsSync(target)).toBe(true);
 });
