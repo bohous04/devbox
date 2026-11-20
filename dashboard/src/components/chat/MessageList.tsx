@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Check, ChevronRight, CircleAlert, Copy, ShieldCheck } from "lucide-react";
 import type { PendingRequest, RunRow, ThreadItem } from "../../../../shared/thread";
 import { Badge } from "@/components/ui/badge";
@@ -127,9 +127,13 @@ function WorkText({ row }: { row: WorkRow }) {
 /** Copies a finished run's answer (its markdown source). A failed copy says so; nothing is retried. */
 function CopyAnswer({ text }: { text: string }) {
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  // One pending reset at a time (a second click restarts it), none left running after unmount.
+  const reset = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(reset.current), []);
   const copy = () => {
+    clearTimeout(reset.current);
     navigator.clipboard.writeText(text).then(() => setState("copied"), () => setState("failed"));
-    setTimeout(() => setState("idle"), 1800);
+    reset.current = setTimeout(() => setState("idle"), 1800);
   };
   return (
     // Wide screens: no height at all, in the column's right margin by the answer's last line, shown on hover or focus
@@ -187,6 +191,8 @@ export function MessageList({ sessionId, items, runs, pending, queued, critic, o
 }) {
   const rows = threadRows(items, runs);
   const anchor = changesAnchor(items, runs);
+  // A notice is a run's failure only when that run failed (run.failed); "event for unknown run" also carries a runId.
+  const failed = new Set(runs.filter((r) => r.status === "failed").map((r) => r.runId));
   return (
     <ol className="flex flex-col gap-4 sm:gap-5" aria-label="Conversation">
       {rows.map((row, i) => {
@@ -214,9 +220,8 @@ export function MessageList({ sessionId, items, runs, pending, queued, critic, o
             ) : it.kind === "request" ? (
               <RequestItem item={it} pending={pending.find((p) => p.requestId === it.itemId)} onAnswer={onAnswer} />
             ) : (
-              // A notice with a run is that run's failure (run.failed) and stays prominent; devd's and the bridge's own
-              // notices are a faint centred divider.
-              it.runId !== null ? (
+              // A failed run's notice stays prominent; every other notice (devd's, the bridge's) is a faint centred divider.
+              it.runId !== null && failed.has(it.runId) ? (
                 <p className="flex items-start gap-2 text-xs text-red-700 dark:text-red-400">
                   <CircleAlert className="mt-px size-3.5 flex-none" aria-hidden="true" />
                   <span className="min-w-0 break-words">{it.text}</span>

@@ -121,7 +121,7 @@ function ChatPage({ id }: { id: string }) {
             </>
           )}
           {heading !== null
-            ? <h1 className="min-w-0 truncate text-sm font-medium text-foreground" title={firstMessage?.split("\n")[0] ?? heading}>{heading}</h1>
+            ? <h1 className="min-w-0 truncate text-sm font-medium text-foreground" title={session?.name?.trim() || (firstMessage?.split("\n")[0] ?? heading)}>{heading}</h1>
             : <h1 className="min-w-0 truncate text-sm text-muted-foreground">{place}</h1>}
         </div>
         <div className="flex flex-none items-center gap-2">
