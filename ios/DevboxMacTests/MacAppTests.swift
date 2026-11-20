@@ -44,11 +44,13 @@ final class MacAppTests: XCTestCase {
         XCTAssertNil(ThreadEdge.pad([CGRect(x: 0, y: 60, width: 10, height: 100)], top: top), "nothing cut")
     }
 
-    /// The second line names the branch when devd recorded one, else the message.
+    /// The second line: what a needs-you row asks; for the others the branch when devd recorded one, else the message.
     func testSidebarRowPlacePrefersTheBranch() throws {
-        XCTAssertEqual(MacInboxRow.place(try item("idle", reason: nil, branch: "retry-queue"), detail: "msg"), "p/r  ·  retry-queue")
-        XCTAssertEqual(MacInboxRow.place(try item("idle", reason: nil), detail: "msg"), "p/r  ·  msg")
-        XCTAssertEqual(MacInboxRow.place(try item("idle", reason: nil), detail: ""), "p/r")
+        XCTAssertEqual(MacInboxRow.secondLine(try item("idle", reason: nil, branch: "retry-queue"), detail: "msg"), "p/r  ·  retry-queue")
+        XCTAssertEqual(MacInboxRow.secondLine(try item("idle", reason: nil), detail: "msg"), "p/r  ·  msg")
+        XCTAssertEqual(MacInboxRow.secondLine(try item("idle", reason: nil), detail: ""), "p/r")
+        XCTAssertEqual(MacInboxRow.secondLine(try item("needs_you", reason: "request", branch: "b"), detail: "May I run it?"), "May I run it?",
+                       "a row that needs you says what it asks")
     }
 
     func testSidebarAgentGlyphAndConnection() {

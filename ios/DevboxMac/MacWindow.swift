@@ -203,7 +203,7 @@ struct MacInboxSidebar: View {
             .help("New session (⌘N)")
             .accessibilityLabel("New session")
         }
-        .padding(.horizontal, 12).padding(.top, 6).padding(.bottom, 8)
+        .padding(.horizontal, 12).padding(.top, 2).padding(.bottom, 8)
         .background(MacTone.sidebar)
     }
 
@@ -281,7 +281,7 @@ struct MacInboxSidebar: View {
 
     private func rows(_ items: [InboxItem], now: Int, preview: Bool) -> some View {
         ForEach(items) { item in
-            MacInboxRow(item: item, now: now, preview: preview)
+            MacInboxRow(item: item, now: now, preview: preview, selected: selection == item.sessionId)
                 .tag(item.sessionId as String?)
                 .contextMenu {
                     Button("Open in New Window") { openWindow(value: item.sessionId) }
@@ -323,13 +323,15 @@ private struct MacGroupHead: View {
 }
 
 /// A sidebar row: the title with its state on the right (one coloured word when the row needs you, otherwise how long
-/// ago, after a live dot while it works, with the agent's glyph before it), and one muted line: the repo and its
-/// branch, or without a branch the latest message in the groups about it. The agent's name, "tmux" and the message
-/// are in the tooltip and the spoken label.
+/// ago, after a live dot while it works) and one muted line (`secondLine`) ending in the agent's glyph. Titles are
+/// regular; a row that needs you is semibold unless selected. The agent's name, "tmux" and the message are also in
+/// the tooltip and the spoken label.
 struct MacInboxRow: View {
     let item: InboxItem
     let now: Int
     let preview: Bool
+    /// The selection fill marks the row; its title stays regular.
+    var selected = false
 
     /// The word for a row that needs you, by its reason; nil for every other row (it shows its age).
     static func word(_ i: InboxItem) -> (text: String, tone: InboxView.Tone)? {
@@ -357,8 +359,11 @@ struct MacInboxRow: View {
         }
     }
 
-    /// The second line after the repo: the branch devd recorded, else (in the message groups) the latest message.
-    static func place(_ i: InboxItem, detail: String) -> String {
+    /// The second line. A row that needs you says what it asks (the message, or the reason without one): that is
+    /// the point of the row. Any other row says where it runs: the repo and the branch devd recorded, else the
+    /// latest message in the groups about it.
+    static func secondLine(_ i: InboxItem, detail: String) -> String {
+        if word(i) != nil, !detail.isEmpty { return detail }
         let place = "\(i.project)/\(i.repo)"
         if let branch = i.branch, !branch.isEmpty { return "\(place)  ·  \(branch)" }
         return detail.isEmpty ? place : "\(place)  ·  \(detail)"
@@ -378,13 +383,10 @@ struct MacInboxRow: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(title.text)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 13, weight: Self.word(item) != nil && !selected ? .semibold : .regular))
                     .foregroundStyle(Theme.C.foreground)
                     .lineLimit(1)
                 Spacer(minLength: 0)
-                let glyph = Self.agentGlyph(item.agent)
-                Image(systemName: glyph.symbol).font(.system(size: 9.5, weight: .bold)).foregroundStyle(glyph.tint)
-                    .accessibilityHidden(true)
                 if let word = Self.word(item) {
                     Text(word.text).font(.system(size: 11, weight: .semibold)).foregroundStyle(InboxTone.text(word.tone))
                 } else {
@@ -395,10 +397,16 @@ struct MacInboxRow: View {
                     }
                 }
             }
-            Text(Self.place(item, detail: detail))
-                .font(.system(size: 11.5))
-                .foregroundStyle(Theme.C.mutedForeground)
-                .lineLimit(1)
+            HStack(spacing: 6) {
+                Text(Self.secondLine(item, detail: detail))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.C.mutedForeground)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                let glyph = Self.agentGlyph(item.agent)
+                Image(systemName: glyph.symbol).font(.system(size: 11, weight: .medium)).foregroundStyle(glyph.tint.opacity(0.7))
+                    .accessibilityHidden(true)
+            }
         }
         .padding(.vertical, 5)
         .contentShape(Rectangle())
@@ -551,6 +559,7 @@ private struct MacChangesChip: View {
     @ObservedObject var thread: ThreadStore
     @StateObject private var changes: ChangesStore
     let show: () -> Void
+    @State private var hover = false
 
     init(store: ThreadStore, client: DevdClient, show: @escaping () -> Void) {
         thread = store
@@ -568,8 +577,14 @@ private struct MacChangesChip: View {
                         Text("−\(c.totals.removed)").foregroundStyle(c.totals.removed > 0 ? InboxTone.danger : Theme.C.mutedForeground)
                     }
                     .font(.system(size: 12, weight: .medium)).monospacedDigit()
-                    .padding(.horizontal, 6)
+                    .padding(.horizontal, 8).frame(height: 26)
+                    // A button, not a label: an outline, filled on hover.
+                    .background(Theme.C.foreground.opacity(hover ? 0.08 : 0.03), in: RoundedRectangle(cornerRadius: 7))
+                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.C.border))
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .onHover { hover = $0 }
                 .help("\(ChangesView.title(c)) — show the changes")
                 .accessibilityLabel("\(ChangesView.title(c)), \(c.totals.added) lines added, \(c.totals.removed) removed")
             } else {
