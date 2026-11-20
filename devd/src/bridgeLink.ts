@@ -1,10 +1,12 @@
 import { SQLiteError } from "bun:sqlite";
+import { lstatSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import type { Socket } from "bun";
 import type { BridgeCommand, ClientFrame, ServerFrame } from "../../image/agent-bridge/src/protocol";
 import { BRIDGE_VERSION } from "../../image/agent-bridge/src/version";
 import { ACK_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
 import type { LinkStatus, LoggedEvent } from "../../shared/thread";
+import { CONTAINER_UID } from "./sshAgent";
 import type { ThreadStore } from "./threadStore";
 
 /** What a bridge says in each handshake (`ready`). `version` is null for a bridge older than switching (1.0.0 sent
@@ -132,6 +134,9 @@ export class BridgeLinks {
      *  (the schedule name): there is no caller left to hear it. */
     onRestoredTurnDone?: (sessionId: string, tag: string, err: Error | null) => void;
     retryMs?: number;
+    /** Owner agent.sock must have. Default: the container user (uid 1000) when devd is root, else
+     *  devd's own uid (tests, dev machines). */
+    socketUid?: number;
     /** Default ACK_INTERVAL_MS. */
     ackMs?: number;
     log?: (msg: string) => void;
@@ -301,6 +306,17 @@ export class BridgeLinks {
   private connect(sessionId: string, link: Link) {
     link.retry = null;
     const path = join(this.d.controlDir(sessionId), "agent.sock");
+    // The control dir is agent-writable (/run/devd) and devd connects as root: a planted symlink
+    // would point devd at any socket on the host. Only a real socket owned by the container user is
+    // accepted (lstat does not follow links). A swap between this check and the connect remains
+    // possible — the session-bound handshake secret is the follow-up that closes it.
+    const sockUid = this.d.socketUid ?? (process.getuid?.() === 0 ? CONTAINER_UID : process.getuid?.());
+    let st: Stats | null = null;
+    try { st = lstatSync(path); } catch { /* not there yet: the connect below fails and retries */ }
+    if (st && (!st.isSocket() || st.uid !== sockUid)) {
+      this.down(sessionId, link, `refusing ${path}: not a socket owned by uid ${sockUid}`);
+      return;
+    }
     Bun.connect({
       unix: path,
       socket: {

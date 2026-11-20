@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Socket } from "bun";
@@ -600,4 +600,34 @@ test("S6-R21: no ack while the store cannot say what is durable; it is logged an
   await waitFor(() => a.acks.length >= 1, "ack once the checkpoint completes");
   expect(a.acks[0]).toBe(2);
   expect(logs.filter((l) => l.includes("acks resumed"))).toEqual([`bridge link ${ID}: acks resumed (seq 2)`]);
+});
+
+test("agent.sock that is a symlink (to a host socket) or not a socket is never connected to", async () => {
+  const root = mkdtempSync(join(tmpdir(), "bl-"));
+  mkdirSync(join(root, ID));
+  const host = mkdtempSync(join(tmpdir(), "bl-host-"));
+  // A socket elsewhere on the host the agent would like devd (root) to talk to.
+  const elsewhere = fakeBridge(join(host, "host.sock"));
+  symlinkSync(join(host, "host.sock"), join(root, ID, "agent.sock"));
+  const store = ThreadStore.open(root, ID);
+  const logs: string[] = [];
+  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
+  cleanups.push(() => { links.drop(ID); elsewhere.close(); store.close(); rmSync(root, { recursive: true, force: true }); rmSync(host, { recursive: true, force: true }); });
+  links.ensure(ID);
+  await waitFor(() => logs.some((l) => l.includes("not a socket owned by")), "refusal logged");
+  await Bun.sleep(RETRY * 3);
+  expect(elsewhere.hellos).toEqual([]);
+  expect(elsewhere.clients()).toBe(0);
+});
+
+test("agent.sock that is a regular file is refused with a logged error", async () => {
+  const root = mkdtempSync(join(tmpdir(), "bl-"));
+  mkdirSync(join(root, ID));
+  writeFileSync(join(root, ID, "agent.sock"), "x");
+  const store = ThreadStore.open(root, ID);
+  const logs: string[] = [];
+  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
+  cleanups.push(() => { links.drop(ID); store.close(); rmSync(root, { recursive: true, force: true }); });
+  links.ensure(ID);
+  await waitFor(() => logs.some((l) => l.includes("not a socket owned by")), "refusal of a regular file");
 });
