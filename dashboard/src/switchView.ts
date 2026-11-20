@@ -157,7 +157,7 @@ export function switchResultText(r: ChatSwitchResult): string | null {
   return null;
 }
 
-const EFFORT_LABELS: Record<string, string> = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" };
+const EFFORT_LABELS: Record<string, string> = { none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max", ultra: "Ultra" };
 /** A level as the agent names it; one this list does not know shows as reported. */
 export const effortLabel = (level: string): string => EFFORT_LABELS[level] ?? level;
 

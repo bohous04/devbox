@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { knownEffort } from "../../shared/effort";
 import type { BackgroundWork, Capabilities, LoggedEvent, PendingRequest, RunRow, ThreadEffort, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
 const TERMINAL: ReadonlySet<string> = new Set(["completed", "interrupted", "failed"]);
@@ -30,6 +31,9 @@ export const THREAD_STORE_SCHEMA = 1;
  *  several items); `updated_seq`
  *  is the seq of their last change, so `snapshot({afterSeq})` also returns items that kept streaming. */
 export class ThreadStore {
+  /** Unknown effort levels already logged, so a bridge repeating one logs it once. */
+  private effortLogged = new Set<string>();
+
   private constructor(private db: Database, private onNotice: (item: ThreadItem) => void) {}
 
   static path(root: string, sessionId: string): string {
@@ -235,7 +239,14 @@ export class ThreadStore {
         this.insertItem(seq, ts, { runId: null, itemId: null, kind: "notice", text: ev.text, status: "done" });
         return;
       case "effort.state": {
-        const state: ThreadEffort = { model: ev.model, supported: ev.supported, effective: ev.effective, chosen: ev.chosen };
+        // Only known levels are stored and served (shared/effort.ts): the bridge's strings never reach the UI as such.
+        const { effort: state, dropped } = knownEffort({ model: ev.model, supported: ev.supported, effective: ev.effective, chosen: ev.chosen });
+        for (const level of dropped) {
+          const shown = JSON.stringify(level.slice(0, 40));
+          if (this.effortLogged.has(shown)) continue;
+          this.effortLogged.add(shown);
+          console.error(`thread store: unknown effort level ${shown} at seq ${seq} dropped`);
+        }
         db.query("INSERT INTO effort (id, state) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET state=excluded.state").run(JSON.stringify(state));
         return;
       }

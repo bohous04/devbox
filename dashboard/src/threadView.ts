@@ -1,3 +1,4 @@
+import { knownEffort } from "../../shared/effort";
 import type { LoggedEvent, RunRow, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
 export const emptyThread = (): ThreadSnapshot => ({
@@ -158,7 +159,8 @@ function dispatch(n: ThreadSnapshot, { seq, ts, event: ev }: LoggedEvent) {
       insertItem(n, seq, ts, { runId: null, itemId: null, kind: "notice", text: ev.text, status: "done" });
       return;
     case "effort.state":
-      n.effort = { model: ev.model, supported: ev.supported, effective: ev.effective, chosen: ev.chosen };
+      // The same filter as devd's store, which logs what it drops.
+      n.effort = knownEffort({ model: ev.model, supported: ev.supported, effective: ev.effective, chosen: ev.chosen }).effort;
       return;
     default: {
       const unknown: never = ev;

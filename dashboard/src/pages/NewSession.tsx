@@ -256,6 +256,9 @@ export function NewSession() {
           )}
           {reusable && !busy && prompt === "" && <InlineAction onClick={() => report(startVps(true))}>Create another</InlineAction>}
           {ibxFailed && !busy && <InlineAction onClick={() => { setHost("vps"); report(startVps()); }}>Open on VPS</InlineAction>}
+          {/* No effort control here yet: a new session starts on the agent's default, set in the thread's composer. Under
+              the box, beside the agent chip: inside the toolbar it squeezed the interface chip to its chevron. */}
+          {choice?.runtime === "chat" && <p className="ml-auto text-xs text-muted-foreground">Effort: agent default · change it in the thread</p>}
         </div>
 
         {repoSessions.length > 0 && (

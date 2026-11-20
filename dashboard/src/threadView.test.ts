@@ -69,3 +69,8 @@ test("effort.state sets the thread's effort, the latest wins, and a snapshot bri
   const merged = mergeSnapshot(emptyThread(), { afterSeq: 0, snapshot: { ...emptyThread(), effort: t.effort } });
   expect(merged.effort).toEqual(t.effort);
 });
+
+test("effort.state: a level outside the known list is never shown", () => {
+  const t = run(emptyThread(), [{ type: "effort.state", model: "m", supported: ["low", "turbo"], effective: "turbo", chosen: "turbo" }]);
+  expect(t.effort).toEqual({ model: "m", supported: ["low"], effective: null, chosen: null });
+});

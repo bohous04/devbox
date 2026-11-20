@@ -1,6 +1,7 @@
 import type { Context, Hono } from "hono";
 import type { Database } from "bun:sqlite";
 import { EFFORT_MIN_BRIDGE_VERSION, IMAGES_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
+import { isKnownEffort, KNOWN_EFFORT_LEVELS } from "../../shared/effort";
 import type { LoggedEvent } from "../../shared/thread";
 import { AgentDisconnected, CommandFailed, CommandTimeout, type BridgeLinks } from "./bridgeLink";
 import { SwitchRefused, type ChatSwitch, type SwitchRequest } from "./chatSwitch";
@@ -194,9 +195,9 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
     if ("res" in r) return r.res;
     const body = await c.req.json().catch(() => null);
     const effort = isRecord(body) ? body.effort : undefined;
-    // The bridge's own check (protocol.ts parseCommand): a bad value would drop devd's whole link.
-    if (effort !== null && (typeof effort !== "string" || !/^[a-z]{1,16}$/.test(effort))) {
-      return c.json({ error: "effort must be a lowercase level name or null" }, 400);
+    // Known levels only (shared/effort.ts); they also pass the bridge's own check, which would drop devd's link.
+    if (effort !== null && !isKnownEffort(effort)) {
+      return c.json({ error: `effort must be null or one of ${KNOWN_EFFORT_LEVELS.join(", ")}` }, 400);
     }
     const version = d.bridgeVersion(id);
     if (version === null || !versionAtLeast(version, EFFORT_MIN_BRIDGE_VERSION)) {

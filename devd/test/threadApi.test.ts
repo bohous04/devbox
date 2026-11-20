@@ -633,7 +633,7 @@ test("POST thread/effort sends setEffort, also during a run; null goes back to t
 test("POST thread/effort refuses a malformed body and a level the model does not list, sending nothing", async () => {
   const t = setup({ bridgeVersion: "1.7.0" });
   // Before any effort.state too: a bad value would make the bridge drop devd's link.
-  for (const body of [{}, { effort: "" }, { effort: 3 }, { effort: "High!" }]) {
+  for (const body of [{}, { effort: "" }, { effort: 3 }, { effort: "High!" }, { effort: "turbo" }]) {
     expect((await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/effort`, body))).status).toBe(400);
   }
   t.feed(CHAT.id, [effortState(["low", "high"])]);
