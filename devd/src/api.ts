@@ -67,6 +67,7 @@ import { parseOtlpMetrics, pointsToRows } from "./metrics";
 import { classifyClaudeState } from "./stats";
 import { isValidTmuxName, killSessionCmd, labelSetCmd, parseProbe, probeCmd, type TmuxSession } from "./tmux";
 import { sessionWorkdir, type TreeProject } from "./tree";
+import { ChangesError, collectChanges } from "./sessionChanges";
 import { COMMIT, VERSION } from "./version";
 import type { SelfUpdateStatus } from "./selfUpdate";
 import type { Decision } from "./criticGate";
@@ -1199,6 +1200,17 @@ export function createApp(d: ApiDeps): Hono {
     setCritic(d.db, s.id, body.critic ? 1 : 0);
     logEvent(d.db, s.id, "critic_toggle", { critic: !!body.critic });
     return c.body(null, 204);
+  });
+
+  // Changed-files card in the chat thread: the worktree's changes against the upstream / default branch.
+  app.get("/api/sessions/:id/changes", async (c) => {
+    const s = getSession(d.db, c.req.param("id"));
+    if (!s) return c.json({ error: "unknown session" }, 404);
+    { const g = ibxOnly(c, s, "Changed files"); if (g) return g; }
+    // safeGit would refuse anyway; this way the dashboard gets the same message as other routes.
+    if (restricted(s.id)) return c.json({ error: SHARED_DENIED }, 403);
+    try { return c.json(await collectChanges(sessionWorkdir(d.root, s))); }
+    catch (e) { if (e instanceof ChangesError) return c.json({ error: e.message }, e.status); throw e; }
   });
 
   app.get("/api/sessions/:id/reviews", (c) => {
