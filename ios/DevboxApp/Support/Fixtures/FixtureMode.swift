@@ -9,7 +9,8 @@ enum FixtureMode {
     typealias Responder = (URLRequest) -> FixtureResponse
     /// A set maps a request ("GET /api/inbox", query ignored) to its response. Sets register here by name.
     static let sets: [String: [String: Responder]] = [
-        "demo": InboxFixtures.routes.merging(ThreadFixtures.routes) { _, _ in fatalError("two fixtures for one route") },
+        "demo": InboxFixtures.routes.merging(ThreadFixtures.routes) { _, _ in fatalError("two fixtures for one route") }
+            .merging(DashboardFixtures.routes) { _, _ in fatalError("two fixtures for one route") },
     ]
 
     /// The requested set's name, or nil when the argument is absent. An unknown name stops the app: a screenshot of

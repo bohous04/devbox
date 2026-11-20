@@ -15,9 +15,11 @@ struct MacWindow: View {
     @State private var newSession = false
     /// Bumped by ⌘F: the sidebar focuses its search field.
     @State private var findRequest = 0
+    /// The dashboard page this window shows; nil while it shows the sessions (the inbox and a thread).
+    @State private var page: MacDashboardPage?
 
     var body: some View {
-        MacWindowContent(thread: $thread, newSession: $newSession, findRequest: findRequest)
+        MacWindowContent(thread: $thread, page: $page, newSession: $newSession, findRequest: findRequest)
             .safeAreaInset(edge: .top) {
                 if let problem = state.restoreNotice {
                     HStack {
@@ -51,7 +53,9 @@ struct MacWindow: View {
             .onChange(of: thread) { _, id in state.windows.show(window: windowId, thread: id) }
             // ⌘N and ⌘F (DevboxMacApp's commands) act on the key window; without a configured devd they are disabled.
             .focusedSceneValue(\.macWindowActions, appModel.client == nil ? nil
-                               : MacWindowActions(newSession: { newSession = true }, find: { findRequest += 1 }))
+                               : MacWindowActions(newSession: { newSession = true },
+                                                  find: { page = nil; findRequest += 1 },
+                                                  toggleDashboard: { page = page == nil ? .initial : nil }))
             .onDisappear { state.windows.close(window: windowId) }
     }
 }
@@ -60,6 +64,7 @@ struct MacWindow: View {
 /// test can host it without opening or restoring windows.
 struct MacWindowContent: View {
     @Binding var thread: String?
+    @Binding var page: MacDashboardPage?
     @Binding var newSession: Bool
     let findRequest: Int
     @EnvironmentObject private var state: MacAppState
@@ -68,10 +73,19 @@ struct MacWindowContent: View {
     var body: some View {
         if let client = appModel.client, let inbox = state.inbox, let live = state.live {
             NavigationSplitView {
-                MacInboxSidebar(store: inbox, selection: $thread, findRequest: findRequest, newSession: { newSession = true })
-                    .navigationSplitViewColumnWidth(min: 260, ideal: 300)
+                Group {
+                    if page != nil {
+                        MacDashboardSidebar(store: inbox, page: $page, back: { page = nil })
+                    } else {
+                        MacInboxSidebar(store: inbox, selection: $thread, findRequest: findRequest, newSession: { newSession = true },
+                                        openDashboard: { page = .initial })
+                    }
+                }
+                .navigationSplitViewColumnWidth(min: 260, ideal: 300)
             } detail: {
-                if let id = thread {
+                if let page {
+                    MacDashboardDetail(page: page, client: client)
+                } else if let id = thread {
                     MacThreadDetail(threadId: id, client: client, inbox: inbox)
                         .id("\(id)|\(appModel.clientIdentity)")
                 } else {
@@ -109,10 +123,9 @@ struct MacWindowContent: View {
     }
 }
 
-/// The inbox as the sidebar, by the same rules as the web and iPhone (InboxView), but with what runs right under what
-/// needs you: needs you, working, finished (five, then "N more"), idle, then the snoozed and settled shelves
-/// (collapsed). Every group is a disclosure group with
-/// its count aligned at the right. Rows are MacInboxRow, with the latest message only in Needs you, Working and
+/// The inbox as the sidebar, by the same rules as the web and iPhone (InboxView): needs you, finished (five, then
+/// "N more"), idle, and under a rule the working, snoozed and settled shelves, collapsed until opened (each window
+/// remembers which). Every group is a disclosure group with its count aligned at the right. Rows are MacInboxRow, with the latest message only in Needs you, Working and
 /// Snoozed, and their times tick every 15 s. Above them: the search field (⌘F) and New session (⌘N). ↑/↓ move
 /// the selection (List); the context menu has the row actions and "Open in New Window".
 struct MacInboxSidebar: View {
@@ -121,8 +134,10 @@ struct MacInboxSidebar: View {
     /// Changes when ⌘F was pressed in this window.
     let findRequest: Int
     let newSession: () -> Void
+    let openDashboard: () -> Void
     @Environment(\.openWindow) private var openWindow
-    @State private var expanded: Set<String> = ["Needs you", "Working", "Finished", "Idle"]
+    /// The open groups, "|"-joined, kept per window.
+    @SceneStorage("macSidebarOpenGroups") private var openGroups = MacSidebarLayout.initial
     @State private var showAll: Set<String> = []
     @State private var actionsFor: InboxItem?
     @State private var query = ""
@@ -208,23 +223,9 @@ struct MacInboxSidebar: View {
         .background(MacTone.sidebar)
     }
 
-    /// The inbox's connection and Settings (⌘,), anchored under the groups.
+    /// The Dashboard button and Settings (⌘,), anchored under the groups; the connection only when it has a problem.
     private var footer: some View {
-        let link = MacInboxSidebar.connection(paused: store.paused, loadError: store.loadError, loaded: store.items != nil)
-        return HStack(spacing: 8) {
-            Circle().fill(link.color).frame(width: 7, height: 7).accessibilityHidden(true)
-            Text(link.text).font(.system(size: 11.5)).foregroundStyle(Theme.C.mutedForeground).lineLimit(1)
-            Spacer(minLength: 0)
-            SettingsLink {
-                Image(systemName: "gearshape").font(.system(size: 13)).frame(width: 26, height: 26).contentShape(Rectangle())
-            }
-            .buttonStyle(.borderless)
-            .help("Settings (⌘,)")
-            .accessibilityLabel("Settings")
-        }
-        .padding(.horizontal, 14).padding(.vertical, 8)
-        .background(MacTone.sidebar)
-        .overlay(alignment: .top) { Rectangle().fill(Theme.C.border).frame(height: 1 / 3) }
+        MacSidebarFooter(store: store, showsConnection: false) { MacDashboardButton(action: openDashboard) }
     }
 
     /// What the footer says about the inbox's link to devd.
@@ -245,9 +246,14 @@ struct MacInboxSidebar: View {
                 .padding(.vertical, 4)
         }
         group("Needs you", split.action, now: now, preview: true)
-        group("Working", g.working, now: now, preview: true)
         group("Finished", split.finished, now: now, preview: false, cap: 5)
         group("Idle", g.idle, now: now, preview: false)
+        if !(g.working.isEmpty && g.snoozed.isEmpty && g.settled.isEmpty) {
+            // The shelves sit apart, under a rule: what runs on its own, and what was put aside.
+            Rectangle().fill(Theme.C.border).frame(height: 1 / 3).padding(.top, 6).listRowSeparator(.hidden)
+                .accessibilityHidden(true)
+        }
+        group("Working", g.working, now: now, preview: true)
         group("Snoozed", g.snoozed, now: now, preview: true)
         group("Settled", g.settled, now: now, preview: false)
     }
@@ -257,7 +263,7 @@ struct MacInboxSidebar: View {
     @ViewBuilder
     private func group(_ label: String, _ items: [InboxItem], now: Int, preview: Bool, cap: Int? = nil) -> some View {
         if !items.isEmpty {
-            let open = expanded.contains(label) || !query.isEmpty
+            let open = MacSidebarLayout.decode(openGroups).contains(label) || !query.isEmpty
             let all = showAll.contains(label)
             Section {
                 if open {
@@ -271,7 +277,11 @@ struct MacInboxSidebar: View {
                     }
                 }
             } header: {
-                MacGroupHead(label: label, count: items.count, open: open) { flip(label, in: &expanded) }
+                MacGroupHead(label: label, count: items.count, open: open) {
+                    var set = MacSidebarLayout.decode(openGroups)
+                    flip(label, in: &set)
+                    openGroups = MacSidebarLayout.encode(set)
+                }
             }
         }
     }
@@ -290,6 +300,27 @@ struct MacInboxSidebar: View {
                 }
         }
     }
+}
+
+/// Which sidebar groups start open: the ones about you. Working, Snoozed and Settled stay shut until opened.
+enum MacSidebarLayout {
+    static let openByDefault: Set<String> = ["Needs you", "Finished", "Idle"]
+
+    /// A new window's open groups.
+    static var initial: String {
+        #if DEBUG
+        if let debugOpen { return encode(debugOpen) }
+        #endif
+        return encode(openByDefault)
+    }
+
+    #if DEBUG
+    /// The screenshot test opens a shelf with it.
+    nonisolated(unsafe) static var debugOpen: Set<String>?
+    #endif
+
+    static func decode(_ s: String) -> Set<String> { Set(s.split(separator: "|").map(String.init)) }
+    static func encode(_ set: Set<String>) -> String { set.sorted().joined(separator: "|") }
 }
 
 /// A group heading as a disclosure button: small and muted, a step below the row titles, with room above it; the
@@ -626,10 +657,11 @@ private struct MacChangesChip: View {
     }
 }
 
-/// What ⌘N and ⌘F do in the key window (DevboxMacApp's commands read it).
+/// What ⌘N, ⌘F and ⌘D do in the key window (DevboxMacApp's commands read it).
 struct MacWindowActions {
     let newSession: () -> Void
     let find: () -> Void
+    let toggleDashboard: () -> Void
 }
 
 private struct MacWindowActionsKey: FocusedValueKey { typealias Value = MacWindowActions }

@@ -89,4 +89,20 @@ final class MacAppTests: XCTestCase {
         XCTAssertEqual(NeedsYouBadge.text(count: 0, stale: true), "?")
         XCTAssertNil(NeedsYouBadge.text(count: 0, stale: false))
     }
+
+    func testSidebarShelvesStartShut() {
+        XCTAssertEqual(MacSidebarLayout.openByDefault, ["Needs you", "Finished", "Idle"])
+        XCTAssertEqual(MacSidebarLayout.decode(MacSidebarLayout.initial), MacSidebarLayout.openByDefault)
+        XCTAssertEqual(MacSidebarLayout.decode(MacSidebarLayout.encode(["Working", "Idle"])), ["Working", "Idle"])
+        XCTAssertEqual(MacSidebarLayout.decode(""), [])
+    }
+
+    func testDashboardListsEveryPageOnceInTheWebOrder() {
+        let listed = MacDashboardPage.sections.flatMap(\.pages)
+        XCTAssertEqual(Set(listed), Set(MacDashboardPage.allCases))
+        XCTAssertEqual(listed.count, MacDashboardPage.allCases.count)
+        XCTAssertEqual(MacDashboardPage.sections.map(\.title), ["Workspace", "Operations", "System"])
+        XCTAssertEqual(listed.map(\.title), ["Overview", "Sessions", "Folders", "Statistics", "AI limits",
+                                             "Schedules", "Production writes", "SSH keys", "Hardware", "Activity"])
+    }
 }

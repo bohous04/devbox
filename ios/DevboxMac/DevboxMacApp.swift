@@ -33,7 +33,8 @@ struct DevboxMacApp: App {
     }
 }
 
-/// ⌘N opens New session, ⌘⇧N a new window (the default ⌘N), ⌘F the sidebar's search, all in the key window.
+/// ⌘N opens New session, ⌘⇧N a new window (the default ⌘N), ⌘F the sidebar's search, ⌘D switches the sidebar
+/// between the sessions and the dashboard, all in the key window.
 struct MacWindowCommands: Commands {
     @FocusedValue(\.macWindowActions) private var actions
     @Environment(\.openWindow) private var openWindow
@@ -49,6 +50,11 @@ struct MacWindowCommands: Commands {
         CommandGroup(after: .textEditing) {
             Button("Find Session…") { actions?.find() }
                 .keyboardShortcut("f")
+                .disabled(actions == nil)
+        }
+        CommandGroup(after: .sidebar) {
+            Button("Dashboard") { actions?.toggleDashboard() }
+                .keyboardShortcut("d")
                 .disabled(actions == nil)
         }
     }
