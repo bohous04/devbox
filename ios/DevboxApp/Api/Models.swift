@@ -1233,6 +1233,8 @@ struct InboxItem: Decodable, Equatable, Identifiable {
     let project: String
     let repo: String
     let agent: String
+    /// The branch devd recorded for the session's worktree; nil when it has none, or from an older devd.
+    let branch: String?
     let attention: Attention
     /// Newest user or assistant message of a chat session, clipped; nil for tmux sessions and empty threads.
     let lastText: String?
