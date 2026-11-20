@@ -631,3 +631,17 @@ test("agent.sock that is a regular file is refused with a logged error", async (
   links.ensure(ID);
   await waitFor(() => logs.some((l) => l.includes("not a socket owned by")), "refusal of a regular file");
 });
+
+test("no agent.sock yet: devd does not connect, it waits for the next retry and connects once a real socket appears", async () => {
+  const root = mkdtempSync(join(tmpdir(), "bl-"));
+  mkdirSync(join(root, ID));
+  const store = ThreadStore.open(root, ID);
+  const logs: string[] = [];
+  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
+  links.ensure(ID);
+  await waitFor(() => logs.some((l) => l.includes("no socket yet")), "waiting logged");
+  expect(logs.some((l) => l.includes("cannot connect"))).toBe(false);
+  const s = fakeBridge(join(root, ID, "agent.sock"));
+  cleanups.push(() => { links.drop(ID); s.close(); store.close(); rmSync(root, { recursive: true, force: true }); });
+  await waitFor(() => s.hellos.length === 1, "hello once the socket exists");
+});

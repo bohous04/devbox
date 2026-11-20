@@ -27,9 +27,9 @@
 //     the config (layer 2) and the git run, the terminal guest could rewrite it (inotify).
 //     The roots of such repos (worktree + bare clone) are provided by index.ts via setUntrustedGitRoots.
 //
-// Residual risk (accepted): for an UNrestricted session, layer 2 can theoretically be bypassed
-// by a race only by whoever is running in the container right now — i.e. the agent, which already has
-// the same reach today. A local path as a remote (`remote.origin.url=/srv/dev/...`) stays
+// Layer 2 is best-effort, not a security boundary: a repo the agent controls can change between
+// probe and run, and git here runs as root. The structural fix is running host git as the agent
+// uid (fix/host-git-as-agent-uid). A local path as a remote (`remote.origin.url=/srv/dev/...`) stays
 // allowed (tests and local bare clones use it) — it runs nothing, but pull/push
 // would touch a different repo on the host.
 import { realpathSync } from "node:fs";

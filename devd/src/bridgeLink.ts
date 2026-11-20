@@ -311,9 +311,11 @@ export class BridgeLinks {
     // accepted (lstat does not follow links). A swap between this check and the connect remains
     // possible — the session-bound handshake secret is the follow-up that closes it.
     const sockUid = this.d.socketUid ?? (process.getuid?.() === 0 ? CONTAINER_UID : process.getuid?.());
-    let st: Stats | null = null;
-    try { st = lstatSync(path); } catch { /* not there yet: the connect below fails and retries */ }
-    if (st && (!st.isSocket() || st.uid !== sockUid)) {
+    let st: Stats;
+    // Nothing there yet (bridge not started): no connect at all — a connect would resolve whatever
+    // appears between this lstat and it, unchecked. The next retry checks again.
+    try { st = lstatSync(path); } catch { this.down(sessionId, link, `no socket yet at ${path}`); return; }
+    if (!st.isSocket() || st.uid !== sockUid) {
       this.down(sessionId, link, `refusing ${path}: not a socket owned by uid ${sockUid}`);
       return;
     }
