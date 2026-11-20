@@ -5,7 +5,7 @@ import { api, type AgentName, type SessionLive, type SessionRuntime, type TreePr
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import {
@@ -166,12 +166,12 @@ export function NewSession() {
   const prompt = draft.trim();
   // What the typed text cannot go with, said before the press (devd refuses the same with the same reasons).
   const textBlock = prompt === "" ? null
-    : onIbx ? "InstaBox sessions start without a prompt: clear the text, or run it on the VPS."
-    : repo === SOLO ? "claudeSolo starts without a prompt: clear the text, or pick a repo."
-    : choice?.runtime === "tmux" && prompt.startsWith("-") ? "A terminal session's first prompt can't start with '-' (the agent would read it as an option)."
+    : onIbx ? "InstaBox starts without a message: clear it, or run on the VPS."
+    : repo === SOLO ? "claudeSolo starts without a message: clear it, or pick a repo."
+    : choice?.runtime === "tmux" && prompt.startsWith("-") ? "A terminal session's message can't start with '-'."
     : null;
   // Typed text is new work: it always starts a new session with it. Empty keeps today's default, joining the repo's
-  // session of this runtime when there is one. The other choice is the secondary row under the options.
+  // session of this runtime when there is one. The other choice is the secondary action next to the summary.
   // The one devd joins: a running session first (joinableSessionId), so the summary names the right one.
   const reusable = onIbx ? null : existing.find((s) => s.status === "running") ?? existing[0] ?? null;
   const start = () => (onIbx ? startInstabox() : prompt !== "" ? startVps(reusable !== null, prompt) : startVps());
@@ -182,11 +182,21 @@ export function NewSession() {
 
   const where = onIbx ? "on InstaBox" : "on the VPS";
   const what = choice?.runtime === "chat" ? "chat" : "terminal";
+  const opensExisting = reusable !== null && prompt === "";
+  // A repo in the old layout (shared working directory) cannot give another session its own worktree or branch — only
+  // its own container. Two agents on one git index must be announced up front, not discovered from the behavior.
+  const shares = reusable && !opensExisting && selected?.cloned && !selected.bare ? ", sharing this repo's files and branch" : "";
   const summary = !repo ? null
     : !choice ? "Pick an interface: the default runtime is not loaded."
-    : prompt !== "" && textBlock === null ? `Starts a new ${what} session ${where} with your message.`
-    : reusable && prompt === "" ? `Opens ${reusable.id} (${what}, ${reusable.status}).`
-    : `Starts a new ${what} session ${where}.`;
+    : opensExisting ? `Opens ${reusable.id} (${what}, ${reusable.status}).`
+    : `Starts a new ${what} session ${where}${prompt !== "" && textBlock === null ? " with your message" : ""}${shares}.`;
+  // One line under the box: progress, then an error, then a warning, then what the send does.
+  const line = busy && step ? { text: `${JOB_STEP_LABEL[step] ?? step}…`, tone: "status" as const }
+    : err ? { text: err, tone: "error" as const }
+    : textBlock ? { text: textBlock, tone: "warn" as const }
+    : repo && choice?.notice ? { text: choice.notice, tone: "warn" as const }
+    : !tree ? { text: "Loading workspaces…", tone: "status" as const }
+    : summary ? { text: summary, tone: "status" as const } : null;
 
   return (
     <div className="mx-auto flex w-full max-w-[42rem] flex-col gap-4 pt-2 sm:min-h-[calc(100dvh-14rem)] sm:justify-center sm:pt-0">
@@ -205,52 +215,32 @@ export function NewSession() {
         start={{ label: startLabel, ready: canStart }}
         onDraft={setDraft}
         onSend={async () => { await start(); }}
-        controls={<AgentMenu agent={agent} disabled={!repo || busy} onPick={setAgent} />}
+        controls={<>
+          <OptionsMenu
+            disabled={busy}
+            runtime={choice?.runtime ?? null} host={onIbx ? "instabox" : "vps"}
+            chatDisabled={chatDisabled} tmuxDisabled={tmuxDisabled} ibxDisabled={ibxDisabled}
+            busyVps={placement?.reason ?? null}
+            onRuntime={setRuntime} onHost={setHost}
+          />
+          <AgentMenu agent={agent} disabled={!repo || busy} onPick={setAgent} />
+        </>}
       />
 
       <div className="flex flex-col gap-3 px-1">
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-          <Segmented label="Interface" options={[
-            { value: "chat", label: "Chat", disabled: chatDisabled },
-            { value: "tmux", label: "Terminal", disabled: tmuxDisabled },
-          ]} value={choice?.runtime ?? null} busy={busy} onPick={(v) => setRuntime(v as SessionRuntime)} />
-          <Segmented label="Where it runs" options={[
-            { value: "vps", label: "VPS", disabled: null },
-            { value: "instabox", label: "InstaBox", disabled: ibxDisabled },
-          ]} value={onIbx ? "instabox" : "vps"} busy={busy} onPick={(v) => setHost(v as "vps" | "instabox")} />
-        </div>
-
-        <div className="flex flex-col gap-1.5 text-sm">
-          {busy && step && <p role="status" className="text-muted-foreground">{JOB_STEP_LABEL[step] ?? step}…</p>}
-          {!busy && summary && <p className="text-foreground/80">{summary}</p>}
-          {textBlock && <p role="status" className="text-amber-700 dark:text-amber-300">{textBlock}</p>}
-          {choice?.runtime === "chat" && <Hint>The agent runs behind the chat view; its terminal stays available as a tab.</Hint>}
-          {repo && choice?.notice && <p role="status" className="text-amber-700 dark:text-amber-300">{choice.notice}</p>}
-          {repo && !choice?.notice && chatDisabled && <Hint>{chatDisabled}</Hint>}
-          {repo && !choice?.notice && tmuxDisabled && <Hint>{tmuxDisabled}</Hint>}
-          {placement?.reason && <Hint>VPS is busy ({placement.reason}) — InstaBox recommended.</Hint>}
-          {onIbx && <Hint>Starts a new session on its own machine with a fresh clone. No review, prod-db, Finder or previews; the agent's browser is visible under Desktop.</Hint>}
-          {ibxDisabled && <Hint>{ibxDisabled}</Hint>}
-          {/* A repo in the old layout (shared working directory) cannot give another session its own worktree or
-              branch — only its own container. Two agents on one git index must be announced up front, not discovered
-              from the behavior. */}
-          {reusable && selected && selected.cloned && !selected.bare && (
-            <Hint>A new session here shares this repo's working directory and branch (own container, same files).</Hint>
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
+          {line && (
+            <p role={line.tone === "error" ? "alert" : "status"} className={cn(
+              line.tone === "error" ? "text-destructive" : line.tone === "warn" ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground",
+            )}>{line.text}</p>
           )}
-          {!tree && !err && <p role="status" className="text-muted-foreground">Loading workspaces…</p>}
-          {err && <p role="alert" className="text-destructive">{err}</p>}
+          {reusable && !busy && (prompt === ""
+            ? <InlineAction onClick={() => report(startVps(true))}>Create another</InlineAction>
+            : <InlineAction disabled={textBlock !== null} onClick={() => report(startVps(false, continueTakesPrompt ? prompt : "", reusable.id))}>
+                Continue {reusable.id} instead{continueTakesPrompt ? "" : " (without your message)"}
+              </InlineAction>)}
+          {ibxFailed && !busy && <InlineAction onClick={() => { setHost("vps"); report(startVps()); }}>Open on VPS</InlineAction>}
         </div>
-
-        {(ibxFailed || reusable) && (
-          <div className="flex flex-wrap gap-2">
-            {reusable && (prompt === ""
-              ? <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => report(startVps(true))}>Create another</Button>
-              : <Button type="button" variant="ghost" size="sm" className="-ml-2 h-auto min-h-8 max-w-full whitespace-normal px-2 py-1 text-left font-normal text-muted-foreground hover:text-foreground" disabled={busy || textBlock !== null} onClick={() => report(startVps(false, continueTakesPrompt ? prompt : "", reusable.id))}>
-                  Continue {reusable.id} instead{continueTakesPrompt ? "" : " (without your message)"}
-                </Button>)}
-            {ibxFailed && <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => { setHost("vps"); report(startVps()); }}>Open on VPS</Button>}
-          </div>
-        )}
 
         {repoSessions.length > 0 && (
           <section aria-label="Sessions of this repo" className="flex flex-col gap-1">
@@ -263,11 +253,13 @@ export function NewSession() {
             {showAll && (
               <ul className="flex flex-col">
                 {listed.map((s) => (
-                  <li key={s.id} className="flex min-h-9 flex-wrap items-center gap-x-2 text-sm">
-                    <span className={cn("size-1.5 rounded-full", s.status === "running" ? "bg-emerald-500" : "bg-muted-foreground/40")} aria-hidden="true" />
-                    <span className="font-mono text-[13px]">{s.id}</span>
-                    <span className="text-muted-foreground">{s.runtime === "chat" ? "chat" : "terminal"} · {s.status}</span>
-                    {runningOther.includes(s) && <Button type="button" size="sm" variant="ghost" className="ml-auto" disabled={busy} onClick={() => openRunning(s)}>Open</Button>}
+                  <li key={s.id} className="flex min-h-9 items-center gap-2 text-sm">
+                    <span className={cn("size-1.5 shrink-0 rounded-full", s.status === "running" ? "bg-emerald-500" : "bg-muted-foreground/40")} aria-hidden="true" />
+                    <span className="min-w-0 flex-1 truncate">
+                      <span className="font-mono text-[13px]">{s.id}</span>
+                      <span className="text-muted-foreground"> · {s.runtime === "chat" ? "chat" : "terminal"} · {s.status}</span>
+                    </span>
+                    {runningOther.includes(s) && <Button type="button" size="sm" variant="ghost" className="shrink-0" disabled={busy} onClick={() => openRunning(s)}>Open</Button>}
                   </li>
                 ))}
               </ul>
@@ -364,9 +356,9 @@ function RepoPicker({ tree, value, disabled, onPick }: { tree: TreeProject[] | n
                         onMouseMove={() => { if (i !== at) setActive(i); }} onClick={() => pick(o.key)}
                         className={cn("flex min-h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm", i === at && "bg-accent")}
                       >
-                        <Check className={cn("size-4 shrink-0", o.key === value ? "" : "invisible")} aria-hidden="true" />
                         <span className="min-w-0 flex-1 truncate">{o.repo.value === SOLO ? "No repo (claudeSolo)" : marked(o.repo.value)}</span>
                         {o.repo.cloned && <span className="text-xs text-muted-foreground">cloned</span>}
+                        {o.key === value && <Check className="size-4 shrink-0" aria-hidden="true" />}
                       </div>
                     );
                   })}
@@ -388,7 +380,7 @@ function AgentMenu({ agent, disabled, onPick }: { agent: AgentName; disabled: bo
       <DropdownMenuTrigger asChild disabled={disabled}>
         <Button
           type="button" variant="ghost" size="sm" aria-label={`Agent: ${profile.label}`} title={`Agent: ${profile.label}`}
-          className="h-8 min-w-0 max-w-56 shrink gap-1.5 rounded-full px-2.5 font-medium text-foreground/90 hover:bg-accent hover:text-foreground has-[>svg]:px-2.5 data-[state=open]:bg-accent data-[state=open]:text-foreground"
+          className="h-8 max-w-56 shrink-0 gap-1.5 rounded-full px-2.5 font-medium text-foreground/90 hover:bg-accent hover:text-foreground has-[>svg]:px-2.5 data-[state=open]:bg-accent data-[state=open]:text-foreground"
         >
           <AgentGlyph agent={agent} />
           <span className="truncate">{profile.label}</span>
@@ -410,28 +402,60 @@ function AgentMenu({ agent, disabled, onPick }: { agent: AgentName; disabled: bo
   );
 }
 
-/** Two quiet choices side by side; a blocked one stays visible, disabled, with its reason as the tooltip. */
-function Segmented({ label, options, value, busy, onPick }: {
-  label: string; options: { value: string; label: string; disabled: string | null }[]; value: string | null; busy: boolean; onPick: (v: string) => void;
-}) {
+/** A secondary action next to the line under the box: quiet text, a real button. */
+function InlineAction({ children, disabled = false, onClick }: { children: ReactNode; disabled?: boolean; onClick: () => void }) {
   return (
-    <div role="group" aria-label={label} className="inline-flex items-center gap-2">
-      <span className="text-xs text-muted-foreground">{label}</span>
-      <div className="inline-flex rounded-full border p-0.5">
-        {options.map((o) => (
-          <button
-            key={o.value} type="button" aria-pressed={value === o.value} disabled={busy || o.disabled !== null}
-            title={o.disabled ?? undefined} onClick={() => onPick(o.value)}
-            className={cn(
-              "h-8 rounded-full px-3 text-sm transition-colors motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-45",
-              "focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50",
-              value === o.value ? "bg-foreground/[0.08] font-medium text-foreground dark:bg-foreground/[0.12]" : "text-muted-foreground hover:text-foreground",
-            )}
-          >
-            {o.label}
-          </button>
-        ))}
-      </div>
-    </div>
+    <button
+      type="button" disabled={disabled} onClick={onClick}
+      className="min-h-8 rounded-sm text-left font-medium text-foreground underline decoration-foreground/30 underline-offset-4 hover:decoration-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 max-sm:min-h-11"
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Interface and host in one chip of the composer's toolbar ("Chat · VPS"); a blocked choice stays listed, disabled,
+ *  with its reason, and each choice says what it means. */
+function OptionsMenu({ disabled, runtime, host, chatDisabled, tmuxDisabled, ibxDisabled, busyVps, onRuntime, onHost }: {
+  disabled: boolean; runtime: SessionRuntime | null; host: "vps" | "instabox";
+  chatDisabled: string | null; tmuxDisabled: string | null; ibxDisabled: string | null; busyVps: string | null;
+  onRuntime: (r: SessionRuntime) => void; onHost: (h: "vps" | "instabox") => void;
+}) {
+  const runtimeLabel = runtime === null ? "…" : runtime === "chat" ? "Chat" : "Terminal";
+  const hostLabel = host === "instabox" ? "InstaBox" : "VPS";
+  const label = `${runtimeLabel} · ${hostLabel}`;
+  const item = (key: string, title: string, current: boolean, blocked: string | null, detail: string, pick: () => void) => (
+    <DropdownMenuItem key={key} disabled={blocked !== null} onSelect={pick} className="items-start data-[disabled]:opacity-100">
+      <Check className={cn("mt-0.5", current ? "" : "invisible")} aria-hidden="true" />
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span className={blocked ? "opacity-50" : undefined}>{title}</span>
+        <span className="text-xs text-muted-foreground">{blocked ?? detail}</span>
+      </span>
+    </DropdownMenuItem>
+  );
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild disabled={disabled}>
+        <Button
+          type="button" variant="ghost" size="sm" aria-label={`Session options: ${label}`} title={`Session options: ${label}`}
+          className="h-8 min-w-0 shrink gap-1 rounded-full px-2.5 font-medium text-foreground/80 hover:bg-accent hover:text-foreground data-[state=open]:bg-accent data-[state=open]:text-foreground"
+        >
+          {/* A phone names the host only when it is not the VPS, so the agent's label keeps its room. */}
+          <span className="truncate">{runtimeLabel}<span className={host === "vps" ? "max-sm:hidden" : undefined}> · {hostLabel}</span></span>
+          <ChevronDown aria-hidden="true" className="size-3.5 opacity-50" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" side="top" sideOffset={8} collisionPadding={16} className="w-80 max-w-[calc(100vw-2rem)]">
+        <DropdownMenuLabel className="text-xs font-medium text-muted-foreground">Interface</DropdownMenuLabel>
+        {item("chat", "Chat", runtime === "chat", chatDisabled, "The agent runs behind a chat view; its terminal stays available as a tab.", () => onRuntime("chat"))}
+        {item("tmux", "Terminal", runtime === "tmux", tmuxDisabled, "The agent runs in a tmux terminal.", () => onRuntime("tmux"))}
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel className="text-xs font-medium text-muted-foreground">Where it runs</DropdownMenuLabel>
+        {item("vps", "VPS", host === "vps", null, busyVps ? `Busy right now (${busyVps}).` : "The shared server, with review, prod-db, Finder and previews.", () => onHost("vps"))}
+        {item("instabox", "InstaBox", host === "instabox", ibxDisabled,
+          `${busyVps ? "Recommended while the VPS is busy. " : ""}A new session on its own machine with a fresh clone. No review, prod-db, Finder or previews; the agent's browser is visible under Desktop.`,
+          () => onHost("instabox"))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
