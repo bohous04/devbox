@@ -117,6 +117,8 @@ test("rowTitle: custom name, else the newest message, else repo and session numb
   expect(rowTitle({ ...base, title: "Boosting" })).toEqual({ text: "Boosting", fromMessage: false });
   expect(rowTitle({ ...base, title: "p/r", lastText: "Fixed the `test`" })).toEqual({ text: "Fixed the test", fromMessage: true });
   expect(rowTitle({ ...base, title: "p/r" })).toEqual({ text: "r #14", fromMessage: false });
+  // A message of only whitespace names nothing (as on iOS): the repo and session number instead.
+  expect(rowTitle({ ...base, title: "p/r", lastText: "  \n " })).toEqual({ text: "r #14", fromMessage: false });
   expect(rowTitle({ ...base, sessionId: "dev-p-r", title: "p/r" })).toEqual({ text: "r", fromMessage: false });
   expect(rowTitle({ ...base, sessionId: "dev-p-notes-13", repo: "notes-13", title: "p/notes-13" })).toEqual({ text: "notes-13", fromMessage: false });
 });

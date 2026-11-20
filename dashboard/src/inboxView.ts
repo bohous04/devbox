@@ -141,7 +141,9 @@ export const plainPreview = (t: string): string => t.replace(/`+/g, "").replace(
  *  not to repeat that message as a preview. */
 export function rowTitle(i: InboxItem): { text: string; fromMessage: boolean } {
   if (i.title !== `${i.project}/${i.repo}`) return { text: i.title, fromMessage: false };
-  if (i.lastText) return { text: plainPreview(i.lastText), fromMessage: true };
+  // A message of only whitespace or markdown marks names nothing: the repo fallback below takes over.
+  const message = i.lastText ? plainPreview(i.lastText) : "";
+  if (message) return { text: message, fromMessage: true };
   const n = new RegExp(`-${i.repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-(\\d+)$`).exec(i.sessionId)?.[1];
   return { text: n ? `${i.repo} #${n}` : i.repo, fromMessage: false };
 }
