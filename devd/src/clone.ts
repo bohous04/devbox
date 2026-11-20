@@ -23,7 +23,7 @@ export interface CloneDeps {
   fetchRepo?: (dir: string, authEnv?: Record<string, string>) => void | Promise<void>;
   // Per-repo git auth env keyed by clone URL (see giteaAuthEnv). Private gitea
   // repos otherwise fail with "could not read Username"; empty for github.
-  credentials?: (url: string) => Record<string, string>;
+  credentials?: (url: string) => Record<string, string> | Promise<Record<string, string>>;
   idFor?: () => string;
   // Pre-flight disk headroom check (spec §8/§18): when provided and usage is already
   // at/over the warn threshold, `start()` refuses to launch the clone/fetch loop at
@@ -101,7 +101,7 @@ export class CloneQueue {
     for (const t of targets) {
       const bare = barePath(this.d.root, t.folder, t.project, t.repo.name);
       const ws = workspacePath(this.d.root, t.folder, t.project, t.repo.name);
-      const authEnv = this.d.credentials?.(t.repo.cloneUrl!) ?? {};
+      const authEnv = (await this.d.credentials?.(t.repo.cloneUrl!)) ?? {};
       try {
         // A bare clone already exists → just fetch, not a second clone next to it (a stale copy
         // nobody fetches anymore). Otherwise an old workspace → fetch, behaves as today.

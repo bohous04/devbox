@@ -80,6 +80,25 @@ export function setUntrustedGitRoots(fn: (() => string[]) | null): void {
   untrustedRoots = fn ?? (() => []);
 }
 
+/** The container user: owner of every agent-writable repo. */
+export const AGENT_UID = 1000;
+
+let agentRoots: () => string[] = () => [];
+/** Roots that hold agent-writable repos (devd's workspace root: workspaces, bare clones, session
+ *  worktrees). Git whose target is inside runs as AGENT_UID when devd is root (layer 4). */
+export function setAgentGitRoots(fn: (() => string[]) | null): void {
+  agentRoots = fn ?? (() => []);
+}
+
+/** Environment of git running as the agent uid: nothing from devd's process env (secrets, root's
+ *  HOME/gitconfig/gh), no global or system config. Auth comes only from the caller's explicit env. */
+const AGENT_GIT_ENV: Readonly<Record<string, string>> = {
+  PATH: "/usr/local/bin:/usr/bin:/bin",
+  HOME: "/nonexistent",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+};
+const asAgent = (cmd: string[]): string[] => ["setpriv", `--reuid=${AGENT_UID}`, `--regid=${AGENT_UID}`, "--clear-groups", ...cmd];
+
 export const isGitArgv = (cmd: readonly string[]): boolean => cmd.length > 0 && basename(cmd[0]!) === "git";
 
 /** Index of the subcommand in argv (`git -C x -c a=b diff …` → index of "diff"), -1 = none. */
@@ -171,23 +190,37 @@ export function repoOverrides(entries: ConfigEntry[]): { args: string[] } | { re
 const refused = (why: string): RunResult => ({ code: 128, stdout: "", stderr: `devd: host git refused — ${why}`, timedOut: false });
 
 /** Secures one host git command. Returns the adjusted argv/opts, or a refusal result. */
-export async function hardenGit(cmd: string[], opts: RunOpts, raw: Raw): Promise<{ cmd: string[]; opts: RunOpts } | { result: RunResult }> {
+/** `uid` = devd's own uid (injectable for tests). */
+export async function hardenGit(cmd: string[], opts: RunOpts, raw: Raw, uid: number = process.getuid?.() ?? -1): Promise<{ cmd: string[]; opts: RunOpts } | { result: RunResult }> {
   const sub = subcommandIndex(cmd);
   const globals = cmd.slice(1, sub < 0 ? cmd.length : sub);
   const rest = sub < 0 ? [] : cmd.slice(sub);
   // Directory git will run in: cwd + an optional -C.
   let dir = resolve(opts.cwd ?? process.cwd());
   for (let i = 0; i < globals.length; i++) if (globals[i] === "-C" && globals[i + 1] !== undefined) dir = resolve(dir, globals[++i]!);
-  const env = { ...(opts.env ?? {}), ...SAFE_GIT_ENV };
-  const unsetEnv = [...(opts.unsetEnv ?? []), ...UNSAFE_GIT_ENV];
-
   const roots = untrustedRoots().filter(Boolean).map(canon);
   const target = canon(dir);
   if (roots.some((r) => within(target, r))) return { result: refused("repo belongs to a restricted (shared/tainted) session") };
 
+  // Layer 4: a repo under an agent root runs as the agent uid when devd is root — whatever the repo
+  // manages to run despite layers 1-3 then runs with the agent's own rights, not root's. Any of
+  // cwd/-C, --git-dir or --work-tree inside an agent root counts.
+  const targets = [target];
+  for (let i = 0; i < globals.length; i++) {
+    const a = globals[i]!;
+    if ((a === "--git-dir" || a === "--work-tree") && globals[i + 1] !== undefined) targets.push(canon(resolve(dir, globals[++i]!)));
+    else if (a.startsWith("--git-dir=") || a.startsWith("--work-tree=")) targets.push(canon(resolve(dir, a.slice(a.indexOf("=") + 1))));
+  }
+  const agent = agentRoots().filter(Boolean).map(canon);
+  const dropToAgent = uid === 0 && targets.some((t) => agent.some((r) => within(t, r)));
+  const env = dropToAgent ? { ...(opts.env ?? {}), ...AGENT_GIT_ENV, ...SAFE_GIT_ENV } : { ...(opts.env ?? {}), ...SAFE_GIT_ENV };
+  const unsetEnv = [...(opts.unsetEnv ?? []), ...UNSAFE_GIT_ENV];
+  const envOpts = dropToAgent ? { env, unsetEnv, inheritEnv: false as const } : { env, unsetEnv };
+  const wrap = dropToAgent ? asAgent : (c: string[]) => c;
+
   // Layer 2: the repo config up front. The probe itself is git, but `config --list` runs nothing.
-  const probe = await raw(["git", ...SAFE_GIT_CONFIG.flatMap((c) => ["-c", c]), ...globals, "config", "--list", "--show-scope", "--show-origin", "-z"],
-    { cwd: opts.cwd, env, unsetEnv, timeoutMs: Math.min(opts.timeoutMs, 30_000) });
+  const probe = await raw(wrap(["git", ...SAFE_GIT_CONFIG.flatMap((c) => ["-c", c]), ...globals, "config", "--list", "--show-scope", "--show-origin", "-z"]),
+    { cwd: opts.cwd, ...envOpts, timeoutMs: Math.min(opts.timeoutMs, 30_000) });
   if (probe.timedOut) return { result: refused("reading git config timed out") };
   if (probe.code !== 0) return { result: { ...probe, stderr: probe.stderr || refused("git config failed").stderr } };
   const entries = parseConfigList(probe.stdout);
@@ -204,5 +237,5 @@ export async function hardenGit(cmd: string[], opts: RunOpts, raw: Raw): Promise
   const tail = rest.length && DIFF_CMDS.has(rest[0]!) ? [rest[0]!, "--no-ext-diff", "--no-textconv", ...rest.slice(1)] : rest;
   // Order: fixed and dynamic overrides BEFORE the caller's global options (safe.directory,
   // credential.helper for InstaBox…), so the caller can deliberately override e.g. the helper.
-  return { cmd: [cmd[0]!, ...fixed, ...dyn.args, ...globals, ...tail], opts: { ...opts, env, unsetEnv } };
+  return { cmd: wrap([cmd[0]!, ...fixed, ...dyn.args, ...globals, ...tail]), opts: { ...opts, ...envOpts } };
 }

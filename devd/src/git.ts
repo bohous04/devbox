@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chownSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { withDir, writeFileAt } from "./noFollowFs";
 import { basename, dirname, join } from "node:path";
 import { redactArgv, run, timeoutFor, type RunResult } from "./proc";
+import { AGENT_UID } from "./safeGit";
 
 // Network git subcommands get a longer cap (cloning a large repo takes minutes).
 const NET = new Set(["clone", "fetch", "pull", "push", "ls-remote"]);
@@ -53,7 +54,18 @@ export function giteaAuthEnv(url: string, token: string | undefined): Record<str
   let base: string;
   try { const u = new URL(url); base = `${u.protocol}//${u.host}/`; }
   catch { return {}; } // unparseable URL → better without auth than throwing
-  const b64 = Buffer.from(`devbox:${token}`).toString("base64");
+  return basicAuthEnv(base, "devbox", token);
+}
+
+/** The same for github.com. Host git runs as the agent uid with no global config (safeGit.ts
+ *  layer 4), so root's gh credential helper is out of reach; devd reads the token from gh itself and
+ *  hands it to that one network call. */
+export function githubAuthEnv(token: string | undefined): Record<string, string> {
+  return token ? basicAuthEnv("https://github.com/", "x-access-token", token) : {};
+}
+
+function basicAuthEnv(base: string, user: string, token: string): Record<string, string> {
+  const b64 = Buffer.from(`${user}:${token}`).toString("base64");
   return {
     GIT_CONFIG_COUNT: "1",
     GIT_CONFIG_KEY_0: `http.${base}.extraHeader`,
@@ -103,6 +115,7 @@ export async function cloneRepo(url: string, dest: string, authEnv: Record<strin
 async function gitClone(args: string[], url: string, dest: string, authEnv: Record<string, string>, label: string, onProgress?: (p: CloneProgress) => void): Promise<void> {
   const partial = `${dest}.partial`;
   rmSync(partial, { recursive: true, force: true }); // leftover from an earlier interruption
+  agentOwnedDir(partial);
   const cmd = ["git", "clone", ...args, ...(onProgress ? ["--progress"] : []), "--", url, partial];
   const ms = timeoutFor("GIT_CLONE");
   const r = await run(cmd, {
@@ -118,6 +131,15 @@ async function gitClone(args: string[], url: string, dest: string, authEnv: Reco
     throw new Error(`${label} failed: ${why}`);
   }
   renameSync(partial, dest);
+}
+
+/** An empty directory for host git running as the agent uid (safeGit.ts layer 4) to fill: its
+ *  parent is root-owned, so that git could not create it itself. Clone and `worktree add` accept an
+ *  existing empty directory. A no-op chown when devd is not root (then git runs as devd anyway). */
+export function agentOwnedDir(path: string, uid: number = process.getuid?.() ?? -1): void {
+  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(path);
+  if (uid === 0) chownSync(path, AGENT_UID, AGENT_UID);
 }
 
 export async function cloneRepoAsync(url: string, dest: string, authEnv: Record<string, string> = {}): Promise<void> {
@@ -467,6 +489,7 @@ export async function addWorktree(bare: string, dest: string, branch: string | n
   // --progress` — on a 9.6 GB tree that is ~20 s the CLI would otherwise show as a frozen spinner.
   // An unborn branch has nothing to check out.
   const add = ["-C", bare, ...safe, "worktree", "add", ...(unborn ? [] : ["--no-checkout"])];
+  if (!existsSync(dest)) agentOwnedDir(dest);
   const args = branch && await has(`refs/heads/${branch}`)
     ? [...add, dest, branch]
     : unborn

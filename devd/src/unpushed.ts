@@ -410,8 +410,8 @@ export async function findPr(o: FindPrOpts): Promise<FoundPr | null> {
 }
 
 export interface UnpushedOpsDeps {
-  /** Git auth env by origin URL (Gitea Basic auth from the token; GitHub goes through the gh helper). */
-  authFor: (url: string) => Record<string, string>;
+  /** Git auth env by origin URL (Basic auth from the Gitea token or from gh for github.com). */
+  authFor: (url: string) => Record<string, string> | Promise<Record<string, string>>;
   /** Token of the Gitea instance for the origin's host. */
   giteaToken: (host: string) => string | undefined;
   /** URLs of the configured Gitea instances (provider detection + API base). */
@@ -440,7 +440,7 @@ export function unpushedOps(root: string, deps: UnpushedOpsDeps) {
       await checkBranch(r.path, branch);
       const remote = await remoteInfo(r.path, deps.giteaUrls());
       if (!remote) return { ok: false, error: "repo has no remote — nowhere to push" };
-      return pushBranch(r.path, branch, deps.authFor(remote.url));
+      return pushBranch(r.path, branch, await deps.authFor(remote.url));
     },
     async createPr(p: { path: string; branch: string; title: string; body: string }): Promise<{ url: string; number: number | null }> {
       const r = repoAt(p.path);

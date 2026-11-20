@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cloneRepo, conflictPrompt, defaultBranch, giteaAuthEnv, pullWithRebase, sh as shAsync } from "../src/git";
+import { cloneRepo, conflictPrompt, defaultBranch, giteaAuthEnv, githubAuthEnv, pullWithRebase, sh as shAsync } from "../src/git";
 import { sh } from "./helpers/sh";
 
 function fixture() {
@@ -111,4 +111,12 @@ test("defaultBranch is asynchronous", async () => {
   const bare = mkdtempSync(join(tmpdir(), "bare-"));
   sh(bare, "git", "init", "--bare", "-b", "trunk", bare);
   expect(await defaultBranch(bare)).toBe("trunk");
+});
+
+test("githubAuthEnv scopes the token to https://github.com/ via GIT_CONFIG_* (never argv), none without a token", () => {
+  const env = githubAuthEnv("tok456");
+  expect(env.GIT_CONFIG_COUNT).toBe("1");
+  expect(env.GIT_CONFIG_KEY_0).toBe("http.https://github.com/.extraHeader");
+  expect(env.GIT_CONFIG_VALUE_0).toBe(`Authorization: Basic ${Buffer.from("x-access-token:tok456").toString("base64")}`);
+  expect(githubAuthEnv(undefined)).toEqual({});
 });
