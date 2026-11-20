@@ -280,6 +280,10 @@ export interface CcRunResult {
   latest: string | null; built: boolean; updated: string[]; restarted: string[]; skipped: string[];
 }
 
+// The changes endpoints' shapes are devd's own (shared/changes.ts).
+export type { ChangedFile, ChangeStatus, FileDiff as SessionFileDiff, SessionChanges } from "../../shared/changes";
+import type { FileDiff as SessionFileDiff, SessionChanges } from "../../shared/changes";
+
 // Carries the HTTP status code next to the message — an optional endpoint (503 = "not configured")
 // can thus be told apart from a real error without parsing localized text. `body` is the parsed error
 // body (null when there was none), for endpoints whose errors carry more than `error`.
@@ -578,6 +582,9 @@ export const api = {
   /** A chat image into the session's own inbox dir; its container path goes with the message (sendMessage). */
   uploadThreadImage: (id: string, image: Blob) => j<{ path: string; size: number }>(`/api/sessions/${encodeURIComponent(id)}/inbox?for=thread`,
     { method: "POST", headers: { "content-type": "application/octet-stream" }, body: image }),
+  sessionChanges: (id: string) => j<SessionChanges>(`/api/sessions/${encodeURIComponent(id)}/changes`),
+  sessionFileDiff: (id: string, path: string) =>
+    j<SessionFileDiff>(`/api/sessions/${encodeURIComponent(id)}/changes/diff?path=${encodeURIComponent(path)}`),
   interrupt: (id: string) => j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/interrupt`, { method: "POST" }),
   answerRequest: (id: string, requestId: string, answer: string) =>
     j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/requests/${encodeURIComponent(requestId)}`, post({ answer })),

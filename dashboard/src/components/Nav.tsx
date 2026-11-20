@@ -99,8 +99,12 @@ export function Sidebar() {
 
 /** Mobile header — just the brand and the theme toggle; navigation is at the bottom by the thumb. */
 export function MobileHeader() {
+  // A chat thread has its own one-line bar (back, title, Chat/Terminal); two stacked bars cost a phone a quarter
+  // of its height.
+  const { pathname } = useLocation();
+  if (pathname.startsWith("/s/")) return null;
   return (
-    <header className="sticky top-0 z-30 flex h-14 items-center gap-2 border-b bg-background/85 px-4 backdrop-blur lg:hidden">
+    <header className="sticky top-0 z-30 flex h-14 items-center gap-2 border-b bg-background px-4 lg:hidden">
       <BrandMark />
       <span className="text-sm font-semibold tracking-tight">Devbox <span className="ml-1 font-normal text-muted-foreground">/ workspace</span></span>
       <span className="flex-1" />
@@ -153,7 +157,7 @@ export function BottomBar() {
       </AnimatePresence>
 
       <nav
-        className="fixed inset-x-0 bottom-0 z-50 grid h-16 grid-cols-5 border-t bg-background/95 backdrop-blur lg:hidden"
+        className="fixed inset-x-0 bottom-0 z-50 grid h-16 grid-cols-5 border-t bg-background lg:hidden"
         aria-label="Main navigation"
       >
         {primaryNav().map((n) => (
