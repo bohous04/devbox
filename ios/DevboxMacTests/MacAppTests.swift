@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 @testable import DevboxApp
 
@@ -91,10 +92,33 @@ final class MacAppTests: XCTestCase {
     }
 
     func testSidebarShelvesStartShut() {
-        XCTAssertEqual(MacSidebarLayout.openByDefault, ["Needs you", "Finished", "Idle"])
-        XCTAssertEqual(MacSidebarLayout.decode(MacSidebarLayout.initial), MacSidebarLayout.openByDefault)
-        XCTAssertEqual(MacSidebarLayout.decode(MacSidebarLayout.encode(["Working", "Idle"])), ["Working", "Idle"])
-        XCTAssertEqual(MacSidebarLayout.decode(""), [])
+        XCTAssertEqual(MacSidebarLayout.shelves, ["Working", "Snoozed", "Settled"])
+        for shelf in MacSidebarLayout.shelves { XCTAssertFalse(MacSidebarLayout.startsOpen(shelf), shelf) }
+    }
+
+    func testFocusingAThreadLeavesTheDashboardOnlyInItsWindow() {
+        XCTAssertNil(MacWindow.page(.stats, afterFocusOn: "a", showing: "a"))
+        XCTAssertEqual(MacWindow.page(.stats, afterFocusOn: "a", showing: "b"), .stats)
+        XCTAssertEqual(MacWindow.page(.stats, afterFocusOn: "a", showing: nil), .stats)
+    }
+
+    func testOpenThreadAnnouncesTheFocusedThread() {
+        let state = MacAppState(isTestRun: true, isFixtureRun: false)
+        var seen: [String] = []
+        let watch = state.focusedThread.sink { seen.append($0) }
+        state.openThread("dev-x")
+        watch.cancel()
+        XCTAssertEqual(seen, ["dev-x"])
+    }
+
+    func testNeedsYouCountLeavesOutFinishedRuns() {
+        func item(_ id: String, _ reason: String) -> InboxItem {
+            try! JSONDecoder().decode(InboxItem.self, from: Data("""
+            {"sessionId":"\(id)","runtime":"chat","title":"t","project":"p","repo":"r","agent":"claude",
+             "attention":{"section":"needs_you","reason":"\(reason)","since":1},"lastText":null}
+            """.utf8))
+        }
+        XCTAssertEqual(InboxView.needsYouCount([item("a", "request"), item("b", "completed"), item("c", "failed")]), 2)
     }
 
     func testDashboardListsEveryPageOnceInTheWebOrder() {

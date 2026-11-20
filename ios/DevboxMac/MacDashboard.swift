@@ -64,7 +64,8 @@ struct MacDashboardSidebar: View {
     let back: () -> Void
 
     var body: some View {
-        List(selection: $page) {
+        // A click that would clear the selection (⌘-click on the picked page) keeps the page: nil means sessions mode.
+        List(selection: Binding(get: { page }, set: { if let p = $0 { page = p } })) {
             ForEach(MacDashboardPage.sections, id: \.title) { section in
                 Section {
                     ForEach(section.pages, id: \.self) { p in
@@ -89,7 +90,7 @@ struct MacDashboardSidebar: View {
     }
 
     private var backRow: some View {
-        let count = store.items.map { InboxView.splitNeedsYou(InboxView.group($0).needsYou).action.count } ?? 0
+        let count = store.items.map(InboxView.needsYouCount) ?? 0
         return Button(action: back) {
             HStack(spacing: 8) {
                 Image(systemName: "chevron.left").font(.system(size: 11, weight: .semibold))
@@ -117,6 +118,8 @@ struct MacDashboardSidebar: View {
 struct MacDashboardDetail: View {
     let page: MacDashboardPage
     let client: DevdClient
+    /// A chat session started from Sessions opens in this window.
+    let openChat: (String) -> Void
 
     var body: some View {
         NavigationStack {
@@ -133,7 +136,7 @@ struct MacDashboardDetail: View {
     private var screen: some View {
         switch page {
         case .overview: OverviewScreen(client: client)
-        case .sessions: SessionsScreen(actions: SessionActions(client: client))
+        case .sessions: SessionsScreen(actions: SessionActions(client: client), onOpenChat: openChat)
         case .folders: FoldersScreen(client: client)
         case .stats: StatsScreen(client: client)
         case .subscriptions: SubscriptionsScreen(client: client)

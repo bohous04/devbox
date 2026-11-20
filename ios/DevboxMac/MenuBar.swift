@@ -34,7 +34,7 @@ private struct NeedsYouLabel: View {
     @ObservedObject var inbox: InboxStore
 
     var body: some View {
-        let count = inbox.items.map { InboxView.group($0).needsYou.count } ?? 0
+        let count = inbox.items.map(InboxView.needsYouCount) ?? 0
         let stale = inbox.paused || inbox.loadError != nil
         let icon = count > 0 ? "tray.full.fill" : "tray"
         if let text = NeedsYouBadge.text(count: count, stale: stale) {
@@ -76,7 +76,7 @@ private struct NeedsYouItems: View {
 
     var body: some View {
         if let items = inbox.items {
-            let needsYou = InboxView.group(items).needsYou
+            let needsYou = InboxView.splitNeedsYou(InboxView.group(items).needsYou).action
             if needsYou.isEmpty {
                 Text("Nothing needs you")
             } else {

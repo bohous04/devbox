@@ -14,6 +14,8 @@ final class MacAppState: ObservableObject {
     /// Built per client; nil until the app is configured.
     @Published private(set) var inbox: InboxStore?
     @Published private(set) var live: LiveStore?
+    /// Each thread asked to come forward (openThread): the window showing it leaves its dashboard.
+    let focusedThread = PassthroughSubject<String, Never>()
     /// A one-time notice from restoring the last run's windows (the window list was unreadable).
     @Published var restoreNotice: String?
     /// The test bundle runs inside this app: then nothing of the real app's startup runs (no devd connection, no login
@@ -87,6 +89,7 @@ final class MacAppState: ObservableObject {
 
     /// Brings the thread's window to the front, or opens one (SwiftUI focuses a window already showing the value).
     func openThread(_ id: String) {
+        focusedThread.send(id)
         NSApp.activate(ignoringOtherApps: true)
         guard let openWindow else {
             pending.append(id)

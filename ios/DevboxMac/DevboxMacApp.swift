@@ -53,7 +53,7 @@ struct MacWindowCommands: Commands {
                 .disabled(actions == nil)
         }
         CommandGroup(after: .sidebar) {
-            Button("Dashboard") { actions?.toggleDashboard() }
+            Button(actions?.inDashboard == true ? "Sessions" : "Dashboard") { actions?.toggleDashboard() }
                 .keyboardShortcut("d")
                 .disabled(actions == nil)
         }

@@ -13,13 +13,14 @@ struct MacWindow: View {
     /// Identifies this window to `ThreadWindows` while it is open (the restore list holds threads, not windows).
     @State private var windowId = UUID().uuidString
     @State private var newSession = false
-    /// Bumped by ⌘F: the sidebar focuses its search field.
-    @State private var findRequest = 0
+    /// Set by ⌘F; the sessions sidebar focuses its search field and clears it, also when ⌘F first had to leave the
+    /// dashboard (the sidebar then appears with it already set).
+    @State private var findPending = false
     /// The dashboard page this window shows; nil while it shows the sessions (the inbox and a thread).
     @State private var page: MacDashboardPage?
 
     var body: some View {
-        MacWindowContent(thread: $thread, page: $page, newSession: $newSession, findRequest: findRequest)
+        MacWindowContent(thread: $thread, page: $page, newSession: $newSession, findPending: $findPending)
             .safeAreaInset(edge: .top) {
                 if let problem = state.restoreNotice {
                     HStack {
@@ -54,8 +55,11 @@ struct MacWindow: View {
             // ⌘N and ⌘F (DevboxMacApp's commands) act on the key window; without a configured devd they are disabled.
             .focusedSceneValue(\.macWindowActions, appModel.client == nil ? nil
                                : MacWindowActions(newSession: { newSession = true },
-                                                  find: { page = nil; findRequest += 1 },
-                                                  toggleDashboard: { page = page == nil ? .initial : nil }))
+                                                  find: { page = nil; findPending = true },
+                                                  toggleDashboard: { page = page == nil ? .initial : nil },
+                                                  inDashboard: page != nil))
+            // A thread brought forward (a notification, a link, Open in New Window) shows the thread, not the dashboard.
+            .onReceive(state.focusedThread) { page = MacWindow.page(page, afterFocusOn: $0, showing: thread) }
             .onDisappear { state.windows.close(window: windowId) }
     }
 }
@@ -66,7 +70,7 @@ struct MacWindowContent: View {
     @Binding var thread: String?
     @Binding var page: MacDashboardPage?
     @Binding var newSession: Bool
-    let findRequest: Int
+    @Binding var findPending: Bool
     @EnvironmentObject private var state: MacAppState
     @EnvironmentObject private var appModel: AppModel
 
@@ -77,14 +81,17 @@ struct MacWindowContent: View {
                     if page != nil {
                         MacDashboardSidebar(store: inbox, page: $page, back: { page = nil })
                     } else {
-                        MacInboxSidebar(store: inbox, selection: $thread, findRequest: findRequest, newSession: { newSession = true },
+                        MacInboxSidebar(store: inbox, selection: $thread, findPending: $findPending, newSession: { newSession = true },
                                         openDashboard: { page = .initial })
                     }
                 }
                 .navigationSplitViewColumnWidth(min: 260, ideal: 300)
             } detail: {
                 if let page {
-                    MacDashboardDetail(page: page, client: client)
+                    MacDashboardDetail(page: page, client: client, openChat: { id in
+                        thread = id
+                        self.page = nil
+                    })
                 } else if let id = thread {
                     MacThreadDetail(threadId: id, client: client, inbox: inbox)
                         .id("\(id)|\(appModel.clientIdentity)")
@@ -125,19 +132,23 @@ struct MacWindowContent: View {
 
 /// The inbox as the sidebar, by the same rules as the web and iPhone (InboxView): needs you, finished (five, then
 /// "N more"), idle, and under a rule the working, snoozed and settled shelves, collapsed until opened (each window
-/// remembers which). Every group is a disclosure group with its count aligned at the right. Rows are MacInboxRow, with the latest message only in Needs you, Working and
-/// Snoozed, and their times tick every 15 s. Above them: the search field (⌘F) and New session (⌘N). ↑/↓ move
+/// remembers which). Every group is a disclosure group with its count aligned at the right. Rows are MacInboxRow,
+/// with the latest message only in Needs you, Working and Snoozed, and their times tick every 15 s. Above them: the search field (⌘F) and New session (⌘N). ↑/↓ move
 /// the selection (List); the context menu has the row actions and "Open in New Window".
 struct MacInboxSidebar: View {
     @ObservedObject var store: InboxStore
     @Binding var selection: String?
-    /// Changes when ⌘F was pressed in this window.
-    let findRequest: Int
+    /// ⌘F was pressed in this window: focus the search field, then clear it.
+    @Binding var findPending: Bool
     let newSession: () -> Void
     let openDashboard: () -> Void
-    @Environment(\.openWindow) private var openWindow
-    /// The open groups, "|"-joined, kept per window.
-    @SceneStorage("macSidebarOpenGroups") private var openGroups = MacSidebarLayout.initial
+    @EnvironmentObject private var state: MacAppState
+    /// The shelves' open state, kept per window; they start shut.
+    @SceneStorage("macShelfWorkingOpen") private var workingOpen = MacSidebarLayout.startsOpen("Working")
+    @SceneStorage("macShelfSnoozedOpen") private var snoozedOpen = MacSidebarLayout.startsOpen("Snoozed")
+    @SceneStorage("macShelfSettledOpen") private var settledOpen = MacSidebarLayout.startsOpen("Settled")
+    /// The groups above the shelves the user shut in this window (they start open; not kept).
+    @State private var shut: Set<String> = []
     @State private var showAll: Set<String> = []
     @State private var actionsFor: InboxItem?
     @State private var query = ""
@@ -181,7 +192,11 @@ struct MacInboxSidebar: View {
             .safeAreaInset(edge: .bottom, spacing: 0) { footer }
         }
         .navigationTitle("Inbox")
-        .onChange(of: findRequest) { _, _ in searching = true }
+        .onChange(of: findPending, initial: true) { _, pending in
+            guard pending else { return }
+            searching = true
+            findPending = false
+        }
         .sheet(item: $actionsFor) { item in
             InboxRowActions(item: item, store: store).frame(minWidth: 360, minHeight: 320)
         }
@@ -263,7 +278,7 @@ struct MacInboxSidebar: View {
     @ViewBuilder
     private func group(_ label: String, _ items: [InboxItem], now: Int, preview: Bool, cap: Int? = nil) -> some View {
         if !items.isEmpty {
-            let open = MacSidebarLayout.decode(openGroups).contains(label) || !query.isEmpty
+            let open = isOpen(label) || !query.isEmpty
             let all = showAll.contains(label)
             Section {
                 if open {
@@ -277,12 +292,26 @@ struct MacInboxSidebar: View {
                     }
                 }
             } header: {
-                MacGroupHead(label: label, count: items.count, open: open) {
-                    var set = MacSidebarLayout.decode(openGroups)
-                    flip(label, in: &set)
-                    openGroups = MacSidebarLayout.encode(set)
-                }
+                MacGroupHead(label: label, count: items.count, open: open) { toggle(label) }
             }
+        }
+    }
+
+    private func isOpen(_ label: String) -> Bool {
+        switch label {
+        case "Working": return workingOpen
+        case "Snoozed": return snoozedOpen
+        case "Settled": return settledOpen
+        default: return !shut.contains(label)
+        }
+    }
+
+    private func toggle(_ label: String) {
+        switch label {
+        case "Working": workingOpen.toggle()
+        case "Snoozed": snoozedOpen.toggle()
+        case "Settled": settledOpen.toggle()
+        default: flip(label, in: &shut)
         }
     }
 
@@ -295,32 +324,28 @@ struct MacInboxSidebar: View {
             MacInboxRow(item: item, now: now, preview: preview)
                 .tag(item.sessionId as String?)
                 .contextMenu {
-                    Button("Open in New Window") { openWindow(value: item.sessionId) }
+                    Button("Open in New Window") { state.openThread(item.sessionId) }
                     Button("Settle or Snooze…") { actionsFor = item }
                 }
         }
     }
 }
 
-/// Which sidebar groups start open: the ones about you. Working, Snoozed and Settled stay shut until opened.
+/// The groups about you (Needs you, Finished, Idle) start open; the shelves under them stay shut until opened.
 enum MacSidebarLayout {
-    static let openByDefault: Set<String> = ["Needs you", "Finished", "Idle"]
+    static let shelves = ["Working", "Snoozed", "Settled"]
 
-    /// A new window's open groups.
-    static var initial: String {
+    /// Whether a shelf is open in a new window: never, except a shelf the screenshot test opens.
+    static func startsOpen(_ shelf: String) -> Bool {
         #if DEBUG
-        if let debugOpen { return encode(debugOpen) }
+        if debugOpenShelves.contains(shelf) { return true }
         #endif
-        return encode(openByDefault)
+        return false
     }
 
     #if DEBUG
-    /// The screenshot test opens a shelf with it.
-    nonisolated(unsafe) static var debugOpen: Set<String>?
+    nonisolated(unsafe) static var debugOpenShelves: Set<String> = []
     #endif
-
-    static func decode(_ s: String) -> Set<String> { Set(s.split(separator: "|").map(String.init)) }
-    static func encode(_ set: Set<String>) -> String { set.sorted().joined(separator: "|") }
 }
 
 /// A group heading as a disclosure button: small and muted, a step below the row titles, with room above it; the
@@ -662,6 +687,15 @@ struct MacWindowActions {
     let newSession: () -> Void
     let find: () -> Void
     let toggleDashboard: () -> Void
+    /// The window shows the dashboard: the ⌘D item then reads "Sessions".
+    let inDashboard: Bool
+}
+
+extension MacWindow {
+    /// A window asked to show its thread leaves the dashboard; other windows keep their page.
+    static func page(_ page: MacDashboardPage?, afterFocusOn focused: String, showing thread: String?) -> MacDashboardPage? {
+        focused == thread ? nil : page
+    }
 }
 
 private struct MacWindowActionsKey: FocusedValueKey { typealias Value = MacWindowActions }
