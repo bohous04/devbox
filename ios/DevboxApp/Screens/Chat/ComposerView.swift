@@ -121,6 +121,7 @@ struct ComposerView: View {
             Button { stop() } label: {
                 Image(systemName: "stop.fill").font(.system(size: 13)).foregroundStyle(Theme.C.foreground)
                     .frame(width: 34, height: 34).background(Theme.C.muted, in: Circle())
+                    .iPhoneTapTarget()
             }
             .disabled(stopping)
             .accessibilityLabel("Stop the run")
@@ -130,6 +131,7 @@ struct ComposerView: View {
                 .foregroundStyle(canSend ? Theme.C.primaryForeground : Theme.C.mutedForeground)
                 .frame(width: 34, height: 34)
                 .background(canSend ? Theme.C.primary : Theme.C.muted, in: Circle())
+                .iPhoneTapTarget()
         }
         .disabled(!canSend)
         .accessibilityLabel("Send")

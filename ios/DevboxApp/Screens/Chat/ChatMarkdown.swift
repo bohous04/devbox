@@ -11,7 +11,7 @@ struct ChatMarkdown: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: quiet ? 6 : 12) {
-            ForEach(Array(ChatMarkdownParse.blocks(text).enumerated()), id: \.offset) { _, b in block(b) }
+            ForEach(Array(ChatMarkdownParse.cachedBlocks(text).enumerated()), id: \.offset) { _, b in block(b) }
         }
         .font(font)
         .lineSpacing(quiet ? 2 : 4)
@@ -96,18 +96,30 @@ struct ChatMarkdown: View {
 
 /// One line or paragraph of inline markdown as a single `Text`, so it wraps and selects as one.
 enum ChatInline {
+    /// The text parsed as one piece first, so bold, code and links around a status emoji stay intact; then each run's
+    /// ✅ ❌ ⚠️ become the app's icons, the run's own attributes kept on the text beside them. Code is left as typed.
     static func text(_ s: String) -> Text {
+        let a = attributed(s)
         var out = Text("")
-        for part in ChatMarkdownParse.statusParts(s) {
-            switch part {
-            case .text(let t): out = out + Text(attributed(t))
-            case .status(let st): out = out + icon(st)
+        for run in a.runs {
+            let piece = AttributedString(a[run.range])
+            if run.inlinePresentationIntent?.contains(.code) == true {
+                out = out + Text(piece)
+                continue
+            }
+            for part in ChatMarkdownParse.statusParts(String(piece.characters)) {
+                switch part {
+                case .text(let t): out = out + Text(AttributedString(t, attributes: run.attributes))
+                case .status(let st): out = out + icon(st)
+                }
             }
         }
         return out
     }
 
-    private static func attributed(_ s: String) -> AttributedString {
+    /// Inline markdown with bare URLs linked, code a size smaller, web links in the accent colour and every other
+    /// link scheme dropped (see `ChatMarkdownParse.isWebLink`): its text stays, plain.
+    static func attributed(_ s: String) -> AttributedString {
         // Unparseable markdown (a stray bracket mid-stream) is shown as typed rather than not at all.
         var a = (try? AttributedString(markdown: ChatMarkdownParse.linkBareURLs(s), options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(s)
@@ -115,11 +127,19 @@ enum ChatInline {
         for run in a.runs where run.inlinePresentationIntent?.contains(.code) == true {
             a[run.range].font = .system(size: 14, design: .monospaced)
         }
+        dropNonWebLinks(&a)
         // Links in the accent colour, no underline: the colour alone marks them, as in the rest of iOS.
         for run in a.runs where run.link != nil {
             a[run.range].foregroundColor = Theme.C.link
         }
         return a
+    }
+
+    /// Agent text must not open the app's own deep links or local schemes: only http(s) links keep their link.
+    static func dropNonWebLinks(_ a: inout AttributedString) {
+        for run in a.runs {
+            if let url = run.link, !ChatMarkdownParse.isWebLink(url) { a[run.range].link = nil }
+        }
     }
 
     private static func icon(_ s: ChatMarkdownParse.Inline.Status) -> Text {

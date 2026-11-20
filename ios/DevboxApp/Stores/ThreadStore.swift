@@ -266,6 +266,9 @@ final class ThreadStore: ObservableObject {
     @Published private(set) var seenError: String?
     /// Where the changed-files card goes (under the latest finished answer); nil: no card.
     @Published private(set) var changesAnchor: ChangesAnchor?
+    /// A short title from the first user message (`ThreadTitle`), worked out again only when that message changes.
+    private(set) var title: String?
+    private var titleSource: String?
     /// devd refused the stream with 404 (or 409 not-a-chat-session): the session is gone. Final: no reconnect.
     @Published private(set) var ended = false
     /// devd answered 409 session-ending: an end is under way, but a failed end leaves the session alive, so the
@@ -429,6 +432,11 @@ final class ThreadStore: ObservableObject {
         }
         display = WorkGroups.rows(rows, runs: t.runs)
         changesAnchor = ChangesView.anchor(rows, runs: t.runs)
+        let first = t.items.first(where: { $0.kind == .user })?.text
+        if first != titleSource {
+            titleSource = first
+            title = first.flatMap(ThreadTitle.from)
+        }
         switchKey = ThreadView.switchKey(t)
         thread = t
     }

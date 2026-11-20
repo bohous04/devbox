@@ -75,8 +75,6 @@ extension View {
         #endif
     }
 
-    /// An opaque navigation bar in the screen's background colour with a hairline under it, so content scrolls under
-    /// a solid bar instead of showing through it. The Mac's window toolbar stays as it is.
     /// No soft fade at a scroll view's edges (the system default from iOS 26): a diff or a code line must not look
     /// rounded off where it meets the block's edge.
     @ViewBuilder
@@ -86,6 +84,16 @@ extension View {
         } else {
             self
         }
+    }
+
+    /// At least 44 pt to tap on iPhone (Apple's minimum) while the drawn control may stay smaller. The Mac's pointer
+    /// needs no more than the control itself.
+    func iPhoneTapTarget() -> some View {
+        #if os(iOS)
+        frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+        #else
+        self
+        #endif
     }
 
     /// A pushed screen that needs the full height (the chat thread): no tab bar under it on iPhone; back navigation
@@ -98,6 +106,8 @@ extension View {
         #endif
     }
 
+    /// An opaque navigation bar in the screen's background colour, so content scrolls under a solid bar instead of
+    /// showing through it (the chat draws the hairline under it). The Mac's window toolbar stays as it is.
     func solidNavigationBar() -> some View {
         #if os(iOS)
         toolbarBackground(Theme.C.background, for: .navigationBar)

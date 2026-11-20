@@ -23,6 +23,8 @@ struct ChangesCard: View {
                 await store.load()
                 shown = []
             }
+            // Off screen (scrolled away, the thread closed): no diff keeps downloading for nobody.
+            .onDisappear { store.cancelDiffs() }
     }
 
     @ViewBuilder
@@ -92,7 +94,7 @@ struct ChangesCard: View {
                         if !g.dir.isEmpty {
                             HStack(spacing: 6) {
                                 Image(systemName: "folder").font(.system(size: 12)).accessibilityHidden(true)
-                                Text(g.dir).lineLimit(1).truncationMode(.middle)
+                                escapedText(g.dir).lineLimit(1).truncationMode(.middle)
                                 Spacer(minLength: 4)
                                 // One folder's sum would only repeat the header's totals.
                                 if groups.count > 1, g.files.count > 1 { Stat(added: g.added, removed: g.removed) }
@@ -130,8 +132,8 @@ struct ChangesCard: View {
                 HStack(spacing: 8) {
                     Text(ChangesView.letter(f.status)).fontWeight(.semibold).foregroundStyle(Self.color(f.status))
                         .frame(width: 12).accessibilityLabel(f.status.rawValue)
-                    (f.oldPath.map { Text(ChangesView.splitPath($0).name + " → ").foregroundColor(Theme.C.mutedForeground) } ?? Text(""))
-                        + Text(name).foregroundColor(Theme.C.foreground.opacity(0.9))
+                    (f.oldPath.map { (escapedText(ChangesView.splitPath($0).name) + Text(" → ")).foregroundColor(Theme.C.mutedForeground) } ?? Text(""))
+                        + escapedText(name).foregroundColor(Theme.C.foreground.opacity(0.9))
                     Spacer(minLength: 4)
                     if let s = ChangesView.stat(f) {
                         Stat(added: s.added, removed: s.removed)
@@ -180,17 +182,20 @@ private struct Stat: View {
 }
 
 /// One changed file's diff, fetched when opened: old and new line numbers, then the line. Long lines scroll sideways
-/// inside the block; invisible and direction-changing characters show as muted escapes.
+/// inside the block; invisible and direction-changing characters show as muted escapes. The store hands the lines over
+/// parsed and escaped; a long diff draws its first `shownMax` lines until asked for all.
 struct FileDiffView: View {
     let path: String
     let store: ChangesStore
-    @State private var diff: SessionFileDiff?
+    @State private var diff: DiffView.Prepared?
     @State private var error: String?
     @State private var attempt = 0
+    @State private var showAll = false
     /// The block's visible width: every row is at least this wide, so line backgrounds run edge to edge.
     @State private var visibleWidth: CGFloat = 0
     /// SF Mono at 12 pt.
     private static let charWidth: CGFloat = 7.23
+    static let shownMax = 2000
 
     var body: some View {
         Group {
@@ -203,9 +208,10 @@ struct FileDiffView: View {
             } else if let diff {
                 if diff.binary {
                     note("Binary file, no text diff")
+                } else if diff.lines.isEmpty {
+                    note("No line changes")
                 } else {
-                    let lines = DiffView.parse(diff.diff)
-                    if lines.isEmpty { note("No line changes") } else { table(lines, truncated: diff.truncated) }
+                    table(diff)
                 }
             } else {
                 HStack(spacing: 8) { ProgressView().controlSize(.mini); Text("Loading diff…") }
@@ -223,16 +229,15 @@ struct FileDiffView: View {
         Text(s).padding(.horizontal, 12).padding(.vertical, 8)
     }
 
-    private func table(_ lines: [DiffLine], truncated: Bool) -> some View {
-        let digits = max(2, String(lines.compactMap { max($0.old ?? 0, $0.new ?? 0) }.max() ?? 0).count)
-        let numWidth = CGFloat(digits) * Self.charWidth
-        // The longest line sets the scrolled width (escapes counted as drawn): numbers, sign, text and margins.
-        let longest = lines.map { l in DiffView.escapeInvisible(l.text).reduce(0) { $0 + $1.text.count } }.max() ?? 0
-        let rowWidth = max(visibleWidth, 8 + 2 * (numWidth + 8) + 12 + CGFloat(longest) * Self.charWidth + 16)
+    private func table(_ d: DiffView.Prepared) -> some View {
+        let shown = showAll ? d.lines[...] : d.lines.prefix(Self.shownMax)
+        let numWidth = CGFloat(d.digits) * Self.charWidth
+        // The longest line sets the scrolled width: numbers, sign, text and margins.
+        let rowWidth = max(visibleWidth, 8 + 2 * (numWidth + 8) + 12 + CGFloat(d.longest) * Self.charWidth + 16)
         return VStack(alignment: .leading, spacing: 0) {
             ScrollView([.horizontal, .vertical]) {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(lines.enumerated()), id: \.offset) { _, l in row(l, digits: digits).frame(width: rowWidth, alignment: .leading) }
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(shown.indices, id: \.self) { i in row(d.lines[i], digits: d.digits).frame(width: rowWidth, alignment: .leading) }
                 }
                 .padding(.vertical, 4)
             }
@@ -240,7 +245,12 @@ struct FileDiffView: View {
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { visibleWidth = $0 }
             .frame(maxHeight: 448)
             .fixedSize(horizontal: false, vertical: true)
-            if truncated { note("Diff truncated: the rest of this file's changes are not shown.") }
+            if shown.count < d.lines.count {
+                Button("Show all \(d.lines.count) lines") { showAll = true }
+                    .font(.system(size: 13, weight: .medium)).buttonStyle(.borderless)
+                    .padding(.horizontal, 12).frame(minHeight: 36)
+            }
+            if d.truncated { note("Diff truncated: the rest of this file's changes are not shown.") }
         }
         .background(Theme.C.background.opacity(0.6))
         .overlay(alignment: .top) { Rectangle().fill(Theme.C.border.opacity(0.6)).frame(height: 1 / 3) }
@@ -248,11 +258,11 @@ struct FileDiffView: View {
     }
 
     @ViewBuilder
-    private func row(_ l: DiffLine, digits: Int) -> some View {
+    private func row(_ l: DiffView.Prepared.Line, digits: Int) -> some View {
         let mono = Font.system(size: 12, design: .monospaced)
         switch l.kind {
         case .hunk, .note:
-            Self.text(l.text).font(mono).italic(l.kind == .note).foregroundStyle(Theme.C.mutedForeground)
+            escapedText(l.parts).font(mono).italic(l.kind == .note).foregroundStyle(Theme.C.mutedForeground)
                 .fixedSize().padding(.horizontal, 12).frame(minHeight: 20)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background { Rectangle().fill(l.kind == .hunk ? Theme.C.muted.opacity(0.6) : .clear) }
@@ -263,7 +273,7 @@ struct FileDiffView: View {
                 Text(Self.number(l.new, width: digits)).fixedSize().padding(.trailing, 8)
                 Text(l.kind == .add ? "+" : l.kind == .del ? "−" : " ").frame(width: 12)
                     .foregroundStyle(Self.tint(l.kind))
-                Self.text(l.text).foregroundStyle(l.kind == .ctx ? Theme.C.foreground.opacity(0.8) : Self.tint(l.kind))
+                escapedText(l.parts).foregroundStyle(l.kind == .ctx ? Theme.C.foreground.opacity(0.8) : Self.tint(l.kind))
                     .fixedSize().padding(.trailing, 16)
                     .accessibilityLabel((l.kind == .add ? "added: " : l.kind == .del ? "removed: " : "") + l.text)
             }
@@ -283,11 +293,14 @@ struct FileDiffView: View {
     private static func tint(_ k: DiffLine.Kind) -> Color {
         k == .add ? Theme.C.okText : k == .del ? Theme.C.dangerText : Theme.C.foreground
     }
+}
 
-    /// The line with escapes muted, as one Text.
-    private static func text(_ s: String) -> Text {
-        DiffView.escapeInvisible(s).reduce(Text("")) { out, p in
-            out + (p.escaped ? Text(p.text).foregroundColor(Theme.C.mutedForeground) : Text(p.text))
-        }
+/// Text with escapes muted, as one Text: diff lines, and file and folder names (a name can hold invisible or
+/// direction-changing characters too).
+func escapedText(_ parts: [DiffView.Part]) -> Text {
+    parts.reduce(Text("")) { out, p in
+        out + (p.escaped ? Text(p.text).foregroundColor(Theme.C.mutedForeground) : Text(p.text))
     }
 }
+
+func escapedText(_ s: String) -> Text { escapedText(DiffView.escapeInvisible(s)) }

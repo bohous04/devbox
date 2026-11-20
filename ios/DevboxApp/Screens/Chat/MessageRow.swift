@@ -139,9 +139,10 @@ struct ChatText: View {
 
     var body: some View {
         // Unparseable markdown (a stray bracket mid-stream) is shown as typed rather than not at all.
-        let attributed = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+        var attributed = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
-        Text(attributed).font(Theme.F.body).textSelection(.enabled)
+        ChatInline.dropNonWebLinks(&attributed)
+        return Text(attributed).font(Theme.F.body).textSelection(.enabled)
     }
 }
 

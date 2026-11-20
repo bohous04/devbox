@@ -127,18 +127,49 @@ struct DiffLine: Equatable {
 }
 
 enum DiffView {
+    private static let hunkRe = try! NSRegularExpression(pattern: #"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@"#)
+
+    /// A diff ready to draw: lines parsed and escaped once (off the main thread, see `ChangesStore.diff`), with the
+    /// widths the table needs.
+    struct Prepared: Equatable {
+        struct Line: Equatable {
+            let kind: DiffLine.Kind
+            let old: Int?
+            let new: Int?
+            let parts: [Part]
+            /// The raw text, for VoiceOver.
+            let text: String
+        }
+        let binary: Bool
+        let truncated: Bool
+        let lines: [Line]
+        /// The longest line in drawn characters (escapes counted as shown).
+        let longest: Int
+        /// Digits of the largest line number (at least 2).
+        let digits: Int
+    }
+
+    static func prepare(_ d: SessionFileDiff) -> Prepared {
+        let parsed = d.binary ? [] : parse(d.diff)
+        let lines = parsed.map { l in Prepared.Line(kind: l.kind, old: l.old, new: l.new, parts: escapeInvisible(l.text), text: l.text) }
+        let longest = lines.map { $0.parts.reduce(0) { $0 + $1.text.count } }.max() ?? 0
+        let digits = max(2, String(parsed.compactMap { max($0.old ?? 0, $0.new ?? 0) }.max() ?? 0).count)
+        return Prepared(binary: d.binary, truncated: d.truncated, lines: lines, longest: longest, digits: digits)
+    }
+
     /// The lines of a git unified diff for display; the per-file header is dropped (the card names the file).
     static func parse(_ diff: String) -> [DiffLine] {
         var out: [DiffLine] = []
         var inHunk = false, o = 0, n = 0
         var lines = diff.components(separatedBy: "\n")
         if lines.last == "" { lines.removeLast() }
-        let hunkRe = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/
         for line in lines {
-            if let m = line.prefixMatch(of: hunkRe) {
+            if line.hasPrefix("@@"),
+               let m = hunkRe.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+               let oldStart = Range(m.range(at: 1), in: line), let newStart = Range(m.range(at: 2), in: line) {
                 inHunk = true
-                o = Int(m.1) ?? 0
-                n = Int(m.2) ?? 0
+                o = Int(line[oldStart]) ?? 0
+                n = Int(line[newStart]) ?? 0
                 out.append(DiffLine(kind: .hunk, text: line, old: nil, new: nil))
             } else if line.hasPrefix("diff ") {
                 inHunk = false
@@ -202,7 +233,7 @@ final class ChangesStore: ObservableObject {
     @Published private(set) var state: State = .loading
     private let base: String
     private let client: DevdClient
-    private var cache: [String: Task<SessionFileDiff, Error>] = [:]
+    private var cache: [String: Task<DiffView.Prepared, Error>] = [:]
     /// "Open diffs" on a long list fetches through this: at most four requests at once.
     private let limiter = AsyncLimiter(4)
     private static let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
@@ -215,22 +246,25 @@ final class ChangesStore: ObservableObject {
     func load() async {
         do {
             let c: SessionChanges = try await client.get(base)
-            cache = [:]
+            cancelDiffs()
             state = c.totals.files == 0 ? .none : .loaded(c)
         } catch is CancellationError {
             return
         } catch {
-            cache = [:]
+            cancelDiffs()
             state = ChangesView.isNoCommits(error) ? .none : .failed(errorText(error))
         }
     }
 
-    func diff(_ path: String) async throws -> SessionFileDiff {
+    /// The file's diff, fetched once per changes result and parsed off the main thread.
+    func diff(_ path: String) async throws -> DiffView.Prepared {
         if let t = cache[path] { return try await t.value }
         // Only RFC 3986 unreserved characters stay as they are; "/", "&", "+" and the rest are escaped.
         let query = path.addingPercentEncoding(withAllowedCharacters: Self.unreserved) ?? path
-        let t = Task { [client, base] () async throws -> SessionFileDiff in
-            try await self.limiter.run { try await client.get("\(base)/diff?path=\(query)") }
+        let t = Task { [client, base] () async throws -> DiffView.Prepared in
+            let d: SessionFileDiff = try await self.limiter.run { try await client.get("\(base)/diff?path=\(query)") }
+            try Task.checkCancellation()
+            return await Task.detached(priority: .userInitiated) { DiffView.prepare(d) }.value
         }
         cache[path] = t
         do {
@@ -239,6 +273,13 @@ final class ChangesStore: ObservableObject {
             if cache[path] == t { cache[path] = nil }
             throw error
         }
+    }
+
+    /// Stops every fetch still running (the card left the screen, or a new changes result replaces them) and
+    /// forgets them, so the next open asks again.
+    func cancelDiffs() {
+        for t in cache.values { t.cancel() }
+        cache = [:]
     }
 }
 

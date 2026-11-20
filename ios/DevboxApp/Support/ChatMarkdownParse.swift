@@ -13,10 +13,43 @@ enum MdBlock: Equatable {
 }
 
 enum ChatMarkdownParse {
-    private static func match(_ s: String, _ pattern: String) -> Bool { s.range(of: pattern, options: .regularExpression) != nil }
-    private static let bullet = #"^\s*[-*+]\s+"#
-    private static let number = #"^\s*\d+[.)]\s+"#
-    private static let tableRule = #"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$"#
+    // Compiled once: a streaming answer is parsed again on every update.
+    private static func regex(_ pattern: String) -> NSRegularExpression { try! NSRegularExpression(pattern: pattern) }
+    private static func match(_ s: String, _ re: NSRegularExpression) -> Bool {
+        re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil
+    }
+    private static func strip(_ s: String, _ re: NSRegularExpression) -> String {
+        re.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: "")
+    }
+    private static let bullet = regex(#"^\s*[-*+]\s+"#)
+    private static let number = regex(#"^\s*\d+[.)]\s+"#)
+    private static let tableRule = regex(#"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$"#)
+    private static let bareURL = regex(#"(?<![(<\[])\bhttps?://[^\s<>()\[\]]+"#)
+    /// A markdown link `[text](target)`: a bare URL inside one is already linked (or is its text).
+    private static let mdLink = regex(#"\[[^\]]*\]\([^)]*\)"#)
+    private static let scheme = regex(#"^https?://"#)
+
+    /// Blocks per message text, so a re-render (or the streaming row's neighbours) does not parse again.
+    private static let blockCache: NSCache<NSString, BlocksBox> = {
+        let c = NSCache<NSString, BlocksBox>()
+        c.countLimit = 400
+        return c
+    }()
+    private final class BlocksBox { let blocks: [MdBlock]; init(_ b: [MdBlock]) { blocks = b } }
+
+    static func cachedBlocks(_ text: String) -> [MdBlock] {
+        if let hit = blockCache.object(forKey: text as NSString) { return hit.blocks }
+        let b = blocks(text)
+        blockCache.setObject(BlocksBox(b), forKey: text as NSString)
+        return b
+    }
+
+    /// Only web links open from an agent's text: any other scheme (the app's own devbox:// deep links, file:, tel:,
+    /// sms:, javascript:) is shown as plain text (dashboard/src/markdown.ts).
+    static func isWebLink(_ url: URL) -> Bool {
+        guard let s = url.scheme?.lowercased() else { return false }
+        return s == "http" || s == "https"
+    }
 
     static func blocks(_ text: String) -> [MdBlock] {
         let lines = text.components(separatedBy: "\n")
@@ -52,7 +85,7 @@ enum ChatMarkdownParse {
                 while i < lines.count {
                     let l = lines[i]
                     if match(l, marker) {
-                        items.append(l.replacingOccurrences(of: marker, with: "", options: .regularExpression))
+                        items.append(strip(l, marker))
                     } else if !items.isEmpty, l.hasPrefix("  "), !l.trimmingCharacters(in: .whitespaces).isEmpty {
                         items[items.count - 1] += " " + l.trimmingCharacters(in: .whitespaces) // a wrapped item
                     } else { break }
@@ -106,9 +139,11 @@ enum ChatMarkdownParse {
         return parts.enumerated().map { i, part in
             guard i % 2 == 0 else { return part } // inside a code span
             let ns = part as NSString
-            let re = try! NSRegularExpression(pattern: #"(?<![(<\[])\bhttps?://[^\s<>()\[\]]+"#)
+            let whole = NSRange(location: 0, length: ns.length)
+            let links = mdLink.matches(in: part, range: whole).map(\.range)
             var result = part
-            for m in re.matches(in: part, range: NSRange(location: 0, length: ns.length)).reversed() {
+            for m in bareURL.matches(in: part, range: whole).reversed()
+            where !links.contains(where: { NSIntersectionRange($0, m.range).length > 0 }) {
                 var url = ns.substring(with: m.range)
                 // Sentence punctuation after a link is not part of it.
                 while let last = url.last, ".,;:!?\"'".contains(last) { url.removeLast() }
@@ -123,7 +158,7 @@ enum ChatMarkdownParse {
     /// name) both stay; the link itself keeps the full address.
     static func shortURL(_ url: String, max: Int = 34) -> String {
         guard url.count > max else { return url }
-        let bare = url.replacing(/^https?:\/\//, with: "")
+        let bare = strip(url, scheme)
         guard bare.count > max else { return bare }
         let head = max / 2
         return String(bare.prefix(head)) + "…" + String(bare.suffix(max - head - 1))

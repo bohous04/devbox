@@ -50,7 +50,7 @@ struct ChatScreen: View {
         let s = live.live?.sessions.first(where: { $0.id == sessionId })
         let place = s.map { "\($0.project) / \($0.repo)" }
         if let name = s?.name?.trimmingCharacters(in: .whitespaces), !name.isEmpty { return (name, place) }
-        if let first = store.thread?.items.first(where: { $0.kind == .user })?.text, let t = ThreadTitle.from(first) { return (t, place) }
+        if let t = store.title { return (t, place) }
         return (place ?? sessionId, nil)
     }
 
@@ -86,6 +86,7 @@ struct ChatScreen: View {
         .solidNavigationBar()
         .hidesTabBar()
         .toolbar {
+            #if os(iOS)
             ToolbarItem(placement: .principal) {
                 // Title and place share one left edge, next to the back button.
                 VStack(alignment: .leading, spacing: 0) {
@@ -97,6 +98,7 @@ struct ChatScreen: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityElement(children: .combine)
             }
+            #endif
             if openTerminal == nil {
                 ToolbarItem(placement: .primaryAction) {
                     Button { showTerminal = true } label: { Label("Terminal", systemImage: "terminal") }
@@ -180,6 +182,11 @@ struct ChatScreen: View {
                         .frame(height: 24).offset(y: -24).allowsHitTesting(false)
                 }
             }
+            // Links in agent text open only on the web: a devbox:// deep link, file:, tel: or sms: in an answer or a
+            // request prompt does nothing (the text renders them unlinked too; this also covers RequestFormView).
+            .environment(\.openURL, OpenURLAction { url in
+                ChatMarkdownParse.isWebLink(url) ? .systemAction : .discarded
+            })
             // The header's bottom edge: a hairline the thread scrolls under.
             .overlay(alignment: .top) { Rectangle().fill(Theme.C.border).frame(height: 1 / 3).accessibilityHidden(true) }
         }

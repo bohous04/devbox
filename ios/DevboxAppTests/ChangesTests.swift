@@ -101,6 +101,50 @@ final class ChangesTests: XCTestCase {
         XCTAssertNil(ToolCallView.firstLine(" \n"))
     }
 
+    func testOnlyWebLinksStayLinksInAgentText() {
+        func links(_ md: String) -> [URL] { ChatInline.attributed(md).runs.compactMap(\.link) }
+        for bad in ["javascript:alert(1)", "devbox://thread/dev-acme-web", "file:///etc/hosts", "tel:+15550100", "sms:+15550100"] {
+            let a = ChatInline.attributed("[open](\(bad))")
+            XCTAssertTrue(links("[open](\(bad))").isEmpty, "\(bad) must not stay a link")
+            XCTAssertEqual(String(a.characters), "open", "the link text stays, plain")
+        }
+        XCTAssertEqual(links("[docs](HTTPS://Example.com/Docs)").map(\.absoluteString), ["HTTPS://Example.com/Docs"])
+        XCTAssertEqual(links("see https://example.com/a").count, 1)
+        XCTAssertTrue(ChatMarkdownParse.isWebLink(URL(string: "Http://example.com")!))
+        XCTAssertFalse(ChatMarkdownParse.isWebLink(URL(string: "devbox://more/vault")!))
+    }
+
+    func testBareURLsInsideALinksTextAreNotLinkedAgain() {
+        let md = "read [the guide at https://example.com/a](https://example.com/b) or https://example.com/c"
+        XCTAssertEqual(ChatMarkdownParse.linkBareURLs(md),
+                       "read [the guide at https://example.com/a](https://example.com/b) or [https://example.com/c](https://example.com/c)")
+        XCTAssertEqual(ChatInline.attributed(md).runs.compactMap(\.link).map(\.absoluteString),
+                       ["https://example.com/b", "https://example.com/c"])
+    }
+
+    func testStatusEmojiInsideBoldKeepsTheBold() {
+        let a = ChatInline.attributed("**✅ all pass**")
+        XCTAssertEqual(String(a.characters), "✅ all pass")
+        XCTAssertTrue(a.runs.allSatisfy { $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true })
+    }
+
+    func testPreparedDiffParsesAndEscapesOnce() {
+        let d = SessionFileDiff(path: "a.ts", status: .modified, base: "origin/main", binary: false, truncated: false,
+                                diff: "@@ -98,2 +98,3 @@\n keep\n+a\u{200B}b\n+new line here\n")
+        let p = DiffView.prepare(d)
+        XCTAssertEqual(p.lines.count, 4)
+        XCTAssertEqual(p.digits, 3, "line 100 needs three digits")
+        XCTAssertEqual(p.lines[2].parts, [.init(text: "a", escaped: false), .init(text: "\\u200b", escaped: true), .init(text: "b", escaped: false)])
+        XCTAssertEqual(p.longest, "@@ -98,2 +98,3 @@".count)
+        XCTAssertTrue(DiffView.prepare(SessionFileDiff(path: "x.png", status: .added, base: "HEAD", binary: true, truncated: false, diff: "")).lines.isEmpty)
+    }
+
+    func testMarkdownBlocksAreCachedPerText() {
+        let text = "| a | b |\n| --- | --- |\n| 1 | 2 |"
+        XCTAssertEqual(ChatMarkdownParse.cachedBlocks(text), ChatMarkdownParse.blocks(text))
+        XCTAssertEqual(ChatMarkdownParse.cachedBlocks(text), ChatMarkdownParse.cachedBlocks(text))
+    }
+
     func testLimiterRunsAtMostFourAtOnceInCallOrder() async {
         let limiter = AsyncLimiter(4)
         var gates: [Int: CheckedContinuation<Void, Never>] = [:]
