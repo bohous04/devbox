@@ -11,7 +11,7 @@ import { EmptyState, RowsSkeleton } from "../components/primitives";
 import { useStore } from "../store";
 import { terminalTabUrl } from "../terminalRoute";
 import { threadTitle } from "../threadTitle";
-import { activeRun, applyNotice, applyThreadEvent, criticRunIds, mergeSnapshot, queuedRunIds } from "../threadView";
+import { activeRun, applyEffort, applyNotice, applyThreadEvent, criticRunIds, mergeSnapshot, queuedRunIds } from "../threadView";
 import { useEventStream } from "../useEventStream";
 
 // Same lazy import as TerminalPage: xterm stays in its own chunk.
@@ -50,6 +50,7 @@ function ChatPage({ id }: { id: string }) {
     onSnapshot: (m) => setThread((t) => (t ? mergeSnapshot(t, m) : t)),
     onThread: (e) => setThread((t) => (t ? applyThreadEvent(t, e) : t)),
     onNotice: (item) => setThread((t) => (t ? applyNotice(t, item) : t)),
+    onEffort: (effort) => setThread((t) => (t ? applyEffort(t, effort) : t)),
   });
 
   // Opening the page marks the thread seen; so does a run ending while the user looks at it, and coming back to

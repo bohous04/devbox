@@ -327,9 +327,12 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
   };
 
   // The SDK reports the level a turn ran at (after any downgrade for the model) only to hooks: Stop sees it per turn.
+  // A run that was going when the effort changed still ran at the old level: its Stop must not report that one as
+  // the level from now on.
+  let ranBeforeChoice: ActiveRun | null = null;
   const onStop: HookCallback = async (hookInput) => {
     const level = (hookInput as { effort?: { level?: unknown } }).effort?.level;
-    if (typeof level === "string") effort.update({ effective: level });
+    if (typeof level === "string" && (active === null || active !== ranBeforeChoice)) effort.update({ effective: level });
     return { continue: true };
   };
 
@@ -425,12 +428,15 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
       if (ended) throw new Error(SESSION_ENDED);
       await stream.setModel(next);
       model = next;
+      // The previous model's levels and level say nothing about this one until the CLI's list does.
+      effort.update({ model: next, supported: null, effective: null });
       void reportLevels(next);
     },
     async setEffort(level) {
       if (ended) throw new Error(SESSION_ENDED);
       effort.check(level);
       await stream.applyFlagSettings({ effortLevel: level as EffortLevel | null });
+      ranBeforeChoice = active;
       // What a turn runs at is known only from its Stop hook.
       effort.choose(level, null);
     },

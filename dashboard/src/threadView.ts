@@ -1,5 +1,4 @@
-import { knownEffort } from "../../shared/effort";
-import type { LoggedEvent, RunRow, ThreadItem, ThreadSnapshot } from "../../shared/thread";
+import type { LoggedEvent, RunRow, ThreadEffort, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
 export const emptyThread = (): ThreadSnapshot => ({
   lastSeq: 0, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: null, effort: null,
@@ -159,8 +158,7 @@ function dispatch(n: ThreadSnapshot, { seq, ts, event: ev }: LoggedEvent) {
       insertItem(n, seq, ts, { runId: null, itemId: null, kind: "notice", text: ev.text, status: "done" });
       return;
     case "effort.state":
-      // The same filter as devd's store, which logs what it drops.
-      n.effort = knownEffort({ model: ev.model, supported: ev.supported, effective: ev.effective, chosen: ev.chosen }).effort;
+      // devd never sends it as a thread event (older apps would show it as unknown): see applyEffort.
       return;
     default: {
       const unknown: never = ev;
@@ -193,6 +191,11 @@ export function mergeSnapshot(t: ThreadSnapshot, m: { afterSeq: number; snapshot
     else runs.push(r);
   }
   return { lastSeq: Math.max(t.lastSeq, s.lastSeq), seenSeq: s.seenSeq, items, runs, pending: s.pending, background: s.background, native: s.native, effort: s.effort };
+}
+
+/** The agent's effort from the stream (`thread-effort`, already parsed by devd's store). */
+export function applyEffort(t: ThreadSnapshot, effort: ThreadEffort | null): ThreadSnapshot {
+  return { ...t, effort };
 }
 
 /** A devd notice from the stream (`thread-notice`, devd's ThreadStore.addNotice): it has an item id `notice:<n>` and no

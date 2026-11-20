@@ -81,6 +81,9 @@ const SESSION_ENDED = "Codex session ended";
 
 // injectItems: the generated protocol has `thread/inject_items`. liveModelSwitch: the model is a turn/start
 // parameter, so a switch applies from the next turn. No background work is reported.
+/** model/list pages read at most (100 models each): a cursor that never ends must not page forever. */
+const MODEL_LIST_MAX_PAGES = 20;
+
 export const CODEX_CAPABILITIES: Capabilities = { resume: true, injectItems: true, liveModelSwitch: true, questions: true, images: true, backgroundVisibility: false };
 
 // Full access, matching today's tmux Codex sessions (global constraints).
@@ -243,13 +246,21 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
   const effort = new EffortState(o.emit, o.effort ?? null);
   // Levels and default per model (model/list); null until read, or when it could not be read.
   let catalog: Map<string, { supported: string[]; default: string }> | null = null;
+  let catalogFailed = false;
   // The thread's configured effort (config.toml), null = each model's default.
   let configured: string | null = null;
   // The model the thread runs when no model was chosen (thread/start's answer).
   let threadModel: string | null = null;
   // turn/start's effort applies to that turn and every later one: once sent, going back to the default must say so.
-  let overridden = false;
+  // A resumed thread may carry one from an earlier bridge (its state.json does not say): its first turn says the level.
+  let overridden = o.resume !== null;
   const baseline = (m: string | null): string | null => configured ?? (m !== null ? catalog?.get(m)?.default ?? null : null);
+  // Without model/list nothing is checked: a choice goes to Codex as it is, and the user is told.
+  const uncheckedNotice = (m: string | null) => {
+    if (catalogFailed && effort.chosen !== null) {
+      o.emit({ type: "bridge.notice", text: `Codex's model list could not be read, so effort ${effort.chosen} is sent without checking that ${m ?? "the model"} takes it.` });
+    }
+  };
   const reportEffort = (m: string | null) => {
     const supported = m === null || catalog === null ? null : catalog.get(m)?.supported ?? null;
     if (m !== null && catalog !== null && supported === null) logError(`codex: ${m} is not in model/list; its effort levels are unknown`);
@@ -537,7 +548,9 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
       // Not awaited: turns need no levels, and a slow or failing model/list must not hold them.
       void readCatalog().then((c) => {
         catalog = c;
+        catalogFailed = c === null;
         reportEffort(model ?? threadModel);
+        uncheckedNotice(model ?? threadModel);
       });
       startNext();
     } catch (e) {
@@ -553,8 +566,10 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
   async function readCatalog(): Promise<Map<string, { supported: string[]; default: string }> | null> {
     const out = new Map<string, { supported: string[]; default: string }>();
     let cursor: string | null = null;
+    let pages = 0;
     try {
       do {
+        if (++pages > MODEL_LIST_MAX_PAGES) throw new Error(`more than ${MODEL_LIST_MAX_PAGES} pages`);
         const page: ModelListPage = await peer.request<ModelListPage>("model/list", { cursor, limit: 100, includeHidden: true });
         for (const m of page.data) {
           const entry = { supported: m.supportedReasoningEfforts.map((x) => x.reasoningEffort), default: m.defaultReasoningEffort };
@@ -604,6 +619,7 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
       if (endReason !== null) throw new Error(endReason);
       model = next;
       reportEffort(next);
+      uncheckedNotice(next);
     },
     async setEffort(level) {
       if (endReason !== null) throw new Error(endReason);

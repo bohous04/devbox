@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { knownEffort } from "../../shared/effort";
+import { parseEffortState } from "../../shared/effort";
 import type { BackgroundWork, Capabilities, LoggedEvent, PendingRequest, RunRow, ThreadEffort, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
 const TERMINAL: ReadonlySet<string> = new Set(["completed", "interrupted", "failed"]);
@@ -31,7 +31,7 @@ export const THREAD_STORE_SCHEMA = 1;
  *  several items); `updated_seq`
  *  is the seq of their last change, so `snapshot({afterSeq})` also returns items that kept streaming. */
 export class ThreadStore {
-  /** Unknown effort levels already logged, so a bridge repeating one logs it once. */
+  /** Effort values already logged as dropped, so a bridge repeating one logs it once per session. */
   private effortLogged = new Set<string>();
 
   private constructor(private db: Database, private onNotice: (item: ThreadItem) => void) {}
@@ -239,14 +239,8 @@ export class ThreadStore {
         this.insertItem(seq, ts, { runId: null, itemId: null, kind: "notice", text: ev.text, status: "done" });
         return;
       case "effort.state": {
-        // Only known levels are stored and served (shared/effort.ts): the bridge's strings never reach the UI as such.
-        const { effort: state, dropped } = knownEffort({ model: ev.model, supported: ev.supported, effective: ev.effective, chosen: ev.chosen });
-        for (const level of dropped) {
-          const shown = JSON.stringify(level.slice(0, 40));
-          if (this.effortLogged.has(shown)) continue;
-          this.effortLogged.add(shown);
-          console.error(`thread store: unknown effort level ${shown} at seq ${seq} dropped`);
-        }
+        // Parsed whatever its shape (shared/effort.ts): the bridge's values reach the UI only as known levels.
+        const state = this.parseEffort(ev, `seq ${seq}`);
         db.query("INSERT INTO effort (id, state) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET state=excluded.state").run(JSON.stringify(state));
         return;
       }
@@ -382,13 +376,32 @@ export class ThreadStore {
       });
     const bg = this.db.query("SELECT work FROM background WHERE id=1").get() as { work: string } | null;
     const n = this.db.query("SELECT * FROM native WHERE id=1").get() as Record<string, any> | null;
-    const effort = this.db.query("SELECT state FROM effort WHERE id=1").get() as { state: string } | null;
     return {
       lastSeq: this.lastSeq(), seenSeq: this.meta("seen_seq"), runs, items, pending,
       background: bg ? (JSON.parse(bg.work) as BackgroundWork[]) : [],
       native: n ? { harness: n.harness, nativeThreadId: n.native_thread_id, account: n.account, model: n.model } : null,
-      effort: effort ? (JSON.parse(effort.state) as ThreadEffort) : null,
+      effort: this.effort(),
     };
+  }
+
+  /** The agent's reasoning effort from the latest effort.state, parsed again on the way out: a store written before
+   *  the parser (or by hand) serves no other shape. null before one. */
+  effort(): ThreadEffort | null {
+    const row = this.db.query("SELECT state FROM effort WHERE id=1").get() as { state: string } | null;
+    if (row === null) return null;
+    let raw: unknown;
+    try { raw = JSON.parse(row.state); } catch { raw = null; }
+    return this.parseEffort(raw, "the stored state");
+  }
+
+  private parseEffort(raw: unknown, where: string): ThreadEffort {
+    const { effort, dropped } = parseEffortState(raw);
+    for (const what of dropped) {
+      if (this.effortLogged.has(what)) continue;
+      this.effortLogged.add(what);
+      console.error(`thread store: effort ${what} at ${where} dropped`);
+    }
+    return effort;
   }
 
   /** The most recently used native thread of `harness`, or null when this session never used that harness. */

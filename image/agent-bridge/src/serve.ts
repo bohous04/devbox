@@ -354,7 +354,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     const r = recoverState(log.scan(), { harness: o.harness, account: o.account, model: o.model });
     loaded = r.state;
     recoveryNotice = `state.json was unusable (${e.message}); the bridge rebuilt its state from the event log: ${r.outcome}. `
-      + `Lost with it: the automatic-continuation history, the usage baseline, an undelivered switch handoff. The damaged file is kept as ${basename(kept)}.`;
+      + `Lost with it: the automatic-continuation history, the usage baseline, an undelivered switch handoff, the chosen reasoning effort (back to the model's default). The damaged file is kept as ${basename(kept)}.`;
     logError(`agent-bridge: ${recoveryNotice}`);
   }
   // After a switch the persisted target is the session's harness, whatever the container was launched with (or,
@@ -756,6 +756,8 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
         persist();
         return;
       case "setEffort":
+        // The harness being replaced would take it and the new one open without it.
+        refuseWhileSwitching("effort change");
         await liveHarness().session.setEffort(cmd.effort);
         state.effort = cmd.effort;
         persist();

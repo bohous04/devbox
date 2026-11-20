@@ -826,7 +826,7 @@ describe("switching: fix round 1", () => {
     expect(f.turns.map((t) => t.text)).toEqual(["P\n\nUser message:\nhi"]);
   });
 
-  test("switchTarget, setModel and restartAgent are refused while a switch is in flight", async () => {
+  test("switchTarget, setModel, setEffort and restartAgent are refused while a switch is in flight", async () => {
     let release: () => void = () => {};
     const gate = new Promise<void>((r) => (release = r));
     const f = fakeHarness({ readyGates: [undefined, gate] });
@@ -838,6 +838,9 @@ describe("switching: fix round 1", () => {
     await expect(switchCmd(target, null)).rejects.toThrow("in progress");
     await expect(cmd({ kind: "setModel", model: "m" })).rejects.toThrow("in progress");
     await expect(cmd({ kind: "restartAgent" })).rejects.toThrow("in progress");
+    await expect(cmd({ kind: "setEffort", effort: "high" })).rejects.toThrow("in progress");
+    expect(f.efforts).toEqual([]);
+    expect(state().effort).toBeNull();
     release();
     await first;
     expect(f.opens.length).toBe(2);
@@ -1290,6 +1293,8 @@ describe("step 6 hardening", () => {
     const started = events().find((e, i) => i >= 3 && e.type === "bridge.started") as Extract<BridgeEvent, { type: "bridge.started" }>;
     expect(started.resumed).toBe(true);
     expect(started.notice).toContain("state.json was unusable (the file is empty)");
+    // A choice of effort lives only in state.json: the user is told it is gone.
+    expect(started.notice).toContain("the chosen reasoning effort (back to the model's default)");
     expect(started.notice).toContain("resumes thread thread-7");
     expect(logged).toContainEqual(expect.stringContaining("state.json was unusable (the file is empty)"));
     expect(readdirSync(dir)).toContain(`state.json.corrupt-${NOW}`);

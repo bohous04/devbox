@@ -7,15 +7,31 @@ export const KNOWN_EFFORT_LEVELS: readonly string[] = ["none", "minimal", "low",
 
 export const isKnownEffort = (v: unknown): v is string => typeof v === "string" && KNOWN_EFFORT_LEVELS.includes(v);
 
-/** An effort.state's facts with every level outside KNOWN_EFFORT_LEVELS dropped (a listed one left out, an unknown
- *  effective or chosen level as not known); `dropped` names what went, for the caller to log. */
-export function knownEffort(e: ThreadEffort): { effort: ThreadEffort; dropped: string[] } {
+const MAX_MODEL_LENGTH = 128;
+
+/** A bridge's effort.state (or what devd stored of one) as devd keeps and serves it, whatever its shape: a model id
+ *  of at most 128 characters, only known levels (each once), anything else as not known. `dropped` says what went,
+ *  shortened, for the caller to log. */
+export function parseEffortState(raw: unknown): { effort: ThreadEffort; dropped: string[] } {
+  const r = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
   const dropped: string[] = [];
-  const keep = (l: string | null) => {
-    if (l === null || isKnownEffort(l)) return l;
-    dropped.push(l);
+  const shown = (v: unknown) => (typeof v === "string" ? JSON.stringify(v.slice(0, 40)) : Array.isArray(v) ? "an array" : typeof v);
+  const level = (field: string, v: unknown): string | null => {
+    if (v === null || v === undefined) return null;
+    if (isKnownEffort(v)) return v;
+    dropped.push(`${field} ${shown(v)}`);
     return null;
   };
-  const supported = e.supported === null ? null : e.supported.filter((l) => keep(l) !== null);
-  return { effort: { model: e.model, supported, effective: keep(e.effective), chosen: keep(e.chosen) }, dropped };
+  let model: string | null = null;
+  if (typeof r.model === "string" && r.model.length <= MAX_MODEL_LENGTH) model = r.model;
+  else if (r.model !== null && r.model !== undefined) dropped.push(`model ${shown(r.model)}`);
+  let supported: string[] | null = null;
+  if (Array.isArray(r.supported)) {
+    supported = [];
+    for (const v of r.supported) {
+      const l = level("supported", v);
+      if (l !== null && !supported.includes(l)) supported.push(l);
+    }
+  } else if (r.supported !== null && r.supported !== undefined) dropped.push(`supported ${shown(r.supported)}`);
+  return { effort: { model, supported, effective: level("effective", r.effective), chosen: level("chosen", r.chosen) }, dropped };
 }

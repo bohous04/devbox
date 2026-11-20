@@ -203,7 +203,7 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
     if (version === null || !versionAtLeast(version, EFFORT_MIN_BRIDGE_VERSION)) {
       return c.json({ error: "bridge-too-old", message: `this session's agent bridge (${version ?? "unknown version"}) cannot change the effort; it needs ${EFFORT_MIN_BRIDGE_VERSION} — recreate the session's container` }, 409);
     }
-    const known = r.store.snapshot({ limit: 0 }).effort;
+    const known = r.store.effort();
     if (effort !== null && known?.supported && !known.supported.includes(effort)) {
       const takes = known.supported.length === 0 ? "takes no effort levels" : `takes ${known.supported.join(", ")}`;
       return c.json({ error: "unsupported-effort", message: `${known.model ?? "this model"} ${takes}` }, 400);
@@ -300,7 +300,8 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
    *  ONE `thread-snapshot` event `{afterSeq, snapshot}` with `id: snapshot.lastSeq`, then live `thread` events with
    *  seq > that id, each exactly once. The store keeps state, not raw events: `snapshot({afterSeq})` holds every item
    *  and run changed after that seq as whole rows, which replace the client's copies; pending, background and
-   *  native replace wholesale.
+   *  native replace wholesale. An effort.state never goes out as a `thread` event: `thread-effort` carries the
+   *  store's parsed ThreadEffort (no id), and the snapshot has it as `effort`.
    *
    *  text/event-stream is not compressed (hono's compress skips it); the ping keeps the connection under Bun's
    *  idleTimeout. */
@@ -342,6 +343,12 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
           // A devd notice (ThreadStore.addNotice) has no seq of its own: no id, so Last-Event-ID stays the bridge's.
           if (isRecord(data) && "notice" in data) { send(sseFrame("thread-notice", data.notice)); return; }
           const e = data as LoggedEvent;
+          // The parsed effort as its own event (no id, like a notice): an app that predates it ignores an event name
+          // it does not know, but would show an unknown `thread` event type as a notice in the thread.
+          if (e.event.type === "effort.state") {
+            if (store) send(sseFrame("thread-effort", store.effort()));
+            return;
+          }
           if (e.seq <= sentSeq) return;
           sentSeq = e.seq;
           send(sseFrame("thread", e, e.seq));

@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import type { BridgeEvent, LoggedEvent, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 import fixture from "../../shared/fixtures/thread-events.json";
-import { activeRun, applyNotice, applyThreadEvent, composerErrorText, criticRunIds, emptyThread, mergeSnapshot, queuedRunIds } from "./threadView";
+import { activeRun, applyEffort, applyNotice, applyThreadEvent, composerErrorText, criticRunIds, emptyThread, mergeSnapshot, queuedRunIds } from "./threadView";
 
 /** The shared cases (also run by ios/DevboxAppTests/ThreadStoreTests.swift): each starts from an empty thread. */
 type Step = { event: LoggedEvent } | { snapshot: { afterSeq: number; snapshot: ThreadSnapshot } } | { notice: ThreadItem };
@@ -61,16 +61,13 @@ test("composerErrorText shows a bridge-too-old refusal's message", () => {
   expect(composerErrorText(409, { error: "bridge-too-old", message: "recreate the container" })).toBe("recreate the container");
 });
 
-test("effort.state sets the thread's effort, the latest wins, and a snapshot brings it too", () => {
-  const e = (chosen: string | null): BridgeEvent => ({ type: "effort.state", model: "gpt-6.1-sol", supported: ["low", "medium", "high"], effective: chosen ?? "medium", chosen });
-  const t = run(emptyThread(), [e(null), e("high")]);
-  expect(t.effort).toEqual({ model: "gpt-6.1-sol", supported: ["low", "medium", "high"], effective: "high", chosen: "high" });
-  expect(t.items).toEqual([]);
-  const merged = mergeSnapshot(emptyThread(), { afterSeq: 0, snapshot: { ...emptyThread(), effort: t.effort } });
-  expect(merged.effort).toEqual(t.effort);
-});
-
-test("effort.state: a level outside the known list is never shown", () => {
-  const t = run(emptyThread(), [{ type: "effort.state", model: "m", supported: ["low", "turbo"], effective: "turbo", chosen: "turbo" }]);
-  expect(t.effort).toEqual({ model: "m", supported: ["low"], effective: null, chosen: null });
+test("effort: a thread-effort replaces the thread's effort; an effort.state thread event changes nothing", () => {
+  const effort = { model: "gpt-6.1-sol", supported: ["low", "medium", "high"], effective: "high", chosen: "high" };
+  const t = applyEffort(emptyThread(), effort);
+  expect(t.effort).toEqual(effort);
+  const after = run(t, [{ type: "effort.state", model: "m", supported: [], effective: null, chosen: null }]);
+  expect(after.effort).toEqual(effort);
+  expect(after.items).toEqual([]);
+  const merged = mergeSnapshot(emptyThread(), { afterSeq: 0, snapshot: { ...emptyThread(), effort } });
+  expect(merged.effort).toEqual(effort);
 });

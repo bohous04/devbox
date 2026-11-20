@@ -650,6 +650,32 @@ describe("Claude effort (1.7.0)", () => {
     expect(events).toContainEqual({ type: "bridge.notice", text: "Effort max is not available on claude-sonnet-4-5; back to its default." });
   });
 
+  test("a run going when the effort changed reports its old level: the chip keeps the choice until a later run reports", async () => {
+    const sdk = fakeSdk();
+    const { session, efforts } = open(sdk, () => 0, { model: "claude-opus-4-5" });
+    await until(() => efforts.length === 1);
+    const signal = new AbortController().signal;
+    await session.startTurn("run-1", "go", "user");
+    await session.setEffort("max");
+    await stopHook(sdk)({ hook_event_name: "Stop", effort: { level: "high" } }, undefined, { signal });
+    expect(efforts.at(-1)).toMatchObject({ chosen: "max", effective: null });
+    sdk.push(result(usage(1, 1), 0.01));
+    await session.startTurn("run-2", "again", "user");
+    await until(() => sdk.inputs.length === 2);
+    await stopHook(sdk)({ hook_event_name: "Stop", effort: { level: "max" } }, undefined, { signal });
+    expect(efforts.at(-1)).toMatchObject({ chosen: "max", effective: "max" });
+  });
+
+  test("a switch to a model the CLI does not list forgets the previous model's levels and level", async () => {
+    const sdk = fakeSdk();
+    const { session, efforts, logs } = open(sdk, () => 0, { model: "claude-opus-4-5" });
+    await until(() => efforts.length === 1);
+    await stopHook(sdk)({ hook_event_name: "Stop", effort: { level: "high" } }, undefined, { signal: new AbortController().signal });
+    await session.setModel("claude-haiku-9");
+    await until(() => logs.some((l) => l.includes("claude-haiku-9 is not in the CLI's model list")));
+    expect(efforts.at(-1)).toEqual({ type: "effort.state", model: "claude-haiku-9", supported: null, effective: null, chosen: null });
+  });
+
   test("launched on the CLI's default model, the levels follow the model its init names", async () => {
     const sdk = fakeSdk();
     const { session, efforts } = open(sdk, () => 0, { model: null });

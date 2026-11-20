@@ -1126,8 +1126,6 @@ enum BridgeEvent: Decodable, Equatable {
     case bridgeStarted(version: String, resumed: Bool, notice: String?)
     /// (bridge 1.5.0+) A notice for the thread that is not about a run.
     case bridgeNotice(text: String)
-    /// (bridge 1.7.0+) The agent's reasoning effort. The apps do not show it yet; known so it is not an unknown event.
-    case effortState
     case unknown(type: String)
 
     private enum K: String, CodingKey {
@@ -1175,8 +1173,6 @@ enum BridgeEvent: Decodable, Equatable {
             self = .bridgeStarted(version: try s(.version), resumed: try c.decode(Bool.self, forKey: .resumed), notice: try o(.notice))
         case "bridge.notice":
             self = .bridgeNotice(text: try s(.text))
-        case "effort.state":
-            self = .effortState
         default:
             self = .unknown(type: type)
         }

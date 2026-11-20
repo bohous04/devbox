@@ -624,4 +624,42 @@ describe("Codex effort (1.7.0)", () => {
     await session.startTurn("run-1", "go", "user");
     await until(() => fake.requests("turn/start").length === 1);
   });
+
+  test("a failing model/list with a choice says that the level goes unchecked, also after a model switch", async () => {
+    const fake = fakeCodex();
+    fake.responders["model/list"] = undefined;
+    const { session, events } = open(fake, { effort: "high" });
+    await session.ready;
+    await until(() => fake.requests("model/list").length === 1);
+    fake.push({ id: fake.requests("model/list")[0]!.id, error: { code: -32601, message: "unknown method" } });
+    const unchecked = (m: string): BridgeEvent => ({ type: "bridge.notice", text: `Codex's model list could not be read, so effort high is sent without checking that ${m} takes it.` });
+    await until(() => events.some((e) => e.type === "bridge.notice"));
+    expect(events).toContainEqual(unchecked("gpt-5.5-codex"));
+    await session.setModel("gpt-5.4-mini");
+    expect(events).toContainEqual(unchecked("gpt-5.4-mini"));
+  });
+
+  test("model/list paging stops after 20 pages: the levels stay unknown, logged", async () => {
+    const fake = fakeCodex();
+    let pages = 0;
+    fake.responders["model/list"] = () => ({ data: [], nextCursor: `page-${++pages}` });
+    const { logs, efforts } = open(fake);
+    await until(() => logs.some((l) => l.includes("model/list failed")));
+    expect(pages).toBe(20);
+    expect(logs.find((l) => l.includes("model/list failed"))).toContain("more than 20 pages");
+    expect(efforts.at(-1)).toMatchObject({ supported: null });
+  });
+
+  test("a resumed thread's first turn says the level: an earlier bridge may have left an override on it", async () => {
+    const fake = fakeCodex();
+    const { session, efforts } = open(fake, { resume: "thread-old" });
+    await until(() => efforts.length === 1);
+    await session.startTurn("run-1", "go", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    expect(fake.requests("turn/start")[0]!.params).toMatchObject({ effort: "medium" });
+    fake.push(...simpleTurn("turn-1", "thread-old"));
+    await session.startTurn("run-2", "go", "user");
+    await until(() => fake.requests("turn/start").length === 2);
+    expect("effort" in (fake.requests("turn/start")[1]!.params as object)).toBe(false);
+  });
 });

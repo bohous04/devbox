@@ -72,7 +72,7 @@ export function Switchers({ sessionId, thread, children }: {
 
   // The level arrives back as the bridge's effort.state over the stream; no target to reload.
   async function setEffort(level: string | null, label: string) {
-    setBusy("effort"); setErr(null);
+    setBusy("effort"); setErr(null); setNote(null);
     try { await api.setChatEffort(sessionId, level); }
     catch (e) { setErr(`Effort change to ${label} failed: ${errorText(e)}`); }
     setBusy(null);

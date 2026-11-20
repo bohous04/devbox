@@ -661,3 +661,32 @@ test("POST thread/effort: the bridge's refusal comes back as 409 command-failed 
   expect(r.status).toBe(409);
   expect(await r.json()).toEqual({ error: "command-failed", message: "the agent has not reported its effort levels yet" });
 });
+
+test("SSE: an effort.state goes out parsed as thread-effort, never as a thread event (older apps show those as unknown)", async () => {
+  const t = setup({ bridgeVersion: "1.7.0" });
+  const res = await t.a.fetch(req("GET", `/api/stream?session=${CHAT.id}`));
+  const events = readEvents(res, 2);
+  await Bun.sleep(10);
+  t.feed(CHAT.id, [{ type: "effort.state", model: "claude-opus-5-5", supported: ["low", "turbo", "high"], effective: "x".repeat(500), chosen: "high" }]);
+  const [next] = t.feed(CHAT.id, [started("r1")]);
+  expect(await events).toEqual([
+    { event: "thread-effort", data: { model: "claude-opus-5-5", supported: ["low", "high"], effective: null, chosen: "high" } },
+    { event: "thread", id: "2", data: next },
+  ]);
+});
+
+test("a malformed effort.state is stored as nothing known: the snapshot stays readable and POST thread/effort answers", async () => {
+  const t = setup({ bridgeVersion: "1.7.0" });
+  const errors = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    t.feed(CHAT.id, [{ type: "effort.state", model: "m".repeat(200), supported: 5, effective: {}, chosen: "A".repeat(100_000) } as unknown as BridgeEvent]);
+    const snap = (await (await t.a.fetch(req("GET", `/api/sessions/${CHAT.id}/thread`))).json()) as ThreadSnapshot;
+    expect(snap.effort).toEqual({ model: null, supported: null, effective: null, chosen: null });
+    expect((await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/effort`, { effort: "high" }))).status).toBe(202);
+    const logged = errors.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("thread store: effort"));
+    expect(logged).toHaveLength(4);
+    expect(logged.every((l) => l.length < 200)).toBe(true);
+  } finally {
+    errors.mockRestore();
+  }
+});
