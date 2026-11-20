@@ -15,6 +15,8 @@ struct MessageRow: View, Equatable {
     private var pending: PendingRequest? { row.pending }
     private var queued: Bool { row.queued }
     private var critic: Bool { row.critic }
+    /// The notice is its run's failure (run.failed), not devd's or the bridge's own.
+    private var failedRun: Bool { row.failedRun }
 
     static func == (a: MessageRow, b: MessageRow) -> Bool { a.row == b.row && a.sessionId == b.sessionId }
 
@@ -22,23 +24,35 @@ struct MessageRow: View, Equatable {
         switch item.kind {
         case .user: userBubble
         case .assistant:
-            HStack(alignment: .lastTextBaseline, spacing: 2) {
-                ChatText(item.text)
+            VStack(alignment: .leading, spacing: 4) {
+                ChatMarkdown(text: item.text)
                 if item.status == .streaming {
                     Image(systemName: "ellipsis").symbolEffect(.variableColor.iterative).foregroundStyle(Theme.C.mutedForeground)
                         .accessibilityLabel("writing")
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         case .tool: ToolCallView(item: item)
         case .request: request
-        case .notice, .unknown: // an item kind of a later devd: its text, shown like a notice rather than dropped
-            Label { Text(item.text) } icon: { Image(systemName: "info.circle") }
-                .font(Theme.F.meta)
-                .foregroundStyle(Theme.C.mutedForeground)
-                .padding(.horizontal, 12).padding(.vertical, 8)
+        case .notice, .unknown: notice // an item kind of a later devd: its text, shown like a notice rather than dropped
+        }
+    }
+
+    /// A run's failure stays prominent; devd's and the bridge's own notices (and an unknown kind) are a faint centred
+    /// line between hairlines.
+    @ViewBuilder
+    private var notice: some View {
+        if item.kind == .notice, failedRun {
+            Label { Text(item.text) } icon: { Image(systemName: "exclamationmark.circle") }
+                .font(Theme.F.meta).foregroundStyle(Theme.C.dangerText)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.C.muted, in: RoundedRectangle(cornerRadius: Theme.R.md))
+        } else {
+            HStack(spacing: 10) {
+                Rectangle().fill(Theme.C.border).frame(height: 1 / 3)
+                Text(item.text).font(.system(size: 11)).foregroundStyle(Theme.C.mutedForeground).multilineTextAlignment(.center)
+                    .layoutPriority(1)
+                Rectangle().fill(Theme.C.border).frame(height: 1 / 3)
+            }
+            .padding(.vertical, 2)
         }
     }
 
@@ -54,12 +68,14 @@ struct MessageRow: View, Equatable {
                         }
                     }
                 }
-                Text(item.text).font(Theme.F.body).textSelection(.enabled)
+                ClampedText(text: item.text)
                 if queued { Badge("queued", variant: .secondary) }
             }
-            .padding(.horizontal, 14).padding(.vertical, 8)
-            .foregroundStyle(Theme.C.primaryForeground)
-            .background(Theme.C.primary, in: RoundedRectangle(cornerRadius: 18))
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .foregroundStyle(Theme.C.foreground)
+            // Quiet: the answer, not the prompt, is what the thread is read for.
+            .background(Theme.C.muted, in: UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: 18, bottomTrailingRadius: 6, topTrailingRadius: 18))
+            .overlay(UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: 18, bottomTrailingRadius: 6, topTrailingRadius: 18).strokeBorder(Theme.C.border.opacity(0.7)))
             .opacity(queued ? 0.7 : 1)
         }
     }
@@ -84,6 +100,34 @@ struct MessageRow: View, Equatable {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Theme.C.card, in: RoundedRectangle(cornerRadius: Theme.R.lg))
             .overlay(RoundedRectangle(cornerRadius: Theme.R.lg).strokeBorder(Theme.C.border))
+        }
+    }
+}
+
+/// A long prompt folds to six lines so it does not outweigh the answer; "Show more" opens it in place. The toggle
+/// shows only when the text really is longer (measured against the same text unclamped).
+struct ClampedText: View {
+    let text: String
+    @State private var open = false
+    @State private var full: CGFloat = 0
+    @State private var clamped: CGFloat = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(text).font(.system(size: 16)).lineSpacing(3).textSelection(.enabled)
+                .lineLimit(open ? nil : 6)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { if !open { clamped = $0 } }
+                .background(alignment: .topLeading) {
+                    // The same text unclamped, invisible, for its real height.
+                    Text(text).font(.system(size: 16)).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                        .hidden()
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { full = $0 }
+                }
+            if open || full > clamped + 1 {
+                Button(open ? "Show less" : "Show more") { withAnimation(.snappy) { open.toggle() } }
+                    .font(.system(size: 14, weight: .medium)).foregroundStyle(Theme.C.mutedForeground)
+                    .buttonStyle(.plain)
+            }
         }
     }
 }

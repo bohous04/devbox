@@ -44,6 +44,16 @@ struct ChatScreen: View {
         return "\(s.project)/\(s.repo)"
     }
 
+    /// The header names the thread like the web's: its nickname, else a short title from its first message, with
+    /// where it runs under it. nil until the thread and the session are known.
+    private var heading: (title: String, place: String?) {
+        let s = live.live?.sessions.first(where: { $0.id == sessionId })
+        let place = s.map { "\($0.project) / \($0.repo)" }
+        if let name = s?.name?.trimmingCharacters(in: .whitespaces), !name.isEmpty { return (name, place) }
+        if let first = store.thread?.items.first(where: { $0.kind == .user })?.text, let t = ThreadTitle.from(first) { return (t, place) }
+        return (place ?? sessionId, nil)
+    }
+
     var body: some View {
         Group {
             if store.ended {
@@ -71,9 +81,22 @@ struct ChatScreen: View {
             }
         }
         .background(Theme.C.background)
-        .navigationTitle(title)
+        .navigationTitle(heading.title)
         .inlineNavigationTitle()
+        .solidNavigationBar()
+        .hidesTabBar()
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                // Title and place share one left edge, next to the back button.
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(heading.title).font(.system(size: 16, weight: .semibold)).lineLimit(1)
+                    if let place = heading.place {
+                        Text(place).font(.system(size: 12)).foregroundStyle(Theme.C.mutedForeground).lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityElement(children: .combine)
+            }
             if openTerminal == nil {
                 ToolbarItem(placement: .primaryAction) {
                     Button { showTerminal = true } label: { Label("Terminal", systemImage: "terminal") }
@@ -103,15 +126,22 @@ struct ChatScreen: View {
     private func conversation(_ t: ThreadSnapshot) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
+                LazyVStack(alignment: .leading, spacing: 16) {
                     banners
                     if t.items.isEmpty {
                         EmptyState("No messages yet — write the first message below.", systemImage: "bubble.left")
                     }
-                    ForEach(store.rows) { row in
-                        MessageRow(row: row, sessionId: sessionId, client: client,
-                                   onAnswer: { try await store.answer(requestId: $0, answer: $1) })
-                            .equatable()
+                    ForEach(store.display) { row in
+                        switch row {
+                        case .work(let w): WorkGroupView(work: w).equatable()
+                        case .item(let r, _):
+                            MessageRow(row: r, sessionId: sessionId, client: client,
+                                       onAnswer: { try await store.answer(requestId: $0, answer: $1) })
+                                .equatable()
+                            if let anchor = store.changesAnchor, anchor.rowId == r.id {
+                                ChangesCard(sessionId: sessionId, client: client, refreshKey: anchor.endedSeq)
+                            }
+                        }
                     }
                     if !t.background.isEmpty {
                         Text("background: \(t.background.map(\.label).joined(separator: ", "))")
@@ -131,16 +161,27 @@ struct ChatScreen: View {
                 if atEnd { proxy.scrollTo("end", anchor: .bottom) }
             }
             .safeAreaInset(edge: .bottom) {
-                VStack(alignment: .leading, spacing: 6) {
-                    ChatSwitchers(sessionId: sessionId, thread: t, targetKey: store.switchKey, client: client)
-                    ComposerView(running: ThreadView.activeRun(t) != nil,
-                                 onSend: { try await store.send(text: $0, images: $1) },
-                                 onStop: { try await store.interrupt() })
+                ChatSwitchers(sessionId: sessionId, thread: t, targetKey: store.switchKey, client: client) { chip, status in
+                    VStack(alignment: .leading, spacing: 6) {
+                        status
+                        ComposerView(running: ThreadView.activeRun(t) != nil, chip: chip,
+                                     onSend: { try await store.send(text: $0, images: $1) },
+                                     onStop: { try await store.interrupt() })
+                    }
                 }
                 .padding(.horizontal, Theme.S.screenPadding)
-                .padding(.vertical, 8)
-                .background(.bar)
+                .padding(.top, 8).padding(.bottom, 6)
+                // Opaque: the thread scrolls under the composer, not through it, and fades out just above it
+                // instead of being cut at a hard line. The fill runs on under the home indicator and the keyboard,
+                // so no strip of the thread shows below the keyboard's rounded corners.
+                .background(Theme.C.background.ignoresSafeArea(.all, edges: .bottom))
+                .background(alignment: .top) {
+                    LinearGradient(colors: [Theme.C.background.opacity(0), Theme.C.background], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 24).offset(y: -24).allowsHitTesting(false)
+                }
             }
+            // The header's bottom edge: a hairline the thread scrolls under.
+            .overlay(alignment: .top) { Rectangle().fill(Theme.C.border).frame(height: 1 / 3).accessibilityHidden(true) }
         }
     }
 

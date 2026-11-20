@@ -75,6 +75,38 @@ extension View {
         #endif
     }
 
+    /// An opaque navigation bar in the screen's background colour with a hairline under it, so content scrolls under
+    /// a solid bar instead of showing through it. The Mac's window toolbar stays as it is.
+    /// No soft fade at a scroll view's edges (the system default from iOS 26): a diff or a code line must not look
+    /// rounded off where it meets the block's edge.
+    @ViewBuilder
+    func plainScrollEdges() -> some View {
+        if #available(iOS 26, macOS 26, *) {
+            scrollEdgeEffectHidden(true, for: .all)
+        } else {
+            self
+        }
+    }
+
+    /// A pushed screen that needs the full height (the chat thread): no tab bar under it on iPhone; back navigation
+    /// brings it back. The Mac has no tab bar there.
+    func hidesTabBar() -> some View {
+        #if os(iOS)
+        toolbar(.hidden, for: .tabBar)
+        #else
+        self
+        #endif
+    }
+
+    func solidNavigationBar() -> some View {
+        #if os(iOS)
+        toolbarBackground(Theme.C.background, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
+        #else
+        self
+        #endif
+    }
+
     /// A field for a URL or a token: no autocapitalization or autocorrection, the URL keyboard on iPhone.
     func plainEntry(url: Bool = false) -> some View {
         #if os(iOS)
