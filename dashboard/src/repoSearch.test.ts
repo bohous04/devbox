@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { TreeProject } from "./api";
-import { highlight, repoSearch } from "./repoSearch";
+import { highlight, openIndex, pickKey, repoSearch, searchTerms } from "./repoSearch";
 
 const repo = (name: string) => ({ name, cloneUrl: `https://git.example/${name}.git`, provider: "github", cloned: false });
 const TREE: TreeProject[] = [
@@ -37,4 +37,26 @@ test("highlight marks every term occurrence, case-insensitively", () => {
   expect(highlight("Harbor-Web", ["web"])).toEqual([{ text: "Harbor-", hit: false }, { text: "Web", hit: true }]);
   expect(highlight("lumen-api", ["api", "lu"])).toEqual([{ text: "lu", hit: true }, { text: "men-", hit: false }, { text: "api", hit: true }]);
   expect(highlight("abc", [])).toEqual([{ text: "abc", hit: false }]);
+});
+
+test("search and highlight fold case and diacritics, also where folding changes the length", () => {
+  const tree: TreeProject[] = [{ folder: "acme", project: "acme", repos: [repo("Café-api"), repo("İstanbul")] }];
+  expect(names(repoSearch(tree, "cafe")[0]!)).toEqual(["Café-api"]);
+  expect(names(repoSearch(tree, "CAFÉ")[0]!)).toEqual(["Café-api"]);
+  expect(names(repoSearch(tree, "istan")[0]!)).toEqual(["İstanbul"]);
+  expect(highlight("Café-api", searchTerms("cafe"))).toEqual([{ text: "Café", hit: true }, { text: "-api", hit: false }]);
+  // "İ" lower-cases to two units; the rest of the name must still line up.
+  expect(highlight("İstanbul", searchTerms("bul"))).toEqual([{ text: "İstan", hit: false }, { text: "bul", hit: true }]);
+  expect(highlight("İstanbul", searchTerms("is"))).toEqual([{ text: "İs", hit: true }, { text: "tanbul", hit: false }]);
+  // A decomposed "é" (e + combining accent) stays one highlighted piece.
+  expect(highlight("café bar", ["cafe"])).toEqual([{ text: "café", hit: true }, { text: " bar", hit: false }]);
+});
+
+test("openIndex: the picked repo's row in the unfiltered list, whatever the last query was", () => {
+  const all = repoSearch(TREE, "").flatMap((s) => s.groups.flatMap((g) => g.items));
+  const key = pickKey("work", "webshop", "cart");
+  expect(all[openIndex(TREE, key)]!.key).toBe(key);
+  // The filtered list puts it elsewhere: an index from there would pick another repo after the query is cleared.
+  expect(repoSearch(TREE, "web").flatMap((s) => s.groups.flatMap((g) => g.items)).findIndex((o) => o.key === key)).not.toBe(openIndex(TREE, key));
+  expect(openIndex(TREE, "")).toBe(0);
 });

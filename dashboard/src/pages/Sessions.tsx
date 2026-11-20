@@ -17,7 +17,7 @@ import { cn } from "@/lib/utils";
 import { agoLabel, bytes, compactNumber, czCurrency, durationLabel, stateLabel } from "../format";
 import { AGENT_IDS, AGENT_PROFILES, agentNameFor, profileFor, tmuxRuntimeBlock } from "../newSession";
 import { CC_EVENT_TYPES, fleetBadge, historyLine, rowState, type HistoryTone } from "../ccUpkeepView";
-import { agentSwitchError, openedNotice } from "../sessionsView";
+import { agentSwitchError } from "../sessionsView";
 import { terminalTabUrl } from "../terminalRoute";
 import { useNow, useStore } from "../store";
 import { FormDialog } from "../components/FormDialog";

@@ -13,7 +13,7 @@ import {
   runtimeAfterDefault, runtimeChoice, sessionsFor, tmuxRuntimeBlock,
 } from "../newSession";
 import { getDefaultRuntime, validateConfig } from "../configEdit";
-import { highlight, pickKey, repoSearch, searchTerms } from "../repoSearch";
+import { highlight, openIndex, pickKey, repoSearch, searchTerms } from "../repoSearch";
 import { openedNotice } from "../sessionsView";
 import { useStore } from "../store";
 import { Composer } from "../components/chat/Composer";
@@ -114,9 +114,10 @@ export function NewSession() {
   // A terminal session opens in the Sessions list (its row expanded), a chat session on its own page.
   // The list reads the live store, so it is refreshed first: the new row is there to expand.
   async function opened(id: string, rt: SessionRuntime, message: string | null) {
-    if (rt === "chat") { navigate(`/s/${encodeURIComponent(id)}`, { state: { notice: message } }); return; }
+    // `replace`: Back from the opened session returns to where New session was opened from, not to this form.
+    if (rt === "chat") { navigate(`/s/${encodeURIComponent(id)}`, { replace: true, state: { notice: message } }); return; }
     await refresh();
-    if (aliveRef.current) navigate(`/sessions?open=${encodeURIComponent(id)}`, { state: { notice: message } });
+    if (aliveRef.current) navigate(`/sessions?open=${encodeURIComponent(id)}`, { replace: true, state: { notice: message } });
   }
 
   // `prompt`: the composer's text, trimmed; empty starts the session without one, as before. A failure is thrown to the
@@ -174,11 +175,16 @@ export function NewSession() {
   // session of this runtime when there is one. The other choice is the secondary action next to the summary.
   // The one devd joins: a running session first (joinableSessionId), so the summary names the right one.
   const reusable = onIbx ? null : existing.find((s) => s.status === "running") ?? existing[0] ?? null;
-  const start = () => (onIbx ? startInstabox() : prompt !== "" ? startVps(reusable !== null, prompt) : startVps());
+  // Typed text always asks for a fresh session: devd's join could otherwise hand it to a session this page does not
+  // know about (another tab, a stale store). Empty opens exactly the session the summary names.
+  const start = () => (onIbx ? startInstabox()
+    : prompt !== "" ? startVps(true, prompt)
+    : reusable ? startVps(false, "", reusable.id)
+    : startVps());
   const startLabel = ibxFailed && onIbx ? "Try again" : onIbx ? "Start on InstaBox" : reusable && prompt === "" ? "Open existing" : "Start session";
   const canStart = !!repo && !busy && !!choice && textBlock === null;
   // Continuing takes the message only where devd can deliver it: a running terminal's agent has already started.
-  const continueTakesPrompt = reusable !== null && !(choice?.runtime === "tmux" && reusable.status === "running");
+  const continueTakesPrompt = reusable !== null && reusable.host !== "instabox" && !(choice?.runtime === "tmux" && reusable.status === "running");
 
   const where = onIbx ? "on InstaBox" : "on the VPS";
   const what = choice?.runtime === "chat" ? "chat" : "terminal";
@@ -303,7 +309,12 @@ function RepoPicker({ tree, value, disabled, onPick }: { tree: TreeProject[] | n
   };
   let index = -1;
   return (
-    <Popover open={open} onOpenChange={(next) => { setOpen(next); if (next) { setQuery(""); setActive(Math.max(flat.findIndex((o) => o.key === value), 0)); } }}>
+    <Popover open={open} onOpenChange={(next) => {
+      setOpen(next);
+      if (!next) return;
+      setQuery("");
+      setActive(openIndex(tree ?? [], value));
+    }}>
       <PopoverTrigger asChild disabled={!tree || disabled}>
         <button
           type="button" aria-label={value ? `Repo: ${path} / ${repo}` : "Choose a repo"}
@@ -335,17 +346,20 @@ function RepoPicker({ tree, value, disabled, onPick }: { tree: TreeProject[] | n
             onKeyDown={(e) => {
               if (e.key === "ArrowDown") { e.preventDefault(); setActive(Math.min(at + 1, flat.length - 1)); }
               else if (e.key === "ArrowUp") { e.preventDefault(); setActive(Math.max(at - 1, 0)); }
+              else if (e.key === "Home") { e.preventDefault(); setActive(0); }
+              else if (e.key === "End") { e.preventDefault(); setActive(Math.max(flat.length - 1, 0)); }
               else if (e.key === "Enter" && flat[at]) { e.preventDefault(); pick(flat[at].key); }
             }}
           />
         </div>
         <div ref={listRef} id="repo-list" role="listbox" aria-label="Repos" className="max-h-[min(22rem,50dvh)] overflow-y-auto p-1">
           {flat.length === 0 && <p className="px-2 py-3 text-sm text-muted-foreground">No repo matches “{query}”.</p>}
+          {/* One level of groups (a listbox allows no nesting): a folder section's heading is part of each group's name. */}
           {sections.map((section) => (
-            <div key={section.heading ?? ""} role="group" aria-label={section.heading ?? "Matches"}>
+            <div key={section.heading ?? ""}>
               {section.heading && <p aria-hidden="true" className="mt-1 border-t px-2 pb-0.5 pt-2.5 text-xs font-semibold text-foreground/70">{section.heading}</p>}
               {section.groups.map((g) => (
-                <div key={g.label} role="group" aria-label={g.label || section.heading || undefined}>
+                <div key={g.label} role="group" aria-label={[section.heading, g.label].filter(Boolean).join(" / ")}>
                   {g.label && <p aria-hidden="true" className="px-2 pb-1 pt-2 text-xs font-medium text-muted-foreground">{groupLabel(g.label)}</p>}
                   {g.items.map((o) => {
                     index += 1;
@@ -354,7 +368,7 @@ function RepoPicker({ tree, value, disabled, onPick }: { tree: TreeProject[] | n
                       <div
                         key={o.key} id={`repo-opt-${i}`} data-index={i} role="option" aria-selected={o.key === value}
                         onMouseMove={() => { if (i !== at) setActive(i); }} onClick={() => pick(o.key)}
-                        className={cn("flex min-h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm", i === at && "bg-accent")}
+                        className={cn("flex min-h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm max-sm:min-h-11", i === at && "bg-accent")}
                       >
                         <span className="min-w-0 flex-1 truncate">{o.repo.value === SOLO ? "No repo (claudeSolo)" : marked(o.repo.value)}</span>
                         {o.repo.cloned && <span className="text-xs text-muted-foreground">cloned</span>}
@@ -392,7 +406,7 @@ function AgentMenu({ agent, disabled, onPick }: { agent: AgentName; disabled: bo
       <DropdownMenuContent align="end" side="bottom" sideOffset={8} collisionPadding={16} className="w-[calc(100vw-2rem)] bg-popover sm:w-72">
         <DropdownMenuLabel className="text-xs font-medium text-muted-foreground">Agent</DropdownMenuLabel>
         {AGENT_IDS.map((id) => (
-          <DropdownMenuItem key={id} onSelect={() => onPick(id)}>
+          <DropdownMenuItem key={id} onSelect={() => onPick(id)} className="max-sm:min-h-11">
             <Check className={id === agent ? "" : "invisible"} aria-hidden="true" />
             <AgentGlyph agent={id} />
             <span className="flex-1 truncate">{AGENT_PROFILES[id].label}</span>
@@ -427,7 +441,7 @@ function OptionsMenu({ disabled, runtime, host, chatDisabled, tmuxDisabled, ibxD
   const hostLabel = host === "instabox" ? "InstaBox" : "VPS";
   const label = `${runtimeLabel} · ${hostLabel}`;
   const item = (key: string, title: string, current: boolean, blocked: string | null, detail: string, pick: () => void) => (
-    <DropdownMenuItem key={key} disabled={blocked !== null} onSelect={pick} className="items-start data-[disabled]:opacity-100">
+    <DropdownMenuItem key={key} disabled={blocked !== null} onSelect={pick} className="items-start data-[disabled]:opacity-100 max-sm:min-h-11">
       <Check className={cn("mt-0.5", current ? "" : "invisible")} aria-hidden="true" />
       <span className="flex min-w-0 flex-1 flex-col">
         <span className={blocked ? "opacity-50" : undefined}>{title}</span>
