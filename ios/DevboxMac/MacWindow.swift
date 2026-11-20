@@ -72,7 +72,7 @@ struct MacWindowContent: View {
         if let client = appModel.client, let inbox = state.inbox, let live = state.live {
             NavigationSplitView {
                 MacInboxSidebar(store: inbox, selection: $thread, findRequest: findRequest, newSession: { newSession = true })
-                    .navigationSplitViewColumnWidth(min: 260, ideal: 320)
+                    .navigationSplitViewColumnWidth(min: 260, ideal: 300)
             } detail: {
                 if let id = thread {
                     MacThreadDetail(threadId: id, client: client, inbox: inbox)
@@ -110,8 +110,8 @@ struct MacWindowContent: View {
 
 /// The inbox as the sidebar, by the same rules as the web and iPhone (InboxView): needs you, finished (five, then
 /// "N more"), idle, then the working, snoozed and settled shelves (collapsed). Every group is a disclosure group with
-/// its count aligned at the right. Rows are the iPhone's InboxRow, with the preview line only in Needs you, Working
-/// and Snoozed, and their times tick every 15 s. Above them: the search field (⌘F) and New session (⌘N). ↑/↓ move
+/// its count aligned at the right. Rows are MacInboxRow, with the latest message only in Needs you, Working and
+/// Snoozed, and their times tick every 15 s. Above them: the search field (⌘F) and New session (⌘N). ↑/↓ move
 /// the selection (List); the context menu has the row actions and "Open in New Window".
 struct MacInboxSidebar: View {
     @ObservedObject var store: InboxStore
@@ -247,8 +247,7 @@ struct MacInboxSidebar: View {
 
     private func rows(_ items: [InboxItem], now: Int, preview: Bool) -> some View {
         ForEach(items) { item in
-            InboxRow(item: item, now: now, preview: preview)
-                .padding(.leading, -12) // InboxRow's own leading inset; the list row has its own
+            MacInboxRow(item: item, now: now, preview: preview)
                 .tag(item.sessionId as String?)
                 .contextMenu {
                     Button("Open in New Window") { openWindow(value: item.sessionId) }
@@ -258,7 +257,8 @@ struct MacInboxSidebar: View {
     }
 }
 
-/// A group heading as a disclosure button: chevron, name, and the count aligned at the sidebar's right edge.
+/// A group heading as a disclosure button: small and muted, a step below the row titles, with room above it; the
+/// count aligned where the rows end.
 private struct MacGroupHead: View {
     let label: String
     let count: Int
@@ -268,15 +268,16 @@ private struct MacGroupHead: View {
     var body: some View {
         Button(action: toggle) {
             HStack(spacing: 6) {
-                Image(systemName: "chevron.right").font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(Theme.C.mutedForeground)
+                Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold))
                     .rotationEffect(.degrees(open ? 90 : 0))
                     .frame(width: 10)
-                Text(label).foregroundStyle(Theme.C.foreground.opacity(0.85))
+                Text(label)
                 Spacer(minLength: 8)
-                Text("\(count)").monospacedDigit().foregroundStyle(Theme.C.mutedForeground)
+                Text("\(count)").monospacedDigit()
             }
-            .font(.system(size: 12, weight: .semibold))
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(Theme.C.mutedForeground)
+            .padding(.top, 10)
             // A section header runs wider than the rows; the inset ends the count where the rows' text ends.
             .padding(.trailing, 14)
             .contentShape(Rectangle())
@@ -284,6 +285,65 @@ private struct MacGroupHead: View {
         .buttonStyle(.plain)
         .accessibilityLabel("\(label), \(count)")
         .accessibilityValue(open ? "expanded" : "collapsed")
+    }
+}
+
+/// A sidebar row: the title with its state on the right (one coloured word when the row needs you, otherwise how long
+/// ago), and one muted line: where it runs and, in the groups about the latest message, that message. The agent and
+/// "tmux" are left to the tooltip and the spoken label.
+struct MacInboxRow: View {
+    let item: InboxItem
+    let now: Int
+    let preview: Bool
+
+    /// The word for a row that needs you, by its reason; nil for every other row (it shows its age).
+    static func word(_ i: InboxItem) -> (text: String, tone: InboxView.Tone)? {
+        guard i.attention.section == .needsYou else { return nil }
+        switch i.attention.reason {
+        case .request?: return ("Answer", .action)
+        case .failed?: return ("Failed", .danger)
+        case .rateLimited?: return ("Limit", .danger)
+        case .disconnected?: return ("Offline", .danger)
+        case .bridgeBehind?: return ("Behind", .danger)
+        case .ciFailed?: return ("CI failed", .danger)
+        default: return nil
+        }
+    }
+
+    /// Age, or for a snoozed row when it comes back.
+    static func when(_ i: InboxItem, now: Int) -> String {
+        if let until = i.attention.until { return InboxRow.untilLabel(until) }
+        return i.attention.since > 0 ? InboxView.shortAgo(now - i.attention.since) : ""
+    }
+
+    var body: some View {
+        let title = InboxView.rowTitle(item)
+        let message = item.lastText.flatMap { title.fromMessage ? nil : InboxView.plainPreview($0) } ?? ""
+        let detail = preview ? (message.isEmpty ? InboxView.reasonLabel(item.attention.reason) : message) : ""
+        let spoken = InboxRow.spokenLabel(item, now: now, title: title.text, detail: detail)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(title.text)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.C.foreground)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if let word = Self.word(item) {
+                    Text(word.text).font(.system(size: 11, weight: .semibold)).foregroundStyle(InboxTone.text(word.tone))
+                } else {
+                    Text(Self.when(item, now: now)).font(.system(size: 11)).monospacedDigit().foregroundStyle(Theme.C.mutedForeground)
+                }
+            }
+            (Text("\(item.project)/\(item.repo)") + Text(detail.isEmpty ? "" : "  ·  \(detail)"))
+                .font(.system(size: 11.5))
+                .foregroundStyle(Theme.C.mutedForeground)
+                .lineLimit(1)
+        }
+        .padding(.vertical, 5)
+        .contentShape(Rectangle())
+        .help(spoken)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spoken)
     }
 }
 
@@ -345,7 +405,8 @@ struct MacThreadDetail: View {
         .navigationTitle(item.map { InboxView.rowTitle($0).text } ?? threadId)
         .navigationSubtitle(item.map { "\($0.project) / \($0.repo)" } ?? "")
         .toolbar {
-            ToolbarItem(placement: .principal) {
+            // With the title and breadcrumb on the left, the view switch sits with the window's actions on the right.
+            ToolbarItem(placement: .primaryAction) {
                 Picker("View", selection: Binding(get: { shown }, set: { tab = $0 })) {
                     Text("Chat").tag(Tab.chat)
                     Text("Terminal").tag(Tab.terminal)
