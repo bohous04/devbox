@@ -123,19 +123,37 @@ export async function unpushedInRepo(dir: string, opts: { limit?: number } = {})
   const remotes = await git(dir, "remote");
   const noRemote = remotes.code === 0 && remotes.stdout.trim() === "";
 
-  const refs = await git(dir, "for-each-ref", "--sort=-committerdate", "--format=%(HEAD)%09%(refname)%09%(upstream:short)", "refs/heads");
+  const refs = await git(dir, "for-each-ref", "--sort=-committerdate", "--format=%(HEAD)%09%(refname)%09%(upstream:short)%09%(objectname)", "refs/heads");
   if (refs.code !== 0) return { noRemote, count: 0, branches: [], error: refs.stderr.trim() };
   const heads = refs.stdout.split("\n").filter(Boolean).map((l) => {
-    const [head, ref, upstream] = l.split("\t");
+    const [head, ref, upstream, tip] = l.split("\t");
     // Branch name from the full ref, not `%(refname:short)` — on a collision with a tag that returns
     // "heads/hotfix", and that is not the name the user knows it by.
-    return { head: head === "*", ref, branch: ref.replace(/^refs\/heads\//, ""), upstream: upstream || null, hashes: [] as string[] };
+    return { head: head === "*", ref, branch: ref.replace(/^refs\/heads\//, ""), upstream: upstream || null, tip, hashes: [] as string[] };
   });
+  // ONE walk over every unpushed commit (all branches, not on any remote) with parents and details,
+  // instead of a rev-list and a log per branch: a bare clone with thousands of branches took
+  // over 15 minutes that way. A branch's unpushed commits are then exactly the ones reachable from
+  // its tip without leaving this set (an ancestor of a pushed commit is pushed too), listed in the
+  // walk's order (newest first, as `rev-list <branch>` lists them).
+  const walk = await git(dir, "log", "--branches", "--not", "--remotes", "--format=%H%x1f%P%x1f%s%x1f%ct%x1f%an", "--");
+  if (walk.code !== 0) return { noRemote, count: 0, branches: [], error: (walk.stderr || walk.stdout).trim() || `git log failed (${walk.code})` };
+  const order = new Map<string, number>();
+  const info = new Map<string, { parents: string[]; commit: UnpushedCommit }>();
+  for (const l of walk.stdout.split("\n")) {
+    if (!l) continue;
+    const [hash, parents, subject, ct, author] = l.split("\x1f");
+    order.set(hash, order.size);
+    info.set(hash, { parents: parents ? parents.split(" ") : [], commit: { hash, subject, at: (parseInt(ct, 10) || 0) * 1000, author } });
+  }
   for (const h of heads) {
-    // Full ref, not the short name: for "hotfix" with a tag of the same name git would resolve the tag
-    // (refs/tags takes precedence) and the branch would look clean. `--` separates revisions from paths.
-    const list = await git(dir, "rev-list", h.ref, "--not", "--remotes", "--");
-    if (list.code === 0) h.hashes = list.stdout.split("\n").filter(Boolean);
+    if (!info.has(h.tip)) continue;                      // tip pushed (or reachable from a remote) → nothing
+    const reach = new Set<string>([h.tip]);
+    const stack = [h.tip];
+    while (stack.length) {
+      for (const p of info.get(stack.pop()!)!.parents) if (info.has(p) && !reach.has(p)) { reach.add(p); stack.push(p); }
+    }
+    h.hashes = [...reach].sort((a, b) => order.get(a)! - order.get(b)!);
   }
   // A commit shared by several branches is reported exactly once — and goes to the BASE, i.e. the branch
   // with the fewest unpushed commits (a feature on top of an unpushed main: main has 2, feature
@@ -151,14 +169,7 @@ export async function unpushedInRepo(dir: string, opts: { limit?: number } = {})
     if (!fresh.length) continue;
     for (const x of fresh) seen.add(x);
     const shown = fresh.slice(0, limit);
-    // `--no-walk`: details only for the selected hashes, without walking history. `=unsorted`
-    // keeps the order from rev-list (newest first).
-    const details = await git(dir, "log", "--no-walk=unsorted", "--format=%H%x1f%s%x1f%ct%x1f%an", ...shown);
-    const commits = details.code === 0 ? details.stdout.split("\n").filter(Boolean).map((l) => {
-      const [hash, subject, ct, author] = l.split("\x1f");
-      return { hash, subject, at: (parseInt(ct, 10) || 0) * 1000, author };
-    }) : shown.map((hash) => ({ hash, subject: "", at: 0, author: "" }));
-    branches.push({ branch: h.branch, upstream: h.upstream, count: fresh.length, commits, truncated: fresh.length > shown.length });
+    branches.push({ branch: h.branch, upstream: h.upstream, count: fresh.length, commits: shown.map((x) => info.get(x)!.commit), truncated: fresh.length > shown.length });
   }
   return { noRemote, count: seen.size, branches };
 }
