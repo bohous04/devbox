@@ -95,6 +95,28 @@ enum ChatSwitch {
         return p.proxy ? "The model of \(p.label) is set in settings" : nil
     }
 
+    private static let familyPrefix: [String: String?] = ["claude": nil, "gpt": "GPT-", "grok": "Grok ", "mistral": "Mistral ", "gemini": "Gemini "]
+
+    /// Display name of a model id for the composer chip ("claude-opus-5-5-high" → "Opus 5.5 High";
+    /// dashboard/src/switchView.ts modelLabel). Display only: switches and devd keep the id. An id of an unknown family
+    /// or shape stays the raw id, so nothing is guessed.
+    static func modelLabel(_ id: String) -> String {
+        let resolved = (sameModelAliases[id] ?? id).replacingOccurrences(of: #"-(\d{8}|\d{4}-\d{2}-\d{2})$"#, with: "", options: .regularExpression)
+        let tokens = resolved.components(separatedBy: "-")
+        guard let family = tokens.first, let prefix = familyPrefix[family], tokens.count > 1,
+              tokens.dropFirst().allSatisfy({ $0.range(of: #"^[a-z0-9.]+$"#, options: .regularExpression) != nil }) else { return id }
+        func digits(_ s: String) -> Bool { !s.isEmpty && s.allSatisfy(\.isNumber) }
+        // Version parts split by dashes ("5-5") join with dots; words are capitalised.
+        var parts: [String] = []
+        for t in tokens.dropFirst() {
+            if digits(t), let prev = parts.last, digits(prev) { parts[parts.count - 1] = "\(prev).\(t)" } else { parts.append(t) }
+        }
+        func cap(_ w: String) -> String { w.prefix(1).uppercased() + w.dropFirst() }
+        guard let prefix else { return parts.map(cap).joined(separator: " ") }
+        if prefix == "GPT-" { return (["GPT-\(parts[0])"] + parts.dropFirst().map(cap)).joined(separator: " ") }
+        return prefix + parts.map(cap).joined(separator: " ")
+    }
+
     /// The models devd accepts for the harness; a reported alias marks the model it runs, a variant marks nothing.
     static func modelOptions(_ t: ChatTarget) -> [Option] {
         let current = t.model.map { sameModelAliases[$0] ?? $0 }

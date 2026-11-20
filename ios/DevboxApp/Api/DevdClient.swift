@@ -24,12 +24,15 @@ struct DevdHTTPError: Error, CustomStringConvertible {
     /// The body's `message` next to the `error` code (chat routes: `command-failed`, `bridge-too-old`,
     /// `request-open`…, devd/src/threadApi.ts). Read by `chatErrorText`; `errorText` keeps showing the code.
     let serverDetail: String?
+    /// The body's stable `code`, where a route sends one (the changes routes: `no_commits`…).
+    let serverCode: String?
     var description: String { "HTTP \(statusCode)" }
 
-    init(statusCode: Int, serverMessage: String? = nil, serverDetail: String? = nil) {
+    init(statusCode: Int, serverMessage: String? = nil, serverDetail: String? = nil, serverCode: String? = nil) {
         self.statusCode = statusCode
         self.serverMessage = serverMessage
         self.serverDetail = serverDetail
+        self.serverCode = serverCode
     }
 }
 
@@ -261,7 +264,8 @@ actor DevdClient {
                 if body.count > 4096 { break }
             }
             let parsed = try? JSONDecoder().decode(ErrorBody.self, from: body)
-            throw DevdHTTPError(statusCode: http.statusCode, serverMessage: parsed?.error, serverDetail: parsed?.message)
+            throw DevdHTTPError(statusCode: http.statusCode, serverMessage: parsed?.error, serverDetail: parsed?.message,
+                                 serverCode: parsed?.code)
         }
         return bytes
     }
@@ -399,7 +403,8 @@ actor DevdClient {
             // `try?` — the body may not be JSON at all (empty 404 from CF Access, an HTML error page
             // etc.); a silent `nil` in that case, not a failed request because of an undecodable error.
             let parsed = try? JSONDecoder().decode(ErrorBody.self, from: data)
-            throw DevdHTTPError(statusCode: httpResponse.statusCode, serverMessage: parsed?.error, serverDetail: parsed?.message)
+            throw DevdHTTPError(statusCode: httpResponse.statusCode, serverMessage: parsed?.error, serverDetail: parsed?.message,
+                                 serverCode: parsed?.code)
         }
         return data
     }
@@ -410,13 +415,16 @@ actor DevdClient {
 private struct ErrorBody: Decodable {
     let error: String?
     let message: String?
+    /// A stable reason next to `error` (the changes routes' `ChangesErrorCode`, shared/changes.ts).
+    let code: String?
 
-    private enum CodingKeys: String, CodingKey { case error, message }
+    private enum CodingKeys: String, CodingKey { case error, message, code }
 
     /// Each field on its own: a `message` of another shape must not cost the `error` code.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         error = try? c.decodeIfPresent(String.self, forKey: .error)
         message = try? c.decodeIfPresent(String.self, forKey: .message)
+        code = try? c.decodeIfPresent(String.self, forKey: .code)
     }
 }
