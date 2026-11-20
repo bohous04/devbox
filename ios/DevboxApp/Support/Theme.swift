@@ -94,11 +94,14 @@ enum ChatLayout {
     static let top: CGFloat = 24
     /// A long prompt folds to this many lines.
     static let bubbleLines = 4
+    /// The composer keeps the field over its controls (the web's layout); the iPhone starts on one row.
+    static let composerTwoRows = true
     #else
     static let column: CGFloat = .infinity
     static let bubble: CGFloat = .infinity
     static let top: CGFloat = 0
     static let bubbleLines = 6
+    static let composerTwoRows = false
     #endif
 }
 

@@ -8,7 +8,7 @@ import UniformTypeIdentifiers
 /// next message.
 /// One box (the web's composer): attach, the field, the model chip and send on one row; from the field's second line
 /// the box grows into two tiers, the field on top and the controls under it, and stays so until the text is cleared
-/// (switching back while typing would make the field jump between widths).
+/// (switching back while typing would make the field jump between widths). The Mac always has the two tiers.
 struct ComposerView: View {
     let running: Bool
     /// The model chip (ChatSwitchers); nil while the session's target is unknown.
@@ -29,7 +29,7 @@ struct ComposerView: View {
     @State private var stopping = false
     @State private var preparing = 0
     @State private var error: String?
-    @State private var twoTier = false
+    @State private var twoTier = ChatLayout.composerTwoRows
     /// The field's height with one line, measured while it is empty.
     @State private var oneLine: CGFloat = 0
 
@@ -112,7 +112,7 @@ struct ComposerView: View {
                 // Grows to two tiers at the second line; back to one row only when the text is cleared.
                 if !twoTier, oneLine > 0, h > oneLine + 4 { withAnimation(.snappy) { twoTier = true } }
             }
-            .onChange(of: text) { _, t in if t.isEmpty, twoTier { withAnimation(.snappy) { twoTier = false } } }
+            .onChange(of: text) { _, t in if t.isEmpty, twoTier, !ChatLayout.composerTwoRows { withAnimation(.snappy) { twoTier = false } } }
     }
 
     @ViewBuilder

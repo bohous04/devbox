@@ -20,21 +20,25 @@ struct ChatScreen: View {
     private let openTerminal: (() -> Void)?
     /// The Mac closes the thread's window when its session ended; nil on iPhone (back navigation does it).
     private let closeWindow: (() -> Void)?
+    /// The Mac header's changes chip: each new value scrolls the thread to the changes card.
+    private let revealChanges: Int
 
     init(sessionId: String, client: DevdClient) {
         self.sessionId = sessionId
         self.client = client
         openTerminal = nil
         closeWindow = nil
+        revealChanges = 0
         _store = StateObject(wrappedValue: ThreadStore(sessionId: sessionId, client: client))
     }
 
     /// The Mac keeps the store outside the screen: its window restores it and saves its seq at quit.
-    init(store: ThreadStore, client: DevdClient, openTerminal: (() -> Void)?, closeWindow: (() -> Void)?) {
+    init(store: ThreadStore, client: DevdClient, openTerminal: (() -> Void)?, closeWindow: (() -> Void)?, revealChanges: Int = 0) {
         self.sessionId = store.sessionId
         self.client = client
         self.openTerminal = openTerminal
         self.closeWindow = closeWindow
+        self.revealChanges = revealChanges
         _store = StateObject(wrappedValue: store)
     }
 
@@ -142,6 +146,7 @@ struct ChatScreen: View {
                                 .equatable()
                             if let anchor = store.changesAnchor, anchor.rowId == r.id {
                                 ChangesCard(sessionId: sessionId, client: client, refreshKey: anchor.endedSeq)
+                                    .id(Self.changesId)
                             }
                         }
                     }
@@ -166,6 +171,7 @@ struct ChatScreen: View {
             .onChange(of: [t.lastSeq, t.items.count]) { _, _ in
                 if atEnd { proxy.scrollTo("end", anchor: .bottom) }
             }
+            .onChange(of: revealChanges) { _, _ in withAnimation(.snappy) { proxy.scrollTo(Self.changesId, anchor: .top) } }
             .safeAreaInset(edge: .bottom) {
                 ChatSwitchers(sessionId: sessionId, thread: t, targetKey: store.switchKey, client: client) { chip, status in
                     VStack(alignment: .leading, spacing: 6) {
@@ -194,9 +200,23 @@ struct ChatScreen: View {
                 ChatMarkdownParse.isWebLink(url) ? .systemAction : .discarded
             })
             // The header's bottom edge: a hairline the thread scrolls under.
-            .overlay(alignment: .top) { Rectangle().fill(Theme.C.border).frame(height: 1 / 3).accessibilityHidden(true) }
+            .overlay(alignment: .top) {
+                VStack(spacing: 0) {
+                    Rectangle().fill(Theme.C.border).frame(height: 1 / 3)
+                    #if os(macOS)
+                    // The Mac's header is opaque: the thread fades out under it instead of a line cut through its
+                    // glyphs, as it does above the composer.
+                    LinearGradient(colors: [Theme.C.background, Theme.C.background.opacity(0)], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 24)
+                    #endif
+                }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
         }
     }
+
+    private static let changesId = "changes"
 
     @ViewBuilder
     private var banners: some View {
