@@ -25,6 +25,21 @@ final class MacScreenshotTests: XCTestCase {
     override func tearDown() {
         FixtureMode.requested = nil
         MacInboxRow.flatStyles = false
+        MacSidebarLayout.debugOpenShelves = []
+    }
+
+    /// The sidebar as a new window shows it (shelves shut), then with Working opened.
+    func testSidebarShelves() throws {
+        for look in ["light", "dark"] { try shoot(name: "sidebar-\(look)", look: look, thread: nil) }
+        MacSidebarLayout.debugOpenShelves = ["Working"]
+        try shoot(name: "sidebar-working-open-dark", look: "dark", thread: nil)
+    }
+
+    /// Dashboard mode on a few of its native screens.
+    func testDashboard() throws {
+        for (page, look) in [(MacDashboardPage.sessions, "dark"), (.folders, "light"), (.schedules, "dark")] {
+            try shoot(name: "dashboard-\(page.rawValue)-\(look)", look: look, thread: nil, page: page)
+        }
     }
 
     func testInbox() throws {
@@ -37,10 +52,10 @@ final class MacScreenshotTests: XCTestCase {
         try shoot(name: "thread-typed-light", look: "light", thread: "dev-orchard-sync", draft: "Pin Node 22 in the Dockerfile too")
     }
 
-    private func shoot(name: String, look: String, thread: String?, draft: String? = nil) throws {
+    private func shoot(name: String, look: String, thread: String?, page: MacDashboardPage? = nil, draft: String? = nil) throws {
         let state = MacAppState(isTestRun: false, isFixtureRun: true)
         state.appModel.reloadConfiguration()
-        let root = MacWindowContent(thread: .constant(thread), newSession: .constant(false), findRequest: 0)
+        let root = MacWindowContent(thread: .constant(thread), page: .constant(page), newSession: .constant(false), findPending: .constant(false))
             .environmentObject(state)
             .environmentObject(state.appModel)
         let size = NSSize(width: 1440, height: 900)

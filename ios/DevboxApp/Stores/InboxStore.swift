@@ -92,6 +92,10 @@ enum InboxView {
          needsYou.filter { $0.attention.reason == .completed }.sorted { $0.attention.since > $1.attention.since })
     }
 
+    /// How many sessions need you: those asking for action, not the runs that merely finished (the sidebar's
+    /// Needs you group, the menu bar count, the dashboard's back row).
+    static func needsYouCount(_ items: [InboxItem]) -> Int { splitNeedsYou(group(items).needsYou).action.count }
+
     enum Tone: Equatable { case action, danger, done, busy, quiet }
 
     struct Mark: Equatable {

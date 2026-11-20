@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 @testable import DevboxApp
 
@@ -88,5 +89,44 @@ final class MacAppTests: XCTestCase {
         XCTAssertEqual(NeedsYouBadge.text(count: 2, stale: true), "2?")
         XCTAssertEqual(NeedsYouBadge.text(count: 0, stale: true), "?")
         XCTAssertNil(NeedsYouBadge.text(count: 0, stale: false))
+    }
+
+    func testSidebarShelvesStartShut() {
+        XCTAssertEqual(MacSidebarLayout.shelves, ["Working", "Snoozed", "Settled"])
+        for shelf in MacSidebarLayout.shelves { XCTAssertFalse(MacSidebarLayout.startsOpen(shelf), shelf) }
+    }
+
+    func testFocusingAThreadLeavesTheDashboardOnlyInItsWindow() {
+        XCTAssertNil(MacWindow.page(.stats, afterFocusOn: "a", showing: "a"))
+        XCTAssertEqual(MacWindow.page(.stats, afterFocusOn: "a", showing: "b"), .stats)
+        XCTAssertEqual(MacWindow.page(.stats, afterFocusOn: "a", showing: nil), .stats)
+    }
+
+    func testOpenThreadAnnouncesTheFocusedThread() {
+        let state = MacAppState(isTestRun: true, isFixtureRun: false)
+        var seen: [String] = []
+        let watch = state.focusedThread.sink { seen.append($0) }
+        state.openThread("dev-x")
+        watch.cancel()
+        XCTAssertEqual(seen, ["dev-x"])
+    }
+
+    func testNeedsYouCountLeavesOutFinishedRuns() {
+        func item(_ id: String, _ reason: String) -> InboxItem {
+            try! JSONDecoder().decode(InboxItem.self, from: Data("""
+            {"sessionId":"\(id)","runtime":"chat","title":"t","project":"p","repo":"r","agent":"claude",
+             "attention":{"section":"needs_you","reason":"\(reason)","since":1},"lastText":null}
+            """.utf8))
+        }
+        XCTAssertEqual(InboxView.needsYouCount([item("a", "request"), item("b", "completed"), item("c", "failed")]), 2)
+    }
+
+    func testDashboardListsEveryPageOnceInTheWebOrder() {
+        let listed = MacDashboardPage.sections.flatMap(\.pages)
+        XCTAssertEqual(Set(listed), Set(MacDashboardPage.allCases))
+        XCTAssertEqual(listed.count, MacDashboardPage.allCases.count)
+        XCTAssertEqual(MacDashboardPage.sections.map(\.title), ["Workspace", "Operations", "System"])
+        XCTAssertEqual(listed.map(\.title), ["Overview", "Sessions", "Folders", "Statistics", "AI limits",
+                                             "Schedules", "Production writes", "SSH keys", "Hardware", "Activity"])
     }
 }

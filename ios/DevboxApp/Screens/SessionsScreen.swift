@@ -7,6 +7,8 @@ struct SessionsScreen: View {
     @EnvironmentObject private var store: LiveStore
     @EnvironmentObject private var appModel: AppModel
     let actions: SessionActions
+    /// Where a chat session started here opens. Nil on the iPhone: the app's deep link takes it to the Inbox tab.
+    var onOpenChat: ((String) -> Void)? = nil
 
     @State private var showNewSession = false
 
@@ -40,7 +42,7 @@ struct SessionsScreen: View {
         }
         .sheet(isPresented: $showNewSession) {
             NewSessionSheet(actions: actions, onStarted: { await store.refreshNow() }, onOpenChat: { id in
-                appModel.pendingDeepLink = .thread(id: id)
+                if let onOpenChat { onOpenChat(id) } else { appModel.pendingDeepLink = .thread(id: id) }
             })
                 .environmentObject(store)
         }
