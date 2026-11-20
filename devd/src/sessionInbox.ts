@@ -152,7 +152,7 @@ export class Inbox {
   private base(s: SessionRow): { item: InboxItem; recheckAt: number | null } {
     const runtime = storedRuntime(s);
     // `agent` is optional in SessionRow only for insert literals; the column is NOT NULL.
-    const base = { sessionId: s.id, runtime, title: s.name || `${s.project}/${s.repo}`, project: s.project, repo: s.repo, agent: s.agent! };
+    const base = { sessionId: s.id, runtime, title: s.name || `${s.project}/${s.repo}`, project: s.project, repo: s.repo, agent: s.agent!, branch: s.branch ?? null };
     // Read outside the store's try: a failing DB read is not an unreadable thread store.
     const pr = this.d.prHold?.(s.id) ?? null;
     if (runtime === "tmux") {
