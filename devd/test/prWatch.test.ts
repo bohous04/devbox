@@ -191,7 +191,7 @@ test("Gitea: merged and closed PRs; no statuses = none; a missing token is an er
 
 // ---------------------------------------------------------------- attention
 
-const snap = (over: Partial<ThreadSnapshot> = {}): ThreadSnapshot => ({ lastSeq: 2, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: null, ...over });
+const snap = (over: Partial<ThreadSnapshot> = {}): ThreadSnapshot => ({ lastSeq: 2, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: null, effort: null, ...over });
 const endedRun: RunRow = {
   runId: "r1", origin: "user", status: "completed", harness: null, nativeThreadId: null, model: null,
   queuedAt: 1, startedAt: 1, endedAt: 1000, endedSeq: 2, usage: null, error: null,

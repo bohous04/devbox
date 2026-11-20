@@ -55,6 +55,7 @@ function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities | (() => 
   const f = {
     opens: [] as HarnessOpenOptions[],
     models: [] as string[],
+    efforts: [] as (string | null)[],
     /** Fails the next startTurn with this error. */
     failNextStart: null as Error | null,
     injected: [] as unknown[][],
@@ -97,6 +98,10 @@ function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities | (() => 
         async setModel(m) {
           f.models.push(m);
         },
+        async setEffort(e) {
+          if (e === "nope") throw new Error("effort nope is not one of low, high");
+          f.efforts.push(e);
+        },
         async injectItems(items) {
           f.injected.push(items);
         },
@@ -122,7 +127,7 @@ function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities | (() => 
 }
 
 function baseState(over: Partial<BridgeState> = {}): BridgeState {
-  return { harness: "claude", nativeThreadId: null, account: null, model: null, activeRunId: null, queue: [], continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, trimSeq: 0, ackCandidate: null, awaitingTarget: false, ...over };
+  return { harness: "claude", nativeThreadId: null, account: null, model: null, activeRunId: null, queue: [], continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, trimSeq: 0, ackCandidate: null, awaitingTarget: false, effort: null, ...over };
 }
 
 // Account homes for switch targets, under the test dir.
@@ -577,6 +582,31 @@ describe("switching", () => {
     expect(g.opens[0].target).toMatchObject({ harness: "claude", model: "claude-opus-4-5" });
   });
 
+  test("setEffort goes to the harness, is kept in state.json and reaches the next harness opened", async () => {
+    const f = fakeHarness();
+    const bridge = await start(f);
+    expect(f.opens[0].effort).toBeNull();
+    await cmd({ kind: "setEffort", effort: "high" });
+    expect(f.efforts).toEqual(["high"]);
+    expect(state().effort).toBe("high");
+    // A level the harness refuses is not kept.
+    await expect(cmd({ kind: "setEffort", effort: "nope" })).rejects.toThrow("not one of");
+    expect(state().effort).toBe("high");
+    await bridge.close();
+    const g = fakeHarness();
+    await start(g);
+    expect(g.opens[0].effort).toBe("high");
+  });
+
+  test("an effort.state from the harness is published and its choice kept (a dropped choice too)", async () => {
+    const f = fakeHarness();
+    await start(f);
+    await cmd({ kind: "setEffort", effort: "high" });
+    f.emit({ type: "effort.state", model: "m2", supported: ["low"], effective: "low", chosen: null });
+    expect(state().effort).toBeNull();
+    expect(events().filter((e) => e.type === "effort.state")).toEqual([{ type: "effort.state", model: "m2", supported: ["low"], effective: "low", chosen: null }]);
+  });
+
   test("setModel and switchTarget during an active run are refused", async () => {
     const f = fakeHarness();
     await start(f);
@@ -796,7 +826,7 @@ describe("switching: fix round 1", () => {
     expect(f.turns.map((t) => t.text)).toEqual(["P\n\nUser message:\nhi"]);
   });
 
-  test("switchTarget, setModel and restartAgent are refused while a switch is in flight", async () => {
+  test("switchTarget, setModel, setEffort and restartAgent are refused while a switch is in flight", async () => {
     let release: () => void = () => {};
     const gate = new Promise<void>((r) => (release = r));
     const f = fakeHarness({ readyGates: [undefined, gate] });
@@ -808,6 +838,9 @@ describe("switching: fix round 1", () => {
     await expect(switchCmd(target, null)).rejects.toThrow("in progress");
     await expect(cmd({ kind: "setModel", model: "m" })).rejects.toThrow("in progress");
     await expect(cmd({ kind: "restartAgent" })).rejects.toThrow("in progress");
+    await expect(cmd({ kind: "setEffort", effort: "high" })).rejects.toThrow("in progress");
+    expect(f.efforts).toEqual([]);
+    expect(state().effort).toBeNull();
     release();
     await first;
     expect(f.opens.length).toBe(2);
@@ -1260,6 +1293,8 @@ describe("step 6 hardening", () => {
     const started = events().find((e, i) => i >= 3 && e.type === "bridge.started") as Extract<BridgeEvent, { type: "bridge.started" }>;
     expect(started.resumed).toBe(true);
     expect(started.notice).toContain("state.json was unusable (the file is empty)");
+    // A choice of effort lives only in state.json: the user is told it is gone.
+    expect(started.notice).toContain("the chosen reasoning effort (back to the model's default)");
     expect(started.notice).toContain("resumes thread thread-7");
     expect(logged).toContainEqual(expect.stringContaining("state.json was unusable (the file is empty)"));
     expect(readdirSync(dir)).toContain(`state.json.corrupt-${NOW}`);

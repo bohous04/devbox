@@ -94,7 +94,7 @@ function fixture(opts: { critic?: CriticOpts; prCheck?: (id: string) => Promise<
   };
   return f;
 }
-const empty: ThreadSnapshot = { lastSeq: 0, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: null };
+const empty: ThreadSnapshot = { lastSeq: 0, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: null, effort: null };
 const noSnapshot = (): ThreadSnapshot => { throw new Error("snapshot read for an event the hub ignores"); };
 
 const started = (runId: string, origin: RunOrigin = "user"): BridgeEvent => ({ type: "run.started", runId, origin, nativeThreadId: null, model: null });

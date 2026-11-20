@@ -35,6 +35,9 @@ export interface BridgeState {
   /** (bridge 1.5.0+) No harness opens until devd sends switchTarget: set when a lost state.json was rebuilt from a
    *  thread of another harness than the launch one (its target is devd's to say). */
   awaitingTarget: boolean;
+  /** (bridge 1.7.0) The user's reasoning effort, kept across restarts and switches; null = the harness's default.
+   *  Files from before 1.7.0 have none. */
+  effort: string | null;
 }
 
 /** state.json exists but cannot be used (empty, not JSON, wrong shape): serve recovers from the event log. */
@@ -86,6 +89,7 @@ const checkState = obj(
     trimSeq: seq,
     ackCandidate: nullable(obj({ seq, at: num })),
     awaitingTarget: bool,
+    effort: nullable(str),
   },
 );
 
@@ -106,7 +110,7 @@ export function loadState(path: string): BridgeState | null {
   // Files from before ACP agents have no instructionsPending: their threads were never ACP threads. Files from
   // before 1.5.0 have no trimSeq or ackCandidate (nothing was trimmed) and never awaited a target across a restart.
   return {
-    target: null, pendingHandoff: null, instructionsPending: false, trimSeq: 0, ackCandidate: null, awaitingTarget: false,
+    target: null, pendingHandoff: null, instructionsPending: false, trimSeq: 0, ackCandidate: null, awaitingTarget: false, effort: null,
     ...(raw as Partial<BridgeState>),
   } as BridgeState;
 }

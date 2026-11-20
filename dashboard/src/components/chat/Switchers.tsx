@@ -8,14 +8,14 @@ import {
 import { api, ApiError, type ChatSwitchResult, type ChatTarget } from "../../api";
 import { profileFor } from "../../newSession";
 import {
-  accountMenuBlocked, awaitingTargetText, claudeAccountOptions, codexAccountOptions, harnessOptions, modelLabel, modelMenuBlocked, modelOptions,
-  switchBlocked, switchErrorText, switchResultText, type SwitchOption,
+  accountMenuBlocked, awaitingTargetText, claudeAccountOptions, codexAccountOptions, effortChipLabel, effortMenuBlocked, effortOptions, harnessOptions,
+  modelLabel, modelMenuBlocked, modelOptions, switchBlocked, switchErrorText, switchResultText, type SwitchOption,
 } from "../../switchView";
 
-type Which = "harness" | "model" | "account";
+type Which = "harness" | "model" | "account" | "effort";
 const errorText = (e: unknown) => (e instanceof ApiError ? switchErrorText(e.status, e.body) : (e as Error).message);
 
-/** Model, account and harness menus of a chat session. devd applies a switch between turns and records it in the
+/** Model, effort, account and harness menus of a chat session. devd applies a switch between turns and records it in the
  *  thread as a notice, which arrives over the stream. The menus show the target devd plans the next switch from
  *  (GET thread/target), re-read when the thread announces a new native thread or a run ends.
  *  Rendered through `children` in two parts: the menus sit inside the composer box, the status lines above it. */
@@ -70,6 +70,14 @@ export function Switchers({ sessionId, thread, children }: {
     setBusy(null);
   }
 
+  // The level arrives back as the bridge's effort.state over the stream; no target to reload.
+  async function setEffort(level: string | null, label: string) {
+    setBusy("effort"); setErr(null); setNote(null);
+    try { await api.setChatEffort(sessionId, level); }
+    catch (e) { setErr(`Effort change to ${label} failed: ${errorText(e)}`); }
+    setBusy(null);
+  }
+
   if (!target) {
     const status = targetErr ? (
       <p role="alert" className="flex flex-wrap items-center gap-2 text-xs text-destructive">
@@ -88,8 +96,10 @@ export function Switchers({ sessionId, thread, children }: {
     : modelOptions(target).some((o) => o.current) ? modelLabel(target.model) : target.model;
   const accountBlocked = accountMenuBlocked(target);
   const accountTitle = target.harness === "codex" ? "Codex account" : "Claude account";
+  const effort = effortChipLabel(thread.effort, target);
+  const effortBlocked = effortMenuBlocked(thread.effort, target);
   // Model and agent only: the account (an email, a plan) is shown inside the menu, never in the chip's label or tooltip.
-  const summary = `Model: ${model}, agent ${profile.label}`;
+  const summary = `Model: ${model}${effort === null ? "" : `, effort ${effort}`}, agent ${profile.label}`;
   // One chip with the agent and model; the menu holds agent, model and account. It opens also while switching is
   // blocked, so the current account stays visible; the items are then disabled and the reason is shown.
   const menus = (
@@ -101,7 +111,9 @@ export function Switchers({ sessionId, thread, children }: {
         >
           {busy !== null ? <LoaderCircle className="size-4 animate-spin" aria-hidden="true" /> : <AgentGlyph agent={target.agent} />}
           {/* On a phone's one-row composer with text, only the agent mark and the chevron (the box sets data-chip). */}
-          <span className="truncate max-sm:group-data-[chip=mark]/box:hidden">{model}</span>
+          <span className="truncate max-sm:group-data-[chip=mark]/box:hidden">
+            {model}{effort !== null && <><span className="text-muted-foreground"> · </span><span className="font-semibold">{effort}</span></>}
+          </span>
           <ChevronDown aria-hidden="true" className="size-3.5 opacity-50" />
         </Button>
       </DropdownMenuTrigger>
@@ -120,6 +132,14 @@ export function Switchers({ sessionId, thread, children }: {
             {modelLabel(o.label) !== o.label && <span className="truncate font-mono text-[11px] text-muted-foreground">{o.label}</span>}</span>}
           onPick={(o) => void doSwitch("model", o.label, () => api.switchChatModel(sessionId, o.value))}
         />
+        <DropdownMenuSeparator />
+        {/* Not blocked by a run: the bridge applies the level from the next message. */}
+        <Section
+          title="Effort" blocked={effortBlocked} options={effortBlocked === null && thread.effort ? effortOptions(thread.effort) : null}
+          render={(o) => <span className="truncate">{o.label}</span>}
+          onPick={(o) => void setEffort(o.value === "" ? null : o.value, o.label)}
+        />
+        {effortBlocked === null && <p className="px-2 pb-1.5 text-xs text-muted-foreground">Applies from your next message.</p>}
         <DropdownMenuSeparator />
         <Section
           title={accountTitle} blocked={blocked ?? accountBlocked}

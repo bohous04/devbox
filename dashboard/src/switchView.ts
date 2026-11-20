@@ -1,8 +1,8 @@
 // Pure logic of the chat composer's switchers (components/chat/Switchers.tsx): which models, accounts and
 // harnesses can be picked and why not. devd decides (devd/src/chatSwitch.ts); these mirror its rules so the
 // menus do not offer what it would refuse, and say why.
-import type { RunRow } from "../../shared/thread";
-import { ACP_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
+import type { RunRow, ThreadEffort } from "../../shared/thread";
+import { ACP_MIN_BRIDGE_VERSION, EFFORT_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
 import { CHAT_MODELS, SAME_MODEL_ALIASES } from "../../shared/chatModels";
 import type { AccountView, ChatSwitchResult, ChatTarget, CodexAccountView } from "./api";
 import { AGENT_IDS, AGENT_PROFILES, chatRuntimeBlock, profileFor } from "./newSession";
@@ -155,4 +155,36 @@ export function switchResultText(r: ChatSwitchResult): string | null {
   if (r.unchanged) return r.exhausted ? "Already on that account; it is over its usage limit" : "Already on that: nothing was switched";
   if (r.exhausted) return "Switched, but the account is over its usage limit";
   return null;
+}
+
+const EFFORT_LABELS: Record<string, string> = { none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max", ultra: "Ultra" };
+/** A level as the agent names it; one this list does not know shows as reported. */
+export const effortLabel = (level: string): string => EFFORT_LABELS[level] ?? level;
+
+const effortBridge = (t: Pick<ChatTarget, "bridgeVersion">) => t.bridgeVersion !== null && versionAtLeast(t.bridgeVersion, EFFORT_MIN_BRIDGE_VERSION);
+
+/** The level part of the composer's chip ("Opus 5.5 · High"): the level the agent reported running at (it may lower a
+ *  choice), else the choice not yet run, else "Default" (Claude says its level only with a reply). null = no level part: an agent without levels, levels
+ *  not reported yet, or a bridge that cannot report them. */
+export function effortChipLabel(e: ThreadEffort | null, t: Pick<ChatTarget, "bridgeVersion">): string | null {
+  if (!effortBridge(t) || e === null || (e.supported !== null && e.supported.length === 0)) return null;
+  const level = e.effective ?? e.chosen;
+  return level === null ? "Default" : effortLabel(level);
+}
+
+/** Why the Effort section cannot be used (devd answers 409 bridge-too-old, the bridge refuses unknown levels). Not
+ *  blocked by a run: the level applies from the next message. */
+export function effortMenuBlocked(e: ThreadEffort | null, t: Pick<ChatTarget, "bridgeVersion">): string | null {
+  if (!effortBridge(t)) return `This session's agent bridge (${t.bridgeVersion ?? "unknown version"}) cannot change the effort: recreate the session's container`;
+  if (e === null) return "The agent has not reported its effort levels yet";
+  if (e.supported === null) return `The agent has not reported the effort levels of ${e.model ?? "this model"}`;
+  if (e.supported.length === 0) return `${e.model ?? "This model"} has no effort levels`;
+  return null;
+}
+
+/** "Default" (value "": the model's own level, sent as null) and the levels the model lists. */
+export function effortOptions(e: ThreadEffort): SwitchOption[] {
+  const detail = e.chosen === null && e.effective !== null ? `${effortLabel(e.effective)} for ${e.model ?? "this model"}`
+    : e.chosen === null ? "The level shows after the agent's first reply" : null;
+  return [option("", "Default", e.chosen === null, { detail }), ...(e.supported ?? []).map((l) => option(l, effortLabel(l), e.chosen === l))];
 }

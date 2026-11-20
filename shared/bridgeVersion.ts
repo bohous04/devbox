@@ -24,3 +24,7 @@ export const IMAGES_MIN_BRIDGE_VERSION = "1.4.0";
 /** The first agent bridge that takes devd's periodic `ack` (S6-R21). An older bridge refuses the unknown frame and
  *  closes the link: devd sends acks only to a bridge that is new enough. */
 export const ACK_MIN_BRIDGE_VERSION = "1.5.0";
+
+/** The first agent bridge that reports and takes a reasoning effort (`effort.state`, `setEffort`). An older bridge
+ *  refuses the unknown command: devd answers 409 bridge-too-old and the dashboard disables the choice. */
+export const EFFORT_MIN_BRIDGE_VERSION = "1.7.0";

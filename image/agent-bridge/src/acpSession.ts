@@ -2,6 +2,7 @@ import type { AcpAgentSpec } from "./acpAgents.ts";
 import { capText, HOST_SESSION_VARS } from "./claude.ts";
 import { ResumeFailedError, type HarnessSession } from "./claudeSession.ts";
 import { spawnCodex, type CodexProcess } from "./codexSession.ts";
+import { EffortState } from "./effort.ts";
 import type { BridgeEvent, Capabilities, RunOrigin, TokenUsage } from "./events.ts";
 import { readImageBase64 } from "./images.ts";
 import { JsonRpcError, JsonRpcPeer, type Id } from "./jsonRpc.ts";
@@ -33,6 +34,8 @@ export interface AcpSessionOptions {
   /** Environment the agent starts from; the bridge's own when omitted. */
   baseEnv?: Record<string, string | undefined>;
   logError?: (msg: string) => void;
+  /** The user's reasoning effort; an ACP agent has none, so a choice is dropped with a notice. */
+  effort?: string | null;
 }
 
 const CLIENT_VERSION = "1.0.0";
@@ -186,6 +189,9 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
   let sessionId: string | null = null;
   // `model` is the one asked for (null: the agent's own); `appliedModel` the one the session runs.
   let model = o.model;
+  // ACP agents take no reasoning effort here: reported as a model without levels.
+  const effort = new EffortState(o.emit, o.effort ?? null);
+  effort.update({ model, supported: [] });
   let appliedModel: string | null = null;
   let modelControl: ModelControl = null;
   let active: ActiveRun | null = null;
@@ -616,6 +622,11 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
       if (endReason !== null) throw new Error(endReason);
       if (modelControl === null) throw new Error(`${spec.id} cannot switch models: the session offers no model option`);
       model = next;
+      effort.update({ model });
+    },
+    async setEffort(level) {
+      effort.check(level);
+      effort.choose(level, null);
     },
     async injectItems() {
       throw new Error("injecting history items is not supported by ACP agents");

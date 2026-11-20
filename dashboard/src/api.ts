@@ -602,6 +602,9 @@ export const api = {
     j<ChatSwitchResult>(`/api/sessions/${encodeURIComponent(id)}/thread/account`, post({ accountId })),
   switchChatHarness: (id: string, agent: AgentName) =>
     j<ChatSwitchResult>(`/api/sessions/${encodeURIComponent(id)}/thread/harness`, post({ agent })),
+  /** The reasoning effort from the next message on; null = the model default. 202 once the bridge took it. */
+  setChatEffort: (id: string, effort: string | null) =>
+    j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/effort`, post({ effort })),
   markSeen: (id: string, seq: number) => j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/seen`, post({ seq })),
   inbox: () => j<{ items: InboxItem[] }>("/api/inbox"),
   // Inbox shelves (any session, tmux too); each answers the session's new inbox item.

@@ -1,6 +1,7 @@
 import type { Context, Hono } from "hono";
 import type { Database } from "bun:sqlite";
-import { IMAGES_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
+import { EFFORT_MIN_BRIDGE_VERSION, IMAGES_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
+import { isKnownEffort, KNOWN_EFFORT_LEVELS } from "../../shared/effort";
 import type { LoggedEvent } from "../../shared/thread";
 import { AgentDisconnected, CommandFailed, CommandTimeout, type BridgeLinks } from "./bridgeLink";
 import { SwitchRefused, type ChatSwitch, type SwitchRequest } from "./chatSwitch";
@@ -185,6 +186,33 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
     : nonEmpty(b.accountId) ? { kind: "account", accountId: b.accountId } : "accountId must be a non-empty string"));
   switchRoute("harness", (b) => (nonEmpty(b.agent) ? { kind: "harness", agent: b.agent } : "agent must be a non-empty string"));
 
+  /** The agent's reasoning effort from the next message on: `effort` a level, or null for the model default. Allowed
+   *  during a run (the running turn keeps its level). 202 once the bridge took it; 400 for a level the model's latest
+   *  effort.state does not list; 409 bridge-too-old before 1.7.0, command-failed when the bridge refuses it. */
+  app.post("/api/sessions/:id/thread/effort", async (c) => {
+    const id = c.req.param("id");
+    const r = chat(c, id);
+    if ("res" in r) return r.res;
+    const body = await c.req.json().catch(() => null);
+    const effort = isRecord(body) ? body.effort : undefined;
+    // Known levels only (shared/effort.ts); they also pass the bridge's own check, which would drop devd's link.
+    if (effort !== null && !isKnownEffort(effort)) {
+      return c.json({ error: `effort must be null or one of ${KNOWN_EFFORT_LEVELS.join(", ")}` }, 400);
+    }
+    const version = d.bridgeVersion(id);
+    if (version === null || !versionAtLeast(version, EFFORT_MIN_BRIDGE_VERSION)) {
+      return c.json({ error: "bridge-too-old", message: `this session's agent bridge (${version ?? "unknown version"}) cannot change the effort; it needs ${EFFORT_MIN_BRIDGE_VERSION} — recreate the session's container` }, 409);
+    }
+    const known = r.store.effort();
+    if (effort !== null && known?.supported && !known.supported.includes(effort)) {
+      const takes = known.supported.length === 0 ? "takes no effort levels" : `takes ${known.supported.join(", ")}`;
+      return c.json({ error: "unsupported-effort", message: `${known.model ?? "this model"} ${takes}` }, 400);
+    }
+    try { await d.links.send(id, { kind: "setEffort", effort }); }
+    catch (e) { return commandError(c, e); }
+    return c.body(null, 202);
+  });
+
   app.post("/api/sessions/:id/thread/seen", async (c) => {
     const id = c.req.param("id");
     const r = chat(c, id);
@@ -272,7 +300,8 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
    *  ONE `thread-snapshot` event `{afterSeq, snapshot}` with `id: snapshot.lastSeq`, then live `thread` events with
    *  seq > that id, each exactly once. The store keeps state, not raw events: `snapshot({afterSeq})` holds every item
    *  and run changed after that seq as whole rows, which replace the client's copies; pending, background and
-   *  native replace wholesale.
+   *  native replace wholesale. An effort.state never goes out as a `thread` event: `thread-effort` carries the
+   *  store's parsed ThreadEffort (no id), and the snapshot has it as `effort`.
    *
    *  text/event-stream is not compressed (hono's compress skips it); the ping keeps the connection under Bun's
    *  idleTimeout. */
@@ -314,6 +343,12 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
           // A devd notice (ThreadStore.addNotice) has no seq of its own: no id, so Last-Event-ID stays the bridge's.
           if (isRecord(data) && "notice" in data) { send(sseFrame("thread-notice", data.notice)); return; }
           const e = data as LoggedEvent;
+          // The parsed effort as its own event (no id, like a notice): an app that predates it ignores an event name
+          // it does not know, but would show an unknown `thread` event type as a notice in the thread.
+          if (e.event.type === "effort.state") {
+            if (store) send(sseFrame("thread-effort", store.effort()));
+            return;
+          }
           if (e.seq <= sentSeq) return;
           sentSeq = e.seq;
           send(sseFrame("thread", e, e.seq));

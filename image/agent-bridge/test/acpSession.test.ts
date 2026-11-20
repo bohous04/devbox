@@ -151,8 +151,9 @@ async function until(cond: () => boolean) {
 const SPEC: AcpAgentSpec = { id: "example", argv: ["example-agent", "acp"] };
 const MCP = [{ name: "devbox", command: "agent-bridge", args: ["mcp"], env: { DEVD_URL: "http://devd.test" } }];
 
-function open(fake: ReturnType<typeof fakeAgent>, o: { spec?: AcpAgentSpec; resume?: string | null; model?: string | null; instructions?: string; onInstructionsDelivered?: () => void } = {}) {
+function open(fake: ReturnType<typeof fakeAgent>, o: { spec?: AcpAgentSpec; resume?: string | null; model?: string | null; instructions?: string; onInstructionsDelivered?: () => void; effort?: string | null } = {}) {
   const events: BridgeEvent[] = [];
+  const efforts: BridgeEvent[] = [];
   const logs: string[] = [];
   const session = openAcpSession(
     {
@@ -163,12 +164,14 @@ function open(fake: ReturnType<typeof fakeAgent>, o: { spec?: AcpAgentSpec; resu
       mcpServers: MCP,
       ...(o.instructions === undefined ? {} : { instructions: o.instructions }),
       ...(o.onInstructionsDelivered === undefined ? {} : { onInstructionsDelivered: o.onInstructionsDelivered }),
-      emit: (e) => events.push(e),
+      // effort.state is asserted on its own; the other tests read the thread's events.
+      emit: (e) => (e.type === "effort.state" ? efforts : events).push(e),
       logError: (m) => logs.push(m),
+      ...(o.effort !== undefined ? { effort: o.effort } : {}),
     },
     fake.spawn,
   );
-  return { session, events, logs };
+  return { session, events, logs, efforts };
 }
 
 const types = (events: BridgeEvent[]) => events.map((e) => e.type);
@@ -959,5 +962,16 @@ describe("Antigravity (live)", () => {
     await session.startTurn("run-1", "list the files", "user");
     await until(() => events.some((e) => e.type === "run.completed"));
     expect(events.filter((e) => e.type === "message.final").map((e) => (e as { text: string }).text)).toEqual(["\n⚠ Verification Required\n"]);
+  });
+});
+
+describe("ACP effort (1.7.0)", () => {
+  test("an ACP agent reports no levels: a choice is dropped with a notice, setEffort only takes null", async () => {
+    const fake = fakeAgent();
+    const { session, efforts, events } = open(fake, { effort: "high" });
+    expect(efforts).toEqual([{ type: "effort.state", model: null, supported: [], effective: null, chosen: null }]);
+    expect(events).toContainEqual({ type: "bridge.notice", text: "Effort high is not available on this model; back to its default." });
+    await expect(session.setEffort("low")).rejects.toThrow("has no effort levels");
+    await session.setEffort(null);
   });
 });

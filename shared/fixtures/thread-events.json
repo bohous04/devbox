@@ -108,7 +108,8 @@
         ],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       }
     },
     {
@@ -205,7 +206,8 @@
         ],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       }
     },
     {
@@ -291,7 +293,8 @@
         ],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       }
     },
     {
@@ -397,7 +400,8 @@
           }
         ],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       }
     },
     {
@@ -523,7 +527,8 @@
         ],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       }
     },
     {
@@ -665,7 +670,8 @@
         ],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       }
     },
     {
@@ -794,7 +800,8 @@
           "nativeThreadId": "n1",
           "account": null,
           "model": "m"
-        }
+        },
+        "effort": null
       }
     },
     {
@@ -900,7 +907,8 @@
           "nativeThreadId": "n1",
           "account": null,
           "model": "m"
-        }
+        },
+        "effort": null
       }
     },
     {
@@ -1024,7 +1032,8 @@
         ],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       }
     },
     {
@@ -1110,7 +1119,8 @@
         ],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       }
     },
     {
@@ -1174,7 +1184,8 @@
         ],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       }
     },
     {
@@ -1240,7 +1251,8 @@
         ],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       }
     },
     {
@@ -1274,7 +1286,8 @@
         ],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       }
     },
     {
@@ -1390,7 +1403,8 @@
             "until": 5000
           }
         ],
-        "native": null
+        "native": null,
+        "effort": null
       },
       "derived": {
         "activeRun": "r1",
@@ -1490,7 +1504,8 @@
                 "nativeThreadId": "x",
                 "account": "a",
                 "model": null
-              }
+              },
+              "effort": null
             }
           }
         }
@@ -1550,7 +1565,8 @@
           "nativeThreadId": "x",
           "account": "a",
           "model": null
-        }
+        },
+        "effort": null
       }
     },
     {
@@ -1615,7 +1631,8 @@
               ],
               "pending": [],
               "background": [],
-              "native": null
+              "native": null,
+              "effort": null
             }
           }
         }
@@ -1652,7 +1669,8 @@
         ],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       }
     },
     {
@@ -1692,7 +1710,8 @@
               "items": [],
               "pending": [],
               "background": [],
-              "native": null
+              "native": null,
+              "effort": null
             }
           }
         }
@@ -1729,7 +1748,8 @@
         ],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       }
     },
     {
@@ -1875,7 +1895,8 @@
         ],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       }
     },
     {
@@ -1975,7 +1996,8 @@
         ],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       }
     },
     {
@@ -2073,7 +2095,8 @@
         ],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       }
     },
     {
@@ -2133,7 +2156,8 @@
               ],
               "pending": [],
               "background": [],
-              "native": null
+              "native": null,
+              "effort": null
             }
           }
         }
@@ -2179,7 +2203,8 @@
         ],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       }
     },
     {
@@ -2215,7 +2240,8 @@
         "items": [],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       }
     },
     {
@@ -2268,7 +2294,8 @@
           "nativeThreadId": "t1",
           "account": "b",
           "model": "claude-opus-5-5"
-        }
+        },
+        "effort": null
       }
     },
     {
@@ -2341,7 +2368,8 @@
           "nativeThreadId": "x1",
           "account": "c",
           "model": null
-        }
+        },
+        "effort": null
       }
     },
     {
@@ -2503,7 +2531,8 @@
         ],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       },
       "derived": {
         "activeRun": "r2",
@@ -2603,7 +2632,8 @@
         ],
         "pending": [],
         "background": [],
-        "native": null
+        "native": null,
+        "effort": null
       },
       "derived": {
         "activeRun": null,

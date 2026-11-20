@@ -21,6 +21,15 @@ interface Sent {
   error?: { code: number; message: string };
 }
 
+// model/list as app-server answers it (v2 Model, the fields the adapter reads).
+const MODEL_LIST = {
+  data: [
+    { id: "gpt-5.5-codex", model: "gpt-5.5-codex", supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "medium" }, { reasoningEffort: "high" }], defaultReasoningEffort: "medium" },
+    { id: "gpt-5.4-mini", model: "gpt-5.4-mini", supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "medium" }], defaultReasoningEffort: "low" },
+  ],
+  nextCursor: null,
+};
+
 // Scripted app-server: answers client requests from `responders`, lets the test push notifications and
 // server requests, and records everything the session wrote to stdin.
 function fakeCodex() {
@@ -41,6 +50,7 @@ function fakeCodex() {
       "thread/resume": (p: any) => threadResumeResponse(p.threadId),
       "turn/start": () => turnStartResponse(`turn-${++turnSeq}`),
       "turn/interrupt": () => ({}),
+      "model/list": () => MODEL_LIST,
     } as Record<string, ((params: any) => unknown) | undefined>,
     push(...msgs: unknown[]) {
       pending.push(...msgs.map((m) => JSON.stringify(m)));
@@ -101,8 +111,9 @@ async function until(cond: () => boolean) {
   expect(cond()).toBe(true);
 }
 
-function open(fake: ReturnType<typeof fakeCodex>, o: { resume?: string | null; model?: string | null } = {}) {
+function open(fake: ReturnType<typeof fakeCodex>, o: { resume?: string | null; model?: string | null; effort?: string | null } = {}) {
   const events: BridgeEvent[] = [];
+  const efforts: BridgeEvent[] = [];
   const logs: string[] = [];
   const session = openCodexSession(
     {
@@ -112,12 +123,14 @@ function open(fake: ReturnType<typeof fakeCodex>, o: { resume?: string | null; m
       resume: o.resume ?? null,
       mcpConfigArgs: ["-c", 'mcp_servers.devbox.command="agent-bridge"'],
       developerInstructions: "call devbox_wait",
-      emit: (e) => events.push(e),
+      // effort.state is asserted on its own (the effort tests); the other tests read the thread's events.
+      emit: (e) => (e.type === "effort.state" ? efforts : events).push(e),
       logError: (m) => logs.push(m),
+      ...(o.effort !== undefined ? { effort: o.effort } : {}),
     },
     fake.spawn,
   );
-  return { session, events, logs };
+  return { session, events, logs, efforts };
 }
 
 const types = (events: BridgeEvent[]) => events.map((e) => e.type);
@@ -131,7 +144,7 @@ describe("openCodexSession", () => {
 
     expect(fake.argv).toEqual(["codex", "app-server", "-c", 'mcp_servers.devbox.command="agent-bridge"']);
     expect(fake.env.CODEX_HOME).toBe("/tmp/codex-home");
-    expect(fake.sent.map((m) => m.method)).toEqual(["initialize", "initialized", "thread/start", "turn/start"]);
+    expect(fake.sent.map((m) => m.method)).toEqual(["initialize", "initialized", "thread/start", "model/list", "turn/start"]);
     expect(fake.requests("initialize")[0]!.params).toEqual({
       clientInfo: { name: "devbox-agent-bridge", title: null, version: expect.any(String) },
       capabilities: { experimentalApi: false, requestAttestation: false },
@@ -508,8 +521,8 @@ describe("Codex switching", () => {
     const { session, events } = open(fake);
     await session.ready;
     await session.setModel("gpt-5.5-mini");
-    // Nothing is sent to the app-server: the model is a turn/start parameter.
-    expect(fake.sent.map((m) => m.method)).toEqual(["initialize", "initialized", "thread/start"]);
+    // Nothing is sent to the app-server: the model is a turn/start parameter (model/list is the effort catalog).
+    expect(fake.sent.map((m) => m.method)).toEqual(["initialize", "initialized", "thread/start", "model/list"]);
     await session.startTurn("run-1", "hi", "user");
     await until(() => fake.requests("turn/start").length === 1);
     expect(fake.requests("turn/start")[0]!.params.model).toBe("gpt-5.5-mini");
@@ -551,5 +564,102 @@ describe("Codex switching", () => {
     const err = await session.ready.then(() => null, (e: unknown) => e);
     expect(err).toBeInstanceOf(Error);
     expect(err).not.toBeInstanceOf(ResumeFailedError);
+  });
+});
+
+describe("Codex effort (1.7.0)", () => {
+  test("levels and the default come from model/list; the thread's configured effort wins over the model default", async () => {
+    const fake = fakeCodex();
+    const { session, efforts } = open(fake);
+    await session.ready;
+    await until(() => efforts.length === 1);
+    expect(efforts[0]).toEqual({ type: "effort.state", model: "gpt-5.5-codex", supported: ["low", "medium", "high"], effective: "medium", chosen: null });
+    const configured = fakeCodex();
+    configured.responders["thread/start"] = () => ({ ...threadStartResponse(), reasoningEffort: "high" });
+    const second = open(configured);
+    await until(() => second.efforts.length === 1);
+    expect(second.efforts[0]).toMatchObject({ effective: "high" });
+  });
+
+  test("a choice goes with every turn/start; back to the default sends the default once, then nothing", async () => {
+    const fake = fakeCodex();
+    const { session, efforts } = open(fake, { effort: "high" });
+    await until(() => efforts.length === 1);
+    expect(efforts[0]).toMatchObject({ chosen: "high", effective: "high" });
+    const turn = async (runId: string, turnId: string) => {
+      await session.startTurn(runId, "go", "user");
+      await until(() => fake.requests("turn/start").length === Number(turnId.slice(5)));
+      fake.push(...simpleTurn(turnId));
+    };
+    await turn("run-1", "turn-1");
+    expect(fake.requests("turn/start")[0]!.params).toMatchObject({ effort: "high" });
+    await session.setEffort(null);
+    expect(efforts.at(-1)).toMatchObject({ chosen: null, effective: "medium" });
+    await turn("run-2", "turn-2");
+    expect(fake.requests("turn/start")[1]!.params).toMatchObject({ effort: "medium" });
+    await turn("run-3", "turn-3");
+    expect("effort" in (fake.requests("turn/start")[2]!.params as object)).toBe(false);
+  });
+
+  test("setEffort refuses a level the model lacks; a model switch drops a choice the new model lacks", async () => {
+    const fake = fakeCodex();
+    const { session, efforts, events } = open(fake);
+    await until(() => efforts.length === 1);
+    await expect(session.setEffort("xhigh")).rejects.toThrow("not one of low, medium, high");
+    await session.setEffort("high");
+    await session.setModel("gpt-5.4-mini");
+    expect(efforts.at(-1)).toEqual({ type: "effort.state", model: "gpt-5.4-mini", supported: ["low", "medium"], effective: "low", chosen: null });
+    expect(events).toContainEqual({ type: "bridge.notice", text: "Effort high is not available on gpt-5.4-mini; back to its default." });
+  });
+
+  test("a failing model/list leaves the levels unknown, logged, and turns still run", async () => {
+    const fake = fakeCodex();
+    fake.responders["model/list"] = undefined;
+    const { session, logs, efforts } = open(fake);
+    await session.ready;
+    await until(() => fake.requests("model/list").length === 1);
+    fake.push({ id: fake.requests("model/list")[0]!.id, error: { code: -32601, message: "unknown method" } });
+    await until(() => logs.some((l) => l.includes("model/list failed")));
+    expect(efforts).toEqual([{ type: "effort.state", model: "gpt-5.5-codex", supported: null, effective: null, chosen: null }]);
+    await session.startTurn("run-1", "go", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+  });
+
+  test("a failing model/list with a choice says that the level goes unchecked, also after a model switch", async () => {
+    const fake = fakeCodex();
+    fake.responders["model/list"] = undefined;
+    const { session, events } = open(fake, { effort: "high" });
+    await session.ready;
+    await until(() => fake.requests("model/list").length === 1);
+    fake.push({ id: fake.requests("model/list")[0]!.id, error: { code: -32601, message: "unknown method" } });
+    const unchecked = (m: string): BridgeEvent => ({ type: "bridge.notice", text: `Codex's model list could not be read, so effort high is sent without checking that ${m} takes it.` });
+    await until(() => events.some((e) => e.type === "bridge.notice"));
+    expect(events).toContainEqual(unchecked("gpt-5.5-codex"));
+    await session.setModel("gpt-5.4-mini");
+    expect(events).toContainEqual(unchecked("gpt-5.4-mini"));
+  });
+
+  test("model/list paging stops after 20 pages: the levels stay unknown, logged", async () => {
+    const fake = fakeCodex();
+    let pages = 0;
+    fake.responders["model/list"] = () => ({ data: [], nextCursor: `page-${++pages}` });
+    const { logs, efforts } = open(fake);
+    await until(() => logs.some((l) => l.includes("model/list failed")));
+    expect(pages).toBe(20);
+    expect(logs.find((l) => l.includes("model/list failed"))).toContain("more than 20 pages");
+    expect(efforts.at(-1)).toMatchObject({ supported: null });
+  });
+
+  test("a resumed thread's first turn says the level: an earlier bridge may have left an override on it", async () => {
+    const fake = fakeCodex();
+    const { session, efforts } = open(fake, { resume: "thread-old" });
+    await until(() => efforts.length === 1);
+    await session.startTurn("run-1", "go", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    expect(fake.requests("turn/start")[0]!.params).toMatchObject({ effort: "medium" });
+    fake.push(...simpleTurn("turn-1", "thread-old"));
+    await session.startTurn("run-2", "go", "user");
+    await until(() => fake.requests("turn/start").length === 2);
+    expect("effort" in (fake.requests("turn/start")[1]!.params as object)).toBe(false);
   });
 });

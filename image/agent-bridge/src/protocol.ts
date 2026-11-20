@@ -36,6 +36,9 @@ export type BridgeCommand =
   | { kind: "endWait" }
   // Refused while a run is active or queued.
   | { kind: "setModel"; model: string }
+  // 1.7.0: reasoning effort from the next message on; null = the harness's default. Refused for a level the current
+  // model does not offer.
+  | { kind: "setEffort"; effort: string | null }
   | { kind: "switchTarget"; target: SwitchTarget; resume: string | null; handoff: HandoffDelivery | null };
 
 export type ClientFrame =
@@ -132,6 +135,11 @@ function parseCommand(v: unknown): BridgeCommand {
     }
     case "setModel":
       return { kind: "setModel", model: nonEmptyString(v.model, "setModel.model") };
+    case "setEffort":
+      if (v.effort !== null && (typeof v.effort !== "string" || !/^[a-z]{1,16}$/.test(v.effort))) {
+        throw new ProtocolError("setEffort.effort must be a lowercase level name or null");
+      }
+      return { kind: "setEffort", effort: v.effort };
     case "switchTarget": {
       if (!("resume" in v) || !("handoff" in v)) throw new ProtocolError("switchTarget needs resume and handoff (null for none)");
       return { kind: "switchTarget", target: parseTarget(v.target), resume: nullableString(v.resume, "switchTarget.resume"), handoff: parseHandoff(v.handoff) };

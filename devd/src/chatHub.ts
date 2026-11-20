@@ -241,6 +241,7 @@ export class ChatHub {
       case "background.changed":
       case "run.failed":
       case "run.interrupted":
+      case "effort.state":
         break;
       default: {
         const unknown: never = ev;

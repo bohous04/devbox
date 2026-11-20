@@ -66,6 +66,8 @@ export interface HarnessOpenOptions {
   /** The thread has not had a prompt get through since it was opened new (BridgeState.instructionsPending). */
   instructionsPending: boolean;
   onInstructionsDelivered: () => void;
+  /** The user's reasoning effort (BridgeState.effort); null = the harness's default. */
+  effort: string | null;
 }
 
 export type OpenHarness = (o: HarnessOpenOptions) => HarnessSession;
@@ -264,6 +266,7 @@ function harnessOpener(launchEnv: Env, logError: (msg: string) => void): OpenHar
         onInstructionsDelivered: o.onInstructionsDelivered,
         baseEnv: env,
         emit: o.emit,
+        effort: o.effort,
         logError,
       });
     }
@@ -278,6 +281,7 @@ function harnessOpener(launchEnv: Env, logError: (msg: string) => void): OpenHar
         mcpConfigArgs: [...codexMcpArgs(), ...codexAccountArgs(env)],
         developerInstructions: APPENDED_SYSTEM_PROMPT,
         emit: o.emit,
+        effort: o.effort,
         logError,
       });
     }
@@ -296,6 +300,7 @@ function harnessOpener(launchEnv: Env, logError: (msg: string) => void): OpenHar
       emit: o.emit,
       usageBaseline: o.usageBaseline,
       onUsageBaseline: o.onUsageBaseline,
+      effort: o.effort,
       logError,
     });
   };
@@ -315,6 +320,8 @@ function recoverState(scan: LogScan, launch: { harness: Harness; account: string
     activeRunId: started.length ? started[started.length - 1]![0] : null,
     queue: open.flatMap(([runId, r]) => (r.started || r.queued === null ? [] : [{ runId, text: r.queued.text, attachments: r.queued.attachments, ...(r.queued.origin ? { origin: r.queued.origin } : {}) }])),
     continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, trimSeq: 0, ackCandidate: null, awaitingTarget: false,
+    // The log does not keep the choice: a rebuilt state starts on the harness's default (effort.state says so).
+    effort: null,
   };
   if (native === null) return { state, outcome: "there is no thread to resume, a new one opens" };
   if (native.harness === launch.harness && native.account === launch.account) {
@@ -347,7 +354,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     const r = recoverState(log.scan(), { harness: o.harness, account: o.account, model: o.model });
     loaded = r.state;
     recoveryNotice = `state.json was unusable (${e.message}); the bridge rebuilt its state from the event log: ${r.outcome}. `
-      + `Lost with it: the automatic-continuation history, the usage baseline, an undelivered switch handoff. The damaged file is kept as ${basename(kept)}.`;
+      + `Lost with it: the automatic-continuation history, the usage baseline, an undelivered switch handoff, the chosen reasoning effort (back to the model's default). The damaged file is kept as ${basename(kept)}.`;
     logError(`agent-bridge: ${recoveryNotice}`);
   }
   // After a switch the persisted target is the session's harness, whatever the container was launched with (or,
@@ -370,6 +377,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     trimSeq: 0,
     ackCandidate: null,
     awaitingTarget: false,
+    effort: null,
   };
   // A Claude/Codex target without its own home (a setModel on the launch target) keeps only the model choice: the
   // account is the one this launch leased, which a recreated container may have changed. An ACP target has no home
@@ -411,6 +419,14 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
         // The adapter reports only its own work; devd sees one list including the declared wait.
         adapterWork = notOverdue(e.work);
         publishBackground();
+        return;
+      case "effort.state":
+        // The harness may have dropped a choice its (new) model does not offer: the state follows it.
+        if (state.effort !== e.chosen) {
+          state.effort = e.chosen;
+          persist();
+        }
+        server.publish(e);
         return;
       case "thread.native":
         state.nativeThreadId = e.nativeThreadId;
@@ -490,6 +506,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
           state.instructionsPending = false;
           persist();
         },
+        effort: state.effort,
       }),
     };
     // Registered before the end handler, so a handled failure is retired before its session's end is looked at.
@@ -736,6 +753,13 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
         current = { ...current!, model: cmd.model };
         state.target = persistableTarget(current);
         state.model = cmd.model;
+        persist();
+        return;
+      case "setEffort":
+        // The harness being replaced would take it and the new one open without it.
+        refuseWhileSwitching("effort change");
+        await liveHarness().session.setEffort(cmd.effort);
+        state.effort = cmd.effort;
         persist();
         return;
       case "switchTarget":

@@ -1,7 +1,8 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { BackgroundWork, Capabilities, LoggedEvent, PendingRequest, RunRow, ThreadItem, ThreadSnapshot } from "../../shared/thread";
+import { parseEffortState } from "../../shared/effort";
+import type { BackgroundWork, Capabilities, LoggedEvent, PendingRequest, RunRow, ThreadEffort, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
 const TERMINAL: ReadonlySet<string> = new Set(["completed", "interrupted", "failed"]);
 /** A user item's images; no field when the message has none (same rule in dashboard/src/threadView.ts). */
@@ -30,6 +31,9 @@ export const THREAD_STORE_SCHEMA = 1;
  *  several items); `updated_seq`
  *  is the seq of their last change, so `snapshot({afterSeq})` also returns items that kept streaming. */
 export class ThreadStore {
+  /** Effort values already logged as dropped, so a bridge repeating one logs it once per session. */
+  private effortLogged = new Set<string>();
+
   private constructor(private db: Database, private onNotice: (item: ThreadItem) => void) {}
 
   static path(root: string, sessionId: string): string {
@@ -74,6 +78,7 @@ export class ThreadStore {
     db.run(`CREATE TABLE IF NOT EXISTS native (
       id INTEGER PRIMARY KEY CHECK (id = 1), harness TEXT NOT NULL, native_thread_id TEXT NOT NULL,
       account TEXT, model TEXT)`);
+    db.run(`CREATE TABLE IF NOT EXISTS effort (id INTEGER PRIMARY KEY CHECK (id = 1), state TEXT NOT NULL)`);
     db.run(`CREATE TABLE IF NOT EXISTS provider_threads (
       harness TEXT NOT NULL, account TEXT, native_thread_id TEXT NOT NULL, covered_through_run TEXT,
       last_used_at INTEGER NOT NULL, caps TEXT, resume_failed INTEGER NOT NULL DEFAULT 0,
@@ -233,6 +238,12 @@ export class ThreadStore {
       case "bridge.notice":
         this.insertItem(seq, ts, { runId: null, itemId: null, kind: "notice", text: ev.text, status: "done" });
         return;
+      case "effort.state": {
+        // Parsed whatever its shape (shared/effort.ts): the bridge's values reach the UI only as known levels.
+        const state = this.parseEffort(ev, `seq ${seq}`);
+        db.query("INSERT INTO effort (id, state) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET state=excluded.state").run(JSON.stringify(state));
+        return;
+      }
       default: {
         const unknown: never = ev;
         const type = (unknown as { type?: unknown }).type;
@@ -369,7 +380,28 @@ export class ThreadStore {
       lastSeq: this.lastSeq(), seenSeq: this.meta("seen_seq"), runs, items, pending,
       background: bg ? (JSON.parse(bg.work) as BackgroundWork[]) : [],
       native: n ? { harness: n.harness, nativeThreadId: n.native_thread_id, account: n.account, model: n.model } : null,
+      effort: this.effort(),
     };
+  }
+
+  /** The agent's reasoning effort from the latest effort.state, parsed again on the way out: a store written before
+   *  the parser (or by hand) serves no other shape. null before one. */
+  effort(): ThreadEffort | null {
+    const row = this.db.query("SELECT state FROM effort WHERE id=1").get() as { state: string } | null;
+    if (row === null) return null;
+    let raw: unknown;
+    try { raw = JSON.parse(row.state); } catch { raw = null; }
+    return this.parseEffort(raw, "the stored state");
+  }
+
+  private parseEffort(raw: unknown, where: string): ThreadEffort {
+    const { effort, dropped } = parseEffortState(raw);
+    for (const what of dropped) {
+      if (this.effortLogged.has(what)) continue;
+      this.effortLogged.add(what);
+      console.error(`thread store: effort ${what} at ${where} dropped`);
+    }
+    return effort;
   }
 
   /** The most recently used native thread of `harness`, or null when this session never used that harness. */

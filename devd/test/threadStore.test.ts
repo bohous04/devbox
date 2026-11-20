@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -410,4 +410,45 @@ test("T8: a store written by a newer devd (higher schema version) is refused wit
   db.close();
   expect(() => ThreadStore.open(dir, "dev-a-b-1")).toThrow(`thread store schema ${THREAD_STORE_SCHEMA + 1} is newer than this devd's (${THREAD_STORE_SCHEMA})`);
   rmSync(dir, { recursive: true, force: true });
+});
+
+test("effort.state: kept for the snapshot across a reopen; levels outside the known list are dropped, logged once", () => {
+  const dir = mkdtempSync(join(tmpdir(), "threads-"));
+  const errors = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const s = ThreadStore.open(dir, "dev-a-b-1");
+    n = 0;
+    const odd: BridgeEvent = { type: "effort.state", model: "m", supported: ["low", "turbo<b>", "high", "low"], effective: "turbo<b>", chosen: "high" };
+    s.apply(ev(odd));
+    s.apply(ev({ ...odd, chosen: null }));
+    expect(s.snapshot().effort).toEqual({ model: "m", supported: ["low", "high"], effective: null, chosen: null });
+    // Stored parsed, not only served parsed: the bridge's values never sit in the store.
+    const row = new Database(ThreadStore.path(dir, "dev-a-b-1")).query("SELECT state FROM effort").get() as { state: string };
+    expect(JSON.parse(row.state)).toEqual({ model: "m", supported: ["low", "high"], effective: null, chosen: null });
+    expect(errors.mock.calls.filter((c) => String(c[0]).includes("thread store: effort"))).toHaveLength(2);
+    s.close();
+    const again = ThreadStore.open(dir, "dev-a-b-1");
+    expect(again.snapshot().effort).toEqual({ model: "m", supported: ["low", "high"], effective: null, chosen: null });
+    again.close();
+  } finally {
+    errors.mockRestore();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("effort: a stored state of another shape (written before the parser, or by hand) is served parsed", () => {
+  const dir = mkdtempSync(join(tmpdir(), "threads-"));
+  const errors = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    ThreadStore.open(dir, "dev-a-b-1").close();
+    const db = new Database(ThreadStore.path(dir, "dev-a-b-1"));
+    db.query("INSERT INTO effort (id, state) VALUES (1, ?)").run(JSON.stringify({ model: "m", supported: "low", effective: ["x"], chosen: "low" }));
+    db.close();
+    const s = ThreadStore.open(dir, "dev-a-b-1");
+    expect(s.snapshot().effort).toEqual({ model: "m", supported: null, effective: null, chosen: "low" });
+    s.close();
+  } finally {
+    errors.mockRestore();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
