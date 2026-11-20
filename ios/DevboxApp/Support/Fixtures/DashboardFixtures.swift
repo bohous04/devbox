@@ -10,6 +10,7 @@ enum DashboardFixtures {
         "GET /api/unpushed": { _ in .json(unpushed(now: Date())) },
         "GET /api/agent-upkeep": { _ in .json(upkeep) },
         "GET /api/operations": { _ in .json(operations(now: Date())) },
+        "GET /api/prod-db/writes": { _ in .json(prodWrites(now: Date())) },
     ]
 
     private static func repo(_ name: String, cloned: Bool = true, agent: String? = nil) -> [String: Any] {
@@ -116,6 +117,16 @@ enum DashboardFixtures {
                result: "Deployed in 2 min 14 s"),
             op(12, "failed", minutesAgo: 1_500, params: ["app": "lumen-docs", "environment": "production", "branch": "main"],
                error: "Health check failed after 3 attempts"),
+        ]
+    }
+
+    static func prodWrites(now: Date) -> [[String: Any]] {
+        let ms = Int(now.timeIntervalSince1970 * 1000)
+        return [
+            ["id": 9, "ts": ms - 8 * 60_000, "session_id": "dev-acme-web", "db": "acme-prod", "status": "pending",
+             "sql": "ALTER TABLE orders ADD COLUMN total_rounded numeric(12,2);", "decided_at": NSNull(), "result": NSNull(), "error": NSNull()],
+            ["id": 8, "ts": ms - 26 * 3_600_000, "session_id": "dev-orchard-sync", "db": "orchard-prod", "status": "executed",
+             "sql": "UPDATE cursors SET page = 0 WHERE stale = true;", "decided_at": ms - 25 * 3_600_000, "result": "3 rows", "error": NSNull()],
         ]
     }
 }
