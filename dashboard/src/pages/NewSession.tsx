@@ -200,7 +200,7 @@ export function NewSession() {
     : summary ? { text: summary, tone: "status" as const } : null;
 
   return (
-    <div className="mx-auto flex w-full max-w-[42rem] flex-col gap-4 pt-2 sm:min-h-[calc(100dvh-14rem)] sm:justify-center sm:pt-0">
+    <div className="mx-auto flex w-full max-w-[42rem] flex-col gap-4 pt-2 sm:pt-[12vh]">
       <h1 className="text-2xl font-semibold tracking-tight sm:text-center">What should we work on?</h1>
 
       <RepoPicker tree={tree} value={repo ? pickKey(folder, project, repo) : ""} disabled={busy} onPick={pickRepo} />
@@ -384,11 +384,13 @@ function AgentMenu({ agent, disabled, onPick }: { agent: AgentName; disabled: bo
           className="h-8 max-w-56 shrink-0 gap-1.5 rounded-full px-2.5 font-medium text-foreground/90 hover:bg-accent hover:text-foreground has-[>svg]:px-2.5 data-[state=open]:bg-accent data-[state=open]:text-foreground"
         >
           <AgentGlyph agent={agent} />
-          <span className="truncate">{profile.label}</span>
+          {/* A phone shows the short name, so the options chip beside it keeps its whole label. */}
+          <span className="truncate sm:hidden">{profile.short}</span>
+          <span className="truncate max-sm:hidden">{profile.label}</span>
           <ChevronDown aria-hidden="true" className="size-3.5 opacity-50" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" side="top" sideOffset={8} collisionPadding={16} className="w-72 max-w-[calc(100vw-2rem)]">
+      <DropdownMenuContent align="end" side="bottom" sideOffset={8} collisionPadding={16} className="w-[calc(100vw-2rem)] bg-popover sm:w-72">
         <DropdownMenuLabel className="text-xs font-medium text-muted-foreground">Agent</DropdownMenuLabel>
         {AGENT_IDS.map((id) => (
           <DropdownMenuItem key={id} onSelect={() => onPick(id)}>
@@ -403,12 +405,12 @@ function AgentMenu({ agent, disabled, onPick }: { agent: AgentName; disabled: bo
   );
 }
 
-/** A secondary action next to the line under the box: quiet text, a real button. */
+/** A secondary action next to the line under the box: quieter than send, a real button. */
 function InlineAction({ children, disabled = false, onClick }: { children: ReactNode; disabled?: boolean; onClick: () => void }) {
   return (
     <button
       type="button" disabled={disabled} onClick={onClick}
-      className="min-h-8 rounded-sm text-left font-medium text-foreground underline decoration-foreground/30 underline-offset-4 hover:decoration-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 max-sm:min-h-11"
+      className="min-h-8 rounded-sm text-left text-muted-foreground underline decoration-muted-foreground/40 underline-offset-4 hover:text-foreground hover:decoration-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 max-sm:min-h-11"
     >
       {children}
     </button>
@@ -441,12 +443,12 @@ function OptionsMenu({ disabled, runtime, host, chatDisabled, tmuxDisabled, ibxD
           type="button" variant="ghost" size="sm" aria-label={`Session options: ${label}`} title={`Session options: ${label}`}
           className="h-8 min-w-0 shrink gap-1 rounded-full px-2.5 font-medium text-foreground/80 hover:bg-accent hover:text-foreground data-[state=open]:bg-accent data-[state=open]:text-foreground"
         >
-          {/* A phone names the host only when it is not the VPS, so the agent's label keeps its room. */}
-          <span className="truncate">{runtimeLabel}<span className={host === "vps" ? "max-sm:hidden" : undefined}> · {hostLabel}</span></span>
+          <span className="truncate">{label}</span>
           <ChevronDown aria-hidden="true" className="size-3.5 opacity-50" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" side="top" sideOffset={8} collisionPadding={16} className="w-80 max-w-[calc(100vw-2rem)]">
+      {/* Downward, under the box: never over the repo pill above it. A phone gets the composer's full width. */}
+      <DropdownMenuContent align="end" side="bottom" sideOffset={8} collisionPadding={16} className="w-[calc(100vw-2rem)] bg-popover sm:w-80">
         <DropdownMenuLabel className="text-xs font-medium text-muted-foreground">Interface</DropdownMenuLabel>
         {item("chat", "Chat", runtime === "chat", chatDisabled, "The agent runs behind a chat view; its terminal stays available as a tab.", () => onRuntime("chat"))}
         {item("tmux", "Terminal", runtime === "tmux", tmuxDisabled, "The agent runs in a tmux terminal.", () => onRuntime("tmux"))}
