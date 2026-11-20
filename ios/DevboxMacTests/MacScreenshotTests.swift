@@ -31,9 +31,11 @@ final class MacScreenshotTests: XCTestCase {
 
     func testThread() throws {
         for look in ["light", "dark"] { try shoot(name: "thread-\(look)", look: look, thread: "dev-orchard-sync") }
+        // The composer with text in it: send enabled.
+        try shoot(name: "thread-typed-light", look: "light", thread: "dev-orchard-sync", draft: "Pin Node 22 in the Dockerfile too")
     }
 
-    private func shoot(name: String, look: String, thread: String?) throws {
+    private func shoot(name: String, look: String, thread: String?, draft: String? = nil) throws {
         let state = MacAppState(isTestRun: false, isFixtureRun: true)
         state.appModel.reloadConfiguration()
         let root = MacWindowContent(thread: .constant(thread), newSession: .constant(false), findRequest: 0)
@@ -63,6 +65,15 @@ final class MacScreenshotTests: XCTestCase {
         }
         RunLoop.main.run(until: Date().addingTimeInterval(1.5))
         XCTAssertNotNil(state.inbox?.items, "the fixture inbox did not load")
+        if let draft {
+            // Typed as a user would: the field's editor takes the text and SwiftUI's binding follows.
+            let field = try XCTUnwrap(Self.allViews(window.contentView!).first { ($0 as? NSTextField)?.placeholderString == "Ask anything" || ($0 is NSTextView && $0.frame.width > 300) },
+                                      "no composer field")
+            window.makeFirstResponder(field)
+            let editor = try XCTUnwrap(window.firstResponder as? NSTextView, "the composer has no editor")
+            editor.insertText(draft, replacementRange: NSRange(location: NSNotFound, length: 0))
+            RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        }
 
         let frame = try XCTUnwrap(window.contentView?.superview, "the window has no frame view")
         // The sidebar list makes its rows when it is drawn on a screen; offscreen they are made here.
@@ -153,6 +164,8 @@ final class MacScreenshotTests: XCTestCase {
         layer.backgroundFilters = nil
         layer.sublayers?.forEach(dropCompositing)
     }
+
+    private static func allViews(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(allViews) }
 
     private static func views(in view: NSView, named name: String) -> [NSView] {
         (String(describing: type(of: view)) == name ? [view] : []) + view.subviews.flatMap { views(in: $0, named: name) }
