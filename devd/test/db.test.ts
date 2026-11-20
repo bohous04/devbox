@@ -14,7 +14,7 @@ import {
   setAutoEnd, savePendingFirstTurn, getPendingFirstTurn, prunePendingFirstTurns, type SessionRow,
   setSessionInstabox, getInstaboxBase, setInstaboxBase,
   deleteAgentLiveState, getAgentLiveState, upsertAgentLiveState,
-  chatSessionsWithoutBridgeSecret, getBridgeSecret, issueBridgeSecret,
+  chatSessionsWithoutBridgeSecret, getBridgeSecret, setBridgeSecret,
 } from "../src/db";
 
 const row = {
@@ -507,8 +507,8 @@ test("DEVBOX-54: bridge secrets live apart from the session row, go with the ses
     id, folder: "f", project: "harbor", repo: id, container: id, port_base: 40000 + id.length, status: "running", solo: 0,
     created_at: 0, last_active_at: 0, important: 0, runtime });
   row("dev-harbor-a", "chat"); row("dev-harbor-bb", "chat"); row("dev-harbor-ccc", "tmux");
-  const s = issueBridgeSecret(db, "dev-harbor-a");
-  expect(s).toMatch(/^[0-9a-f]{64}$/);
+  const s = "0f".repeat(32);
+  setBridgeSecret(db, "dev-harbor-a", s);
   expect(getBridgeSecret(db, "dev-harbor-a")).toBe(s);
   expect(JSON.stringify(getSession(db, "dev-harbor-a"))).not.toContain(s);
   expect(JSON.stringify(listSessions(db))).not.toContain(s);

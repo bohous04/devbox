@@ -1,8 +1,13 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 /** The container env that carries the per-container secret devd stored for this session (1.6.0). */
 export const BRIDGE_SECRET_ENV = "DEVD_BRIDGE_SECRET";
 const SECRET = /^[0-9a-f]{64}$/;
+
+/** A new container's secret (devd). */
+export function newBridgeSecret(): string {
+  return randomBytes(32).toString("hex");
+}
 
 export function isBridgeSecret(v: string): boolean {
   return SECRET.test(v);

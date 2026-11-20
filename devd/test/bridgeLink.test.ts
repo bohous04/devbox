@@ -24,10 +24,11 @@ const ev = (seq: number): LoggedEvent => ({ seq, ts: 1000 + seq, event: { type: 
 type CmdReply = { ok: true } | { ok: false; error: string } | "never";
 
 /** A unix socket server speaking the bridge's frame protocol, with knobs the real one has no need for. */
-function fakeBridge(path: string, o: { events?: LoggedEvent[]; ignoreAfterSeq?: boolean; ready?: Record<string, unknown>; binding?: { session: string; secret: string } } = {}) {
+function fakeBridge(path: string, o: { events?: LoggedEvent[]; ignoreAfterSeq?: boolean; ready?: Record<string, unknown>; binding?: { session: string; secret: string }; onHello?: string } = {}) {
   const events = [...(o.events ?? [])];
   const hellos: number[] = [];
   const nonces: (string | undefined)[] = [];
+  const sessions: (string | undefined)[] = [];
   const acks: number[] = [];
   const cmds: unknown[] = [];
   let reply: CmdReply = { ok: true };
@@ -46,6 +47,9 @@ function fakeBridge(path: string, o: { events?: LoggedEvent[]; ignoreAfterSeq?: 
           if (f.t === "hello") {
             hellos.push(f.afterSeq);
             nonces.push(f.nonce);
+            sessions.push(f.session);
+            // "silent": no answer at all; any other string is written instead of the bridge's answer.
+            if (o.onHello !== undefined) { if (o.onHello !== "silent") s.write(o.onHello); continue; }
             if (f.nonce !== undefined && o.binding) write(s, { t: "bind", session: o.binding.session, proof: bridgeProof(o.binding.secret, f.nonce, o.binding.session) });
             for (const e of events) if (o.ignoreAfterSeq || e.seq > f.afterSeq) write(s, { t: "event", e });
             s.data.hello = true;
@@ -62,7 +66,7 @@ function fakeBridge(path: string, o: { events?: LoggedEvent[]; ignoreAfterSeq?: 
     },
   });
   return {
-    hellos, acks, cmds, nonces,
+    hellos, acks, cmds, nonces, sessions,
     setReply(r: CmdReply) { reply = r; },
     publish(e: LoggedEvent) { events.push(e); for (const c of clients) if (c.data.hello) write(c, { t: "event", e }); },
     raw(line: string) { for (const c of clients) c.write(line); },
@@ -82,7 +86,7 @@ async function waitFor(cond: () => boolean, what: string, ms = 2000) {
 const cleanups: (() => void)[] = [];
 afterEach(() => { for (const c of cleanups.splice(0)) c(); });
 
-function setup(prior: LoggedEvent[] = [], o: { ackMs?: number; secret?: string | null; legacyUntil?: number } = {}) {
+function setup(prior: LoggedEvent[] = [], o: { ackMs?: number; secret?: string | null; legacyUntil?: number; now?: () => number; bindTimeoutMs?: number } = {}) {
   const root = mkdtempSync(join(tmpdir(), "bl-"));
   mkdirSync(join(root, ID));
   const store = ThreadStore.open(root, ID);
@@ -100,6 +104,8 @@ function setup(prior: LoggedEvent[] = [], o: { ackMs?: number; secret?: string |
     controlDir: (id) => join(root, id),
     store: () => store,
     binding,
+    ...(o.now ? { now: o.now } : {}),
+    ...(o.bindTimeoutMs ? { bindTimeoutMs: o.bindTimeoutMs } : {}),
     onEvent: (id, e) => t.onEvent(id, e),
     onStatus: (id, s) => t.onStatus(id, s),
     onBehind: (id) => t.onBehind(id),
@@ -701,10 +707,13 @@ test("binding: a bridge proving this session's secret gets the link; the hello c
   expect(b.nonces[0]).toMatch(/^[0-9a-f]{32}$/);
   expect(c.nonces[0]).toMatch(/^[0-9a-f]{32}$/);
   expect(c.nonces[0]).not.toBe(b.nonces[0]);
+  // The hello names the session, so another session's bridge drops it before it acks or replays anything (I1).
+  expect(c.sessions).toEqual([ID]);
 });
 
 for (const [what, binding, says] of [
-  ["another session's bridge", { session: "dev-harbor-api", secret: SECRET }, "dev-harbor-api"],
+  ["another session's bridge", { session: "dev-harbor-api", secret: SECRET }, "of another session (dev-harbor-api)"],
+  ["a bridge naming a session id that is not one", { session: "x\nforged line " + "y".repeat(80), secret: SECRET }, "of another session:"],
   ["a bridge with another secret", { session: ID, secret: "1f".repeat(32) }, "does not match"],
   ["a bridge that sends no proof (older than the binding)", undefined, "did not prove"],
 ] as const) {
@@ -786,4 +795,51 @@ test("legacyBridgeStartupLine lists the sessions that still lack a secret with t
   expect(legacyBridgeStartupLine(["dev-harbor-web", "dev-harbor-api"], Date.UTC(2026, 11, 4))).toBe(
     "bridge binding: 2 chat sessions predate it (no bridge secret) and are connected only until 2026-12-04; end and reopen them before then: dev-harbor-web, dev-harbor-api",
   );
+});
+
+test("binding: a session id from the bridge that is not one never reaches the log, the thread or the user", async () => {
+  const { links, store, serve, logs, refusals } = setup([], { secret: SECRET });
+  serve({ binding: { session: "x\nforged", secret: SECRET } });
+  links.ensure(ID);
+  await waitFor(() => refusals.length === 1, "refusal");
+  for (const t of [...logs, ...notices(store), ...refusals]) expect(t).not.toContain("forged");
+});
+
+test("binding: a malformed frame before the bind is a refusal, not a poison frame to count or skip", async () => {
+  const { links, store, serve, refusals } = setup([], { secret: SECRET });
+  const b = serve({ onHello: '{"t":"event","e":{"seq":1}}\n' });
+  links.ensure(ID);
+  await waitFor(() => b.hellos.length >= POISON_LIMIT + 1, "attempts past the poison limit");
+  expect(refusals).toHaveLength(1);
+  expect(refusals[0]).toContain("did not prove");
+  expect(notices(store)).toEqual(refusals);
+  expect(store.lastSeq()).toBe(0);
+});
+
+test("binding: a bridge that never answers the hello is refused after the bind timeout, and devd retries", async () => {
+  const { links, serve, refusals } = setup([], { secret: SECRET, bindTimeoutMs: 30 });
+  const b = serve({ onHello: "silent" });
+  links.ensure(ID);
+  await waitFor(() => refusals.length === 1 && b.hellos.length >= 2, "timeout refusal and a retry");
+  expect(refusals[0]).toContain("did not prove its session within");
+  expect(links.status(ID)).not.toBe("connected");
+});
+
+test("binding: the user is notified at most once per 30 minutes per session, even with accepted links between", async () => {
+  let now = Date.UTC(2026, 10, 20);
+  const { links, store, serve, refusals } = setup([], { secret: SECRET, now: () => now });
+  let current = serve({ binding: { session: "dev-harbor-api", secret: SECRET } });
+  links.ensure(ID);
+  await waitFor(() => refusals.length === 1, "first refusal");
+  const flip = async (binding: { session: string; secret: string }, cond: () => boolean, what: string) => {
+    current.close();
+    current = serve({ binding });
+    await waitFor(cond, what);
+  };
+  await flip({ session: ID, secret: SECRET }, () => links.status(ID) === "connected", "accepted");
+  await flip({ session: "dev-harbor-api", secret: SECRET }, () => notices(store).length === 2, "second episode in the thread");
+  expect(refusals).toHaveLength(1);
+  now += 30 * 60_000;
+  await flip({ session: ID, secret: SECRET }, () => links.status(ID) === "connected", "accepted again");
+  await flip({ session: "dev-harbor-api", secret: SECRET }, () => refusals.length === 2, "notified again after 30 min");
 });

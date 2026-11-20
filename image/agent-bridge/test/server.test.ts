@@ -139,6 +139,27 @@ test("no bind frame for a hello without a nonce (an older devd) or on a bridge w
   void unbound;
 });
 
+test("a bound bridge drops a hello meant for another session: no ack of its afterSeq, no replay", async () => {
+  const secret = "0f".repeat(32);
+  const hellos: number[] = [];
+  const errs: string[] = [];
+  const server = startServer({ socketPath, log: new EventLog(logPath), onCommand: async () => {}, handshake: () => ({ version: "1.6.0", awaitingTarget: false }), binding: { session: "dev-harbor-web", secret }, onHello: (s) => hellos.push(s), logError: (m) => errs.push(m) });
+  closers.push(() => server.close());
+  server.publish(ev("a"));
+  const c = await connect();
+  const nonce = "ab".repeat(16);
+  c.send({ t: "hello", afterSeq: 0, nonce, session: "dev-harbor-api" });
+  await c.closed;
+  // Only the bind, so devd can say whose bridge it reached.
+  expect(c.frames).toEqual([{ t: "bind", session: "dev-harbor-web", proof: bridgeProof(secret, nonce, "dev-harbor-web") }]);
+  expect(hellos).toEqual([]);
+  expect(errs).toHaveLength(1);
+  const ok = await connect();
+  ok.send({ t: "hello", afterSeq: 0, nonce, session: "dev-harbor-web" });
+  expect(seqs(await ok.waitFor(3))).toEqual(["bind", 1, "ready1"]);
+  expect(hellos).toEqual([0]);
+});
+
 test("bridgeProof depends on the secret, the nonce and the session", () => {
   const s1 = "0f".repeat(32), s2 = "1f".repeat(32), n1 = "ab".repeat(16), n2 = "cd".repeat(16);
   const p = bridgeProof(s1, n1, "dev-harbor-web");

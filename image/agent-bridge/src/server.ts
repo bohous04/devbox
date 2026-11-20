@@ -122,6 +122,13 @@ export function startServer(o: {
     if (frame.nonce !== undefined && o.binding) {
       send(c, { t: "bind", session: o.binding.session, proof: bridgeProof(o.binding.secret, frame.nonce, o.binding.session) });
     }
+    // devd meant another session (a socket that leads here by mistake or on purpose): its afterSeq must not ack this
+    // log, nor this thread be replayed to it. The bind above tells devd whose bridge this is.
+    if (o.binding && frame.session !== undefined && frame.session !== o.binding.session) {
+      logError(`agent-bridge: a hello for another session; closing that client`);
+      drop(c);
+      return;
+    }
     o.onHello?.(frame.afterSeq);
     const done = replay(c, frame.afterSeq).catch((err) => {
       logError(`agent-bridge: replay failed, closing client: ${err instanceof Error ? err.message : String(err)}`);
