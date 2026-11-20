@@ -108,8 +108,9 @@ struct MacWindowContent: View {
     }
 }
 
-/// The inbox as the sidebar, by the same rules as the web and iPhone (InboxView): needs you, finished (five, then
-/// "N more"), idle, then the working, snoozed and settled shelves (collapsed). Every group is a disclosure group with
+/// The inbox as the sidebar, by the same rules as the web and iPhone (InboxView), but with what runs right under what
+/// needs you: needs you, working, finished (five, then "N more"), idle, then the snoozed and settled shelves
+/// (collapsed). Every group is a disclosure group with
 /// its count aligned at the right. Rows are MacInboxRow, with the latest message only in Needs you, Working and
 /// Snoozed, and their times tick every 15 s. Above them: the search field (⌘F) and New session (⌘N). ↑/↓ move
 /// the selection (List); the context menu has the row actions and "Open in New Window".
@@ -120,7 +121,7 @@ struct MacInboxSidebar: View {
     let findRequest: Int
     let newSession: () -> Void
     @Environment(\.openWindow) private var openWindow
-    @State private var expanded: Set<String> = ["Needs you", "Finished", "Idle"]
+    @State private var expanded: Set<String> = ["Needs you", "Working", "Finished", "Idle"]
     @State private var showAll: Set<String> = []
     @State private var actionsFor: InboxItem?
     @State private var query = ""
@@ -161,6 +162,7 @@ struct MacInboxSidebar: View {
             .scrollContentBackground(.hidden)
             .background(MacTone.sidebar)
             .safeAreaInset(edge: .top, spacing: 0) { tools }
+            .safeAreaInset(edge: .bottom, spacing: 0) { footer }
         }
         .navigationTitle("Inbox")
         .onChange(of: findRequest) { _, _ in searching = true }
@@ -200,6 +202,33 @@ struct MacInboxSidebar: View {
         .background(MacTone.sidebar)
     }
 
+    /// The inbox's connection and Settings (⌘,), anchored under the groups.
+    private var footer: some View {
+        let link = MacInboxSidebar.connection(paused: store.paused, loadError: store.loadError, loaded: store.items != nil)
+        return HStack(spacing: 8) {
+            Circle().fill(link.color).frame(width: 7, height: 7).accessibilityHidden(true)
+            Text(link.text).font(.system(size: 11.5)).foregroundStyle(Theme.C.mutedForeground).lineLimit(1)
+            Spacer(minLength: 0)
+            SettingsLink {
+                Image(systemName: "gearshape").font(.system(size: 13)).frame(width: 26, height: 26).contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .help("Settings (⌘,)")
+            .accessibilityLabel("Settings")
+        }
+        .padding(.horizontal, 14).padding(.vertical, 8)
+        .background(MacTone.sidebar)
+        .overlay(alignment: .top) { Rectangle().fill(Theme.C.border).frame(height: 1 / 3) }
+    }
+
+    /// What the footer says about the inbox's link to devd.
+    static func connection(paused: Bool, loadError: String?, loaded: Bool) -> (text: String, color: Color) {
+        if paused { return ("Reconnecting — refreshing every 5 s", InboxTone.action) }
+        if !loaded, loadError != nil { return ("Can't reach devd", InboxTone.danger) }
+        if !loaded { return ("Connecting…", Theme.C.mutedForeground) }
+        return ("Connected", InboxTone.doneIcon)
+    }
+
     @ViewBuilder
     private func groups(_ g: InboxView.Groups, now: Int) -> some View {
         let split = InboxView.splitNeedsYou(g.needsYou)
@@ -210,9 +239,9 @@ struct MacInboxSidebar: View {
                 .padding(.vertical, 4)
         }
         group("Needs you", split.action, now: now, preview: true)
+        group("Working", g.working, now: now, preview: true)
         group("Finished", split.finished, now: now, preview: false, cap: 5)
         group("Idle", g.idle, now: now, preview: false)
-        group("Working", g.working, now: now, preview: true)
         group("Snoozed", g.snoozed, now: now, preview: true)
         group("Settled", g.settled, now: now, preview: false)
     }
@@ -289,8 +318,9 @@ private struct MacGroupHead: View {
 }
 
 /// A sidebar row: the title with its state on the right (one coloured word when the row needs you, otherwise how long
-/// ago), and one muted line: where it runs and, in the groups about the latest message, that message. The agent and
-/// "tmux" are left to the tooltip and the spoken label.
+/// ago, after a live dot while it works), and one muted line: where it runs and, in the groups about the latest
+/// message, that message, with the agent's mark at its end. The agent's name and "tmux" are left to the tooltip and
+/// the spoken label. (Inbox rows carry no branch, so the line cannot name one.)
 struct MacInboxRow: View {
     let item: InboxItem
     let now: Int
@@ -307,6 +337,18 @@ struct MacInboxRow: View {
         case .bridgeBehind?: return ("Behind", .danger)
         case .ciFailed?: return ("CI failed", .danger)
         default: return nil
+        }
+    }
+
+    /// The agent's mark: its initial, two letters where one is taken (Claude C, Codex Co).
+    static func agentMark(_ agent: String) -> String {
+        switch AgentName(rawValue: agent) ?? .unknown {
+        case .claude, .claudeGemini, .claudeOpenrouter: return "C"
+        case .codex: return "Co"
+        case .grok: return "G"
+        case .antigravity: return "A"
+        case .vibe: return "V"
+        case .unknown: return "?"
         }
     }
 
@@ -331,19 +373,47 @@ struct MacInboxRow: View {
                 if let word = Self.word(item) {
                     Text(word.text).font(.system(size: 11, weight: .semibold)).foregroundStyle(InboxTone.text(word.tone))
                 } else {
-                    Text(Self.when(item, now: now)).font(.system(size: 11)).monospacedDigit().foregroundStyle(Theme.C.mutedForeground)
+                    HStack(spacing: 5) {
+                        if item.attention.section == .working { LiveDot() }
+                        Text(Self.when(item, now: now)).font(.system(size: 11)).monospacedDigit()
+                            .foregroundStyle(item.attention.section == .working ? InboxTone.busy : Theme.C.mutedForeground)
+                    }
                 }
             }
-            (Text("\(item.project)/\(item.repo)") + Text(detail.isEmpty ? "" : "  ·  \(detail)"))
-                .font(.system(size: 11.5))
-                .foregroundStyle(Theme.C.mutedForeground)
-                .lineLimit(1)
+            HStack(spacing: 6) {
+                (Text("\(item.project)/\(item.repo)") + Text(detail.isEmpty ? "" : "  ·  \(detail)"))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.C.mutedForeground)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text(Self.agentMark(item.agent))
+                    .font(.system(size: 8.5, weight: .bold))
+                    .foregroundStyle(Theme.C.mutedForeground)
+                    .frame(minWidth: 16, minHeight: 14)
+                    .background(Theme.C.foreground.opacity(0.07), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+            }
         }
         .padding(.vertical, 5)
         .contentShape(Rectangle())
         .help(spoken)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(spoken)
+    }
+}
+
+/// A working row's mark: a dot that breathes while the agent runs; still with Reduce Motion.
+private struct LiveDot: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var dim = false
+
+    var body: some View {
+        Circle().fill(InboxTone.busy).frame(width: 6, height: 6)
+            .opacity(dim ? 0.35 : 1)
+            .onAppear {
+                guard !reduceMotion else { return }
+                withAnimation(.easeInOut(duration: 1).repeatForever(autoreverses: true)) { dim = true }
+            }
+            .accessibilityHidden(true)
     }
 }
 
@@ -384,6 +454,7 @@ struct MacThreadDetail: View {
     @EnvironmentObject private var state: MacAppState
     @Environment(\.dismissWindow) private var dismissWindow
     @State private var tab: Tab?
+    @State private var revealChanges = 0
 
     private var item: InboxItem? { inbox.items?.first { $0.sessionId == threadId } }
 
@@ -394,7 +465,8 @@ struct MacThreadDetail: View {
             case .chat:
                 let store = state.windows.store(for: threadId, client: client)
                 ChatScreen(store: store, client: client, openTerminal: { tab = .terminal },
-                           closeWindow: { dismissWindow(id: MacWindow.sceneId, value: threadId) })
+                           closeWindow: { dismissWindow(id: MacWindow.sceneId, value: threadId) },
+                           revealChanges: revealChanges)
                     .id(ObjectIdentifier(store))
                     .onReceive(store.$ended) { if $0 { state.windows.ended(threadId) } }
             case .terminal:
@@ -404,8 +476,17 @@ struct MacThreadDetail: View {
         // The window names its thread, as the inbox row does, and where it runs.
         .navigationTitle(item.map { InboxView.rowTitle($0).text } ?? threadId)
         .navigationSubtitle(item.map { "\($0.project) / \($0.repo)" } ?? "")
+        // Opaque, as the thread fades out under it (ChatScreen).
+        .toolbarBackground(Theme.C.background, for: .windowToolbar)
+        .toolbarBackground(.visible, for: .windowToolbar)
         .toolbar {
-            // With the title and breadcrumb on the left, the view switch sits with the window's actions on the right.
+            // With the title and breadcrumb on the left, the changes and the view switch sit on the right.
+            ToolbarItem(placement: .primaryAction) {
+                MacChangesChip(store: state.windows.store(for: threadId, client: client), client: client) {
+                    tab = .chat
+                    revealChanges += 1
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Picker("View", selection: Binding(get: { shown }, set: { tab = $0 })) {
                     Text("Chat").tag(Tab.chat)
@@ -415,6 +496,42 @@ struct MacThreadDetail: View {
                 .labelsHidden()
             }
         }
+    }
+}
+
+/// The header's changes: the worktree's +/− against its base, when it has any; a click shows the changes card. Loads
+/// with the thread and again when a run ends, as the card does.
+private struct MacChangesChip: View {
+    @ObservedObject var thread: ThreadStore
+    @StateObject private var changes: ChangesStore
+    let show: () -> Void
+
+    init(store: ThreadStore, client: DevdClient, show: @escaping () -> Void) {
+        thread = store
+        _changes = StateObject(wrappedValue: ChangesStore(sessionId: store.sessionId, client: client))
+        self.show = show
+    }
+
+    var body: some View {
+        Group {
+            if case .loaded(let c) = changes.state {
+                Button(action: show) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "doc.badge.plus").foregroundStyle(Theme.C.mutedForeground)
+                        Text("+\(c.totals.added)").foregroundStyle(InboxTone.doneIcon)
+                        Text("−\(c.totals.removed)").foregroundStyle(c.totals.removed > 0 ? InboxTone.danger : Theme.C.mutedForeground)
+                    }
+                    .font(.system(size: 12, weight: .medium)).monospacedDigit()
+                    .padding(.horizontal, 6)
+                }
+                .help("\(ChangesView.title(c)) — show the changes")
+                .accessibilityLabel("\(ChangesView.title(c)), \(c.totals.added) lines added, \(c.totals.removed) removed")
+            } else {
+                // Not empty: an empty view never appears, so its task (the fetch) would never run.
+                Color.clear.frame(width: 0, height: 0).accessibilityHidden(true)
+            }
+        }
+        .task(id: thread.changesAnchor?.endedSeq) { await changes.load() }
     }
 }
 

@@ -35,6 +35,17 @@ final class MacAppTests: XCTestCase {
         XCTAssertEqual(MacInboxRow.when(try item("idle", reason: nil, since: 1_000), now: 1_000 + 3 * 60_000), "3m")
     }
 
+    func testSidebarAgentMarkAndConnection() {
+        XCTAssertEqual(MacInboxRow.agentMark("claude"), "C")
+        XCTAssertEqual(MacInboxRow.agentMark("codex"), "Co")
+        XCTAssertEqual(MacInboxRow.agentMark("grok"), "G")
+        XCTAssertEqual(MacInboxRow.agentMark("something-new"), "?")
+        XCTAssertEqual(MacInboxSidebar.connection(paused: false, loadError: nil, loaded: true).text, "Connected")
+        XCTAssertEqual(MacInboxSidebar.connection(paused: true, loadError: "x", loaded: true).text, "Reconnecting — refreshing every 5 s")
+        XCTAssertEqual(MacInboxSidebar.connection(paused: false, loadError: "x", loaded: false).text, "Can't reach devd")
+        XCTAssertEqual(MacInboxSidebar.connection(paused: false, loadError: nil, loaded: false).text, "Connecting…")
+    }
+
     func testMenuBarCountSaysWhenItIsStale() {
         XCTAssertEqual(NeedsYouBadge.text(count: 2, stale: false), "2")
         XCTAssertEqual(NeedsYouBadge.text(count: 2, stale: true), "2?")
