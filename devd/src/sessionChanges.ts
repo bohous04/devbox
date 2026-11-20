@@ -1,15 +1,16 @@
 import { mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
-import type { ChangedFile, ChangeStatus, FileDiff, SessionChanges } from "../../shared/changes";
+import type { ChangedFile, ChangesErrorCode, ChangeStatus, FileDiff, SessionChanges } from "../../shared/changes";
 import { sh } from "./git";
 import { run, timeoutFor } from "./proc";
 import { countUntracked, readUntracked, RootOwnedError, type CounterDeps } from "./untrackedCounter";
 
 /** An explicit failure the route maps to its HTTP status — never an empty list in its place.
- *  The message goes to the client, so it carries no host paths or git stderr (those are logged). */
+ *  The message goes to the client, so it carries no host paths or git stderr (those are logged); `code` is the
+ *  stable name clients match on (the message may be reworded). */
 export class ChangesError extends Error {
-  constructor(readonly status: 400 | 404 | 409 | 500, message: string) { super(message); }
+  constructor(readonly status: 400 | 404 | 409 | 500, readonly code: ChangesErrorCode, message: string) { super(message); }
 }
 
 const MAX_FILES = 500;
@@ -52,18 +53,18 @@ interface Repo {
  *  - untracked files are read by a child running as the worktree owner: see untrackedCounter.ts.
  */
 async function openRepo(ws: string, expected: Expected): Promise<Repo> {
-  if (!isDir(ws)) throw new ChangesError(409, "session worktree is missing");
+  if (!isDir(ws)) throw new ChangesError(409, "worktree_missing", "session worktree is missing");
   // devd runs as root over a worktree owned by uid 1000 → safe.directory (same as collectGitStats).
   const discover: Git = (...args) => sh(ws, "git", "-c", `safe.directory=${ws}`, ...args);
   const dirs = await discover("rev-parse", "--git-dir", "--git-common-dir");
   if (dirs.code !== 0) {
     console.error(`changes ${ws}: git rev-parse failed: ${dirs.stderr.trim()}`);
-    throw new ChangesError(409, "session worktree is not a readable git repository");
+    throw new ChangesError(409, "not_a_repo", "session worktree is not a readable git repository");
   }
   const [gitDir, commonDir] = dirs.stdout.trim().split("\n").map((p) => canon(isAbsolute(p) ? p : resolve(ws, p)));
   if (!gitDir || !commonDir || gitDir !== canon(expected.gitDir) || commonDir !== canon(expected.commonDir)) {
     console.error(`changes ${ws}: git dir ${gitDir} / common dir ${commonDir}, expected ${expected.gitDir} / ${expected.commonDir}`);
-    throw new ChangesError(409, "session worktree points to a different git repository");
+    throw new ChangesError(409, "foreign_git_dir", "session worktree points to a different git repository");
   }
   const pinned = ["git", "-c", `safe.directory=${ws}`, "--git-dir", gitDir, "--work-tree", ws];
   const git: Git = (...args) => sh(ws, ...pinned, ...args);
@@ -72,12 +73,12 @@ async function openRepo(ws: string, expected: Expected): Promise<Repo> {
     const r = await git(...args);
     if (r.code !== 0) {
       console.error(`changes ${ws}: git ${args.join(" ")} failed: ${r.stderr.trim()}`);
-      throw new ChangesError(500, `${what} failed`);
+      throw new ChangesError(500, "git_failed", `${what} failed`);
     }
     return r.stdout;
   };
   const head = await git("rev-parse", "--verify", "--quiet", "HEAD^{commit}");
-  if (head.code !== 0) throw new ChangesError(409, "repository has no commits yet");
+  if (head.code !== 0) throw new ChangesError(409, "no_commits", "repository has no commits yet");
   const base = await originDefault(git, gitDir, commonDir);
   const rev = base ? (await must(`merge-base with ${base}`, "merge-base", base, head.stdout.trim())).trim() : head.stdout.trim();
   return { ws, git, must, base, rev, gitCapped };
@@ -92,7 +93,7 @@ async function listChanges(repo: Repo): Promise<{ tracked: ChangedFile[]; untrac
 }
 
 const rethrowRootOwned = (e: unknown): never => {
-  if (e instanceof RootOwnedError) throw new ChangesError(409, e.message);
+  if (e instanceof RootOwnedError) throw new ChangesError(409, "root_owned", e.message);
   throw e;
 };
 
@@ -152,7 +153,7 @@ function validPath(path: string): boolean {
  * child and rendered as a new-file diff. Capped at MAX_DIFF on a line boundary.
  */
 export async function collectFileDiff(ws: string, expected: Expected, path: string, counterDeps?: CounterDeps): Promise<FileDiff> {
-  if (!validPath(path)) throw new ChangesError(400, "invalid path");
+  if (!validPath(path)) throw new ChangesError(400, "invalid_path", "invalid path");
   const repo = await openRepo(ws, expected);
   const { tracked, untracked } = await listChanges(repo);
   const base = repo.base ?? "HEAD";
@@ -177,7 +178,7 @@ export async function collectFileDiff(ws: string, expected: Expected, path: stri
     const header = trackedHeader(entry.status, entry.oldPath ?? path, path);
     return capped(header + hunks, (diff, truncated) => result(diff, truncated));
   }
-  if (!untracked.includes(path)) throw new ChangesError(404, "file is not among the session's changes");
+  if (!untracked.includes(path)) throw new ChangesError(404, "not_changed", "file is not among the session's changes");
   const file = await readWorking(ws, path, MAX_DIFF, counterDeps);
   if (file.binary) return { path, status: "untracked", base, binary: true, truncated: false, diff: "" };
   return { path, status: "untracked", base, binary: false, ...newFileDiff(path, file.content, file, MAX_DIFF) };
@@ -197,9 +198,9 @@ async function readWorking(ws: string, path: string, maxBytes: number, counterDe
   const file = await readUntracked(ws, path, maxBytes, counterDeps).catch(rethrowRootOwned);
   if ("unavailable" in file) {
     console.error(`changes ${ws}: reading ${path} failed: ${file.unavailable}`);
-    throw new ChangesError(500, "reading the file failed");
+    throw new ChangesError(500, "read_failed", "reading the file failed");
   }
-  if (!file.ok) throw new ChangesError(409, "file is not a readable regular file in the worktree");
+  if (!file.ok) throw new ChangesError(409, "unreadable_file", "file is not a readable regular file in the worktree");
   return file;
 }
 
@@ -213,13 +214,13 @@ async function baseBlob(repo: Repo, path: string): Promise<string | null> {
   // the backstop — nothing can make devd buffer more than MAX_SIDE.
   const oid = (await repo.must("resolving the base", "rev-parse", "--verify", "--quiet", `${repo.rev}:${path}`)).trim();
   const size = Number((await repo.must("reading the base size", "cat-file", "-s", oid)).trim());
-  if (!Number.isFinite(size)) throw new ChangesError(500, "reading the base size failed");
+  if (!Number.isFinite(size)) throw new ChangesError(500, "read_failed", "reading the base size failed");
   if (size > MAX_SIDE) return null;
   const r = await repo.gitCapped(MAX_SIDE + 1, "cat-file", "blob", oid);
   if (r.stdoutTruncated) return null;
   if (r.code !== 0) {
     console.error(`changes ${repo.ws}: git cat-file blob ${oid} failed: ${r.stderr.trim()}`);
-    throw new ChangesError(500, "reading the base failed");
+    throw new ChangesError(500, "read_failed", "reading the base failed");
   }
   return r.stdout;
 }
@@ -237,7 +238,7 @@ async function unifiedHunks(ws: string, old: string, cur: string): Promise<strin
     // Exit 1 = "files differ"; a non-zero exit is otherwise accepted only after our own kill at maxStdout.
     if (r.code !== 0 && r.code !== 1 && !r.stdoutTruncated) {
       console.error(`changes ${ws}: git diff --no-index failed: ${r.stderr.trim()}`);
-      throw new ChangesError(500, "git diff failed");
+      throw new ChangesError(500, "git_failed", "git diff failed");
     }
     const at = r.stdout.search(/^@@/m);
     return at < 0 ? "" : r.stdout.slice(at);
@@ -309,18 +310,18 @@ export function parseDiff(out: string): ChangedFile[] {
   while (i < t.length && t[i]!.startsWith(":")) {
     const code = t[i]!.slice(t[i]!.lastIndexOf(" ") + 1);
     const status = STATUS[code[0]!];
-    if (!status) throw new ChangesError(500, `unexpected git diff status ${JSON.stringify(code)}`);
+    if (!status) throw new ChangesError(500, "git_failed", `unexpected git diff status ${JSON.stringify(code)}`);
     if (code[0] === "R") { raw.push({ path: t[i + 2]!, status, oldPath: t[i + 1]! }); i += 3; }
     else { raw.push({ path: t[i + 1]!, status }); i += 2; }
   }
   const files: ChangedFile[] = [];
   for (const r of raw) {
     const tab = (t[i] ?? "").split("\t");
-    if (tab.length < 3) throw new ChangesError(500, "git diff output is malformed");
+    if (tab.length < 3) throw new ChangesError(500, "git_failed", "git diff output is malformed");
     let path = tab.slice(2).join("\t");
     if (path) i += 1;
     else { path = t[i + 2] ?? ""; i += 3; }
-    if (path !== r.path) throw new ChangesError(500, "git diff output is malformed");
+    if (path !== r.path) throw new ChangesError(500, "git_failed", "git diff output is malformed");
     const num = (s: string) => (s === "-" ? null : Number(s));
     files.push({
       path: r.path, status: r.status, added: num(tab[0]!), removed: num(tab[1]!),

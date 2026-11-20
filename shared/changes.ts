@@ -30,6 +30,19 @@ export interface SessionChanges {
   countsUnavailable?: true;
 }
 
+/** Why a changes route refused (both routes). `error` is for people and may be reworded; `code` is stable. A refusal
+ *  from a guard in front of every route (the shared-session guard, 403) comes without a code. */
+export type ChangesErrorCode =
+  | "unknown_session" | "instabox" | "restricted"
+  | "worktree_missing" | "not_a_repo" | "foreign_git_dir" | "no_commits" | "root_owned"
+  | "invalid_path" | "not_changed" | "unreadable_file"
+  | "git_failed" | "read_failed";
+
+export interface ChangesErrorBody {
+  error: string;
+  code: ChangesErrorCode;
+}
+
 /** GET /api/sessions/:id/changes/diff?path= — one changed file's unified diff against `base`. */
 export interface FileDiff {
   path: string;

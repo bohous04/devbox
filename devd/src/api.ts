@@ -68,6 +68,7 @@ import { classifyClaudeState } from "./stats";
 import { isValidTmuxName, killSessionCmd, labelSetCmd, parseProbe, probeCmd, type TmuxSession } from "./tmux";
 import { barePath, sessionWorkdir, type TreeProject } from "./tree";
 import { ChangesError, collectChanges, collectFileDiff } from "./sessionChanges";
+import type { ChangesErrorBody, ChangesErrorCode } from "../../shared/changes";
 import { COMMIT, VERSION } from "./version";
 import type { SelfUpdateStatus } from "./selfUpdate";
 import type { Decision } from "./criticGate";
@@ -268,8 +269,9 @@ const busy = (c: { json: (b: unknown, s: 409) => Response }, e: unknown) =>
 
 // Features that live on the VPS (Finder, port preview, inbox, critic, recreate) — for a session
 // on InstaBox 409. Returns null when the session is not InstaBox (continue normally).
-const ibxOnly = (c: { json: (b: unknown, s: 409) => Response }, s: { host?: string } | null | undefined, what: string) =>
-  s?.host === "instabox" ? c.json({ error: `${what} is VPS-only (InstaBox session)` }, 409) : null;
+/** `code`: an optional stable name for clients that match on it (the changes routes, shared/changes.ts). */
+const ibxOnly = (c: { json: (b: unknown, s: 409) => Response }, s: { host?: string } | null | undefined, what: string, code?: string) =>
+  s?.host === "instabox" ? c.json({ error: `${what} is VPS-only (InstaBox session)`, ...(code ? { code } : {}) }, 409) : null;
 
 // Long routes (backup, restore, open with clone, manual upkeep) can take minutes.
 // Bun closes an idle connection after `idleTimeout` (max 255 s), so for them the
@@ -1206,22 +1208,22 @@ export function createApp(d: ApiDeps): Hono {
   // Same guards for the listing and the per-file diff; `read` gets the worktree and the git dirs it must resolve to.
   const sessionChanges = async <T,>(c: Context, read: (ws: string, expected: { gitDir: string; commonDir: string }) => Promise<T>) => {
     const s = getSession(d.db, c.req.param("id") ?? "");
-    if (!s) return c.json({ error: "unknown session" }, 404);
-    { const g = ibxOnly(c, s, "Changed files"); if (g) return g; }
+    if (!s) return c.json({ error: "unknown session", code: "unknown_session" } satisfies ChangesErrorBody, 404);
+    { const g = ibxOnly(c, s, "Changed files", "instabox" satisfies ChangesErrorCode); if (g) return g; }
     // safeGit would refuse anyway; this way the dashboard gets the same message as other routes.
-    if (restricted(s.id)) return c.json({ error: SHARED_DENIED }, 403);
+    if (restricted(s.id)) return c.json({ error: SHARED_DENIED, code: "restricted" } satisfies ChangesErrorBody, 403);
     // The repo git must resolve to: the session's registration in the bare clone devd created
     // (git and reregisterWorktree name it after the worktree dir), else <ws>/.git.
     const ws = sessionWorkdir(d.root, s);
     const bare = s.worktree ? barePath(d.root, s.folder, s.project, s.repo) : null;
     const expected = bare ? { gitDir: join(bare, "worktrees", basename(ws)), commonDir: bare } : { gitDir: join(ws, ".git"), commonDir: join(ws, ".git") };
     try { return c.json(await read(ws, expected)); }
-    catch (e) { if (e instanceof ChangesError) return c.json({ error: e.message }, e.status); throw e; }
+    catch (e) { if (e instanceof ChangesError) return c.json({ error: e.message, code: e.code } satisfies ChangesErrorBody, e.status); throw e; }
   };
   app.get("/api/sessions/:id/changes", (c) => sessionChanges(c, collectChanges));
   app.get("/api/sessions/:id/changes/diff", (c) => {
     const path = c.req.query("path");
-    if (!path) return c.json({ error: "path required" }, 400);
+    if (!path) return c.json({ error: "path required", code: "invalid_path" } satisfies ChangesErrorBody, 400);
     return sessionChanges(c, (ws, expected) => collectFileDiff(ws, expected, path));
   });
 
