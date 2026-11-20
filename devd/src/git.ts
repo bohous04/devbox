@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { withDir, writeFileAt } from "./noFollowFs";
 import { basename, dirname, join } from "node:path";
 import { redactArgv, run, timeoutFor, type RunResult } from "./proc";
 
@@ -160,10 +161,17 @@ export async function fetchBare(bare: string, authEnv: Record<string, string> = 
  *  for `git worktree lock`; written directly because `worktree lock <path>` cannot find a
  *  registration whose gitdir holds the container path. */
 export function lockWorktree(bare: string, dest: string): void {
-  const marker = join(bare, "worktrees", basename(dest), "locked");
+  // The bare clone is agent-writable (mounted rw, chowned to uid 1000) and devd runs as root:
+  // no symlink below `bare` is followed (noFollowFs.ts).
   try {
-    if (existsSync(dirname(marker)) && !existsSync(marker)) writeFileSync(marker, "devbox session (container path /workspace)\n");
-  } catch (e) { console.error(`locking worktree ${dest} failed:`, e); }
+    withDir(bare, ["worktrees", basename(dest)], false, (d) => {
+      try { writeFileAt(d, "locked", "devbox session (container path /workspace)\n", { mode: 0o644 }); }
+      catch (e) { if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; } // already locked
+    });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return; // no registration to lock
+    console.error(`locking worktree ${dest} failed:`, e);
+  }
 }
 
 export async function pullWithRebase(dir: string, authEnv: Record<string, string> = {}): Promise<PullResult> {
@@ -324,14 +332,19 @@ async function worktreeHead(bare: string, branch: string | null, from: string): 
  *  `/workspace`) + `HEAD`. The index is not copied, because there is none; `git reset` recomputes it
  *  from HEAD — a mixed reset without paths does NOT CHANGE the working tree, only the index, so changes show
  *  up as changes instead of the whole tree appearing as new files. */
-async function reregisterWorktree(bare: string, dest: string, head: string): Promise<boolean> {
+/** Exported for tests. */
+export async function reregisterWorktree(bare: string, dest: string, head: string): Promise<boolean> {
   const admin = join(bare, "worktrees", basename(dest));
+  // Both the bare clone and the worktree are agent-writable and devd runs as root: written without
+  // following any symlink, a planted link is replaced (noFollowFs.ts).
+  const file = { mode: 0o644, replace: true };
   try {
-    mkdirSync(admin, { recursive: true });
-    writeFileSync(join(admin, "commondir"), "../..\n");
-    writeFileSync(join(admin, "gitdir"), `${join(dest, ".git")}\n`);
-    writeFileSync(join(admin, "HEAD"), `${head}\n`);
-    writeFileSync(join(dest, ".git"), `gitdir: ${admin}\n`);
+    withDir(bare, ["worktrees", basename(dest)], true, (d) => {
+      writeFileAt(d, "commondir", "../..\n", file);
+      writeFileAt(d, "gitdir", `${join(dest, ".git")}\n`, file);
+      writeFileAt(d, "HEAD", `${head}\n`, file);
+    });
+    withDir(dest, [], false, (d) => writeFileAt(d, ".git", `gitdir: ${admin}\n`, file));
   } catch (e) {
     console.error(`restoring the registration of worktree ${dest} failed:`, e);
     return false;

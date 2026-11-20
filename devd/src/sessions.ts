@@ -3,7 +3,8 @@ import { archiveChats } from "./chatArchive";
 import { removeThreadImages } from "./threadImages";
 import { codexRemoteLaunchScope } from "./codexRemoteLaunch";
 import type { Database } from "bun:sqlite";
-import { chmodSync, chownSync, existsSync, mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, fchownSync, lstatSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { openDirNoFollow, withDir, writeFileAt, type DirHandle } from "./noFollowFs";
 import { dirname, join } from "node:path";
 import { liveAgentPresent, staleAccountMounts } from "./accountMountRepair";
 import { chatRuntimeBlock, specFor, tmuxRuntimeBlock, usesProxy, type Upstream } from "./agents";
@@ -483,6 +484,39 @@ export class SessionManager {
     return join(this.d.controlRoot ?? DEFAULT_CONTROL_ROOT, id);
   }
 
+  /** The control dir as a real directory owned by devd itself. Its parent (controlRoot) is not
+   *  agent-writable and the dir is the container's mount root, so the agent cannot swap it — this
+   *  check makes that assumption explicit before root writes or chmods it. */
+  private ensureControlDir(id: string): string {
+    const dir = this.controlDir(id);
+    mkdirSync(dir, { recursive: true });
+    const st = lstatSync(dir);
+    if (!st.isDirectory() || st.uid !== process.getuid?.()) throw new Error(`control dir ${dir} is not a directory owned by devd`);
+    return dir;
+  }
+
+  /** Durable stop intent for the container's recovery helper. `recovery/` belongs to the container
+   *  user (the helper writes its journal there), so the agent can replace it with a symlink: it is
+   *  opened without following links, a planted link is removed (logged) and the dir recreated, and
+   *  the marker is written as a new file (noFollowFs.ts). */
+  private markManualStop(id: string): void {
+    const dir = this.ensureControlDir(id);
+    const open = () => openDirNoFollow(dir, ["recovery"], true);
+    let d: DirHandle;
+    try { d = open(); }
+    catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "ELOOP" && code !== "ENOTDIR") throw e;
+      console.error(`control dir of ${id}: recovery is not a directory (${code}), replacing it`);
+      withDir(dir, [], false, (c) => rmSync(join(c.path, "recovery"), { force: true }));
+      d = open();
+    }
+    try {
+      try { fchownSync(d.fd, 1000, 1000); } catch { /* existing image may own it already */ }
+      writeFileAt(d, "manual-stop", "1\n", { mode: 0o644, replace: true });
+    } finally { d.close(); }
+  }
+
   // A failed agent kill must not leave an orphaned session row (the container is already gone).
   private async killSshAgent(id: string): Promise<void> {
     try { await this.d.killSshAgent?.(id); }
@@ -520,10 +554,12 @@ export class SessionManager {
     const dir = this.controlDir(id);
     const path = join(dir, "gitea-tokens.json");
     try {
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(path, JSON.stringify(tokens), { mode: 0o600 });
-      // Read by uid 1000 in the container via a :ro mount; devd runs as root.
-      try { chownSync(path, 1000, 1000); } catch { chmodSync(path, 0o644); }
+      this.ensureControlDir(id);
+      // Read by uid 1000 in the container via a :ro mount; devd runs as root. The control dir is
+      // agent-writable (/run/devd): never follow a planted symlink (noFollowFs.ts).
+      const asRoot = process.getuid?.() === 0;
+      withDir(dir, [], false, (d) => writeFileAt(d, "gitea-tokens.json", JSON.stringify(tokens),
+        asRoot ? { mode: 0o600, owner: { uid: 1000, gid: 1000 }, replace: true } : { mode: 0o644, replace: true }));
     } catch (e) {
       console.error(`writing placeholders for ${id} failed:`, (e as Error).message);
       return this.d.giteaTokensPath;   // better the state before phase 2 than a session without git
@@ -609,23 +645,22 @@ export class SessionManager {
   // A chat session has no launcher reading the file: the prompt is only returned, and the API sends it as the
   // session's first message once the bridge link connects.
   private syncPromptFile(id: string, runtime: SessionRuntime, pull: PullResult, override?: string): string | undefined {
-    const dir = this.controlDir(id);
-    mkdirSync(dir, { recursive: true });
-    chmodSync(dir, 0o777); // devd may run as root; container user is uid 1000
+    const dir = this.ensureControlDir(id);
+    chmodSync(dir, 0o777); // devd may run as root; container user is uid 1000 (a real dir: ensureControlDir)
     const file = join(dir, "prompt");
+    // The agent can plant `/run/devd/prompt` → a host file: replace the link, never write through it.
+    const write = (text: string) => withDir(dir, [], false, (d) => writeFileAt(d, "prompt", text, { mode: 0o666, replace: true }));
     if (runtime === "chat") {
       rmSync(file, { force: true });
       return pull.status === "conflict" ? conflictPrompt(pull.files) : override;
     }
     if (pull.status === "conflict") {
       const prompt = conflictPrompt(pull.files);
-      writeFileSync(file, prompt);
-      chmodSync(file, 0o666);
+      write(prompt);
       return prompt;                                   // a conflict takes precedence (Claude handles the rebase)
     }
     if (override) {                                     // scheduled run: initial prompt into the channel
-      writeFileSync(file, override);
-      chmodSync(file, 0o666);
+      write(override);
       return override;
     }
     rmSync(file, { force: true });
@@ -952,7 +987,8 @@ export class SessionManager {
         // The worktree metadata (registration in the bare clone, `.git` in the worktree, the computed index)
         // was written by root; the container runs as uid 1000. Without the chown git could not commit in it.
         bornWorktree = true;
-        await sh(worktree, "chown", "1000:1000", join(worktree, ".git"));
+        // -h: `.git` is agent-writable; chown the link itself, never what it points to.
+        await sh(worktree, "chown", "-h", "1000:1000", join(worktree, ".git"));
         logEvent(this.d.db, id, "worktree", { path: worktree, branch, state });
       }
       // Record what the session actually sits on — for a new one right into the row below, for an old row
@@ -1096,10 +1132,7 @@ export class SessionManager {
         return;
       }
       await this.checkpointRecovery(id);
-      const recovery = join(this.controlDir(id), "recovery");
-      mkdirSync(recovery, { recursive: true });
-      try { chownSync(recovery, 1000, 1000); } catch { /* existing image may own it already */ }
-      writeFileSync(join(recovery, "manual-stop"), "1\n");
+      this.markManualStop(id);
       // Desired stopped state is durable before awaiting Docker. A host crash
       // during stop must not turn the interrupted lifecycle into restart intent.
       updateSession(this.d.db, id, { status: "stopped" });
