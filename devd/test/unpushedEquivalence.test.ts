@@ -100,6 +100,31 @@ for (const remote of [true, false]) {
   }
 }
 
+test("same order as the reference with equal commit dates when another tip merges an older commit (rebase-like history)", async () => {
+  // feat: base ← a1 ← a2 ← a3; 0y: base ← y1..y5, merged with a1. All commits in the same second.
+  const r = repo({ remote: false, tie: true });
+  r.commit("base");
+  r.g("checkout", "-qb", "feat"); r.commit("a1");
+  r.g("checkout", "-q", "main"); r.g("checkout", "-qb", "0y");
+  for (let i = 1; i <= 5; i++) r.commit(`y${i}`);
+  r.g("merge", "-q", "--no-ff", "-m", "M", "feat");
+  r.g("checkout", "-q", "feat"); r.commit("a2"); r.commit("a3");
+  r.g("branch", "-D", "main");
+  const got = await unpushedInRepo(r.work);
+  expect(got).toEqual(await reference(r.work));
+  expect(got.branches.find((b) => b.branch === "feat")!.commits.map((c) => c.subject)).toEqual(["a3", "a2", "a1", "base"]);
+});
+
+test("a subject containing the field separator survives", async () => {
+  const r = repo({ remote: true });
+  r.commit("base"); r.g("push", "-q", "-u", "origin", "main");
+  r.commit("odd \x1f subject");
+  writeFileSync(join(r.work, "x"), "1"); r.g("add", "."); r.g("commit", "-qm", "sep\x1finside");
+  // (The reference split on the separator too, so it is not the oracle here.)
+  const got = await unpushedInRepo(r.work);
+  expect(got.branches[0]!.commits.map((c) => [c.subject, c.author])).toEqual([["sep\x1finside", "Tess"], ["odd \x1f subject", "Tess"]]);
+});
+
 test("one-pass equals the reference on a bare clone and on a clean repo", async () => {
   const r = rich({ remote: true });
   const bare = join(r.base, "mirror.git");
@@ -128,3 +153,10 @@ test("many branches: the one-pass scan runs a fixed number of git calls, not one
   const calls = readFileSync(log, "utf8").split("\n").filter((l) => / (rev-list|log) /.test(l) && !/ config --list /.test(l));
   expect(calls.length).toBeLessThanOrEqual(2);
 }, 30_000);
+
+test("above the cap the count stays exact and the breakdown is explicitly skipped, not silently empty", async () => {
+  const r = rich({ remote: false });
+  const full = await reference(r.work);
+  expect(await unpushedInRepo(r.work, { cap: 3 })).toEqual({ noRemote: true, count: full.count, branches: [], detailsSkipped: true });
+  expect((await unpushedInRepo(r.work, { cap: full.count })).detailsSkipped).toBeUndefined();
+});
