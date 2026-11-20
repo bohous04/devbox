@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown, FolderGit2, Search } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import { Dialog } from "radix-ui";
 import { api, type AgentName, type SessionLive, type SessionRuntime, type TreeProject } from "../api";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -10,7 +11,7 @@ import {
 import { cn } from "@/lib/utils";
 import {
   AGENT_IDS, AGENT_PROFILES, SOLO, chatRuntimeBlock, defaultAgentFor, instaboxAgentBlock, repoChoices, runningInOtherRuntime,
-  runtimeAfterDefault, runtimeChoice, sessionsFor, tmuxRuntimeBlock,
+  continueTakesPrompt, runtimeAfterDefault, runtimeChoice, sendPlan, sessionsFor, tmuxRuntimeBlock,
 } from "../newSession";
 import { getDefaultRuntime, validateConfig } from "../configEdit";
 import { highlight, openIndex, pickKey, repoSearch, searchTerms } from "../repoSearch";
@@ -40,6 +41,9 @@ export function NewSession() {
   const [ibxFailed, setIbxFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // The open "where does your message go" question, answered through its resolver.
+  // It holds the session it names, so a store update while it is open cannot change where the answer goes.
+  const [asking, setAsking] = useState<{ resolve: (w: Where) => void; session: SessionLive; takesPrompt: boolean } | null>(null);
   const [showAll, setShowAll] = useState(false);
   // The composer's text: what may start with it is decided here (InstaBox and a running terminal take none).
   const [draft, setDraft] = useState("");
@@ -173,19 +177,27 @@ export function NewSession() {
     : choice?.runtime === "tmux" && agent === "antigravity" && prompt.startsWith("-") ? "Antigravity's terminal message can't start with '-'."
     : null;
   // Typed text is new work: it always starts a new session with it. Empty opens the repo's session of this runtime
-  // when there is one, as before. The other choice is the secondary action next to the summary.
+  // when there is one, as before. Typed text with such a session asks where it goes (askWhere): nothing is picked for
+  // the user.
   // The session an empty box opens, named in the summary and sent by id: a running one first.
   const reusable = onIbx ? null : existing.find((s) => s.status === "running") ?? existing[0] ?? null;
-  // Typed text always asks for a fresh session: devd's join could otherwise hand it to a session this page does not
-  // know about (another tab, a stale store). Empty opens exactly the session the summary names.
-  const start = () => (onIbx ? startInstabox()
-    : prompt !== "" ? startVps(true, prompt)
-    : reusable ? startVps(false, "", reusable.id)
-    : startVps());
+  // A new session with text is always asked for fresh: devd's join could otherwise hand it to a session this page does
+  // not know about (another tab, a stale store). Continuing names the session by id, as an empty box does.
+  const start = async (): Promise<void | false> => {
+    const plan = sendPlan(prompt, reusable, onIbx);
+    if (plan === "instabox") return startInstabox();
+    if (plan === "open") return startVps(false, "", reusable!.id);
+    if (plan === "new") return prompt === "" ? startVps() : startVps(true, prompt);
+    const target = reusable!, takesPrompt = continueTakes;
+    const picked = await new Promise<Where>((resolve) => setAsking({ resolve, session: target, takesPrompt }));
+    setAsking(null);
+    if (picked === null) return false; // cancelled: the text stays in the box
+    return picked === "continue" ? startVps(false, takesPrompt ? prompt : "", target.id) : startVps(true, prompt);
+  };
   const startLabel = ibxFailed && onIbx ? "Try again" : onIbx ? "Start on InstaBox" : reusable && prompt === "" ? "Open existing" : "Start session";
   const canStart = !!repo && !busy && !!choice && textBlock === null;
   // Continuing takes the message only where devd can deliver it: a running terminal's agent has already started.
-  const continueTakesPrompt = reusable !== null && reusable.host !== "instabox" && !(choice?.runtime === "tmux" && reusable.status === "running");
+  const continueTakes = reusable !== null && !!choice && continueTakesPrompt(reusable, choice.runtime);
 
   const where = onIbx ? "on InstaBox" : "on the VPS";
   const what = choice?.runtime === "chat" ? "chat" : "terminal";
@@ -196,6 +208,7 @@ export function NewSession() {
   const summary = !repo ? null
     : !choice ? "Pick an interface: the default runtime is not loaded."
     : opensExisting ? `Opens ${reusable.id} (${what}, ${reusable.status}).`
+    : reusable && prompt !== "" && textBlock === null ? `Asks whether your message continues ${reusable.id} or starts a new session.`
     : `Starts a new ${what} session ${where}${prompt !== "" && textBlock === null ? " with your message" : ""}${shares}.`;
   // One line under the box: progress, then an error, then a warning, then what the send does.
   const line = busy && step ? { text: `${JOB_STEP_LABEL[step] ?? step}…`, tone: "status" as const }
@@ -221,7 +234,7 @@ export function NewSession() {
         imagesOff="Images can be added once the session is open"
         start={{ label: startLabel, ready: canStart }}
         onDraft={setDraft}
-        onSend={async () => { await start(); }}
+        onSend={start}
         controls={<>
           <OptionsMenu
             disabled={busy}
@@ -241,11 +254,7 @@ export function NewSession() {
               line.tone === "error" ? "text-destructive" : line.tone === "warn" ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground",
             )}>{line.text}</p>
           )}
-          {reusable && !busy && (prompt === ""
-            ? <InlineAction onClick={() => report(startVps(true))}>Create another</InlineAction>
-            : <InlineAction disabled={textBlock !== null} onClick={() => report(startVps(false, continueTakesPrompt ? prompt : "", reusable.id))}>
-                Continue {reusable.id} instead{continueTakesPrompt ? "" : " (without your message)"}
-              </InlineAction>)}
+          {reusable && !busy && prompt === "" && <InlineAction onClick={() => report(startVps(true))}>Create another</InlineAction>}
           {ibxFailed && !busy && <InlineAction onClick={() => { setHost("vps"); report(startVps()); }}>Open on VPS</InlineAction>}
         </div>
 
@@ -275,7 +284,54 @@ export function NewSession() {
           </section>
         )}
       </div>
+      {asking && <AskWhere session={asking.session} what={what} takesPrompt={asking.takesPrompt} onPick={asking.resolve} />}
     </div>
+  );
+}
+
+type Where = "continue" | "new" | null;
+
+/** Typed text with an existing session of the repo: where it goes is asked, never guessed. Two equal choices, nothing
+ *  focused at first (Enter does not pick one), Escape cancels and the text stays in the box. */
+function AskWhere({ session, what, takesPrompt, onPick }: {
+  session: SessionLive; what: string; takesPrompt: boolean; onPick: (w: Where) => void;
+}) {
+  const content = useRef<HTMLDivElement>(null);
+  // It unmounts when answered, so it hands focus back itself: to the box the send came from (the text stays there).
+  useEffect(() => {
+    const back = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    return () => { back?.focus(); };
+  }, []);
+  const choice = "flex min-h-11 w-full flex-col items-start gap-0.5 rounded-lg border px-3.5 py-2.5 text-left text-sm transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 motion-reduce:transition-none";
+  return (
+    <Dialog.Root open onOpenChange={(next) => { if (!next) onPick(null); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/45" />
+        <Dialog.Content
+          ref={content} tabIndex={-1}
+          className="fixed left-1/2 top-1/2 z-50 w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl border bg-background p-5 shadow-xl outline-none sm:p-6"
+          onOpenAutoFocus={(e) => { e.preventDefault(); content.current?.focus(); }}
+        >
+          <Dialog.Title className="text-lg font-semibold tracking-tight">Where should your message go?</Dialog.Title>
+          <Dialog.Description className="mt-1 text-sm text-muted-foreground">
+            This repo already has a {what} session, {session.id} ({session.status}).
+          </Dialog.Description>
+          <div className="mt-5 flex flex-col gap-2">
+            <button type="button" className={choice} onClick={() => onPick("continue")}>
+              <span className="font-medium">Continue <span className="font-mono text-[13px]">{session.id}</span></span>
+              <span className="text-xs text-muted-foreground">{takesPrompt
+                ? "Your message goes to that session."
+                : `Opens it without your message: ${session.host === "instabox" ? "an InstaBox session takes no message" : "its agent is already running, so the message would not reach it"}.`}</span>
+            </button>
+            <button type="button" className={choice} onClick={() => onPick("new")}>
+              <span className="font-medium">New session</span>
+              <span className="text-xs text-muted-foreground">Starts another {what} session with your message.</span>
+            </button>
+          </div>
+          <p className="mt-4 text-xs text-muted-foreground">Esc cancels; your message stays in the box.</p>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 

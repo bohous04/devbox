@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import {
-  AGENT_IDS, AGENT_PROFILES, SOLO, chatRuntimeBlock, defaultAgentFor, folderChoices, instaboxAgentBlock, isProxyAgent, profileFor, projectChoices, repoChoices, runningInOtherRuntime, runtimeAfterDefault, runtimeChoice, sessionsFor, soleProject, tmuxRuntimeBlock,
+  AGENT_IDS, AGENT_PROFILES, SOLO, chatRuntimeBlock, continueTakesPrompt, defaultAgentFor, folderChoices, instaboxAgentBlock, isProxyAgent, profileFor, projectChoices, repoChoices, runningInOtherRuntime, runtimeAfterDefault, runtimeChoice, sendPlan, sessionsFor, soleProject, tmuxRuntimeBlock,
 } from "./newSession";
 import type { TreeProject } from "./api";
 // Only this test may import devd — it ensures the manual mirror in newSession.ts
@@ -166,4 +166,20 @@ test("runningInOtherRuntime: the repo's running sessions the form's runtime woul
   const repo = [s("dev-x-r", "tmux", "running"), s("dev-x-r-2", "chat", "stopped"), s("dev-x-r-3", undefined, "running"), s("dev-x-r-4", "chat", "running")];
   expect(runningInOtherRuntime(repo, "chat").map((x) => x.id)).toEqual(["dev-x-r", "dev-x-r-3"]);   // no runtime = tmux
   expect(runningInOtherRuntime(repo, "tmux").map((x) => x.id)).toEqual(["dev-x-r-4"]);
+});
+
+test("sendPlan: typed text with an existing session is asked about, never sent to one side by itself", () => {
+  const s = { id: "dev-acme-web" };
+  expect(sendPlan("fix it now", s, false)).toBe("ask");
+  expect(sendPlan("", s, false)).toBe("open");
+  expect(sendPlan("fix it now", null, false)).toBe("new");
+  expect(sendPlan("", null, false)).toBe("new");
+  expect(sendPlan("", s, true)).toBe("instabox");
+});
+
+test("continueTakesPrompt: not on InstaBox, not into a running terminal (its agent already read the prompt file)", () => {
+  expect(continueTakesPrompt({ status: "running" }, "chat")).toBe(true);
+  expect(continueTakesPrompt({ status: "stopped" }, "tmux")).toBe(true);
+  expect(continueTakesPrompt({ status: "running" }, "tmux")).toBe(false);
+  expect(continueTakesPrompt({ status: "stopped", host: "instabox" }, "tmux")).toBe(false);
 });
