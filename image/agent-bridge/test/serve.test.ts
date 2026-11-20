@@ -1181,6 +1181,21 @@ describe("launch env", () => {
     expect(f.opens[0].target).toEqual({ harness: "claude", account: null, model: "gpt-x", env: { ANTHROPIC_MODEL: "gpt-x" } });
   });
 
+  test("serveConfigFromEnv binds the bridge to its session when devd gave it a secret", () => {
+    const env = { DEVD_RUNTIME: "chat", DEVD_AGENT: "vibe", DEVD_SESSION_ID: "dev-harbor-web" };
+    const secret = "0f".repeat(32);
+    expect(serveConfigFromEnv({ ...env, DEVD_BRIDGE_SECRET: secret }).binding).toEqual({ session: "dev-harbor-web", secret });
+    // A container devd created without a secret (a dev machine, a test) serves unbound; devd decides whether it takes that.
+    expect(serveConfigFromEnv(env).binding).toBeNull();
+    expect(() => serveConfigFromEnv({ ...env, DEVD_BRIDGE_SECRET: "short" })).toThrow(ConfigError);
+    expect(() => serveConfigFromEnv({ ...env, DEVD_BRIDGE_SECRET: "zz".repeat(32) })).toThrow("DEVD_BRIDGE_SECRET");
+    expect(() => serveConfigFromEnv({ DEVD_RUNTIME: "chat", DEVD_AGENT: "vibe", DEVD_BRIDGE_SECRET: secret })).toThrow("DEVD_SESSION_ID");
+  });
+
+  test("a harness never inherits the bridge's session secret", () => {
+    expect(harnessEnv({ PATH: "/bin", DEVD_BRIDGE_SECRET: "0f".repeat(32) }, {})).toEqual({ PATH: "/bin" });
+  });
+
   test("a harness never inherits proxy profile keys or ANTHROPIC_API_KEY from the launch env", () => {
     const launch = { PATH: "/bin", ANTHROPIC_BASE_URL: "http://old", ANTHROPIC_AUTH_TOKEN: "old", ANTHROPIC_API_KEY: "api", DEVBOX_PROXY_PROFILE: "1" };
     expect(harnessEnv(launch, { CLAUDE_CONFIG_DIR: "/a" })).toEqual({ PATH: "/bin", CLAUDE_CONFIG_DIR: "/a" });

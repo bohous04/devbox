@@ -10,6 +10,11 @@ describe("parseClientFrame", () => {
     expect(parseClientFrame('{"t":"hello","afterSeq":0}')).toEqual({ t: "hello", afterSeq: 0 });
   });
 
+  test("accepts a hello with a nonce (1.6.0 session binding)", () => {
+    const nonce = "ab".repeat(16);
+    expect(parseClientFrame(JSON.stringify({ t: "hello", afterSeq: 2, nonce }))).toEqual({ t: "hello", afterSeq: 2, nonce });
+  });
+
   test("accepts a startTurn command", () => {
     const line = '{"t":"cmd","id":"c1","cmd":{"kind":"startTurn","text":"hi"}}';
     expect(parseClientFrame(line)).toEqual({ t: "cmd", id: "c1", cmd: { kind: "startTurn", text: "hi" } });
@@ -54,6 +59,9 @@ describe("parseClientFrame", () => {
       '{"t":"hello","afterSeq":-1}',
       '{"t":"hello","afterSeq":1.5}',
       '{"t":"hello"}',
+      '{"t":"hello","afterSeq":0,"nonce":""}',
+      '{"t":"hello","afterSeq":0,"nonce":7}',
+      `{"t":"hello","afterSeq":0,"nonce":"${"a".repeat(257)}"}`,
       '{"t":"ack"}',
       '{"t":"ack","seq":-1}',
       '{"t":"ack","seq":"3"}',

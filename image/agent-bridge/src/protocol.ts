@@ -39,7 +39,8 @@ export type BridgeCommand =
   | { kind: "switchTarget"; target: SwitchTarget; resume: string | null; handoff: HandoffDelivery | null };
 
 export type ClientFrame =
-  | { t: "hello"; afterSeq: number }
+  // `nonce` (1.6.0): a bound bridge answers it with a `bind` frame before anything else. Older bridges ignore it.
+  | { t: "hello"; afterSeq: number; nonce?: string }
   | { t: "cmd"; id: string; cmd: BridgeCommand }
   // 1.5.0+ (S6-R21): devd's store holds every event up to `seq` durably; sent periodically on a live link. Older
   // bridges refuse an unknown frame type and close the link, so devd sends it only to a bridge that is new enough.
@@ -49,7 +50,9 @@ export type ServerFrame =
   | { t: "res"; id: string; ok: boolean; error?: string; result?: unknown }
   // `version` and `awaitingTarget` (the bridge holds no harness until devd sends switchTarget) are in every
   // handshake since 1.1.0; a bridge without them predates switching.
-  | { t: "ready"; lastSeq: number; version?: string; awaitingTarget?: boolean };
+  | { t: "ready"; lastSeq: number; version?: string; awaitingTarget?: boolean }
+  // 1.6.0: the answer to a hello's nonce, before the replay; `proof` = bridgeProof(secret, nonce, session).
+  | { t: "bind"; session: string; proof: string };
 
 export class ProtocolError extends Error {}
 
@@ -149,7 +152,11 @@ export function parseClientFrame(line: string): ClientFrame {
     if (typeof raw.afterSeq !== "number" || !Number.isInteger(raw.afterSeq) || raw.afterSeq < 0) {
       throw new ProtocolError("hello.afterSeq must be a non-negative integer");
     }
-    return { t: "hello", afterSeq: raw.afterSeq };
+    if (raw.nonce === undefined) return { t: "hello", afterSeq: raw.afterSeq };
+    if (typeof raw.nonce !== "string" || raw.nonce === "" || raw.nonce.length > 256) {
+      throw new ProtocolError("hello.nonce must be a non-empty string of at most 256 characters");
+    }
+    return { t: "hello", afterSeq: raw.afterSeq, nonce: raw.nonce };
   }
   if (raw.t === "ack") {
     if (typeof raw.seq !== "number" || !Number.isInteger(raw.seq) || raw.seq < 0) {

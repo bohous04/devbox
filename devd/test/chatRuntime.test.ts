@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createApp } from "../src/api";
 import { chatRuntimeBlock } from "../src/agents";
 import { DEFAULT_CONFIG } from "../src/config";
-import { getRepoAgent, getSession, insertSession, openDb, setRepoAgent, type SessionRow } from "../src/db";
+import { getBridgeSecret, getRepoAgent, getSession, insertSession, openDb, setRepoAgent, type SessionRow } from "../src/db";
 import { runArgs } from "../src/docker";
 import { SessionManager } from "../src/sessions";
 
@@ -99,6 +99,30 @@ test("a chat session's container env carries DEVD_RUNTIME=chat (tmux row: tmux)"
   const args = async (id: string, repo: string, runtime: "tmux" | "chat") => runArgs(await mgr["runOpts"](id, "/srv/dev/p/r", 40100, "p", repo, "claude", runtime));
   expect(await args("dev-p-chat", "chat", "chat")).toContain("DEVD_RUNTIME=chat");
   expect(await args("dev-p-tmux", "tmux", "tmux")).toContain("DEVD_RUNTIME=tmux");
+});
+
+test("DEVBOX-54: every new chat container gets a fresh bridge secret, passed by name only (never in docker's argv)", async () => {
+  const db = openDb(":memory:");
+  const mgr = new SessionManager({
+    db, cfg: structuredClone(DEFAULT_CONFIG), root: mkdtempSync(join(tmpdir(), "rt-root-")), image: "devbox:latest",
+    controlRoot: mkdtempSync(join(tmpdir(), "rt-ctl-")), extraMounts: [],
+  });
+  const opts = (id: string, runtime: "tmux" | "chat") => mgr["runOpts"](id, "/srv/dev/p/r", 40100, "p", "r", "claude", runtime);
+  const first = await opts("dev-p-chat", "chat");
+  const secret = getBridgeSecret(db, "dev-p-chat");
+  expect(secret).toMatch(/^[0-9a-f]{64}$/);
+  expect(first.secretEnv).toEqual({ DEVD_BRIDGE_SECRET: secret! });
+  const args = runArgs(first);
+  expect(args.join(" ")).not.toContain(secret!);
+  expect(args).toContain("DEVD_BRIDGE_SECRET");
+  expect(JSON.stringify(first.env)).not.toContain(secret!);
+  // A recreated container (another runOpts) gets a new secret; the stored one follows it.
+  const second = await opts("dev-p-chat", "chat");
+  expect(second.secretEnv!.DEVD_BRIDGE_SECRET).not.toBe(secret);
+  expect(getBridgeSecret(db, "dev-p-chat")).toBe(second.secretEnv!.DEVD_BRIDGE_SECRET);
+  // A tmux container runs no bridge: no secret.
+  expect((await opts("dev-p-tmux", "tmux")).secretEnv).toBeUndefined();
+  expect(getBridgeSecret(db, "dev-p-tmux")).toBeNull();
 });
 
 function chatSession(db: ReturnType<typeof openDb>, agent: "claude" | "codex" = "claude") {

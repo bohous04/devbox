@@ -1,6 +1,7 @@
 import { migrateWeeklyUsage } from "./weeklyUsage";
 import { Database } from "bun:sqlite";
 import { existsSync, renameSync, rmSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { migrateLiveActivities } from "./liveActivitiesDb";
 // The agent a session launches — today a "profile", see agents.ts. The re-export (via
 // import + export, not a bare `export ... from`) keeps today's import paths
@@ -225,6 +226,11 @@ export function openDb(path: string): Database {
   if (!scheduleCols().includes("agent")) db.run(`ALTER TABLE schedules ADD COLUMN agent TEXT`); // NULL = the repo's remembered agent, as for a manual open
   // devd's own first message of a chat session until the bridge confirmed it (BridgeLinks.startTurnWhenConnected):
   // a devd restart between open and connect must not lose a scheduled run's prompt.
+  // DEVBOX-54: the secret the agent bridge in a chat session's current container proves its session with
+  // (bridgeLink.ts). A table of its own, never a sessions column: session rows are read with SELECT * and go out
+  // in API payloads. A new container gets a new secret (issueBridgeSecret in runOpts).
+  db.run(`CREATE TABLE IF NOT EXISTS bridge_secrets (
+    session_id TEXT PRIMARY KEY, secret TEXT NOT NULL, issued_at INTEGER NOT NULL)`);
   db.run(`CREATE TABLE IF NOT EXISTS pending_first_turns (
     session_id TEXT PRIMARY KEY, text TEXT NOT NULL, created_at INTEGER NOT NULL,
     after_seq INTEGER NOT NULL DEFAULT 0, tag TEXT)`);
@@ -718,6 +724,25 @@ export function deleteSession(db: Database, id: string): void {
   db.query(`DELETE FROM session_prs WHERE session_id=?`).run(id);
   // An undelivered first message must not reach a later session that reuses the id.
   db.query(`DELETE FROM pending_first_turns WHERE session_id=?`).run(id);
+  db.query(`DELETE FROM bridge_secrets WHERE session_id=?`).run(id);
+}
+
+/** A fresh secret for the container about to be created for `id`, replacing the previous container's. */
+export function issueBridgeSecret(db: Database, id: string): string {
+  const secret = randomBytes(32).toString("hex");
+  db.query(`INSERT OR REPLACE INTO bridge_secrets (session_id,secret,issued_at) VALUES (?,?,?)`).run(id, secret, Date.now());
+  return secret;
+}
+
+/** null: the session's container was created before the binding (a legacy bridge). */
+export function getBridgeSecret(db: Database, id: string): string | null {
+  return (db.query(`SELECT secret FROM bridge_secrets WHERE session_id=?`).get(id) as { secret: string } | null)?.secret ?? null;
+}
+
+/** Local chat sessions whose container has no secret yet: legacy until recreated. */
+export function chatSessionsWithoutBridgeSecret(db: Database): string[] {
+  return (db.query(`SELECT id FROM sessions WHERE runtime='chat' AND host='vps' AND id NOT IN (SELECT session_id FROM bridge_secrets) ORDER BY id`)
+    .all() as { id: string }[]).map((r) => r.id);
 }
 
 export function getSession(db: Database, id: string): SessionRow | null {

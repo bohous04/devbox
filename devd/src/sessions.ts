@@ -12,8 +12,9 @@ import { parseProcTree, PS_TREE_CMD } from "./ccUpkeep";
 import { insteadOfEnv } from "./gitProxy";
 import { dindCleanupPlan, dindEnsurePlan, dindName, dindNetwork, dindNetworkCreate, dindSubnetCandidates, dockerHostFor } from "./dind";
 import { IBX_PATHS, toRemoteRunOpts } from "./instabox/runOpts";
+import { BRIDGE_SECRET_ENV } from "../../image/agent-bridge/src/binding";
 import type { DevConfig, Settings } from "./config";
-import { deleteGitStat, deleteSession, getRepoAgent, getSession, insertSession, listSessions, logEvent, releaseLeasesForSession, setAutoEnd, setRepoAgent, setSessionAgent, setSessionBranch, updateSession, type AgentName, type SessionRow, type SessionRuntime } from "./db";
+import { deleteGitStat, deleteSession, getRepoAgent, issueBridgeSecret, getSession, insertSession, listSessions, logEvent, releaseLeasesForSession, setAutoEnd, setRepoAgent, setSessionAgent, setSessionBranch, updateSession, type AgentName, type SessionRow, type SessionRuntime } from "./db";
 import { containerEnv, containerMountDestinations, containerState, execInContainer, removeContainer, runContainer, startContainer, stopContainer, type RunOpts } from "./docker";
 import { dockerArgv } from "./dockerTarget";
 import { inspectCanonicalWorkspace, removeStoppedWorkspaceContainer, type CanonicalWorkspaceContainer } from "./canonicalWorkspace";
@@ -835,6 +836,9 @@ export class SessionManager {
         OTEL_RESOURCE_ATTRIBUTES: otelResourceAttributes(id, project, repo),
         ...await this.proxyEnvFor(agent),
       },
+      // DEVBOX-54: every new chat container gets its own secret, which its agent bridge proves the session with
+      // (bridgeLink.ts). A kept container (docker start) keeps the secret it was created with.
+      ...(runtime === "chat" && !remote ? { secretEnv: { [BRIDGE_SECRET_ENV]: issueBridgeSecret(this.d.db, id) } } : {}),
     };
   }
 

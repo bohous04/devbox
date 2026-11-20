@@ -74,7 +74,7 @@ test("a normal exchange: devd's store and the dashboard's copy agree, user messa
   const links = new BridgeLinks({
     controlDir: () => ctl, store: () => store,
     onEvent: (_id, e) => { client = applyThreadEvent(client, e); },
-    onStatus: () => {}, onBehind: () => {}, retryMs: 20, log: () => {},
+    onStatus: () => {}, onBehind: () => {}, retryMs: 20, log: () => {}, binding: { secret: () => null, legacyUntil: Date.UTC(9999, 0, 1), onRefused: () => {} },
   });
   cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => bridge.close(), () => store.close(), () => links.drop(ID));
 
@@ -164,7 +164,7 @@ test("C1 end to end: a thread the restarted bridge cannot resume becomes a fresh
     onEvent: (id, e) => sw.onEvent(id, e),
     onStatus: () => {}, onBehind: () => {},
     onHandshake: (id, h) => { handshakes.push(h); sw.onHandshake(id, h); },
-    retryMs: 20, log: () => {},
+    retryMs: 20, log: () => {}, binding: { secret: () => null, legacyUntil: Date.UTC(9999, 0, 1), onRefused: () => {} },
   });
   sw = new ChatSwitch({
     db, links, threads: () => store, claudePool: () => ACCOUNT_POOL_DEFAULTS,
