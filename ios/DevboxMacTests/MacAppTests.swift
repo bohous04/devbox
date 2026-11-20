@@ -11,6 +11,14 @@ final class MacAppTests: XCTestCase {
         XCTAssertNil(delegate.state.inbox, "a test run does not connect to devd")
     }
 
+    /// A fixture run (screenshots) keeps a throwaway window list and never registers the login item.
+    func testFixtureRunLeavesTheRealAppStateAlone() {
+        let state = MacAppState(isTestRun: false, isFixtureRun: true)
+        state.startLoginItem()
+        XCTAssertFalse(state.startedLoginItem)
+        XCTAssertEqual(state.windows.restorePlan(current: nil).open, [], "a fixture run restores no threads of the real app")
+    }
+
     func testMenuBarCountSaysWhenItIsStale() {
         XCTAssertEqual(NeedsYouBadge.text(count: 2, stale: false), "2")
         XCTAssertEqual(NeedsYouBadge.text(count: 2, stale: true), "2?")

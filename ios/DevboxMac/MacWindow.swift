@@ -27,7 +27,14 @@ struct MacWindow: View {
                 }
             }
             // The app restores its windows itself (ThreadWindows); macOS restoring them too would double them.
-            .background(WindowConfigurator { $0.isRestorable = false })
+            .background(WindowConfigurator { window in
+                window.isRestorable = false
+                #if DEBUG
+                if let size = FixtureMode.windowSize {
+                    window.setFrame(NSRect(origin: window.frame.origin, size: size), display: true)
+                }
+                #endif
+            })
             .onAppear {
                 state.setOpenWindow(openWindow)
                 state.windows.show(window: windowId, thread: thread)
@@ -73,8 +80,10 @@ struct MacWindow: View {
     }
 }
 
-/// The inbox sections as a sidebar list: needs you, working, idle, then the snoozed and settled shelves (collapsed,
-/// as on the web and iPhone). The context menu has the row actions and "Open in New Window".
+/// The inbox as the sidebar, by the same rules as the web and iPhone (InboxView): needs you, finished (five, then
+/// "N more"), idle, then the working, snoozed and settled shelves (collapsed). Rows are the iPhone's InboxRow, with
+/// the preview line only in Needs you, Working and Snoozed, and their times tick every 15 s. ↑/↓ move the selection
+/// (List); the context menu has the row actions and "Open in New Window".
 struct MacInboxSidebar: View {
     @ObservedObject var store: InboxStore
     @Binding var selection: String?
@@ -83,47 +92,98 @@ struct MacInboxSidebar: View {
     @State private var actionsFor: InboxItem?
 
     var body: some View {
-        List(selection: $selection) {
-            if store.paused || store.badFrame != nil {
-                Text(store.paused ? "Live updates paused — refreshing every 5 s\(store.loadError.map { " (last refresh failed: \($0))" } ?? "")"
-                     : "Live update dropped: \(store.badFrame ?? "")")
-                    .font(Theme.F.meta)
-                    .foregroundStyle(Theme.C.warnText)
+        TimelineView(.periodic(from: .now, by: 15)) { context in
+            List(selection: $selection) {
+                if store.paused || store.badFrame != nil {
+                    Text(store.paused ? "Live updates paused — refreshing every 5 s\(store.loadError.map { " (last refresh failed: \($0))" } ?? "")"
+                         : "Live update dropped: \(store.badFrame ?? "")")
+                        .font(Theme.F.meta)
+                        .foregroundStyle(Theme.C.warnText)
+                        .listRowSeparator(.hidden)
+                }
+                if let items = store.items {
+                    groups(InboxView.group(items), now: InboxView.ms(context.date))
+                } else if let error = store.loadError {
+                    Label { Text("Can't load the inbox: \(error)") } icon: { Image(systemName: "exclamationmark.triangle") }
+                        .font(Theme.F.meta)
+                        .foregroundStyle(Theme.C.dangerText)
+                } else {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading the inbox…").foregroundStyle(Theme.C.mutedForeground)
+                    }
+                    .font(.callout)
+                    .padding(.vertical, 6)
+                }
             }
-            if let items = store.items {
-                let g = InboxView.group(items)
-                Section("Needs you · \(g.needsYou.count)") { rows(g.needsYou) }
-                shelf("Working", g.working)
-                Section("Idle · \(g.idle.count)") { rows(g.idle) }
-                shelf("Snoozed", g.snoozed)
-                shelf("Settled", g.settled)
-            } else if let error = store.loadError {
-                Text("Can't load the inbox: \(error)").font(Theme.F.meta).foregroundStyle(Theme.C.dangerText)
-            } else {
-                ProgressView()
-            }
+            .listStyle(.sidebar)
+            // An opaque sidebar, one tone with the window, instead of the translucent material.
+            .scrollContentBackground(.hidden)
+            .background(MacTone.sidebar)
         }
-        .listStyle(.sidebar)
         .navigationTitle("Inbox")
         .sheet(item: $actionsFor) { item in
             InboxRowActions(item: item, store: store).frame(minWidth: 360, minHeight: 320)
         }
     }
 
-    private func shelf(_ label: String, _ items: [InboxItem]) -> some View {
-        Section(isExpanded: Binding(
-            get: { openShelves.contains(label) },
-            set: { if $0 { openShelves.insert(label) } else { openShelves.remove(label) } }
-        )) {
-            rows(items)
-        } header: {
-            Text("\(label) · \(items.count)")
+    @ViewBuilder
+    private func groups(_ g: InboxView.Groups, now: Int) -> some View {
+        let split = InboxView.splitNeedsYou(g.needsYou)
+        if split.action.isEmpty {
+            Label { Text("Nothing waiting for you") } icon: { Image(systemName: "checkmark.circle").foregroundStyle(InboxTone.doneIcon) }
+                .font(.callout)
+                .foregroundStyle(Theme.C.mutedForeground)
+                .padding(.vertical, 4)
+        }
+        group("Needs you", split.action, now: now, preview: true)
+        group("Finished", split.finished, now: now, preview: false, cap: 5)
+        group("Idle", g.idle, now: now, preview: false)
+        shelf("Working", g.working, now: now, preview: true)
+        shelf("Snoozed", g.snoozed, now: now, preview: true)
+        shelf("Settled", g.settled, now: now, preview: false)
+    }
+
+    /// An open group, not shown while empty; with `cap`, rows past it hide behind "N more".
+    @ViewBuilder
+    private func group(_ label: String, _ items: [InboxItem], now: Int, preview: Bool, cap: Int? = nil) -> some View {
+        if !items.isEmpty {
+            let all = openShelves.contains(label)
+            Section {
+                rows(cap.map { all ? items : Array(items.prefix($0)) } ?? items, now: now, preview: preview)
+                if let cap, items.count > cap {
+                    Button(all ? "Show fewer" : "\(items.count - cap) more") { toggle(label) }
+                        .buttonStyle(.plain)
+                        .font(.callout)
+                        .foregroundStyle(Theme.C.mutedForeground)
+                        .accessibilityValue(all ? "expanded" : "collapsed")
+                }
+            } header: {
+                MacGroupHead(label: label, count: items.count)
+            }
         }
     }
 
-    private func rows(_ items: [InboxItem]) -> some View {
+    /// A group that starts collapsed; not shown while empty.
+    @ViewBuilder
+    private func shelf(_ label: String, _ items: [InboxItem], now: Int, preview: Bool) -> some View {
+        if !items.isEmpty {
+            Section(isExpanded: Binding(get: { openShelves.contains(label) }, set: { _ in toggle(label) })) {
+                rows(items, now: now, preview: preview)
+            } header: {
+                MacGroupHead(label: label, count: items.count)
+            }
+        }
+    }
+
+    private func toggle(_ label: String) {
+        if openShelves.contains(label) { openShelves.remove(label) } else { openShelves.insert(label) }
+    }
+
+    private func rows(_ items: [InboxItem], now: Int, preview: Bool) -> some View {
         ForEach(items) { item in
-            InboxRow(item: item, now: InboxView.ms(Date()), preview: true)
+            InboxRow(item: item, now: now, preview: preview)
+                .padding(.leading, -12) // InboxRow's own leading inset; the list row has its own
                 .tag(item.sessionId as String?)
                 .contextMenu {
                     Button("Open in New Window") { openWindow(value: item.sessionId) }
@@ -131,6 +191,26 @@ struct MacInboxSidebar: View {
                 }
         }
     }
+}
+
+/// A group heading: the name and a quiet count, as on the web and iPhone.
+private struct MacGroupHead: View {
+    let label: String
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(label).foregroundStyle(Theme.C.foreground.opacity(0.85))
+            Text("\(count)").monospacedDigit().foregroundStyle(Theme.C.mutedForeground)
+        }
+        .font(.callout.weight(.semibold))
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// The Mac window's own tones.
+enum MacTone {
+    static let sidebar = Color(light: 0xF6F6F7, dark: 0x111113)
 }
 
 /// Turns off AppKit window restoration for the window hosting this view. One path for macOS 14 and 15+
@@ -182,6 +262,9 @@ struct MacThreadDetail: View {
                 TerminalScreen(sessionId: threadId, title: item?.title ?? threadId, client: client, closable: false)
             }
         }
+        // The window names its thread, as the inbox row does, and where it runs.
+        .navigationTitle(item.map { InboxView.rowTitle($0).text } ?? threadId)
+        .navigationSubtitle(item.map { "\($0.project) / \($0.repo)" } ?? "")
         .toolbar {
             ToolbarItem(placement: .principal) {
                 Picker("View", selection: Binding(get: { shown }, set: { tab = $0 })) {
