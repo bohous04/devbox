@@ -6,11 +6,13 @@ import SwiftUI
 struct StatGrid: View {
     private let items: [(label: String, value: String)]
 
-    init(_ items: [(label: String, value: String)]) {
-        self.items = items
-    }
+    private let columns: [GridItem]
 
-    private let columns = [GridItem(.adaptive(minimum: 68), spacing: 0)]
+    /// `minimumColumnWidth`: a few long labels need wider cells than the session detail's many short ones.
+    init(_ items: [(label: String, value: String)], minimumColumnWidth: CGFloat = 68) {
+        self.items = items
+        columns = [GridItem(.adaptive(minimum: minimumColumnWidth), spacing: 0)]
+    }
 
     var body: some View {
         LazyVGrid(columns: columns, spacing: 0) {

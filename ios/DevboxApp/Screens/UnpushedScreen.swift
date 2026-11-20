@@ -1,0 +1,323 @@
+import SwiftUI
+
+/// Unpushed commits, mirrors `dashboard/src/pages/Unpushed.tsx` (see `UnpushedStore`): by folder, then repo, then
+/// branch, with the branch's commits folded away until asked for. Push and Create PR are the web's actions; unlike the
+/// web, both ask for a confirmation first (like Production writes and Schedules), because one mis-tap on a phone must
+/// not push. Create PR opens a form with an editable title, then confirms.
+struct UnpushedScreen: View {
+    @StateObject private var store: UnpushedStore
+    @State private var expanded: Set<String> = []
+    @State private var busy: Set<String> = []
+    @State private var actionError: [String: String] = [:]
+    @State private var prDraft: BranchRef?
+    @State private var confirmPush: BranchRef?
+
+    init(client: DevdClient) {
+        _store = StateObject(wrappedValue: UnpushedStore(client: client))
+    }
+
+    struct BranchRef: Identifiable {
+        let repo: UnpushedRepo
+        let branch: UnpushedBranch
+        var id: String { Self.key(repo, branch) }
+        static func key(_ repo: UnpushedRepo, _ branch: UnpushedBranch) -> String { "\(repo.path)#\(branch.branch)" }
+    }
+
+    var body: some View {
+        List {
+            if let error = store.error {
+                Section { Text("Failed to load: \(error)").font(.caption).foregroundStyle(Theme.C.dangerText) }
+            }
+            if let error = store.status?.error {
+                Section { Text("Last scan failed: \(error)").font(.caption).foregroundStyle(Theme.C.dangerText) }
+            }
+            if let notice = store.notice {
+                Section { noticeRow(notice) }
+            }
+            content
+        }
+        .insetGroupedList()
+        .themedListBackground()
+        .navigationTitle("Unpushed")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { Task { await store.load(fresh: true) } } label: { Label("Rescan", systemImage: "arrow.clockwise") }
+                    .help("Scan every repository again")
+            }
+        }
+        .task { await store.load() }
+        .onDisappear { store.stop() }
+        .refreshable { await store.load(fresh: true) }
+        .confirmationDialog(
+            confirmPush.map { "Push \($0.branch.branch) to origin?" } ?? "Push?",
+            isPresented: Binding(get: { confirmPush != nil }, set: { if !$0 { confirmPush = nil } }),
+            titleVisibility: .visible,
+            presenting: confirmPush
+        ) { ref in
+            Button("Push") { push(ref.repo, ref.branch) }
+            Button("Cancel", role: .cancel) {}
+        } message: { ref in
+            Text("\(UnpushedStore.commitsLabel(ref.branch.count)) from \(UnpushedStore.repoTitle(ref.repo)) go to the remote.")
+        }
+        .sheet(item: $prDraft) { draft in
+            CreatePrSheet(repo: draft.repo, branch: draft.branch) { title in
+                try await store.createPr(draft.repo, draft.branch, title: title)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let report = store.report {
+            Section {
+                summary(report)
+            } footer: {
+                Text("Commits that exist only on this machine, newest first. Uncommitted changes are not counted.")
+            }
+            if report.folders.isEmpty {
+                Section { EmptyState("Everything is pushed. All \(report.scanned) repositories have their commits on a remote.", systemImage: "checkmark.circle") }
+            }
+            ForEach(report.folders, id: \.folder) { folder in
+                Section {
+                    ForEach(folder.repos, id: \.path) { repo in
+                        repoRow(repo)
+                        ForEach(repo.branches, id: \.branch) { branch in branchRow(repo, branch) }
+                    }
+                } header: {
+                    HStack {
+                        Text("\(folder.folder)/").font(.system(.subheadline, design: .monospaced).weight(.semibold))
+                        Text("\(folder.repos.count) \(folder.repos.count == 1 ? "repo" : "repos")")
+                        Spacer()
+                        Text(UnpushedStore.commitsLabel(folder.count)).monospacedDigit()
+                    }
+                    .textCase(nil)
+                }
+            }
+        } else {
+            Section {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text(store.status?.scanning == true ? "Scanning repositories for the first time…" : "Loading…")
+                        .font(.subheadline).foregroundStyle(Theme.C.mutedForeground)
+                }
+            }
+        }
+    }
+
+    private func summary(_ report: UnpushedReport) -> some View {
+        let folders = "\(report.folders.count) \(report.folders.count == 1 ? "folder" : "folders")"
+        let ago = Format.agoLabel(Date().timeIntervalSince1970 * 1000 - Double(report.at))
+        return HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text("\(report.total)").font(.system(.title3, design: .monospaced).weight(.semibold))
+            Text("unpushed \(report.total == 1 ? "commit" : "commits") across \(folders) · \(report.scanned) repos scanned · \(ago)"
+                 + (store.status?.scanning == true ? " · rescanning…" : ""))
+                .font(.caption).foregroundStyle(Theme.C.mutedForeground)
+        }
+    }
+
+    private func noticeRow(_ notice: UnpushedStore.Notice) -> some View {
+        HStack(spacing: 8) {
+            StatusDot(.ok)
+            Text(notice.text).font(.subheadline)
+            Spacer(minLength: 8)
+            if let url = notice.url {
+                Link(destination: url) { Label("Open", systemImage: "arrow.up.right.square") }.font(.subheadline)
+            }
+            Button("Dismiss") { store.notice = nil }.buttonStyle(.borderless).font(.subheadline)
+        }
+    }
+
+    private func repoRow(_ repo: UnpushedRepo) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            let title = HStack(spacing: 8) {
+                StatusDot(repo.error == nil ? .warn : .danger)
+                Text(UnpushedStore.repoTitle(repo)).font(.system(.subheadline, design: .monospaced).weight(.semibold))
+                ForEach(UnpushedStore.repoFlags(repo), id: \.self) { Badge($0.uppercased(), variant: .outline) }
+                Text(UnpushedStore.commitsLabel(repo.count)).font(.caption).foregroundStyle(Theme.C.mutedForeground)
+            }
+            let path = Text(repo.path).font(.system(.caption2, design: .monospaced)).foregroundStyle(Theme.C.mutedForeground)
+                .lineLimit(1).truncationMode(.head)
+            // The path sits at the right where it fits (Mac), under the name otherwise (iPhone).
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { title; Spacer(minLength: 8); path }
+                VStack(alignment: .leading, spacing: 2) { title; path }
+            }
+            if let error = repo.error {
+                Text("git failed here: \(error)").font(.caption).foregroundStyle(Theme.C.dangerText)
+            }
+            if repo.detailsSkipped == true {
+                Text("Too many unpushed commits to break down by branch; only the total is counted.")
+                    .font(.caption).foregroundStyle(Theme.C.mutedForeground)
+            }
+        }
+    }
+
+    private func branchRow(_ repo: UnpushedRepo, _ branch: UnpushedBranch) -> some View {
+        let key = BranchRef.key(repo, branch)
+        let open = expanded.contains(key)
+        let toggle = Button {
+            if open { expanded.remove(key) } else { expanded.insert(key) }
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "chevron.right").font(.caption2.weight(.semibold))
+                    .rotationEffect(.degrees(open ? 90 : 0)).foregroundStyle(Theme.C.mutedForeground)
+                let mono = Font.system(.caption, design: .monospaced).weight(.semibold)
+                let count = Text(UnpushedStore.commitsLabel(branch.count, shown: branch.truncated ? branch.commits.count : nil))
+                    .font(.caption).foregroundStyle(Theme.C.mutedForeground)
+                // "branch → upstream" on one line where it fits; otherwise the branch first and its upstream under
+                // it, so neither the arrow nor the upstream is truncated away.
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(UnpushedStore.branchLabel(branch)).font(mono)
+                        count
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(branch.branch).font(mono).lineLimit(1).truncationMode(.middle)
+                            count
+                        }
+                        Text(UnpushedStore.upstreamLabel(branch)).font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(Theme.C.mutedForeground)
+                    }
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(open ? "expanded" : "collapsed")
+        let actions = HStack(spacing: 8) {
+            if UnpushedStore.canPush(repo) {
+                Button("Push") { confirmPush = BranchRef(repo: repo, branch: branch) }
+                    .buttonStyle(.bordered).controlSize(.small)
+                    .accessibilityLabel("Push \(branch.branch)")
+            }
+            if UnpushedStore.canCreatePr(repo) {
+                Button("Create PR") { prDraft = BranchRef(repo: repo, branch: branch) }
+                    .buttonStyle(.bordered).controlSize(.small)
+                    .accessibilityLabel("Create pull request for \(branch.branch)")
+            }
+        }
+        return VStack(alignment: .leading, spacing: 6) {
+            // The actions sit at the right where the branch name fits beside them (Mac), under it otherwise (iPhone).
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { toggle; Spacer(minLength: 8); actions }
+                VStack(alignment: .leading, spacing: 6) { toggle; actions }
+            }
+            .disabled(busy.contains(key))
+            if let error = actionError[key] {
+                Text(error).font(.caption).foregroundStyle(Theme.C.dangerText)
+            }
+            if open {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(branch.commits, id: \.hash) { commitRow($0) }
+                }
+                .padding(.leading, 18)
+            }
+        }
+        .padding(.leading, 16)
+    }
+
+    private func commitRow(_ c: UnpushedCommit) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(UnpushedStore.shortHash(c.hash)).font(.system(.caption, design: .monospaced)).foregroundStyle(Theme.C.mutedForeground)
+            Text(c.subject).font(.subheadline).lineLimit(1)
+            Spacer(minLength: 8)
+            if c.at > 0 {
+                Text(Format.agoLabel(Date().timeIntervalSince1970 * 1000 - Double(c.at)))
+                    .font(.caption).foregroundStyle(Theme.C.mutedForeground).help(c.author)
+            }
+        }
+    }
+
+    private func push(_ repo: UnpushedRepo, _ branch: UnpushedBranch) {
+        let key = BranchRef.key(repo, branch)
+        busy.insert(key)
+        actionError[key] = nil
+        Task {
+            do { try await store.push(repo, branch) } catch { actionError[key] = writeErrorText(error) }
+            busy.remove(key)
+        }
+    }
+}
+
+/// The web's inline Create PR form: the target, an editable title (the body is the commit list), then one button
+/// that pushes the branch and opens the pull request.
+private struct CreatePrSheet: View {
+    let repo: UnpushedRepo
+    let branch: UnpushedBranch
+    let create: (String) async throws -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var title: String
+    @State private var error: String?
+    @State private var busy = false
+    @State private var confirming = false
+
+    init(repo: UnpushedRepo, branch: UnpushedBranch, create: @escaping (String) async throws -> Void) {
+        self.repo = repo
+        self.branch = branch
+        self.create = create
+        _title = State(initialValue: UnpushedStore.prTitle(branch))
+    }
+
+    private var target: String {
+        let host = repo.remote?.provider == "github" ? "GitHub" : "Gitea"
+        return "\(branch.branch) → \(repo.base ?? "main") on \(host) · \(repo.remote?.owner ?? "")/\(repo.remote?.name ?? "")"
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Pull request title", text: $title)
+                        .onSubmit(review)
+                } header: {
+                    Text(target).textCase(nil)
+                } footer: {
+                    Text("Body: \(UnpushedStore.commitsLabel(branch.count)) listed as bullet points.")
+                }
+                if let error {
+                    Section { Text(error).font(.caption).foregroundStyle(Theme.C.dangerText) }
+                }
+            }
+            .navigationTitle("Create pull request")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Push + create PR", action: review).disabled(busy)
+                }
+            }
+        }
+        .confirmationDialog("Push \(branch.branch) and open the pull request?", isPresented: $confirming, titleVisibility: .visible) {
+            Button("Push + create PR", action: submit)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(target)
+        }
+        #if os(macOS)
+        .frame(minWidth: 420, minHeight: 220)
+        #endif
+    }
+
+    /// Checks the title, then asks before anything is pushed.
+    private func review() {
+        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { error = "Title is required."; return }
+        error = nil
+        confirming = true
+    }
+
+    private func submit() {
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !busy else { return }
+        busy = true
+        error = nil
+        Task {
+            do {
+                try await create(t)
+                dismiss()
+            } catch {
+                self.error = writeErrorText(error)
+            }
+            busy = false
+        }
+    }
+}

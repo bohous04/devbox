@@ -133,8 +133,9 @@ struct MacWindowContent: View {
 /// The inbox as the sidebar, by the same rules as the web and iPhone (InboxView): needs you, finished (five, then
 /// "N more"), idle, and under a rule the working, snoozed and settled shelves, collapsed until opened (each window
 /// remembers which). Every group is a disclosure group with its count aligned at the right. Rows are MacInboxRow,
-/// with the latest message only in Needs you, Working and Snoozed, and their times tick every 15 s. Above them: the search field (⌘F) and New session (⌘N). ↑/↓ move
-/// the selection (List); the context menu has the row actions and "Open in New Window".
+/// with the latest message only in Needs you, Working and Snoozed, and their times tick every 15 s. Above them: the
+/// search field (⌘F) and New session (⌘N). ↑/↓ move the selection (List); the context menu has the row actions and
+/// "Open in New Window".
 struct MacInboxSidebar: View {
     @ObservedObject var store: InboxStore
     @Binding var selection: String?
@@ -333,8 +334,6 @@ struct MacInboxSidebar: View {
 
 /// The groups about you (Needs you, Finished, Idle) start open; the shelves under them stay shut until opened.
 enum MacSidebarLayout {
-    static let shelves = ["Working", "Snoozed", "Settled"]
-
     /// Whether a shelf is open in a new window: never, except a shelf the screenshot test opens.
     static func startsOpen(_ shelf: String) -> Bool {
         #if DEBUG

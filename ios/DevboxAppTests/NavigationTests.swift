@@ -47,8 +47,8 @@ final class NavigationTests: XCTestCase {
     func testMoreGroupsMatchWeb() {
         XCTAssertEqual(MoreMenu.sections.map(\.title), ["Workspace", "Operations", "System"])
         XCTAssertEqual(MoreMenu.sections.map { $0.items.map(\.title) }, [
-            ["Folders", "AI limits & accounts"],
-            ["Schedules", "Production writes", "SSH keys"],
+            ["Folders", "AI limits & accounts", "Unpushed"],
+            ["Schedules", "Agent upkeep", "Production writes", "Operations", "SSH keys"],
             ["Hardware", "Activity", "Notifications", "Settings"],
         ])
     }

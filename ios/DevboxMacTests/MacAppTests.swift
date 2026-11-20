@@ -92,8 +92,7 @@ final class MacAppTests: XCTestCase {
     }
 
     func testSidebarShelvesStartShut() {
-        XCTAssertEqual(MacSidebarLayout.shelves, ["Working", "Snoozed", "Settled"])
-        for shelf in MacSidebarLayout.shelves { XCTAssertFalse(MacSidebarLayout.startsOpen(shelf), shelf) }
+        for shelf in ["Working", "Snoozed", "Settled"] { XCTAssertFalse(MacSidebarLayout.startsOpen(shelf), shelf) }
     }
 
     func testFocusingAThreadLeavesTheDashboardOnlyInItsWindow() {
@@ -126,7 +125,8 @@ final class MacAppTests: XCTestCase {
         XCTAssertEqual(Set(listed), Set(MacDashboardPage.allCases))
         XCTAssertEqual(listed.count, MacDashboardPage.allCases.count)
         XCTAssertEqual(MacDashboardPage.sections.map(\.title), ["Workspace", "Operations", "System"])
-        XCTAssertEqual(listed.map(\.title), ["Overview", "Sessions", "Folders", "Statistics", "AI limits",
-                                             "Schedules", "Production writes", "SSH keys", "Hardware", "Activity"])
+        XCTAssertEqual(listed.map(\.title), ["Overview", "Sessions", "Folders", "Statistics", "AI limits", "Unpushed",
+                                             "Schedules", "Agent upkeep", "Production writes", "Operations", "SSH keys",
+                                             "Hardware", "Activity"])
     }
 }

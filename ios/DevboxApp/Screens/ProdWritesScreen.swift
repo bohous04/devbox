@@ -88,12 +88,13 @@ struct ProdWritesScreen: View {
         VStack(alignment: .leading, spacing: 6) {
             header(w)
             // Actions right under the header (like the web, 8313854) — with a long migration you do not scroll past the SQL.
-            HStack {
+            // The row wraps: the iPhone's taller Approve button (see decisionButtonStyle) no longer fits beside the others.
+            WrapLayout(spacing: 8) {
                 Button("Approve and execute") { confirmApprove = w }
-                    .buttonStyle(.borderedProminent)
+                    .decisionButtonStyle(prominent: true)
+                    .opacity(busyId == w.id ? 0.5 : 1)
                 Button("Reject", role: .destructive) { confirmReject = w }
                     .buttonStyle(.bordered)
-                Spacer()
                 Button("Impact preview") { Task { await store.loadPreview(w.id) } }
                     .buttonStyle(.borderless)
             }
