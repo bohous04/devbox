@@ -978,22 +978,24 @@ export function createApp(d: ApiDeps): Hono {
   // Its outcome is not lost: a refusal or timeout lands in the thread, the event log and a notification.
   const linkOpenedChat = (r: { session: SessionRow; claudePrompt?: string }, prompt?: string) => {
     const s = r.session;
+    const onDone = prompt === undefined ? undefined : (err: Error | null) => {
+      if (!err) return;
+      try {
+        logEvent(d.db, s.id, "first_prompt_failed", { error: err.message });
+        d.threads?.(s.id).addNotice(`Your first message was not delivered (${err.message}). Send it again.`, Date.now());
+        d.notify(`${s.project}/${s.repo}`, `First message to ${s.id} was not delivered: ${err.message}`, { session: { id: s.id, project: s.project, repo: s.repo, runtime: "chat" } });
+      } catch (e) { console.error(`reporting the failed first message of ${s.id} failed:`, e); }
+    };
     try {
-      if (storedRuntime(s) === "chat" && s.status === "running") {
-        d.links?.ensure(s.id);
+      if (storedRuntime(s) === "chat" && s.status === "running") d.links?.ensure(s.id);
+      // The user's prompt is queued even when the session is not running yet: the persisted first turn goes out once
+      // its bridge connects. devd's own conflict message keeps its old rule (a running session only).
+      if (storedRuntime(s) === "chat" && (s.status === "running" || prompt !== undefined)) {
         const first = r.claudePrompt !== undefined && prompt !== undefined ? `${r.claudePrompt}\n\n${prompt}` : r.claudePrompt ?? prompt;
-        const onDone = prompt === undefined ? undefined : (err: Error | null) => {
-          if (!err) return;
-          try {
-            logEvent(d.db, s.id, "first_prompt_failed", { error: err.message });
-            d.threads?.(s.id).addNotice(`Your first message was not delivered (${err.message}). Send it again.`, Date.now());
-            d.notify(`${s.project}/${s.repo}`, `First message to ${s.id} was not delivered: ${err.message}`, { session: { id: s.id, project: s.project, repo: s.repo, runtime: "chat" } });
-          } catch (e) { console.error(`reporting the failed first message of ${s.id} failed:`, e); }
-        };
         if (first !== undefined) d.links?.startTurnWhenConnected(s.id, first, onDone);
       }
     }
-    catch (e) { console.error(`bridge link of opened session ${s.id} failed:`, e); }
+    catch (e) { console.error(`bridge link of opened session ${s.id} failed:`, e); onDone?.(e as Error); }
     d.inbox?.changedSafe(s.id);
   };
   app.post("/api/sessions", async (c) => {
@@ -1084,6 +1086,8 @@ export function createApp(d: ApiDeps): Hono {
           if (blocked) return c.json({ error: blocked }, 400);
         }
       }
+      // A chat prompt travels only over the bridge link: without one it would be dropped, so it is refused first.
+      if (runtime === "chat" && prompt !== undefined && !d.links) return c.json({ error: "chat sessions cannot take a first prompt here (no bridge link)" }, 503);
       if (runtime !== undefined || body.sessionId !== undefined) {
         const firstPrompt = runtime === "tmux" ? prompt : undefined;
         const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, runtime, fresh: body.fresh, sessionId: body.sessionId, ...(firstPrompt !== undefined ? { firstPrompt } : {}) });

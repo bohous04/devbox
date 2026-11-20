@@ -18,15 +18,23 @@ interface Harness {
   queued?: boolean;
   /** Runs in the joined session's thread. */
   runs?: { status: string }[];
+  /** No bridge links (a devd without chat support wired). */
+  noLinks?: boolean;
+  /** startTurnWhenConnected throws (the pending-turn DB write fails). */
+  queueFails?: boolean;
 }
 function appWith(open: (t: Record<string, unknown>) => Promise<Opened>, h: Harness = {}) {
   const turns: { id: string; text: string; onDone?: (err: Error | null) => void }[] = [];
   const notices: string[] = [];
   const notified: string[] = [];
   const db = openDb(":memory:");
-  const links = {
-    ensure: () => {}, send: async () => {}, hasFirstTurn: () => h.queued ?? false,
-    startTurnWhenConnected: (id: string, text: string, onDone?: (err: Error | null) => void) => { turns.push({ id, text, onDone }); },
+  const ensured: string[] = [];
+  const links = h.noLinks ? undefined : {
+    ensure: (id: string) => { ensured.push(id); }, send: async () => {}, hasFirstTurn: () => h.queued ?? false,
+    startTurnWhenConnected: (id: string, text: string, onDone?: (err: Error | null) => void) => {
+      if (h.queueFails) throw new Error("disk full");
+      turns.push({ id, text, onDone });
+    },
   };
   const threads = () => ({ snapshot: () => ({ runs: h.runs ?? [] }), addNotice: (text: string) => { notices.push(text); } });
   const app = createApp({
@@ -37,7 +45,7 @@ function appWith(open: (t: Record<string, unknown>) => Promise<Opened>, h: Harne
     backup: { build: async () => "/tmp/x", restore: async () => {} }, links, threads,
     remoteAddr: () => ("addr" in h ? h.addr : "127.0.0.1"),
   } as never);
-  return { app, turns, notices, notified, db };
+  return { app, turns, notices, notified, db, ensured };
 }
 const post = (a: { app: ReturnType<typeof createApp> }, body: unknown) =>
   a.app.request("/api/sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -59,6 +67,25 @@ test("chat: devd's pull-conflict message goes first, the prompt follows in the s
   const a = appWith(async () => chatOpened("Resolve the conflict"));
   expect((await post(a, { ...BASE, runtime: "chat", prompt: "Then fix the test" })).status).toBe(201);
   expect(a.turns.map(({ id, text }) => ({ id, text }))).toEqual([{ id: "dev-p-r", text: "Resolve the conflict\n\nThen fix the test" }]);
+});
+
+test("chat: a session that is not running yet still gets the prompt once its bridge connects, never dropped", async () => {
+  const a = appWith(async () => ({ created: false, session: { id: "dev-p-r", status: "stopped", runtime: "chat" } }));
+  expect((await post(a, { ...BASE, runtime: "chat", prompt: "fix the login bug" })).status).toBe(200);
+  expect(a.turns.map((t) => t.text)).toEqual(["fix the login bug"]);
+  expect(a.ensured).toEqual([]); // the link sync connects it when the session runs
+});
+
+test("chat: without bridge links the prompt is refused before anything opens; a failed queue is reported", async () => {
+  let calls = 0;
+  const none = appWith(async () => { calls++; return chatOpened(); }, { noLinks: true });
+  const r = await post(none, { ...BASE, runtime: "chat", prompt: "fix the login bug" });
+  expect(r.status).toBe(503);
+  expect(calls).toBe(0);
+  const failing = appWith(async () => chatOpened(), { queueFails: true });
+  expect((await post(failing, { ...BASE, runtime: "chat", prompt: "fix the login bug" })).status).toBe(201);
+  expect(failing.notices.join()).toContain("Your first message was not delivered (disk full)");
+  expect(failing.notified.join()).toContain("disk full");
 });
 
 test("chat: a prompt starting with '-' is plain text there", async () => {
