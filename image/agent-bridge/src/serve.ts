@@ -14,6 +14,7 @@ import { ACP_INSTRUCTIONS, acpMcpServers, APPENDED_SYSTEM_PROMPT, claudeMcpServe
 import type { BridgeCommand, HandoffDelivery, SwitchTarget, TurnOrigin } from "./protocol";
 import { INHERITED_STRIP, isProxyProfile, proxyProfileEnv } from "./proxyProfile";
 import { startServer } from "./server";
+import { BRIDGE_SECRET_ENV, isBridgeSecret } from "./binding";
 import { loadState, saveState, StateCorruptError, type BridgeState, type PersistedTarget } from "./state";
 import { BRIDGE_VERSION } from "./version";
 import { DeclaredWaits } from "./waits";
@@ -86,6 +87,8 @@ export interface ServeOptions {
   sweepMs?: number;
   /** Size below which the event log is not trimmed (eventLog.ts COMPACT_MIN_BYTES); tests lower it. */
   logCompactMinBytes?: number;
+  /** Answers devd's hello nonce (server.ts); none serves unbound. */
+  binding?: { session: string; secret: string } | null;
 }
 
 export interface Bridge {
@@ -193,6 +196,17 @@ export interface ServeConfig {
   model: string | null;
   bridgeDir: string;
   socketPath: string;
+  /** From DEVD_SESSION_ID and DEVD_BRIDGE_SECRET; null when devd gave no secret. */
+  binding: { session: string; secret: string } | null;
+}
+
+function bindingFromEnv(env: Env): ServeConfig["binding"] {
+  const secret = env[BRIDGE_SECRET_ENV];
+  if (secret === undefined || secret === "") return null;
+  if (!isBridgeSecret(secret)) throw new ConfigError(`${BRIDGE_SECRET_ENV} must be 64 lowercase hex characters`);
+  const session = env.DEVD_SESSION_ID;
+  if (!session) throw new ConfigError(`${BRIDGE_SECRET_ENV} is set but DEVD_SESSION_ID is not`);
+  return { session, secret };
 }
 
 export function serveConfigFromEnv(env: Env): ServeConfig {
@@ -219,6 +233,7 @@ export function serveConfigFromEnv(env: Env): ServeConfig {
     model: env.DEVD_AGENT_MODEL ? env.DEVD_AGENT_MODEL : null,
     bridgeDir: env.DEVD_BRIDGE_DIR ?? DEFAULT_BRIDGE_DIR,
     socketPath: env.DEVD_AGENT_SOCK ?? DEFAULT_SOCKET,
+    binding: bindingFromEnv(env),
   };
 }
 
@@ -227,6 +242,7 @@ export function serveConfigFromEnv(env: Env): ServeConfig {
 export function harnessEnv(launchEnv: Env, targetEnv: Record<string, string>): Env {
   const env: Env = { ...launchEnv };
   for (const k of INHERITED_STRIP) delete env[k];
+  delete env[BRIDGE_SECRET_ENV]; // only the bridge proves the session; a harness has no use for the secret
   return { ...env, ...targetEnv };
 }
 
@@ -802,7 +818,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     }
   }
 
-  const server = startServer({ socketPath: o.socketPath, log, onCommand: handle, handshake: () => ({ version: BRIDGE_VERSION, awaitingTarget }), onHello, onAck: acknowledge, logError });
+  const server = startServer({ socketPath: o.socketPath, log, onCommand: handle, handshake: () => ({ version: BRIDGE_VERSION, awaitingTarget }), binding: o.binding ?? null, onHello, onAck: acknowledge, logError });
   const sweep = setInterval(() => {
     maintainLog();
     waits.sweep();
@@ -918,6 +934,7 @@ export async function runServe(env: Env = process.env): Promise<number> {
   const config = serveConfigFromEnv(env);
   if (config.harness === "claude" && !Bun.which("claude")) throw new ConfigError("claude binary not found on PATH");
   const logError = (msg: string) => console.error(msg);
+  if (!config.binding) logError(`agent-bridge: ${BRIDGE_SECRET_ENV} is not set; serving unbound (devd refuses an unbound bridge for a session it gave a secret)`);
   const resolveOptions: ResolveOptions = { codexAccountsRoot: env.DEVD_CODEX_ACCOUNTS_DIR || CODEX_ACCOUNTS_ROOT, claudeExecutable: Bun.which("claude") };
   const bridge = await serve({ ...config, openHarness: harnessOpener(env, logError), resolveTarget: (t) => resolveTarget(t, resolveOptions), logError });
   return bridge.closed;

@@ -40,7 +40,7 @@ import { createGiteaApi } from "./gitea";
 import { giteaAuthEnv, githubAuthEnv, sshRemote } from "./git";
 import {
   activeLeases, diskHistoryEnds, failRunningCloneJobs, getSession, getSessionPr, type SessionRow, insertDiskTotal, lastMetricTs, listAccounts, listSessions, logEvent,
-  getRepoAgent, applyPendingRestore, checkpointFully, savePendingFirstTurn, prunePendingFirstTurns, getPendingFirstTurn, deletePendingFirstTurn, openDb, startCheckpointer, pruneAccountLeases, pruneCriticReviews, pruneDiskStats, pruneEvents, pruneNotifyLog, prunePushAlerts,
+  getRepoAgent, applyPendingRestore, checkpointFully, savePendingFirstTurn, prunePendingFirstTurns, getPendingFirstTurn, deletePendingFirstTurn, getBridgeSecret, chatSessionsWithoutBridgeSecret, openDb, startCheckpointer, pruneAccountLeases, pruneCriticReviews, pruneDiskStats, pruneEvents, pruneNotifyLog, prunePushAlerts,
 } from "./db";
 import { createSshAgents } from "./sshAgent";
 import { pendingSshLabel, reapExpiredGrants } from "./sshApprovals";
@@ -71,7 +71,7 @@ import { createPushover, type Pushover } from "./pushover";
 import { createApnsChannel, tickPushAlerts, type RunFn } from "./pushChannel";
 import { predictDisk } from "./aggregate";
 import { DEFAULT_CONTROL_ROOT, DEFAULT_DEVD_URL, DEFAULT_OPENROUTER_URL, SessionManager, storedRuntime, upstreamKey } from "./sessions";
-import { BridgeLinks, USER_FIRST_PROMPT_TAG } from "./bridgeLink";
+import { BridgeLinks, LEGACY_BRIDGE_UNTIL, legacyBridgeStartupLine, USER_FIRST_PROMPT_TAG } from "./bridgeLink";
 import { ThreadStore } from "./threadStore";
 import { ChatHub } from "./chatHub";
 import { ChatSwitch } from "./chatSwitch";
@@ -471,6 +471,16 @@ const prWatch: PrWatch = new PrWatch({
   notify,
 });
 const bridgeLinks = new BridgeLinks({
+  binding: {
+    secret: (id) => getBridgeSecret(db, id),
+    legacyUntil: LEGACY_BRIDGE_UNTIL,
+    // The thread notice is only seen in the session; the user hears it here, with the session to act on.
+    onRefused: (id, text) => {
+      const s = getSession(db, id);
+      notify(s ? `${s.project}/${s.repo}` : id, text, s ? { session: scheduledNotifySession(s) } : undefined);
+      inbox.changed(id);
+    },
+  },
   controlDir: (id) => join(controlRoot, id),
   store: threadStore,
   onEvent: (id, e) => {
@@ -511,8 +521,13 @@ const bridgeLinks = new BridgeLinks({
   },
 });
 reportPrunedFirstPrompts({ db, threads: threadStore, notify }, prunedFirstTurns);
-const releaseThread = (id: string) => {
+{
+  const legacy = legacyBridgeStartupLine(chatSessionsWithoutBridgeSecret(db), LEGACY_BRIDGE_UNTIL);
+  if (legacy) console.error(legacy);
+}
+const releaseThread = (id: string, ended = false) => {
   bridgeLinks.drop(id);
+  if (ended) bridgeLinks.forget(id);
   chatHub.drop(id);
   chatSwitch.drop(id);
   threadStores.get(id)?.close();

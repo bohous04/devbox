@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../src/api";
 import { chatRuntimeBlock } from "../src/agents";
 import { DEFAULT_CONFIG } from "../src/config";
-import { getRepoAgent, getSession, insertSession, openDb, setRepoAgent, type SessionRow } from "../src/db";
+import { getBridgeSecret, getRepoAgent, getSession, insertSession, openDb, setRepoAgent, type SessionRow } from "../src/db";
 import { runArgs } from "../src/docker";
 import { SessionManager } from "../src/sessions";
 
@@ -100,6 +100,43 @@ test("a chat session's container env carries DEVD_RUNTIME=chat (tmux row: tmux)"
   expect(await args("dev-p-chat", "chat", "chat")).toContain("DEVD_RUNTIME=chat");
   expect(await args("dev-p-tmux", "tmux", "tmux")).toContain("DEVD_RUNTIME=tmux");
 });
+
+test("DEVBOX-54: every new chat container gets a fresh bridge secret, passed by name only (never in docker's argv)", async () => {
+  const db = openDb(":memory:");
+  const mgr = new SessionManager({
+    db, cfg: structuredClone(DEFAULT_CONFIG), root: mkdtempSync(join(tmpdir(), "rt-root-")), image: "devbox:latest",
+    controlRoot: mkdtempSync(join(tmpdir(), "rt-ctl-")), extraMounts: [],
+  });
+  const opts = (id: string, runtime: "tmux" | "chat") => mgr["runOpts"](id, "/srv/dev/p/r", 40100, "p", "r", "claude", runtime);
+  const first = await opts("dev-p-chat", "chat");
+  const secret = first.secretEnv!.DEVD_BRIDGE_SECRET;
+  expect(secret).toMatch(/^[0-9a-f]{64}$/);
+  const args = runArgs(first);
+  expect(args.join(" ")).not.toContain(secret);
+  expect(args).toContain("DEVD_BRIDGE_SECRET");
+  expect(JSON.stringify(first.env)).not.toContain(secret);
+  // Stored only once the container with it runs (M4): a failed docker run leaves the old container's secret.
+  expect(getBridgeSecret(db, "dev-p-chat")).toBeNull();
+  const failing = fakeDocker("exit 1");
+  try { await expect(mgr["runContainer"](first)).rejects.toThrow("docker run failed"); } finally { failing(); }
+  expect(getBridgeSecret(db, "dev-p-chat")).toBeNull();
+  const working = fakeDocker("exit 0");
+  try { await mgr["runContainer"](first); } finally { working(); }
+  expect(getBridgeSecret(db, "dev-p-chat")).toBe(secret);
+  // A recreated container (another runOpts) gets a new secret.
+  expect((await opts("dev-p-chat", "chat")).secretEnv!.DEVD_BRIDGE_SECRET).not.toBe(secret);
+  // A tmux container runs no bridge: no secret.
+  expect((await opts("dev-p-tmux", "tmux")).secretEnv).toBeUndefined();
+});
+
+function fakeDocker(script: string): () => void {
+  const dir = mkdtempSync(join(tmpdir(), "fake-docker-"));
+  writeFileSync(join(dir, "docker"), `#!/usr/bin/env bash\n${script}\n`);
+  chmodSync(join(dir, "docker"), 0o755);
+  const orig = process.env.PATH;
+  process.env.PATH = `${dir}:${orig}`;
+  return () => { process.env.PATH = orig; };
+}
 
 function chatSession(db: ReturnType<typeof openDb>, agent: "claude" | "codex" = "claude") {
   insertSession(db, { id: "dev-p-r", folder: "f", project: "p", repo: "r", container: "dev-p-r", port_base: 40100,

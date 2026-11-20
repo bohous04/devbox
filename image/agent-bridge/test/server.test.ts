@@ -6,6 +6,7 @@ import { EventLog } from "../src/eventLog";
 import type { BridgeEvent } from "../src/events";
 import { encodeFrame, type ClientFrame, type ServerFrame } from "../src/protocol";
 import { startServer, type CommandHandler } from "../src/server";
+import { bridgeProof } from "../src/binding";
 
 let dir: string;
 let socketPath: string;
@@ -107,6 +108,65 @@ test("every handshake's ready frame carries the bridge's version and whether it 
   const b = await connect();
   b.send({ t: "hello", afterSeq: 0 });
   expect((await b.waitFor(1))[0]).toEqual({ t: "ready", lastSeq: 0, version: "1.2.3", awaitingTarget: false });
+});
+
+test("a bound bridge answers a hello's nonce with its session and proof before the replay", async () => {
+  const secret = "0f".repeat(32);
+  const server = startServer({ socketPath, log: new EventLog(logPath), onCommand: async () => {}, handshake: () => ({ version: "1.6.0", awaitingTarget: false }), binding: { session: "dev-harbor-web", secret } });
+  closers.push(() => server.close());
+  server.publish(ev("a"));
+  const c = await connect();
+  const nonce = "ab".repeat(16);
+  c.send({ t: "hello", afterSeq: 0, nonce });
+  const [bind, event, ready] = await c.waitFor(3);
+  // First, so devd applies nothing from a bridge that has not proven its session.
+  expect(bind).toEqual({ t: "bind", session: "dev-harbor-web", proof: bridgeProof(secret, nonce, "dev-harbor-web") });
+  expect(event.t).toBe("event");
+  expect(ready.t).toBe("ready");
+});
+
+test("no bind frame for a hello without a nonce (an older devd) or on a bridge without a secret", async () => {
+  const bound = startServer({ socketPath, log: new EventLog(logPath), onCommand: async () => {}, handshake: () => ({ version: "1.6.0", awaitingTarget: false }), binding: { session: "dev-harbor-web", secret: "0f".repeat(32) } });
+  closers.push(() => bound.close());
+  const a = await connect();
+  a.send({ t: "hello", afterSeq: 0 });
+  expect(seqs(await a.waitFor(1))).toEqual(["ready0"]);
+  await bound.close();
+  const unbound = start();
+  const b = await connect();
+  b.send({ t: "hello", afterSeq: 0, nonce: "ab".repeat(16) });
+  expect(seqs(await b.waitFor(1))).toEqual(["ready0"]);
+  void unbound;
+});
+
+test("a bound bridge drops a hello meant for another session: no ack of its afterSeq, no replay", async () => {
+  const secret = "0f".repeat(32);
+  const hellos: number[] = [];
+  const errs: string[] = [];
+  const server = startServer({ socketPath, log: new EventLog(logPath), onCommand: async () => {}, handshake: () => ({ version: "1.6.0", awaitingTarget: false }), binding: { session: "dev-harbor-web", secret }, onHello: (s) => hellos.push(s), logError: (m) => errs.push(m) });
+  closers.push(() => server.close());
+  server.publish(ev("a"));
+  const c = await connect();
+  const nonce = "ab".repeat(16);
+  c.send({ t: "hello", afterSeq: 0, nonce, session: "dev-harbor-api" });
+  await c.closed;
+  // Only the bind, so devd can say whose bridge it reached.
+  expect(c.frames).toEqual([{ t: "bind", session: "dev-harbor-web", proof: bridgeProof(secret, nonce, "dev-harbor-web") }]);
+  expect(hellos).toEqual([]);
+  expect(errs).toHaveLength(1);
+  const ok = await connect();
+  ok.send({ t: "hello", afterSeq: 0, nonce, session: "dev-harbor-web" });
+  expect(seqs(await ok.waitFor(3))).toEqual(["bind", 1, "ready1"]);
+  expect(hellos).toEqual([0]);
+});
+
+test("bridgeProof depends on the secret, the nonce and the session", () => {
+  const s1 = "0f".repeat(32), s2 = "1f".repeat(32), n1 = "ab".repeat(16), n2 = "cd".repeat(16);
+  const p = bridgeProof(s1, n1, "dev-harbor-web");
+  expect(p).toMatch(/^[0-9a-f]{64}$/);
+  expect(bridgeProof(s2, n1, "dev-harbor-web")).not.toBe(p);
+  expect(bridgeProof(s1, n2, "dev-harbor-web")).not.toBe(p);
+  expect(bridgeProof(s1, n1, "dev-harbor-api")).not.toBe(p);
 });
 
 test("an event published during replay is delivered once, after the replay", async () => {

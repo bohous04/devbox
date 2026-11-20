@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_CONFIG } from "../src/config";
 import type { ConfigRepo } from "../src/configrepo";
-import { insertSession, insertMetrics, openDb, listSchedules, listNotifyLog, logEvent, getSession, setRepoAgent, type SessionRow } from "../src/db";
+import { insertSession, insertMetrics, setBridgeSecret, openDb, listSchedules, listNotifyLog, logEvent, getSession, setRepoAgent, type SessionRow } from "../src/db";
 import { createApp } from "../src/api";
 import { sh } from "./helpers/sh";
 import { loadCatalog } from "../src/prodDb";
@@ -379,6 +379,22 @@ test("GET /api/sessions?tmux=1: adds tmux sessions; without the parameter nothin
 
   const withTmux = await (await a.request("/api/sessions?tmux=1")).json() as { tmux: { name: string; label: string | null; agent: string | null; title: string | null; attached: number }[] }[];
   expect(withTmux[0].tmux[0]).toEqual({ name: "main", label: "SHOP-58", agent: null, title: null, attached: 1 });
+});
+
+test("DEVBOX-54: the bridge secret never appears in the session list", async () => {
+  const { a, db } = app();
+  insertSession(db, {
+    id: "dev-harbor-web", folder: "f", project: "harbor", repo: "web", container: "dev-harbor-web", port_base: 40100,
+    status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0, runtime: "chat",
+  });
+  const secret = "0f".repeat(32);
+  setBridgeSecret(db, "dev-harbor-web", secret);
+  for (const path of ["/api/sessions", "/api/sessions?tmux=1"]) {
+    const body = await (await a.request(path)).text();
+    expect(body).toContain("dev-harbor-web");
+    expect(body).not.toContain(secret);
+    expect(body).not.toContain("secret");
+  }
 });
 
 test("tree endpoint delegates to tree()", async () => {

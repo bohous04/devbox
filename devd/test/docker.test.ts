@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { containerState, criticExecArgv, execInContainer, removeContainer, runContainer, spawnWithTimeout, startContainer, stopContainer } from "../src/docker";
@@ -27,6 +27,19 @@ test("containerState: a docker timeout throws, does not return missing", async (
   try {
     await expect(containerState("anything")).rejects.toThrow(/timed out/);
   } finally { restore(); delete process.env.DEVD_TIMEOUT_DOCKER_QUERY_MS; }
+});
+
+test("runContainer: a secret env reaches docker by name, its value only in the docker CLI's environment", async () => {
+  const out = join(mkdtempSync(join(tmpdir(), "fake-docker-out-")), "seen");
+  const restore = fakeDockerOnPath(`printf '%s\\n' "$*" > ${out}; printf 'secret=%s\\n' "\${DEVD_BRIDGE_SECRET:-}" >> ${out}; exit 0`);
+  try {
+    await runContainer({ name: "dev-harbor-web", image: "img", workspace: "/w", portBase: 40100, portsPerSession: 1, env: { DEVD_RUNTIME: "chat" }, secretEnv: { DEVD_BRIDGE_SECRET: "c0ffee" } });
+  } finally { restore(); }
+  const [argv, env] = readFileSync(out, "utf8").trim().split("\n");
+  expect(argv).toContain("-e DEVD_RUNTIME=chat");
+  expect(argv).toContain("-e DEVD_BRIDGE_SECRET img");
+  expect(argv).not.toContain("c0ffee");
+  expect(env).toBe("secret=c0ffee");
 });
 
 test("execInContainer: returns RunResult with timedOut", async () => {

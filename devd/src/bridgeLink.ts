@@ -1,8 +1,10 @@
 import { SQLiteError } from "bun:sqlite";
+import { randomBytes } from "node:crypto";
 import { lstatSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import type { Socket } from "bun";
 import type { BridgeCommand, ClientFrame, ServerFrame } from "../../image/agent-bridge/src/protocol";
+import { bridgeProof, proofMatches } from "../../image/agent-bridge/src/binding";
 import { BRIDGE_VERSION } from "../../image/agent-bridge/src/version";
 import { ACK_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
 import type { LinkStatus, LoggedEvent } from "../../shared/thread";
@@ -30,6 +32,26 @@ export const ACK_INTERVAL_MS = 10 * 60_000;
 /** SQLite errors of the store itself (full disk, I/O, locks): every event would fail, so none is skipped for them. */
 const STORE_ERROR = /^SQLITE_(FULL|IOERR|BUSY|LOCKED|READONLY|CANTOPEN|NOMEM|CORRUPT|NOTADB|PROTOCOL|PERM|AUTH|INTERRUPT|ABORT)/;
 
+/** DEVBOX-54: until when a chat session whose container predates the session binding (no secret stored) is still
+ *  connected on the socket owner check alone. After it devd refuses such a link; ending and reopening the session
+ *  creates a container with a secret. */
+export const LEGACY_BRIDGE_UNTIL = Date.UTC(2026, 11, 4);
+
+const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+/** How long a bound connection may take to answer the hello with its `bind`. */
+const BIND_TIMEOUT_MS = 10_000;
+/** At most one refusal notification per session this often: a bridge flipping between refused and accepted must not
+ *  turn into a stream of pushes. The thread notice and the log still say every episode. */
+const REFUSED_NOTIFY_MS = 30 * 60_000;
+/** What a session id looks like; anything else a bridge claims is not repeated to the log, thread or user. */
+const SESSION_ID = /^[A-Za-z0-9._-]{1,64}$/;
+
+/** devd's startup line about the sessions still on a legacy bridge; null when there are none. */
+export function legacyBridgeStartupLine(ids: string[], until: number): string | null {
+  if (ids.length === 0) return null;
+  return `bridge binding: ${ids.length} chat sessions predate it (no bridge secret) and are connected only until ${day(until)}; end and reopen them before then: ${ids.join(", ")}`;
+}
+
 interface Pending { resolve: () => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }
 
 interface Link {
@@ -53,6 +75,13 @@ interface Link {
   ackTimer: ReturnType<typeof setInterval> | null;
   /** A skipped ack was logged; reset (and the recovery logged) once an ack goes out again. */
   ackFailLogged: boolean;
+  /** This connection's hello nonce while devd waits for the bridge's `bind`; nothing it sends is applied until then. */
+  nonce: string | null;
+  /** The secret this connection must be proven with (read at connect); null = legacy. */
+  secret: string | null;
+  /** The current refusal episode was said (log, thread); reset once a link is accepted. */
+  refused: boolean;
+  bindTimer: ReturnType<typeof setTimeout> | null;
 }
 
 class MalformedFrame extends Error {}
@@ -93,13 +122,17 @@ function parseServerFrame(line: string): ServerFrame {
       if (typeof f.id !== "string" || typeof f.ok !== "boolean") throw new MalformedFrame("res without id or ok");
       if (!f.ok && typeof f.error !== "string") throw new MalformedFrame("failed res without an error message");
       return f as ServerFrame;
+    case "bind":
+      if (typeof f.session !== "string" || typeof f.proof !== "string") throw new MalformedFrame("bind without session or proof");
+      return f as ServerFrame;
     case "ready":
       if (!Number.isInteger(f.lastSeq)) throw new MalformedFrame("ready without lastSeq");
       if (f.version !== undefined && typeof f.version !== "string") throw new MalformedFrame("ready with a non-string version");
       if (f.awaitingTarget !== undefined && typeof f.awaitingTarget !== "boolean") throw new MalformedFrame("ready with a non-boolean awaitingTarget");
       return f as ServerFrame;
     default:
-      throw new MalformedFrame(`unknown frame type ${String(f.t)}`);
+      // The type is repeated (log, thread notice) only when it looks like one: a bridge's text must not forge lines.
+      throw new MalformedFrame(typeof f.t === "string" && /^[a-z_]{1,16}$/.test(f.t) ? `unknown frame type ${f.t}` : "unknown frame type");
   }
 }
 
@@ -120,11 +153,26 @@ export class BridgeLinks {
   /** devd's own first message per session (startTurnWhenConnected), until the bridge took it. */
   private firstTurns = new Map<string, string>();
   private firstTurnDone = new Map<string, (err: Error | null) => void>();
+  private legacyLogged = new Set<string>();
+  private refusedNotifiedAt = new Map<string, number>();
+  private bindTimeoutMs: number;
+  private now: () => number;
   private retryMs: number;
   private ackMs: number;
   private log: (msg: string) => void;
 
   constructor(private d: {
+    /** DEVBOX-54: binds each link to its session (see LEGACY_BRIDGE_UNTIL). */
+    binding: {
+      /** The secret stored for the session's current container; null = created before the binding. */
+      secret: (id: string) => string | null;
+      legacyUntil: number;
+      /** devd refused the session's bridge and the user has to act; once per episode, with the thread notice's text. */
+      onRefused: (id: string, text: string) => void;
+    };
+    now?: () => number;
+    /** Default BIND_TIMEOUT_MS. */
+    bindTimeoutMs?: number;
     controlDir: (id: string) => string;
     store: (id: string) => ThreadStore;
     onEvent: (sessionId: string, e: LoggedEvent) => void;
@@ -152,6 +200,8 @@ export class BridgeLinks {
   }) {
     this.retryMs = d.retryMs ?? 2000;
     this.ackMs = d.ackMs ?? ACK_INTERVAL_MS;
+    this.bindTimeoutMs = d.bindTimeoutMs ?? BIND_TIMEOUT_MS;
+    this.now = d.now ?? Date.now;
     this.log = d.log ?? ((msg) => console.error(msg));
   }
 
@@ -177,7 +227,7 @@ export class BridgeLinks {
     const link: Link = {
       status: "connecting", socket: null, buffer: "", decoder: new TextDecoder(), outbound: [],
       pending: new Map(), retry: null, dropped: false, outageLogged: false, behindSince: null, failure: null, ackFailLogged: false,
-      ackTimer: null,
+      ackTimer: null, nonce: null, secret: null, refused: false, bindTimer: null,
     };
     this.links.set(sessionId, link);
     this.notifyStatus(sessionId, "connecting");
@@ -193,10 +243,16 @@ export class BridgeLinks {
     this.links.delete(sessionId);
     link.dropped = true;
     if (link.retry) clearTimeout(link.retry);
+    this.endBindWait(link);
     this.stopAcks(link);
     link.socket?.end();
     link.socket = null;
     this.failPending(link, "link dropped");
+  }
+
+  /** The session ended: a later session that reuses the id starts without its refusal rate limit. */
+  forget(sessionId: string): void {
+    this.refusedNotifiedAt.delete(sessionId);
   }
 
   status(sessionId: string): LinkStatus {
@@ -324,8 +380,21 @@ export class BridgeLinks {
     const path = join(this.d.controlDir(sessionId), "agent.sock");
     // The control dir is agent-writable (/run/devd) and devd connects as root: a planted symlink
     // would point devd at any socket on the host. Only a real socket owned by the container user is
-    // accepted (lstat does not follow links). A swap between this check and the connect remains
-    // possible — the session-bound handshake secret is the follow-up that closes it.
+    // accepted (lstat does not follow links). A swap between this check and the connect is caught by the session
+    // binding: a bridge must prove the session's secret before devd applies anything (legacy sessions aside).
+    try { link.secret = this.d.binding.secret(sessionId); }
+    catch (err) { this.down(sessionId, link, `cannot read the session's bridge secret: ${err instanceof Error ? err.message : String(err)}`); return; }
+    if (link.secret === null) {
+      const until = this.d.binding.legacyUntil;
+      if (this.now() >= until) {
+        this.refuse(sessionId, link, `devd no longer connects to the agent bridge of ${sessionId}: its container predates the session binding, which devd accepted until ${day(until)}. To continue, end and reopen the session (the new container's bridge can prove its session).`);
+        return;
+      }
+      if (!this.legacyLogged.has(sessionId)) {
+        this.legacyLogged.add(sessionId);
+        this.log(`bridge link ${sessionId}: legacy bridge without a session secret (its container predates the session binding): only the socket owner is checked, until ${day(until)}`);
+      }
+    }
     const sockUid = this.d.socketUid ?? (process.getuid?.() === 0 ? CONTAINER_UID : process.getuid?.());
     let st: Stats;
     // Nothing there yet (bridge not started): no connect at all — a connect would resolve whatever
@@ -361,17 +430,90 @@ export class BridgeLinks {
     link.buffer = "";
     link.decoder = new TextDecoder();
     link.outbound = [];
-    if (link.outageLogged) this.log(`bridge link ${sessionId}: reconnected`);
-    link.outageLogged = false;
-    this.write(link, { t: "hello", afterSeq });
+    if (link.secret !== null) {
+      // Connected only once the bridge's `bind` proved the session (onData); until then nothing is sent or applied.
+      link.nonce = randomBytes(16).toString("hex");
+      // `session`: a bound bridge of another session drops this hello before it acks or replays anything.
+      this.write(link, { t: "hello", afterSeq, nonce: link.nonce, session: sessionId });
+      link.bindTimer = setTimeout(() => {
+        link.bindTimer = null;
+        if (link.socket === socket && link.nonce !== null) {
+          this.refuse(sessionId, link, `devd refused the agent bridge of ${sessionId}: the agent bridge did not prove its session within ${this.bindTimeoutMs / 1000} s. devd keeps retrying; if this stays, end and reopen the session.`);
+        }
+      }, this.bindTimeoutMs);
+      return;
+    }
+    this.accepted(sessionId, link);
+    this.write(link, { t: "hello", afterSeq, session: sessionId });
     this.setStatus(sessionId, link, "connected");
     this.sendFirstTurn(sessionId);
+  }
+
+  /** The connection is this session's bridge (bound, or legacy within the window). */
+  private accepted(sessionId: string, link: Link) {
+    if (link.outageLogged) this.log(`bridge link ${sessionId}: reconnected`);
+    link.outageLogged = false;
+    link.refused = false;
+  }
+
+  /** The first frame of a connection that must be bound: its `bind`, or a refusal. True when the link is bound. */
+  private checkBind(sessionId: string, link: Link, f: ServerFrame): boolean {
+    const nonce = link.nonce!;
+    let why: string | null = null;
+    if (f.t !== "bind") why = `the agent bridge did not prove its session (its first frame was "${f.t}"): its container may predate the session binding, or the socket is not this session's bridge`;
+    else if (f.session !== sessionId) {
+      why = SESSION_ID.test(f.session)
+        ? `the socket leads to the agent bridge of another session (${f.session})`
+        : "the socket leads to the agent bridge of another session: it names no valid session id";
+    }
+    else if (!proofMatches(bridgeProof(link.secret!, nonce, sessionId), f.proof)) why = "the agent bridge's proof does not match this session's secret";
+    if (why !== null) {
+      this.refuse(sessionId, link, `devd refused the agent bridge of ${sessionId}: ${why}. devd keeps retrying; if this stays, end and reopen the session.`);
+      return false;
+    }
+    this.endBindWait(link);
+    this.accepted(sessionId, link);
+    this.setStatus(sessionId, link, "connected");
+    this.sendFirstTurn(sessionId);
+    return true;
+  }
+
+  private endBindWait(link: Link) {
+    link.nonce = null;
+    if (link.bindTimer) clearTimeout(link.bindTimer);
+    link.bindTimer = null;
+  }
+
+  /** Closes the connection (if any) and retries; said once per episode in the log, the thread and to the user. */
+  private refuse(sessionId: string, link: Link, text: string) {
+    if (!link.refused) {
+      link.refused = true;
+      this.log(`bridge link ${sessionId}: refused: ${text}`);
+      try { this.d.store(sessionId).addNotice(text, Date.now()); }
+      catch (e) { this.log(`bridge link ${sessionId}: cannot add a notice: ${e instanceof Error ? e.message : String(e)}`); }
+      const last = this.refusedNotifiedAt.get(sessionId);
+      if (last === undefined || this.now() - last >= REFUSED_NOTIFY_MS) {
+        this.refusedNotifiedAt.set(sessionId, this.now());
+        try { this.d.binding.onRefused(sessionId, text); }
+        catch (e) { this.log(`bridge link ${sessionId}: onRefused failed: ${e instanceof Error ? e.message : String(e)}`); }
+      }
+    }
+    this.endBindWait(link);
+    const socket = link.socket;
+    if (socket) {
+      // Detach first: end() may call the close callback synchronously, and it must not run onClose twice.
+      this.onClose(sessionId, link, "refused", true);
+      socket.end();
+    } else {
+      this.down(sessionId, link, "refused", true);
+    }
   }
 
   /** `quiet`: a repeat of a failure already logged; neither this outage nor its reconnect is logged again. */
   private onClose(sessionId: string, link: Link, why: string, quiet = false) {
     if (link.dropped) return;
     link.socket = null;
+    this.endBindWait(link);
     this.stopAcks(link);
     this.failPending(link, why);
     this.down(sessionId, link, why, quiet);
@@ -395,8 +537,18 @@ export class BridgeLinks {
       link.buffer = link.buffer.slice(nl + 1);
       if (!line) continue;
       try {
-        this.handle(sessionId, link, parseServerFrame(line));
+        const f = parseServerFrame(line);
+        if (link.nonce !== null) {
+          if (!this.checkBind(sessionId, link, f)) return;
+          continue;
+        }
+        this.handle(sessionId, link, f);
       } catch (err) {
+        // Before the bind nothing is this session's yet: no poison counting, no skipped event, just a refusal.
+        if (link.nonce !== null) {
+          this.refuse(sessionId, link, `devd refused the agent bridge of ${sessionId}: the agent bridge did not prove its session (its first frame was malformed). devd keeps retrying; if this stays, end and reopen the session.`);
+          return;
+        }
         // A malformed frame or a store write error: drop this connection (onClose logs why); the reconnect's
         // hello carries the stored seq, so nothing is lost or applied twice.
         const what = err instanceof MalformedFrame ? `malformed frame: ${err.message}` : `cannot apply frame: ${err instanceof Error ? err.message : String(err)}`;
@@ -468,6 +620,7 @@ export class BridgeLinks {
         else p.reject(new CommandFailed(f.error));
         return;
       }
+      case "bind": return; // only the first frame of a bound connection means anything (checkBind)
       case "ready":
         this.checkBehind(sessionId, link, f.lastSeq);
         this.checkVersion(sessionId, f.version ?? null);

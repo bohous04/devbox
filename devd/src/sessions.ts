@@ -12,8 +12,9 @@ import { parseProcTree, PS_TREE_CMD } from "./ccUpkeep";
 import { insteadOfEnv } from "./gitProxy";
 import { dindCleanupPlan, dindEnsurePlan, dindName, dindNetwork, dindNetworkCreate, dindSubnetCandidates, dockerHostFor } from "./dind";
 import { IBX_PATHS, toRemoteRunOpts } from "./instabox/runOpts";
+import { BRIDGE_SECRET_ENV, newBridgeSecret } from "../../image/agent-bridge/src/binding";
 import type { DevConfig, Settings } from "./config";
-import { deleteGitStat, deleteSession, getRepoAgent, getSession, insertSession, listSessions, logEvent, releaseLeasesForSession, setAutoEnd, setRepoAgent, setSessionAgent, setSessionBranch, updateSession, type AgentName, type SessionRow, type SessionRuntime } from "./db";
+import { deleteGitStat, deleteSession, getRepoAgent, setBridgeSecret, getSession, insertSession, listSessions, logEvent, releaseLeasesForSession, setAutoEnd, setRepoAgent, setSessionAgent, setSessionBranch, updateSession, type AgentName, type SessionRow, type SessionRuntime } from "./db";
 import { containerEnv, containerMountDestinations, containerState, execInContainer, removeContainer, runContainer, startContainer, stopContainer, type RunOpts } from "./docker";
 import { dockerArgv } from "./dockerTarget";
 import { inspectCanonicalWorkspace, removeStoppedWorkspaceContainer, type CanonicalWorkspaceContainer } from "./canonicalWorkspace";
@@ -108,7 +109,7 @@ export interface SessionDeps {
   /** Drops the chat session's bridge link and closes its thread store. Runs inside the session lock: at the
    *  start of stop(), and in end() right before the archive, so no handle is open when end() archives
    *  `_threads/<id>.sqlite`. */
-  releaseThread?: (session: string) => void;
+  releaseThread?: (session: string, ended?: boolean) => void;
   /** Sidecar with its own docker daemon instead of the host socket. Opt-in. */
   dind?: boolean;
   /** Is the session shared or tainted (shareTaint.ts) RIGHT NOW, relative to the container that
@@ -789,6 +790,14 @@ export class SessionManager {
     return !current["DEVD_CLIPROXY_KEY"] || !current["DEVD_AGENT_MODEL"];
   }
 
+  /** `docker run`, then the container's bridge secret (DEVBOX-54) replaces the stored one: only after the run
+   *  succeeded, so a failed recreate leaves a surviving old container's secret in place. */
+  private async runContainer(o: RunOpts): Promise<void> {
+    await runContainer(o);
+    const secret = o.secretEnv?.[BRIDGE_SECRET_ENV];
+    if (secret !== undefined) setBridgeSecret(this.d.db, o.name, secret);
+  }
+
   // `bare` != null only for a worktree session (see worktreeMounts). A repo in the old form
   // does not have it and gets exactly the same mounts as before.
   // `remote` = the container will run on an InstaBox VM: no dind (R2), no prod-db keys, no
@@ -835,6 +844,10 @@ export class SessionManager {
         OTEL_RESOURCE_ATTRIBUTES: otelResourceAttributes(id, project, repo),
         ...await this.proxyEnvFor(agent),
       },
+      // DEVBOX-54: every new chat container gets its own secret, which its agent bridge proves the session with
+      // (bridgeLink.ts); stored by runContainer once the container runs. A kept container (docker start) keeps the
+      // secret it was created with.
+      ...(runtime === "chat" && !remote ? { secretEnv: { [BRIDGE_SECRET_ENV]: newBridgeSecret() } } : {}),
     };
   }
 
@@ -1075,7 +1088,7 @@ export class SessionManager {
           await removeContainer(id);
         }
         await this.ensureDind(id);
-        await runContainer(await this.runOpts(id, dir, existing.port_base, t.project, t.repo, agent, storedRuntime(existing), worktree ? bare : null));
+        await this.runContainer(await this.runOpts(id, dir, existing.port_base, t.project, t.repo, agent, storedRuntime(existing), worktree ? bare : null));
         // Audit log: an agent switch is always logged, even when the container was missing and would
         // have to be created again anyway — "agent-switch" carries more information than a plain "recreate".
         if (switching) logEvent(this.d.db, id, "agent-switch", { from: existing.agent ?? "claude", to: agent });
@@ -1102,7 +1115,7 @@ export class SessionManager {
         earlyDind ?? this.ensureDind(id),
       ]);
       progress({ step: "container", detail: "starting the container" });
-      await runContainer(opts);
+      await this.runContainer(opts);
     } catch (e) {
       deleteSession(this.d.db, id);
       throw e;
@@ -1141,7 +1154,7 @@ export class SessionManager {
         await this.ensureOwned(ws); // git init ran as root → chown to dev (uid 1000)
         try {
           await this.ensureDind(id);
-          await runContainer(await this.runOpts(id, ws, port_base, project, repo, chosen, "tmux" /* solo is tmux-only: the API refuses chat+solo */));
+          await this.runContainer(await this.runOpts(id, ws, port_base, project, repo, chosen, "tmux" /* solo is tmux-only: the API refuses chat+solo */));
         } catch (e) {
           deleteSession(this.d.db, id);
           throw e;
@@ -1218,7 +1231,7 @@ export class SessionManager {
     await this.checkpointRecovery(id);
     await removeContainer(id);
     await this.ensureDind(id);
-    await runContainer(await this.runOpts(id, dir, s.port_base, s.project, s.repo, agent, storedRuntime(s), s.worktree ? bare : null));
+    await this.runContainer(await this.runOpts(id, dir, s.port_base, s.project, s.repo, agent, storedRuntime(s), s.worktree ? bare : null));
     updateSession(this.d.db, id, { status: "running", last_active_at: this.now() });
     logEvent(this.d.db, id, "recreate", { reason });
     return getSession(this.d.db, id)!;
@@ -1301,7 +1314,7 @@ export class SessionManager {
         hasJournal: () => existsSync(join(this.controlDir(id), "recovery", "latest.json")),
         create: async s => {
           this.revokeShares(id); // this create() = a missing container is being created again
-          await runContainer(await this.runOpts(id, workspace(s), s.port_base, s.project, s.repo,
+          await this.runContainer(await this.runOpts(id, workspace(s), s.port_base, s.project, s.repo,
             s.agent ?? "claude", storedRuntime(s), s.worktree ? barePath(this.d.root, s.folder, s.project, s.repo) : null));
         },
         start: s => startContainer(s.container),
@@ -1336,7 +1349,7 @@ export class SessionManager {
         removeStopped: (observed) => removeStoppedWorkspaceContainer(observed),
         create: async (row) => {
           this.revokeShares(id); // no-op if the session did not have a row yet (fresh Remote resume)
-          await runContainer(await this.runOpts(id, route.cwd, row.port_base,
+          await this.runContainer(await this.runOpts(id, route.cwd, row.port_base,
             row.project, row.repo, row.agent ?? "codex", storedRuntime(getSession(this.d.db, id)!) /* inserted before create */, route.restore.bare));
         },
         allocatePort: () => allocatePortBase(this.d.db, this.d.cfg.settings),
@@ -1419,7 +1432,7 @@ export class SessionManager {
         if (staleCanonicalMount) await removeStoppedWorkspaceContainer(observed);
         else await removeContainer(id);
         await this.ensureDind(id);
-        await runContainer(await this.runOpts(id, ws, s.port_base, s.project, s.repo, agent, storedRuntime(s)));
+        await this.runContainer(await this.runOpts(id, ws, s.port_base, s.project, s.repo, agent, storedRuntime(s)));
         logEvent(this.d.db, id, "recreate", { reason: staleCanonicalMount ? "canonical-workspace" : "proxy-env" });
       } else {
         await startContainer(id);
@@ -1445,7 +1458,7 @@ export class SessionManager {
         this.d.revokePlaceholder?.(id);
         await this.killSshAgent(id);
         rmSync(this.controlDir(id), { recursive: true, force: true });
-        this.d.releaseThread?.(id);
+        this.d.releaseThread?.(id, true);
         this.keepChats(id);
         deleteGitStat(this.d.db, id);
         try { releaseLeasesForSession(this.d.db, id, this.now()); }
@@ -1475,7 +1488,7 @@ export class SessionManager {
       // _chat-archive instead of piling up under _claude-projects or being deleted.
       // The chat store is released only now: until the container is gone the bridge may still send events, and
       // the store takes them (isEnding keeps readers out). Closed here, it is archived with no handle open.
-      this.d.releaseThread?.(id);
+      this.d.releaseThread?.(id, true);
       this.keepChats(id);
       // Its chat images go only now (S5-R23): the bridge that read them is gone with the container. A failure leaves
       // them on disk (logged) and must not leave the session row behind, like the lease release below.

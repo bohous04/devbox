@@ -1,5 +1,6 @@
 import { chmodSync, rmSync } from "node:fs";
 import type { Socket } from "bun";
+import { bridgeProof } from "./binding";
 import type { BridgeEvent, LoggedEvent } from "./events";
 import type { EventLog } from "./eventLog";
 import { encodeFrame, parseClientFrame, type BridgeCommand, type ServerFrame } from "./protocol";
@@ -35,6 +36,8 @@ export function startServer(o: {
   log: EventLog;
   onCommand: CommandHandler;
   handshake: () => Handshake;
+  /** The session this bridge belongs to and devd's secret for it; null serves unbound (no `bind` frame). */
+  binding?: { session: string; secret: string } | null;
   /** A hello's `afterSeq`: devd has stored every event up to it. Called before the replay. */
   onHello?: (afterSeq: number) => void;
   /** A periodic ack's `seq` (S6-R21): devd's store holds every event up to it durably. */
@@ -116,6 +119,16 @@ export function startServer(o: {
     if (c.hello) throw new Error("duplicate hello");
     c.hello = true;
     c.replaying = true;
+    if (frame.nonce !== undefined && o.binding) {
+      send(c, { t: "bind", session: o.binding.session, proof: bridgeProof(o.binding.secret, frame.nonce, o.binding.session) });
+    }
+    // devd meant another session (a socket that leads here by mistake or on purpose): its afterSeq must not ack this
+    // log, nor this thread be replayed to it. The bind above tells devd whose bridge this is.
+    if (o.binding && frame.session !== undefined && frame.session !== o.binding.session) {
+      logError(`agent-bridge: a hello for another session; closing that client`);
+      drop(c);
+      return;
+    }
     o.onHello?.(frame.afterSeq);
     const done = replay(c, frame.afterSeq).catch((err) => {
       logError(`agent-bridge: replay failed, closing client: ${err instanceof Error ? err.message : String(err)}`);

@@ -7,6 +7,9 @@ export interface RunOpts {
   bindIp?: string; extraMounts?: string[]; env?: Record<string, string>; cmd?: string[];
   /** Sidecar (dind) network. Without it the container stays on the default bridge. */
   network?: string;
+  /** Env whose values never go into docker's argv (readable by every host user in /proc): `-e NAME` only, the
+   *  value reaches `docker run` through the CLI's own environment. */
+  secretEnv?: Record<string, string>;
 }
 
 // A timeout is an ERROR, never a state: the caller must not confuse "docker did not respond" with
@@ -17,8 +20,12 @@ export interface RunOpts {
 // .catch(console.error), the scheduled run skips that tick. Nowhere is the exception
 // mapped to "missing".
 async function docker(group: TimeoutGroup, target: string, ...args: string[]): Promise<RunResult> {
+  return dockerWithEnv(group, target, args);
+}
+
+async function dockerWithEnv(group: TimeoutGroup, target: string, args: string[], env?: Record<string, string>): Promise<RunResult> {
   const ms = timeoutFor(group);
-  const r = await runDocker(target, args, { timeoutMs: ms });
+  const r = await runDocker(target, args, { timeoutMs: ms, ...(env ? { env } : {}) });
   if (r.timedOut) throw new Error(`docker ${args[0]} timed out after ${Math.round(ms / 1000)} s`);
   return r;
 }
@@ -54,12 +61,13 @@ export function runArgs(o: RunOpts): string[] {
   }
   for (const m of o.extraMounts ?? []) args.push("-v", m);
   for (const [k, v] of Object.entries(o.env ?? {})) args.push("-e", `${k}=${v}`);
+  for (const k of Object.keys(o.secretEnv ?? {})) args.push("-e", k);
   args.push(o.image, ...(o.cmd ?? []));
   return args;
 }
 
 export async function runContainer(o: RunOpts): Promise<void> {
-  const r = await docker("DOCKER_LIFECYCLE", o.name, ...runArgs(o));
+  const r = await dockerWithEnv("DOCKER_LIFECYCLE", o.name, runArgs(o), o.secretEnv);
   if (r.code !== 0) throw new Error(`docker run failed: ${r.stderr.trim()}`);
 }
 

@@ -6,21 +6,29 @@ import type { Socket } from "bun";
 import { Database, type SQLiteError } from "bun:sqlite";
 import { BRIDGE_VERSION } from "../../image/agent-bridge/src/version";
 import { ACK_MIN_BRIDGE_VERSION } from "../../shared/bridgeVersion";
-import { AgentDisconnected, BridgeLinks, CommandFailed, CommandTimeout, FirstTurnPending, POISON_LIMIT, USER_FIRST_PROMPT_TAG } from "../src/bridgeLink";
+import { bridgeProof } from "../../image/agent-bridge/src/binding";
+import { AgentDisconnected, BridgeLinks, legacyBridgeStartupLine, CommandFailed, CommandTimeout, FirstTurnPending, POISON_LIMIT, USER_FIRST_PROMPT_TAG } from "../src/bridgeLink";
 import { ThreadStore } from "../src/threadStore";
 import type { LinkStatus, LoggedEvent } from "../../shared/thread";
 
 const ID = "dev-a-b-1";
 const RETRY = 20;
+const SECRET = "0f".repeat(32);
+/** A session devd created before the binding, while the compat window is open. */
+const FAR = Date.UTC(9999, 0, 1);
+const LEGACY = { secret: () => null, legacyUntil: FAR, onRefused: () => {} };
+const legacyLine = `bridge link ${ID}: legacy bridge without a session secret (its container predates the session binding): only the socket owner is checked, until 9999-01-01`;
 
 const ev = (seq: number): LoggedEvent => ({ seq, ts: 1000 + seq, event: { type: "message.delta", runId: "r1", itemId: `m${seq}`, text: `t${seq}` } });
 
 type CmdReply = { ok: true } | { ok: false; error: string } | "never";
 
 /** A unix socket server speaking the bridge's frame protocol, with knobs the real one has no need for. */
-function fakeBridge(path: string, o: { events?: LoggedEvent[]; ignoreAfterSeq?: boolean; ready?: Record<string, unknown> } = {}) {
+function fakeBridge(path: string, o: { events?: LoggedEvent[]; ignoreAfterSeq?: boolean; ready?: Record<string, unknown>; binding?: { session: string; secret: string }; onHello?: string } = {}) {
   const events = [...(o.events ?? [])];
   const hellos: number[] = [];
+  const nonces: (string | undefined)[] = [];
+  const sessions: (string | undefined)[] = [];
   const acks: number[] = [];
   const cmds: unknown[] = [];
   let reply: CmdReply = { ok: true };
@@ -38,6 +46,11 @@ function fakeBridge(path: string, o: { events?: LoggedEvent[]; ignoreAfterSeq?: 
           s.data.buf = s.data.buf.slice(nl + 1);
           if (f.t === "hello") {
             hellos.push(f.afterSeq);
+            nonces.push(f.nonce);
+            sessions.push(f.session);
+            // "silent": no answer at all; any other string is written instead of the bridge's answer.
+            if (o.onHello !== undefined) { if (o.onHello !== "silent") s.write(o.onHello); continue; }
+            if (f.nonce !== undefined && o.binding) write(s, { t: "bind", session: o.binding.session, proof: bridgeProof(o.binding.secret, f.nonce, o.binding.session) });
             for (const e of events) if (o.ignoreAfterSeq || e.seq > f.afterSeq) write(s, { t: "event", e });
             s.data.hello = true;
             write(s, { t: "ready", lastSeq: events.length ? events[events.length - 1].seq : 0, version: BRIDGE_VERSION, ...o.ready });
@@ -53,7 +66,7 @@ function fakeBridge(path: string, o: { events?: LoggedEvent[]; ignoreAfterSeq?: 
     },
   });
   return {
-    hellos, acks, cmds,
+    hellos, acks, cmds, nonces, sessions,
     setReply(r: CmdReply) { reply = r; },
     publish(e: LoggedEvent) { events.push(e); for (const c of clients) if (c.data.hello) write(c, { t: "event", e }); },
     raw(line: string) { for (const c of clients) c.write(line); },
@@ -73,7 +86,7 @@ async function waitFor(cond: () => boolean, what: string, ms = 2000) {
 const cleanups: (() => void)[] = [];
 afterEach(() => { for (const c of cleanups.splice(0)) c(); });
 
-function setup(prior: LoggedEvent[] = [], o: { ackMs?: number } = {}) {
+function setup(prior: LoggedEvent[] = [], o: { ackMs?: number; secret?: string | null; legacyUntil?: number; now?: () => number; bindTimeoutMs?: number } = {}) {
   const root = mkdtempSync(join(tmpdir(), "bl-"));
   mkdirSync(join(root, ID));
   const store = ThreadStore.open(root, ID);
@@ -85,9 +98,14 @@ function setup(prior: LoggedEvent[] = [], o: { ackMs?: number } = {}) {
   const onStatus: (id: string, s: LinkStatus) => void = (_id, s) => { statuses.push(s); };
   const onBehind: (id: string) => void = () => {};
   const t = { onEvent, onStatus, onBehind };
+  const refusals: string[] = [];
+  const binding = { secret: () => o.secret ?? null, legacyUntil: o.legacyUntil ?? FAR, onRefused: (_id: string, text: string) => { refusals.push(text); } };
   const links = new BridgeLinks({
     controlDir: (id) => join(root, id),
     store: () => store,
+    binding,
+    ...(o.now ? { now: o.now } : {}),
+    ...(o.bindTimeoutMs ? { bindTimeoutMs: o.bindTimeoutMs } : {}),
     onEvent: (id, e) => t.onEvent(id, e),
     onStatus: (id, s) => t.onStatus(id, s),
     onBehind: (id) => t.onBehind(id),
@@ -99,7 +117,7 @@ function setup(prior: LoggedEvent[] = [], o: { ackMs?: number } = {}) {
   const servers: ReturnType<typeof fakeBridge>[] = [];
   const serve = (o?: Parameters<typeof fakeBridge>[1]) => { const s = fakeBridge(sock, o); servers.push(s); return s; };
   cleanups.push(() => { links.drop(ID); for (const s of servers) s.close(); store.close(); rmSync(root, { recursive: true, force: true }); });
-  return { links, store, seen, statuses, logs, serve, t, root };
+  return { links, store, seen, statuses, logs, serve, t, root, refusals, binding };
 }
 
 test("reconnect replays only events after the stored seq", async () => {
@@ -249,7 +267,7 @@ test("a store write error drops the connection and the reconnect replays the eve
   } as unknown as ThreadStore;
   const seen: number[] = [];
   const logs: string[] = [];
-  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: (_id, e) => { seen.push(e.seq); }, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
+  const links = new BridgeLinks({ binding: LEGACY, controlDir: (id) => join(root, id), store: () => store, onEvent: (_id, e) => { seen.push(e.seq); }, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
   const s = fakeBridge(join(root, ID, "agent.sock"), { events: [ev(1)] });
   cleanups.push(() => { links.drop(ID); s.close(); real.close(); rmSync(root, { recursive: true, force: true }); });
   links.ensure(ID);
@@ -265,7 +283,7 @@ test("an unreadable store keeps the link disconnected and retrying, without cras
   const real = ThreadStore.open(root, ID);
   const store = () => { if (broken) throw new Error("session is ending"); return real; };
   const logs: string[] = [];
-  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
+  const links = new BridgeLinks({ binding: LEGACY, controlDir: (id) => join(root, id), store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
   const s = fakeBridge(join(root, ID, "agent.sock"));
   cleanups.push(() => { links.drop(ID); s.close(); real.close(); rmSync(root, { recursive: true, force: true }); });
   links.ensure(ID);
@@ -354,7 +372,7 @@ function devdOver(root: string, pendingTurns: ReturnType<typeof persistence>["pe
   mkdirSync(join(root, ID), { recursive: true });
   const store = ThreadStore.open(root, ID);
   const logs: string[] = [];
-  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); }, pendingTurns, ...extra });
+  const links = new BridgeLinks({ binding: LEGACY, controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); }, pendingTurns, ...extra });
   cleanups.push(() => { links.drop(ID); store.close(); });
   return { links, store, logs, sock: join(root, ID, "agent.sock") };
 }
@@ -480,6 +498,7 @@ test("T9: an event that fails the same way on every replay is skipped after POIS
   expect(notices).toEqual([`devd skipped event 2 from the agent bridge after ${POISON_LIMIT} failed attempts: cannot apply frame: NOT NULL constraint failed: items.text`]);
   // First cycle: disconnected + reconnected; the repeats say nothing; the skip says it once.
   expect(logs).toEqual([
+    legacyLine,
     `bridge link ${ID}: disconnected (cannot apply frame: NOT NULL constraint failed: items.text); retrying every ${RETRY} ms`,
     `bridge link ${ID}: reconnected`,
     `bridge link ${ID}: skipped event 2 after ${POISON_LIMIT} failed attempts: cannot apply frame: NOT NULL constraint failed: items.text`,
@@ -499,7 +518,7 @@ test("T9: an event whose error message varies on every try is still skipped at P
       : (t as any)[k].bind(t),
   });
   const logs: string[] = [];
-  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
+  const links = new BridgeLinks({ binding: LEGACY, controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
   const s = fakeBridge(join(root, ID, "agent.sock"), { events: [ev(1), ev(2), ev(3)] });
   cleanups.push(() => { links.drop(ID); s.close(); real.close(); rmSync(root, { recursive: true, force: true }); });
   links.ensure(ID);
@@ -531,7 +550,7 @@ test("T9: a store that cannot write at all is never skipped past: the event wait
   });
   const seen: number[] = [];
   const logs: string[] = [];
-  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: (_id, e) => { seen.push(e.seq); }, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
+  const links = new BridgeLinks({ binding: LEGACY, controlDir: (id) => join(root, id), store: () => store, onEvent: (_id, e) => { seen.push(e.seq); }, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
   const s = fakeBridge(join(root, ID, "agent.sock"), { events: [ev(1)] });
   cleanups.push(() => { links.drop(ID); s.close(); real.close(); rmSync(root, { recursive: true, force: true }); });
   links.ensure(ID);
@@ -635,7 +654,7 @@ test("agent.sock that is a symlink (to a host socket) or not a socket is never c
   symlinkSync(join(host, "host.sock"), join(root, ID, "agent.sock"));
   const store = ThreadStore.open(root, ID);
   const logs: string[] = [];
-  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
+  const links = new BridgeLinks({ binding: LEGACY, controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
   cleanups.push(() => { links.drop(ID); elsewhere.close(); store.close(); rmSync(root, { recursive: true, force: true }); rmSync(host, { recursive: true, force: true }); });
   links.ensure(ID);
   await waitFor(() => logs.some((l) => l.includes("not a socket owned by")), "refusal logged");
@@ -650,7 +669,7 @@ test("agent.sock that is a regular file is refused with a logged error", async (
   writeFileSync(join(root, ID, "agent.sock"), "x");
   const store = ThreadStore.open(root, ID);
   const logs: string[] = [];
-  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
+  const links = new BridgeLinks({ binding: LEGACY, controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
   cleanups.push(() => { links.drop(ID); store.close(); rmSync(root, { recursive: true, force: true }); });
   links.ensure(ID);
   await waitFor(() => logs.some((l) => l.includes("not a socket owned by")), "refusal of a regular file");
@@ -661,11 +680,198 @@ test("no agent.sock yet: devd does not connect, it waits for the next retry and 
   mkdirSync(join(root, ID));
   const store = ThreadStore.open(root, ID);
   const logs: string[] = [];
-  const links = new BridgeLinks({ controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
+  const links = new BridgeLinks({ binding: LEGACY, controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: (m) => { logs.push(m); } });
   links.ensure(ID);
   await waitFor(() => logs.some((l) => l.includes("no socket yet")), "waiting logged");
   expect(logs.some((l) => l.includes("cannot connect"))).toBe(false);
   const s = fakeBridge(join(root, ID, "agent.sock"));
   cleanups.push(() => { links.drop(ID); s.close(); store.close(); rmSync(root, { recursive: true, force: true }); });
   await waitFor(() => s.hellos.length === 1, "hello once the socket exists");
+});
+
+// DEVBOX-54: devd binds each link to its session. The bridge proves the session with an HMAC under the secret devd
+// gave that session's container, before devd applies anything it sends.
+const notices = (store: ThreadStore) => store.snapshot().items.filter((i) => i.kind === "notice").map((i) => i.text);
+
+test("binding: a bridge proving this session's secret gets the link; the hello carries a fresh nonce", async () => {
+  const { links, seen, serve } = setup([], { secret: SECRET });
+  const b = serve({ events: [ev(1)], binding: { session: ID, secret: SECRET } });
+  links.ensure(ID);
+  await waitFor(() => links.status(ID) === "connected" && seen.length === 1, "bound link");
+  await links.send(ID, { kind: "stop" });
+  expect(b.cmds).toEqual([{ kind: "stop" }]);
+  b.close();
+  await waitFor(() => links.status(ID) === "disconnected", "disconnect");
+  const c = serve({ binding: { session: ID, secret: SECRET } });
+  await waitFor(() => links.status(ID) === "connected", "rebound");
+  expect(b.nonces[0]).toMatch(/^[0-9a-f]{32}$/);
+  expect(c.nonces[0]).toMatch(/^[0-9a-f]{32}$/);
+  expect(c.nonces[0]).not.toBe(b.nonces[0]);
+  // The hello names the session, so another session's bridge drops it before it acks or replays anything (I1).
+  expect(c.sessions).toEqual([ID]);
+});
+
+for (const [what, binding, says] of [
+  ["another session's bridge", { session: "dev-harbor-api", secret: SECRET }, "of another session (dev-harbor-api)"],
+  ["a bridge naming a session id that is not one", { session: "x\nforged line " + "y".repeat(80), secret: SECRET }, "of another session:"],
+  ["a bridge with another secret", { session: ID, secret: "1f".repeat(32) }, "does not match"],
+  ["a bridge that sends no proof (older than the binding)", undefined, "did not prove"],
+] as const) {
+  test(`binding: ${what} is refused before anything it sends is applied, said once in the thread, the log and to the user`, async () => {
+    const { links, store, seen, serve, logs, refusals } = setup([], { secret: SECRET });
+    const b = serve({ events: [ev(1), ev(2)], binding });
+    links.ensure(ID);
+    await waitFor(() => b.hellos.length >= 3, "several refused attempts");
+    expect(store.lastSeq()).toBe(0);
+    expect(seen).toEqual([]);
+    expect(links.status(ID)).not.toBe("connected");
+    await expect(links.send(ID, { kind: "stop" })).rejects.toBeInstanceOf(AgentDisconnected);
+    expect(b.cmds).toEqual([]);
+    expect(notices(store)).toHaveLength(1);
+    expect(notices(store)[0]).toContain(says);
+    expect(refusals).toEqual(notices(store));
+    expect(logs.filter((l) => l.includes("refused"))).toHaveLength(1);
+  });
+}
+
+test("binding: a refusal episode ends once the right bridge answers; a new one is said again", async () => {
+  const { links, store, serve, refusals, binding } = setup([], { secret: SECRET });
+  const wrong = serve({ binding: { session: "dev-harbor-api", secret: SECRET } });
+  links.ensure(ID);
+  await waitFor(() => refusals.length === 1, "first refusal");
+  wrong.close();
+  serve({ binding: { session: ID, secret: SECRET } });
+  await waitFor(() => links.status(ID) === "connected", "bound");
+  void binding;
+  expect(notices(store)).toHaveLength(1);
+});
+
+test("legacy: a session without a secret connects on the owner check alone before the cutoff, logged once", async () => {
+  const { links, seen, serve, logs, refusals } = setup([], { secret: null, legacyUntil: Date.now() + 86_400_000 });
+  const a = serve({ events: [ev(1)] });
+  links.ensure(ID);
+  await waitFor(() => links.status(ID) === "connected" && seen.length === 1, "legacy link");
+  expect(a.nonces).toEqual([undefined]);
+  a.close();
+  await waitFor(() => links.status(ID) === "disconnected", "disconnect");
+  serve();
+  await waitFor(() => links.status(ID) === "connected", "legacy reconnect");
+  expect(logs.filter((l) => l.includes("legacy bridge"))).toHaveLength(1);
+  expect(refusals).toEqual([]);
+});
+
+test("legacy: after the cutoff devd does not connect; the thread and the user hear once which session and the fix", async () => {
+  const { links, store, serve, refusals, logs } = setup([], { secret: null, legacyUntil: Date.now() - 1 });
+  const a = serve({ events: [ev(1)] });
+  links.ensure(ID);
+  await waitFor(() => refusals.length === 1, "refusal");
+  await Bun.sleep(RETRY * 4);
+  expect(a.hellos).toEqual([]);
+  expect(store.lastSeq()).toBe(0);
+  expect(refusals).toHaveLength(1);
+  expect(refusals[0]).toContain(ID);
+  expect(refusals[0]).toContain("end and reopen the session");
+  expect(notices(store)).toEqual(refusals);
+  expect(logs.filter((l) => l.includes("refused"))).toHaveLength(1);
+});
+
+test("legacy: a session recreated during the retries (a secret now stored) binds on the next attempt", async () => {
+  let secret: string | null = null;
+  const root = mkdtempSync(join(tmpdir(), "bl-"));
+  mkdirSync(join(root, ID));
+  const store = ThreadStore.open(root, ID);
+  const links = new BridgeLinks({ binding: { secret: () => secret, legacyUntil: Date.now() - 1, onRefused: () => {} }, controlDir: (id) => join(root, id), store: () => store, onEvent: () => {}, onStatus: () => {}, onBehind: () => {}, retryMs: RETRY, log: () => {} });
+  const b = fakeBridge(join(root, ID, "agent.sock"), { binding: { session: ID, secret: SECRET } });
+  cleanups.push(() => { links.drop(ID); b.close(); store.close(); rmSync(root, { recursive: true, force: true }); });
+  links.ensure(ID);
+  await Bun.sleep(RETRY * 3);
+  expect(b.hellos).toEqual([]);
+  secret = SECRET;
+  await waitFor(() => links.status(ID) === "connected", "bound after the secret appeared");
+});
+
+test("legacyBridgeStartupLine lists the sessions that still lack a secret with the cutoff date", () => {
+  expect(legacyBridgeStartupLine([], Date.UTC(2026, 11, 4))).toBeNull();
+  expect(legacyBridgeStartupLine(["dev-harbor-web", "dev-harbor-api"], Date.UTC(2026, 11, 4))).toBe(
+    "bridge binding: 2 chat sessions predate it (no bridge secret) and are connected only until 2026-12-04; end and reopen them before then: dev-harbor-web, dev-harbor-api",
+  );
+});
+
+test("binding: a session id from the bridge that is not one never reaches the log, the thread or the user", async () => {
+  const { links, store, serve, logs, refusals } = setup([], { secret: SECRET });
+  serve({ binding: { session: "x\nforged", secret: SECRET } });
+  links.ensure(ID);
+  await waitFor(() => refusals.length === 1, "refusal");
+  for (const t of [...logs, ...notices(store), ...refusals]) expect(t).not.toContain("forged");
+});
+
+test("binding: a malformed frame before the bind is a refusal, not a poison frame to count or skip", async () => {
+  const { links, store, serve, refusals } = setup([], { secret: SECRET });
+  const b = serve({ onHello: '{"t":"event","e":{"seq":1}}\n' });
+  links.ensure(ID);
+  await waitFor(() => b.hellos.length >= POISON_LIMIT + 1, "attempts past the poison limit");
+  expect(refusals).toHaveLength(1);
+  expect(refusals[0]).toContain("did not prove");
+  expect(notices(store)).toEqual(refusals);
+  expect(store.lastSeq()).toBe(0);
+});
+
+test("binding: a bridge that never answers the hello is refused after the bind timeout, and devd retries", async () => {
+  const { links, serve, refusals } = setup([], { secret: SECRET, bindTimeoutMs: 30 });
+  const b = serve({ onHello: "silent" });
+  links.ensure(ID);
+  await waitFor(() => refusals.length === 1 && b.hellos.length >= 2, "timeout refusal and a retry");
+  expect(refusals[0]).toContain("did not prove its session within");
+  expect(links.status(ID)).not.toBe("connected");
+});
+
+test("binding: the user is notified at most once per 30 minutes per session, even with accepted links between", async () => {
+  let now = Date.UTC(2026, 10, 20);
+  const { links, store, serve, refusals } = setup([], { secret: SECRET, now: () => now });
+  let current = serve({ binding: { session: "dev-harbor-api", secret: SECRET } });
+  links.ensure(ID);
+  await waitFor(() => refusals.length === 1, "first refusal");
+  const flip = async (binding: { session: string; secret: string }, cond: () => boolean, what: string) => {
+    current.close();
+    current = serve({ binding });
+    await waitFor(cond, what);
+  };
+  await flip({ session: ID, secret: SECRET }, () => links.status(ID) === "connected", "accepted");
+  await flip({ session: "dev-harbor-api", secret: SECRET }, () => notices(store).length === 2, "second episode in the thread");
+  expect(refusals).toHaveLength(1);
+  now += 30 * 60_000;
+  await flip({ session: ID, secret: SECRET }, () => links.status(ID) === "connected", "accepted again");
+  await flip({ session: "dev-harbor-api", secret: SECRET }, () => refusals.length === 2, "notified again after 30 min");
+});
+
+test("binding: a forged frame type (with a newline) before the bind never reaches the log, the thread or the user", async () => {
+  const { links, store, serve, logs, refusals } = setup([], { secret: SECRET });
+  serve({ onHello: JSON.stringify({ t: "x\nforged line" }) + "\n" });
+  links.ensure(ID);
+  await waitFor(() => refusals.length === 1, "refusal");
+  expect(refusals[0]).toContain("its first frame was malformed");
+  for (const t of [...logs, ...notices(store), ...refusals]) expect(t).not.toContain("forged");
+});
+
+test("a forged frame type on a live link is not repeated in the log or the thread either", async () => {
+  const { links, store, serve, logs } = setup();
+  const b = serve();
+  links.ensure(ID);
+  await waitFor(() => links.status(ID) === "connected", "link");
+  b.raw(JSON.stringify({ t: "x\nforged line" }) + "\n");
+  await waitFor(() => logs.some((l) => l.includes("unknown frame type")), "drop logged");
+  for (const t of [...logs, ...notices(store)]) expect(t).not.toContain("forged");
+});
+
+test("binding: forget(id) after a session ended lets a session reusing the id be notified at once", async () => {
+  const { links, serve, refusals } = setup([], { secret: SECRET });
+  const b = serve({ binding: { session: "dev-harbor-api", secret: SECRET } });
+  links.ensure(ID);
+  await waitFor(() => refusals.length === 1, "first refusal");
+  links.drop(ID);
+  links.forget(ID);
+  b.close();
+  serve({ binding: { session: "dev-harbor-api", secret: SECRET } });
+  links.ensure(ID);
+  await waitFor(() => refusals.length === 2, "notified again for the new session");
 });
