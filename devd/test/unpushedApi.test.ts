@@ -74,9 +74,12 @@ function opsDeps(over: { push?: (path: string, branch: string) => Promise<{ ok: 
 test("POST /api/unpushed/push pushes the branch and drops the cache", async () => {
   const { calls, cache, dep } = opsDeps();
   const app = createApp(fakeDeps({ unpushed: dep }));
+  const before = Date.now();
   const r = await app.request("/api/unpushed/push", post({ path: "/srv/dev/apps/web", branch: "feature" }));
   expect(r.status).toBe(200);
-  expect(await r.json()).toEqual({ ok: true });
+  const body = (await r.json()) as { ok: true; at: number };
+  expect(body.ok).toBe(true);
+  expect(body.at).toBeGreaterThanOrEqual(before);       // the dashboard hides the branch until a report starts after it
   expect(calls).toEqual([["push", "/srv/dev/apps/web", "feature"]]);
   expect(cache.calls().invalidates).toBe(1);
 });
@@ -103,7 +106,7 @@ test("POST /api/unpushed/pr pushes first, then creates the PR and returns the UR
   const app = createApp(fakeDeps({ unpushed: dep }));
   const r = await app.request("/api/unpushed/pr", post({ path: "/srv/dev/apps/web", branch: "feature", title: "Title", body: "- work" }));
   expect(r.status).toBe(200);
-  expect(await r.json()).toEqual({ url: "https://github.com/o/n/pull/5", number: 5 });
+  expect(await r.json()).toMatchObject({ url: "https://github.com/o/n/pull/5", number: 5, at: expect.any(Number) });
   expect(calls).toEqual([
     ["push", "/srv/dev/apps/web", "feature"],
     ["pr", { path: "/srv/dev/apps/web", branch: "feature", title: "Title", body: "- work" }],

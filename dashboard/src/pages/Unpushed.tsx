@@ -11,12 +11,12 @@ import { cn } from "@/lib/utils";
 import { agoLabel } from "../format";
 import { useNow } from "../store";
 import {
-  branchKey, branchLabel, canCreatePr, canPush, commitsLabel, folderKey, prBody, prTitle, repoFlags, repoKey, repoTitle, shortHash, toggled,
+  branchKey, branchLabel, canCreatePr, canPush, commitsLabel, folderKey, prBody, prTitle, repoFlags, repoKey, repoTitle, shortHash, toggled, withoutPushed, type PushedBranch,
 } from "../unpushedView";
 
 /** What just succeeded — after a push/PR the branch disappears from the report (it is no longer unpushed),
  *  so the confirmation and the PR link have to live outside it, above the list. */
-interface Notice { text: string; url?: string }
+interface Notice { text: string; url?: string; pushed?: PushedBranch }
 
 /** Expansion is shared by all three levels (folder → repo → branch): the page holds one
  *  set of expanded keys and each block reads its own from it. */
@@ -46,8 +46,8 @@ function BranchBlock({ repo, b, now, onDone, expanded, onToggle }: { repo: Unpus
 
   async function push() {
     setErr(null);
-    await api.unpushedPush(repo.path, b.branch);
-    await onDone({ text: `Pushed ${b.branch} to origin (${repoTitle(repo)}).` });
+    const r = await api.unpushedPush(repo.path, b.branch);
+    await onDone({ text: `Pushed ${b.branch} to origin (${repoTitle(repo)}).`, pushed: { path: repo.path, branch: b.branch, at: r.at } });
   }
 
   async function createPr() {
@@ -56,7 +56,7 @@ function BranchBlock({ repo, b, now, onDone, expanded, onToggle }: { repo: Unpus
     if (!t) { setErr("Title is required."); return; }
     const r = await api.unpushedPr(repo.path, b.branch, t, prBody(b));
     setPrOpen(false);
-    await onDone({ text: `Pull request${r.number ? ` #${r.number}` : ""} created for ${b.branch} (${repoTitle(repo)}).`, url: r.url });
+    await onDone({ text: `Pull request${r.number ? ` #${r.number}` : ""} created for ${b.branch} (${repoTitle(repo)}).`, url: r.url, pushed: { path: repo.path, branch: b.branch, at: r.at } });
   }
 
   return (
@@ -126,6 +126,7 @@ function RepoBlock({ r, now, onDone, expanded, onToggle }: { r: UnpushedRepo; no
         <span className="ml-auto truncate font-mono text-[11px] text-muted-foreground" title={r.path}>{r.path}</span>
       </Toggle>
       {r.error && <div className="text-xs font-medium text-destructive">git failed here: {r.error}</div>}
+      {r.detailsSkipped && <div className="text-xs text-muted-foreground">Too many unpushed commits to break down by branch; only the total is counted.</div>}
       {r.branches.length > 0 && (
         <Collapse open={open}>
           <div className="flex flex-col gap-3 rounded-md border bg-muted/30 p-3">
@@ -164,7 +165,9 @@ function FolderCard({ f, now, onDone, expanded, onToggle }: { f: UnpushedFolder;
 
 export function Unpushed() {
   const [status, setStatus] = useState<UnpushedStatus | null>(null);
-  const report = status?.report ?? null;
+  // Branches pushed from this page, hidden until a report scanned after the push arrives.
+  const [pushed, setPushed] = useState<PushedBranch[]>([]);
+  const report = status?.report ? withoutPushed(status.report, pushed) : null;
   const [err, setErr] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   // The default state is "everything collapsed" — folders, repos and branches. The page serves as
@@ -196,6 +199,7 @@ export function Unpushed() {
   // After a push/PR the server cache is dropped, so a plain load already brings a new scan.
   async function done(n: Notice) {
     setNotice(n);
+    if (n.pushed) setPushed((p) => [...p, n.pushed!]);
     await load();
   }
 

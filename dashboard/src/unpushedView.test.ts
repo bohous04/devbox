@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import type { UnpushedBranch, UnpushedRepo } from "./api";
-import { branchKey, branchLabel, canCreatePr, canPush, commitsLabel, folderKey, prBody, prTitle, repoFlags, repoKey, repoTitle, shortHash, toggled } from "./unpushedView";
+import type { UnpushedBranch, UnpushedReport, UnpushedRepo } from "./api";
+import { branchKey, branchLabel, canCreatePr, canPush, commitsLabel, folderKey, prBody, prTitle, repoFlags, repoKey, repoTitle, shortHash, toggled, withoutPushed } from "./unpushedView";
 
 const repo = (over: Partial<UnpushedRepo> = {}): UnpushedRepo => ({
   folder: "acme", project: "portal", repo: "web", path: "/srv/dev/acme/portal/web", bare: false, noRemote: false,
@@ -90,4 +90,24 @@ test("expansion keys: folder, repo and branch do not mix up, even with the same 
   expect(new Set(keys).size).toBe(3);
   // the same branch in two repos = two different keys
   expect(branchKey("/srv/dev/web/web", "main")).not.toBe(branchKey("/srv/dev/web/other", "main"));
+});
+
+test("withoutPushed hides a pushed branch until the report is newer than the push, and fixes the counts", () => {
+  const a = branch({ branch: "a", count: 2 });
+  const b = branch({ branch: "b", count: 3 });
+  const report: UnpushedReport = { at: 1000, total: 6, scanned: 4, folders: [
+    { folder: "acme", count: 6, repos: [repo({ count: 5, branches: [a, b] }), repo({ path: "/srv/dev/acme/x", count: 1, branches: [branch({ branch: "a" })] })] },
+  ] };
+  const pushedA = [{ path: "/srv/dev/acme/portal/web", branch: "a", at: 2000 }];
+  const v = withoutPushed(report, pushedA);
+  expect(v.total).toBe(4);
+  expect(v.folders[0]!.count).toBe(4);
+  expect(v.folders[0]!.repos[0]!.count).toBe(3);
+  expect(v.folders[0]!.repos[0]!.branches.map((x) => x.branch)).toEqual(["b"]);
+  expect(v.folders[0]!.repos[1]!.branches.map((x) => x.branch)).toEqual(["a"]);   // same name, other repo
+  // A repo and a folder left with nothing disappear.
+  const all = withoutPushed(report, [...pushedA, { path: "/srv/dev/acme/portal/web", branch: "b", at: 2000 }, { path: "/srv/dev/acme/x", branch: "a", at: 2000 }]);
+  expect(all).toMatchObject({ total: 0, folders: [] });
+  // A report scanned after the push is shown as is.
+  expect(withoutPushed({ ...report, at: 2500 }, pushedA)).toEqual({ ...report, at: 2500 });
 });

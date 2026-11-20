@@ -2160,8 +2160,10 @@ export function createApp(d: ApiDeps): Hono {
     if (!path || !branch) return c.json({ error: "missing path or branch" }, 400);
     try {
       const r = await d.unpushed.push(path, branch);
+      // `at`: a report scanned after this (report.at is the scan's start) no longer has the branch.
+      const at = Date.now();
       d.unpushed.refresh();
-      return r.ok ? c.json({ ok: true }) : c.json({ error: r.error }, 502);
+      return r.ok ? c.json({ ok: true, at }) : c.json({ error: r.error }, 502);
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
     }
@@ -2176,9 +2178,10 @@ export function createApp(d: ApiDeps): Hono {
     if (!title) return c.json({ error: "missing PR title" }, 400);
     try {
       const pushed = await d.unpushed.push(path, branch);
+      const at = Date.now();                             // see /api/unpushed/push
       d.unpushed.refresh();
       if (!pushed.ok) return c.json({ error: `push failed: ${pushed.error}` }, 502);
-      return c.json(await d.unpushed.createPr({ path, branch, title, body }));
+      return c.json({ ...(await d.unpushed.createPr({ path, branch, title, body })), at });
     } catch (e) {
       const msg = (e as Error).message;
       // Input rejection (foreign path, unknown branch) is 400; anything from the provider 502.

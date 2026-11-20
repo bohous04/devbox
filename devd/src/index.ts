@@ -680,6 +680,7 @@ const tree = () => treeCache.get();
 // background: the API serves the last report at once (the first scan after a restart answers
 // "scanning"), so a slow repo never holds a request.
 const unpushedCache = backgroundSnapshot(() => buildUnpushedReport(root, { giteaHosts: getGiteaInstances().map((i) => i.url) }), 60_000);
+unpushedCache.peek();   // start the first scan at boot, not on the first page open
 // Push / Create PR from the page: git auth for Gitea same as for clone (credentialsForUrl),
 // GitHub goes through the gh helper on the host; PRs on Gitea via the API with a token from the vault.
 const unpushed = {

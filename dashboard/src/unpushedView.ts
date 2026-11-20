@@ -1,7 +1,7 @@
 // Pure logic of the Work in progress page (unpushed commits). JSX stays in pages/
 // (same pattern as sshApprovalsView / accountsView).
 
-import type { UnpushedBranch, UnpushedRepo } from "./api";
+import type { UnpushedBranch, UnpushedReport, UnpushedRepo } from "./api";
 
 export function shortHash(hash: string): string {
   return hash.slice(0, 7);
@@ -71,4 +71,26 @@ export function prBody(b: UnpushedBranch): string {
 export function commitsLabel(count: number, shown?: number): string {
   const base = `${count} ${count === 1 ? "commit" : "commits"}`;
   return shown !== undefined && shown < count ? `${base} · showing ${shown}` : base;
+}
+
+/* ------------------------------ after a push ------------------------------ */
+
+export interface PushedBranch { path: string; branch: string; at: number }
+
+/** The report without branches pushed from this page after it was scanned: the server rescans in
+ *  the background, and until a newer report arrives the pushed branch would still show. Counts of
+ *  repos, folders and the total are reduced to match; emptied repos and folders disappear. */
+export function withoutPushed(report: UnpushedReport, pushed: readonly PushedBranch[]): UnpushedReport {
+  const hide = pushed.filter((p) => p.at > report.at);
+  if (!hide.length) return report;
+  const hidden = (path: string, branch: string) => hide.some((p) => p.path === path && p.branch === branch);
+  const folders = report.folders.map((f) => {
+    const repos = f.repos.map((r) => {
+      const branches = r.branches.filter((b) => !hidden(r.path, b.branch));
+      const gone = r.branches.filter((b) => hidden(r.path, b.branch)).reduce((n, b) => n + b.count, 0);
+      return gone ? { ...r, branches, count: r.count - gone } : r;
+    }).filter((r) => r.count > 0 || r.error);
+    return { ...f, repos, count: repos.reduce((n, r) => n + r.count, 0) };
+  }).filter((f) => f.repos.length > 0);
+  return { ...report, folders, total: folders.reduce((n, f) => n + f.count, 0) };
 }

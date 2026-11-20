@@ -67,7 +67,7 @@ export function backgroundSnapshot<T>(fn: () => Promise<T>, ttlMs: number, now: 
   const start = () => {
     running = fn()
       .then((v) => { value = { v, at: now() }; error = null; })
-      .catch((e) => { error = (e as Error).message ?? String(e); console.error("background build failed:", e); })
+      .catch((e) => { error = e instanceof Error ? e.message : String(e); console.error("background build failed:", e); })
       .finally(() => { running = null; if (again) { again = false; start(); } });
   };
   return {
