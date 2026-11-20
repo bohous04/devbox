@@ -54,8 +54,21 @@ struct MacWindow: View {
             .onDisappear { state.windows.close(window: windowId) }
     }
 
-    @ViewBuilder
     private var content: some View {
+        MacWindowContent(thread: $thread, newSession: $newSession, findRequest: findRequest)
+    }
+}
+
+/// The window's sidebar and detail, apart from the window's own bookkeeping (MacWindow), so the offscreen screenshot
+/// test can host it without opening or restoring windows.
+struct MacWindowContent: View {
+    @Binding var thread: String?
+    @Binding var newSession: Bool
+    let findRequest: Int
+    @EnvironmentObject private var state: MacAppState
+    @EnvironmentObject private var appModel: AppModel
+
+    var body: some View {
         if let client = appModel.client, let inbox = state.inbox, let live = state.live {
             NavigationSplitView {
                 MacInboxSidebar(store: inbox, selection: $thread, findRequest: findRequest, newSession: { newSession = true })

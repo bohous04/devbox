@@ -13,8 +13,9 @@ enum FixtureMode {
     ]
 
     /// The requested set's name, or nil when the argument is absent. An unknown name stops the app: a screenshot of
-    /// the wrong data must not pass for the right one.
-    static let requested: String? = {
+    /// the wrong data must not pass for the right one. Settable for the Mac's offscreen screenshot test, which runs in
+    /// the test host without launch arguments.
+    static var requested: String? = {
         let args = ProcessInfo.processInfo.arguments
         guard let i = args.firstIndex(of: "-DevboxFixtures") else { return nil }
         guard i + 1 < args.count, sets[args[i + 1]] != nil else {
