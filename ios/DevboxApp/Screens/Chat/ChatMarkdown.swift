@@ -59,43 +59,32 @@ struct ChatMarkdown: View {
     }
 
     #if os(macOS)
-    /// A Mac window has room for columns: a real grid, cells aligned under their header, rows apart by hairlines.
-    /// Plain rules, no box: the header over a hairline, rows apart by hairlines. A command or path stays on one line,
-    /// at its full width, the other columns wrapping around it; past 64 characters it is cut at its end (the whole
-    /// text in its tooltip).
+    /// A Mac window has room for columns: plain rules, no box (the header over a hairline, rows apart by hairlines),
+    /// within the thread's column. Columns share the width by their content (TableColumns); a command or path stays
+    /// on one line, cut at its end only when its column has to give way (the whole text in its tooltip).
     private func grid(_ header: [String], _ rows: [[String]]) -> some View {
         let columns = max(header.count, rows.map(\.count).max() ?? 0)
         let hasHeader = !header.allSatisfy { $0.trimmingCharacters(in: .whitespaces).isEmpty }
         @ViewBuilder
         func cell(_ s: String) -> some View {
             if ChatMarkdownParse.isCodeOnly(s) {
-                // Its full width first (the other columns wrap around it); only a very long one is cut.
                 ChatInline.text(s).lineLimit(1).truncationMode(.tail).help(s)
-                    .fixedSize(horizontal: s.count <= 64, vertical: false)
                     .padding(.trailing, 16).padding(.vertical, 6)
             } else {
-                ChatInline.text(s)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.trailing, 16).padding(.vertical, 6)
+                ChatInline.text(s).padding(.trailing, 16).padding(.vertical, 6)
             }
         }
-        // No spacing of its own: each cell pads itself, so the hairlines run edge to edge.
-        return Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 0, verticalSpacing: 0) {
+        return TableColumns(columns: columns, hasHeader: hasHeader) {
             if hasHeader {
-                GridRow {
-                    ForEach(0..<columns, id: \.self) { j in
-                        Text(j < header.count ? header[j] : "").font(.system(size: ChatType.s(12), weight: .medium))
-                            .foregroundStyle(Theme.C.mutedForeground)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.trailing, 16).padding(.vertical, 5)
-                    }
+                ForEach(0..<columns, id: \.self) { j in
+                    Text(j < header.count ? header[j] : "").font(.system(size: ChatType.s(12), weight: .medium))
+                        .foregroundStyle(Theme.C.mutedForeground)
+                        .padding(.trailing, 16).padding(.vertical, 5)
                 }
             }
             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                Divider().gridCellUnsizedAxes(.horizontal).overlay(Theme.C.border)
-                GridRow {
-                    ForEach(0..<columns, id: \.self) { j in cell(j < row.count ? row[j] : "") }
-                }
+                Rectangle().fill(Theme.C.border).frame(height: 1 / 3)
+                ForEach(0..<columns, id: \.self) { j in cell(j < row.count ? row[j] : "") }
             }
         }
     }
@@ -214,3 +203,92 @@ struct StatusMark {
         Image(systemName: symbol).foregroundStyle(color).accessibilityLabel(label)
     }
 }
+
+#if os(macOS)
+/// A table's layout: subviews are the header's cells (when there is one), then per row a rule and its cells. Each
+/// column wants its widest cell's one-line width; when they all fit, the last column takes the rest. When they do
+/// not, the width is filled water-like: a column narrower than an even share keeps its width, the others split what
+/// is left evenly (and wrap, or cut a command). So a short column never stays wide while another wraps a lone word,
+/// and the table never runs past its column.
+struct TableColumns: Layout {
+    let columns: Int
+    let hasHeader: Bool
+
+    static func widths(natural: [CGFloat], available: CGFloat) -> [CGFloat] {
+        guard !natural.isEmpty else { return [] }
+        if natural.reduce(0, +) <= available {
+            var w = natural
+            w[w.count - 1] += available - natural.reduce(0, +)
+            return w
+        }
+        var w = natural.map { _ in CGFloat(0) }
+        var open = Set(natural.indices)
+        var left = available
+        while true {
+            let share = left / CGFloat(max(open.count, 1))
+            let fits = open.filter { natural[$0] <= share }
+            if fits.isEmpty {
+                for j in open { w[j] = share }
+                return w
+            }
+            for j in fits { w[j] = natural[j]; left -= natural[j]; open.remove(j) }
+            if open.isEmpty { return w }
+        }
+    }
+
+    private struct Plan { var widths: [CGFloat]; var heights: [CGFloat]; var rules: [CGFloat] }
+
+    /// Rows of subview indices (cells) and the rule before each body row.
+    private func rows(_ count: Int) -> (cells: [[Int]], rules: [Int?]) {
+        var cells: [[Int]] = []
+        var rules: [Int?] = []
+        var i = 0
+        if hasHeader {
+            cells.append(Array(i..<min(i + columns, count))); rules.append(nil); i += columns
+        }
+        while i < count {
+            rules.append(i); i += 1
+            cells.append(Array(i..<min(i + columns, count))); i += columns
+        }
+        return (cells, rules)
+    }
+
+    private func plan(_ proposal: ProposedViewSize, _ subviews: Subviews) -> Plan {
+        let (cells, rules) = rows(subviews.count)
+        var natural = Array(repeating: CGFloat(0), count: columns)
+        for row in cells {
+            for (j, i) in row.enumerated() { natural[j] = max(natural[j], subviews[i].sizeThatFits(.unspecified).width) }
+        }
+        let available = proposal.width ?? natural.reduce(0, +)
+        let widths = Self.widths(natural: natural, available: available)
+        let heights = cells.map { row in
+            row.enumerated().map { j, i in subviews[i].sizeThatFits(ProposedViewSize(width: widths[j], height: nil)).height }.max() ?? 0
+        }
+        let ruleHeights = rules.map { r in r.map { subviews[$0].sizeThatFits(ProposedViewSize(width: available, height: nil)).height } ?? 0 }
+        return Plan(widths: widths, heights: heights, rules: ruleHeights)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let p = plan(proposal, subviews)
+        return CGSize(width: p.widths.reduce(0, +), height: p.heights.reduce(0, +) + p.rules.reduce(0, +))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let p = plan(ProposedViewSize(width: bounds.width, height: nil), subviews)
+        let (cells, rules) = rows(subviews.count)
+        var y = bounds.minY
+        for (n, row) in cells.enumerated() {
+            if let r = rules[n] {
+                subviews[r].place(at: CGPoint(x: bounds.minX, y: y), proposal: ProposedViewSize(width: bounds.width, height: p.rules[n]))
+                y += p.rules[n]
+            }
+            var x = bounds.minX
+            for (j, i) in row.enumerated() {
+                subviews[i].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(width: p.widths[j], height: p.heights[n]))
+                x += p.widths[j]
+            }
+            y += p.heights[n]
+        }
+    }
+}
+#endif
