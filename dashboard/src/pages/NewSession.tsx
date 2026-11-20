@@ -168,7 +168,6 @@ export function NewSession() {
   const textBlock = prompt === "" ? null
     : onIbx ? "InstaBox starts without a message: clear it, or run on the VPS."
     : repo === SOLO ? "claudeSolo starts without a message: clear it, or pick a repo."
-    : choice?.runtime === "tmux" && prompt.startsWith("-") ? "A terminal session's message can't start with '-'."
     : choice?.runtime === "tmux" && !/\s/.test(prompt) ? "A terminal session's message needs more than one word."
     : null;
   // Typed text is new work: it always starts a new session with it. Empty keeps today's default, joining the repo's
