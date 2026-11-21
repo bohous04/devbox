@@ -79,8 +79,8 @@ const UNCHANGED: SwitchResult = { kind: "set-model", unchanged: true };
 /** GET .../thread/target: the profile and the target devd plans the next switch from. `awaitingTarget`: the bridge
  *  holds no harness until it gets a target (devd keeps sending it; a switch is allowed despite queued messages). */
 /** `bridgeVersion`: from the bridge's latest handshake; null before one, or for a 1.0.0 bridge (it sends none). */
-/** `bridgeOutdated`: the bridge's handshake named a version older than this devd's (it lacks the newer fixes until the
- *  session's container is recreated); false while no version is known. */
+/** `bridgeOutdated`: the bridge's latest handshake named a version older than this devd's, or none (1.0.0); it lacks
+ *  the newer fixes until the session's container is recreated. False before a handshake. */
 export interface CurrentTarget extends Target { agent: AgentName; awaitingTarget: boolean; bridgeVersion: string | null; bridgeOutdated: boolean }
 
 export interface ChatSwitchDeps {
@@ -178,9 +178,11 @@ export class ChatSwitch {
     if (!s) throw new Error(`unknown session ${sessionId}`);
     const { harness, account, model } = this.current(s, this.d.threads(sessionId));
     const bridgeVersion = this.bridgeVersions.get(sessionId) ?? null;
+    // A handshake seen without a version is a 1.0.0 bridge; before any handshake nothing is claimed.
+    const handshaken = this.bridgeVersions.has(sessionId);
     return {
       agent: agentNameFor(s.agent), harness, account, model, awaitingTarget: this.awaiting.has(sessionId), bridgeVersion,
-      bridgeOutdated: bridgeVersion !== null && !versionAtLeast(bridgeVersion, BRIDGE_VERSION),
+      bridgeOutdated: handshaken && (bridgeVersion === null || !versionAtLeast(bridgeVersion, BRIDGE_VERSION)),
     };
   }
 
@@ -558,7 +560,7 @@ export class ChatSwitch {
     this.log(`chat switch ${sessionId}: sending the awaited target failed: ${msg}`);
     if (!r.noticed && store !== null) {
       r.noticed = true;
-      store.addNotice(`The agent waits for its target (model, account, agent) and devd could not send it (${msg}); devd keeps trying. Picking a model, account or agent also sets it.`, this.d.now(), "warn");
+      store.addNotice(`The agent waits for its target (model, account, agent) and devd could not send it (${msg}); devd keeps trying. Picking a model, account or agent also sets it.`, this.d.now());
     }
     if (e instanceof AgentDisconnected && !(e instanceof CommandTimeout)) return;
     this.schedule(sessionId, r);

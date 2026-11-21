@@ -90,7 +90,7 @@ enum ChatSwitch {
     /// devd's `bridgeOutdated`, said beside the menus while true (switchView.ts bridgeOutdatedText): it was a thread
     /// notice that went stale once the bridge was updated.
     static func bridgeOutdatedText(_ t: ChatTarget) -> String? {
-        t.bridgeOutdated == true ? "This session's agent bridge (\(t.bridgeVersion ?? "unknown version")) is outdated: recreate the session's container for the newer fixes." : nil
+        t.bridgeOutdated == true ? "This session's agent bridge (\(t.bridgeVersion ?? "older than 1.1.0")) is outdated: recreate the session's container for the newer fixes." : nil
     }
 
     static func awaitingTargetText(_ t: ChatTarget) -> String? {

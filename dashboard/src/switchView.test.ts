@@ -4,7 +4,7 @@ import type { AccountView, ChatTarget, CodexAccountView } from "./api";
 import {
   effortChipLabel, effortFooter, effortMenuBlocked, effortOptions, newSessionEffort, newSessionEffortBlock, newSessionEffortHint,
   accountMenuBlocked, claudeAccountOptions, codexAccountOptions, harnessOptions, modelMenuBlocked, modelOptions,
-  awaitingTargetText, bridgeOutdatedText, modelLabel, switchBlocked, switchErrorText, switchResultText,
+  awaitingTargetText, bridgeOutdatedText, modelLabel, switchNoticeCount, switchBlocked, switchErrorText, switchResultText,
 } from "./switchView";
 import { CHAT_MODELS } from "../../shared/chatModels";
 // Tests may import devd (see newSession.test.ts): the model list is the one devd accepts.
@@ -236,6 +236,13 @@ test("effort hint on /new: Codex's levels come with its session, so the line say
 test("an outdated bridge is said beside the menus while devd says it is, with what to do", () => {
   expect(bridgeOutdatedText({ bridgeOutdated: false, bridgeVersion: "1.8.0" })).toBeNull();
   expect(bridgeOutdatedText({ bridgeOutdated: true, bridgeVersion: "1.7.0" })).toBe("This session's agent bridge (1.7.0) is outdated: recreate the session's container for the newer fixes.");
+  // A handshake without a version: a 1.0.0 bridge.
+  expect(bridgeOutdatedText({ bridgeOutdated: true, bridgeVersion: null })).toBe("This session's agent bridge (older than 1.1.0) is outdated: recreate the session's container for the newer fixes.");
   // A devd from before the field: nothing said.
   expect(bridgeOutdatedText({ bridgeVersion: "1.7.0" })).toBeNull();
+});
+
+test("a hidden housekeeping notice does not refetch the target; a shown notice does", () => {
+  const n = (text: string) => ({ seq: 1, runId: null, itemId: "notice:1", kind: "notice" as const, text, status: "done" as const, ts: 1 });
+  expect(switchNoticeCount([n("Agent bridge restarted (v1.8.0)"), n("Switched to Codex · resumed")])).toBe(1);
 });

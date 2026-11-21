@@ -156,6 +156,8 @@ export const USER_FIRST_PROMPT_TAG = "\u0001user-first-prompt";
 
 export class BridgeLinks {
   private links = new Map<string, Link>();
+  /** `<sessionId>\0<version>` of the outdated bridges already logged (checkVersion). */
+  private outdatedLogged = new Set<string>();
   /** devd's own first message per session (startTurnWhenConnected), until the bridge took it. */
   private firstTurns = new Map<string, FirstTurn>();
   private firstTurnDone = new Map<string, (err: Error | null) => void>();
@@ -623,7 +625,7 @@ export class BridgeLinks {
     if (f.count === POISON_LIMIT) {
       const text = `the agent bridge keeps sending a frame devd cannot read (${what}); the link reconnects every ${this.retryMs} ms`;
       this.log(`bridge link ${sessionId}: ${text}`);
-      try { this.d.store(sessionId).addNotice(text, Date.now(), "warn"); }
+      try { this.d.store(sessionId).addNotice(text, Date.now()); }
       catch (e) { this.log(`bridge link ${sessionId}: cannot add a notice: ${e instanceof Error ? e.message : String(e)}`); }
     }
     return f.count;
@@ -689,11 +691,14 @@ export class BridgeLinks {
     link.ackFailLogged = false;
   }
 
-  /** M12: a bridge older than the one this devd ships keeps running until its container is recreated. Logged on each
-   *  handshake; the user sees it as session state while it is true (the target's `bridgeOutdated`), not in the thread,
-   *  where it went stale once the bridge was updated. */
+  /** M12: a bridge older than the one this devd ships keeps running until its container is recreated. Logged once per
+   *  session and version (in memory); the user sees it as session state while it is true (the target's
+   *  `bridgeOutdated`), not in the thread, where it went stale once the bridge was updated. */
   private checkVersion(sessionId: string, version: string | null) {
     if (version !== null && versionAtLeast(version, BRIDGE_VERSION)) return;
+    const key = `${sessionId}\0${version ?? ""}`;
+    if (this.outdatedLogged.has(key)) return;
+    this.outdatedLogged.add(key);
     this.log(`bridge link ${sessionId}: this session's agent bridge is ${version ?? "older than 1.1.0"}, older than the current ${BRIDGE_VERSION}: it lacks the newer fixes until the session's container is recreated`);
   }
 
@@ -711,7 +716,7 @@ export class BridgeLinks {
       if (link.behindSince !== null) return;
       const text = `bridge log is behind devd's store (bridge ${bridgeSeq}, devd ${storeSeq}); new events may be missing`;
       this.log(`bridge link ${sessionId}: ${text}`);
-      store.addNotice(text, Date.now(), "warn");
+      store.addNotice(text, Date.now());
       link.behindSince = Date.now();
     }
     try { this.d.onBehind(sessionId); }

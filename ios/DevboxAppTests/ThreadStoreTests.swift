@@ -87,6 +87,12 @@ final class ThreadStoreTests: XCTestCase {
             ThreadItem(seq: $0.offset, runId: nil, itemId: "notice:\($0.offset)", kind: .notice, text: $0.element, ts: 1)
         }, pending: [], background: [], native: nil)
         XCTAssertEqual(ThreadView.shownItems(snapshot).map(\.text), cases.shown)
+        // A hidden notice is no switch: the target is not refetched for it; a shown one still counts.
+        var more = snapshot
+        more.items.append(ThreadItem(seq: 99, runId: nil, itemId: "notice:99", kind: .notice, text: cases.hidden[0], ts: 1))
+        XCTAssertEqual(ThreadView.switchKey(more), ThreadView.switchKey(snapshot))
+        more.items.append(ThreadItem(seq: 100, runId: nil, itemId: "notice:100", kind: .notice, text: cases.shown[0], ts: 1))
+        XCTAssertNotEqual(ThreadView.switchKey(more), ThreadView.switchKey(snapshot))
     }
 
     func testANoticeKeepsItsTone() throws {

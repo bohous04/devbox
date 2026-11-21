@@ -41,6 +41,8 @@ final class ChatSwitchTests: XCTestCase {
         XCTAssertNil(ChatSwitch.bridgeOutdatedText(target(bridge: "1.8.0", outdated: false)))
         XCTAssertEqual(ChatSwitch.bridgeOutdatedText(target(bridge: "1.7.0", outdated: true)),
                        "This session's agent bridge (1.7.0) is outdated: recreate the session's container for the newer fixes.")
+        XCTAssertEqual(ChatSwitch.bridgeOutdatedText(target(bridge: nil, outdated: true)),
+                       "This session's agent bridge (older than 1.1.0) is outdated: recreate the session's container for the newer fixes.")
         // A devd from before the field: nothing said.
         XCTAssertNil(ChatSwitch.bridgeOutdatedText(target(bridge: "1.7.0")))
     }

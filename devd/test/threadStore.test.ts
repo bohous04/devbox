@@ -453,12 +453,12 @@ test("schema 3: a schema-2 store gains the notice tone; a warning notice keeps i
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("a skipped event's notice is a warning: data may be missing", () => {
+test("a skipped event's notice is plain: nothing the user can act on", () => {
   const dir = mkdtempSync(join(tmpdir(), "threads-"));
   try {
     const s = ThreadStore.open(dir, "dev-a-b-1");
     s.skipEvent(5, "devd skipped event 5", 1);
-    expect(s.snapshot().items.map((i) => i.tone)).toEqual(["warn"]);
+    expect(s.snapshot().items.map((i) => i.tone)).toEqual([undefined]);
     s.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

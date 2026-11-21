@@ -336,10 +336,10 @@ export class ThreadStore {
   }
 
   /** Gives up on the bridge's event `seq` (above lastSeq), which devd cannot apply: it counts as applied, and the
-   *  notice `text` takes its place at that seq (a warning: what the event said is missing). */
+   *  notice `text` takes its place at that seq. */
   skipEvent(seq: number, text: string, ts: number): void {
     if (seq <= this.lastSeq()) throw new Error(`skipEvent(${seq}) is not above lastSeq ${this.lastSeq()}`);
-    this.notice(seq, text, ts, () => this.setMeta("last_seq", seq), "warn");
+    this.notice(seq, text, ts, () => this.setMeta("last_seq", seq));
   }
 
   private notice(seq: number, text: string, ts: number, also: () => void, tone?: "warn") {

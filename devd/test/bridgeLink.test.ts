@@ -321,7 +321,7 @@ test("a bridge log behind the store is logged, shown as a notice and reported, u
   expect(behind).toEqual([ID]);
   expect(logs.some((l) => l.includes("behind") && l.includes("bridge 2") && l.includes("devd 5"))).toBe(true);
   const notice = store.snapshot().items.filter((i) => i.kind === "notice");
-  expect(notice.map((i) => [i.text, i.tone])).toEqual([["bridge log is behind devd's store (bridge 2, devd 5); new events may be missing", "warn"]]);
+  expect(notice.map((i) => [i.text, i.tone])).toEqual([["bridge log is behind devd's store (bridge 2, devd 5); new events may be missing", undefined]]);
   a.close();
   await waitFor(() => links.status(ID) === "disconnected", "disconnect");
   serve({ events: [ev(1), ev(2), ev(3), ev(4), ev(5), ev(6)] });
@@ -576,7 +576,7 @@ test("T9: a frame without a seq that keeps failing is said once in the thread; t
   cleanups.push(() => clearInterval(raw));
   await waitFor(() => s.hellos.length >= POISON_LIMIT + 3, "repeated failures");
   const notices = store.snapshot().items.filter((i) => i.kind === "notice").map((i) => [i.text, i.tone]);
-  expect(notices).toEqual([[`the agent bridge keeps sending a frame devd cannot read (malformed frame: not valid JSON); the link reconnects every ${RETRY} ms`, "warn"]]);
+  expect(notices).toEqual([[`the agent bridge keeps sending a frame devd cannot read (malformed frame: not valid JSON); the link reconnects every ${RETRY} ms`, undefined]]);
   expect(logs.filter((l) => l.includes("not valid JSON"))).toHaveLength(2);
 });
 
@@ -592,7 +592,8 @@ test("M12: a bridge older than this devd's is logged, never put in the thread (t
   await Bun.sleep(RETRY);
   const text = `this session's agent bridge is 1.4.0, older than the current ${BRIDGE_VERSION}: it lacks the newer fixes until the session's container is recreated`;
   expect(store.snapshot().items.filter((i) => i.kind === "notice")).toEqual([]);
-  expect(logs.filter((l) => l.includes("older than the current"))).toEqual([`bridge link ${ID}: ${text}`, `bridge link ${ID}: ${text}`]);
+  // Once per session and version, however often it reconnects.
+  expect(logs.filter((l) => l.includes("older than the current"))).toEqual([`bridge link ${ID}: ${text}`]);
   b.close();
   await waitFor(() => links.status(ID) === "disconnected", "disconnect");
   serve({ ready: { version: BRIDGE_VERSION } });

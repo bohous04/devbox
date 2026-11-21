@@ -77,7 +77,7 @@ enum ThreadView {
     static func switchKey(_ t: ThreadSnapshot) -> String {
         let n = t.native
         return [n?.harness, n?.nativeThreadId, n?.model, n?.account].map { $0 ?? "-" }.joined(separator: "|")
-            + "|\(t.runs.filter { $0.endedSeq != nil }.count)|\(t.runs.count)|\(t.items.filter { $0.kind == .notice }.count)"
+            + "|\(t.runs.filter { $0.endedSeq != nil }.count)|\(t.runs.count)|\(t.items.filter { $0.kind == .notice && !isHousekeeping($0) }.count)"
     }
 
     /// The newest seq at which a run ended: reaching it while the thread is open counts as seen.

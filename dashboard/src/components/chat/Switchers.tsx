@@ -8,7 +8,7 @@ import {
 import { api, ApiError, type ChatSwitchResult, type ChatTarget } from "../../api";
 import { profileFor } from "../../newSession";
 import {
-  accountMenuBlocked, awaitingTargetText, bridgeOutdatedText, claudeAccountOptions, codexAccountOptions, effortChipLabel, effortFooter, effortMenuBlocked, effortOptions, harnessOptions,
+  accountMenuBlocked, awaitingTargetText, bridgeOutdatedText, switchNoticeCount, claudeAccountOptions, codexAccountOptions, effortChipLabel, effortFooter, effortMenuBlocked, effortOptions, harnessOptions,
   modelLabel, modelMenuBlocked, modelOptions, switchBlocked, switchErrorText, switchResultText, type SwitchOption,
 } from "../../switchView";
 
@@ -35,7 +35,7 @@ export function Switchers({ sessionId, thread, children }: {
   const n = thread.native;
   const ended = thread.runs.filter((r) => r.endedSeq !== null).length;
   // A queued message or a devd notice (a bridge restart, a failed resume) may mean the bridge now awaits its target.
-  const notices = thread.items.filter((i) => i.kind === "notice").length;
+  const notices = switchNoticeCount(thread.items);
   const runCount = thread.runs.length;
   const loadTarget = useCallback(() => api.chatTarget(sessionId).then(
     (t) => { setTarget(t); setTargetErr(null); },

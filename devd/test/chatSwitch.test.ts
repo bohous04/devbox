@@ -531,9 +531,20 @@ test("GET thread/target says whether the session's bridge is older than this dev
   expect(await outdated()).toBe(true);
   t.handshake(false, BRIDGE_VERSION);
   expect(await outdated()).toBe(false);
-  // No version known (before a handshake, or a bridge too old to name one): not claimed either way.
+  // A handshake without a version is a 1.0.0 bridge: outdated too.
   t.handshake(false, null);
-  expect(await outdated()).toBe(false);
+  expect(await outdated()).toBe(true);
+});
+
+test("bridgeOutdated: not claimed before a handshake; a recreated container's current bridge clears it", async () => {
+  const t = setup();
+  expect(t.sw.target(CHAT.id).bridgeOutdated).toBe(false);
+  t.handshake(false, "1.4.0");
+  expect(t.sw.target(CHAT.id).bridgeOutdated).toBe(true);
+  t.sw.drop(CHAT.id);
+  expect(t.sw.target(CHAT.id).bridgeOutdated).toBe(false);
+  t.handshake(false, BRIDGE_VERSION);
+  expect(t.sw.target(CHAT.id).bridgeOutdated).toBe(false);
 });
 
 test("after a failed resume the switch notice says so", async () => {
@@ -590,7 +601,7 @@ test("a failed re-plan after a failed resume stays visible, but the DB follows t
   expect(await t.post("account", { accountId: "backup" })).toEqual({ status: 409, body: { error: "agent-disconnected" } });
   expect(activeLeases(t)).toEqual(["backup"]);
   expect(notices(t).at(-1)).toStartWith("The agent waits for its target");
-  expect(t.store.snapshot().items.at(-1)?.tone).toBe("warn");
+  expect(t.store.snapshot().items.at(-1)?.tone).toBeUndefined();
   // What devd sends on the next handshake is the target the bridge holds: backup, a fresh thread, the full handoff.
   t.setOnSend(() => {});
   t.handshake(true);
