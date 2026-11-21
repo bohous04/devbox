@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { RunRow, ThreadItem } from "../../shared/thread";
 import cases from "../../shared/fixtures/housekeeping-notices.json";
-import { shortDuration, threadRows, toolLabel, workLabel, workSummary } from "./workGroups";
+import { type ThreadRow, opensTurn, shortDuration, threadRows, toolLabel, workLabel, workSummary } from "./workGroups";
 
 let seq = 0;
 const item = (runId: string | null, kind: ThreadItem["kind"], extra: Partial<ThreadItem> = {}): ThreadItem =>
@@ -75,4 +75,10 @@ test("threadRows: bridge housekeeping (restarts, an older bridge) stays out of t
   const notices = [...cases.hidden, ...cases.shown].map((text) => item(null, "notice", { text }));
   const shown = threadRows(notices, []).map((r) => (r.type === "item" ? r.item.text : ""));
   expect(shown).toEqual(cases.shown);
+});
+
+test("opensTurn: a prompt after another row, not the first and not right after a notice", () => {
+  const it = (seq: number, kind: ThreadItem["kind"]): ThreadRow => ({ type: "item", item: { seq, runId: null, itemId: String(seq), kind, text: "", status: "done", ts: seq } as ThreadItem });
+  const rows = [it(1, "user"), it(2, "assistant"), it(3, "user"), it(4, "notice"), it(5, "user")];
+  expect(rows.map((_, i) => opensTurn(rows, i))).toEqual([false, false, true, false, false]);
 });

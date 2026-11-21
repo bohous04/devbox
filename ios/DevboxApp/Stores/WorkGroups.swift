@@ -35,6 +35,18 @@ enum WorkGroups {
     /// The thread's rows. A run folds only once it ended and only when it called a tool; a running run stays
     /// expanded (its last message may still turn out to be prose before the next tool). The fold sits where its first
     /// item was; user messages, requests and notices never fold.
+    /// The rows that open a turn: a prompt after another row, not right after a notice (which already sets it off).
+    /// They get a little more room above them (ChatLayout.turnGap; dashboard workGroups.ts opensTurn).
+    static func turnStarts(_ rows: [ThreadDisplayRow]) -> Set<String> {
+        var out = Set<String>()
+        for (i, row) in rows.enumerated() where i > 0 {
+            guard case .item(let r, _) = row, r.item.kind == .user else { continue }
+            if case .item(let prev, _) = rows[i - 1], prev.item.kind == .notice { continue }
+            out.insert(row.id)
+        }
+        return out
+    }
+
     static func rows(_ rows: [ChatRow], runs: [RunRow]) -> [ThreadDisplayRow] {
         let endedRuns = Dictionary(runs.filter { ended.contains($0.status) }.map { ($0.runId, $0) }, uniquingKeysWith: { a, _ in a })
         var answer: [String: Int] = [:]

@@ -107,12 +107,15 @@ struct ChatScreen: View {
                         let state = store.thread.flatMap { ThreadView.runState($0, now: InboxView.ms(context.date)) }
                         let line = [heading.place, state].compactMap { $0 }.joined(separator: " · ")
                         if !line.isEmpty {
-                            Text(line).font(.system(size: 12)).foregroundStyle(Theme.C.mutedForeground).lineLimit(1)
+                            Text(line).font(.caption).foregroundStyle(Theme.C.mutedForeground).lineLimit(1)
                         }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityElement(children: .combine)
+                // One element read as "title, place, state", whatever the layout.
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel([heading.title, heading.place, store.thread.flatMap { ThreadView.runState($0, now: InboxView.ms(Date())) }]
+                    .compactMap { $0 }.joined(separator: ", "))
             }
             #endif
             if openTerminal == nil {
@@ -153,6 +156,7 @@ struct ChatScreen: View {
                     if t.items.isEmpty {
                         EmptyState("No messages yet — write the first message below.", systemImage: "bubble.left")
                     }
+                    let turnStarts = WorkGroups.turnStarts(store.display)
                     ForEach(store.display) { row in
                         switch row {
                         case .work(let w): WorkGroupView(work: w).equatable().modifier(ThreadEdge.Track(id: row.id, frames: rowFrames))
@@ -163,7 +167,7 @@ struct ChatScreen: View {
                                 .modifier(ThreadEdge.Track(id: row.id, frames: rowFrames, quiet: r.item.kind == .notice && !r.failedRun && !r.item.warns))
                                 // A prompt opens a turn: a little more room above it, so prompt, work and answer read
                                 // as one group.
-                                .padding(.top, r.item.kind == .user && row.id != store.display.first?.id ? ChatLayout.turnGap : 0)
+                                .padding(.top, turnStarts.contains(row.id) ? ChatLayout.turnGap : 0)
                             if let anchor = store.changesAnchor, anchor.rowId == r.id {
                                 ChangesCard(sessionId: sessionId, client: client, refreshKey: anchor.endedSeq, open: $changesOpen)
                                     .id(Self.changesId)

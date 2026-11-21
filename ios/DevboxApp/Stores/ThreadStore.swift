@@ -55,18 +55,23 @@ enum ThreadView {
     /// The run the Stop button interrupts.
     static func activeRun(_ t: ThreadSnapshot) -> RunRow? { t.runs.first { $0.status == .running } }
 
-    /// The thread's state for the iPhone header, after the place: "Working…", "Queued", or how the last run ended and
-    /// when ("Finished 3m ago"); nil before any run.
+    /// The thread's state for the iPhone header, after the place, in the inbox's order: "Needs you" (a question
+    /// waits), "Working…", "Queued", "Background", else how the last run ended and when ("Finished 3m ago"; the word
+    /// alone without an end time); nil before any run. devd sends runs in the order they were created.
     static func runState(_ t: ThreadSnapshot, now: Int) -> String? {
+        if !t.pending.isEmpty { return "Needs you" }
         if activeRun(t) != nil { return "Working…" }
         if t.runs.contains(where: { $0.status == .queued }) { return "Queued" }
-        guard let last = t.runs.last(where: { $0.endedAt != nil }), let ended = last.endedAt else { return nil }
+        if !t.background.isEmpty { return "Background" }
+        guard let last = t.runs.last else { return nil }
         let word: String
         switch last.status {
+        case .completed: word = "Finished"
         case .failed: word = "Failed"
         case .interrupted: word = "Stopped"
-        default: word = "Finished"
+        case .queued, .running, .unknown: return nil
         }
+        guard let ended = last.endedAt else { return word }
         let ago = InboxView.shortAgo(now - ended)
         return "\(word) \(ago == "now" ? ago : "\(ago) ago")"
     }
