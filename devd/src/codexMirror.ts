@@ -4,9 +4,14 @@
 // volume, which only the container mounts, so the read runs inside it (MIRROR_CODEX_READ). Which thread: Codex's hook
 // events carry it (`notify_log.agent_session_id`, as codexHarvester attributes usage), and the pane's codex process
 // keeps the rollouts of its conversations open (verified on 0.166.0, also the one left by `/new`): the newest hook-named
-// thread whose rollout the pane's process has open is the conversation the pane is on. That rules out another codex in
-// the session (another window, `codex exec`) and a fresh codex before its first prompt, whose rollout does not exist
-// yet. A `/new` conversation shows up with its first prompt's hook event. The running rollout stays plain `.jsonl`.
+// thread whose rollout the pane's process has open is the conversation the pane is on (TranscriptMirror.codexThread
+// adds the guards). That rules out another codex in the session (another window, `codex exec`) and a fresh codex before
+// its first prompt, whose rollout does not exist yet. A `/new` conversation shows up with its first prompt's hook event.
+// The running rollout stays plain `.jsonl`.
+//
+// Subagents (verified on 0.166.0): a spawned agent runs in the same process, with a rollout of its own that the process
+// keeps open and whose session_meta has `source.subagent`. Whether it sends hook events of its own was not verified;
+// the locate probe drops subagent rollouts from the open ones either way, so its thread can never be the choice.
 //
 // The rollout's shape (verified on codex-cli 0.166.0): `{timestamp, type, payload}` lines. A turn runs from
 // `event_msg task_started` to `task_complete` (or `turn_aborted`); what the user typed is `event_msg item_completed`
@@ -22,25 +27,72 @@ export const CODEX_CHUNK_BYTES = 1024 * 1024;
 export const CODEX_LINE_CAP = 4 * 1024 * 1024;
 
 // Finds the thread's rollout and reads complete lines from the cursor (from 0 for another thread, or when the file is
-// not the one the cursor read: another inode, shorter, or a changed head). Prints one JSON object (`{"id": null}`: no
-// single rollout of it); `lines` are the rollout's own lines, so this is the only output that carries conversation
-// content.
+// not the one the cursor read: shorter, a changed head, or another inode in the same home; a thread moved to another
+// account's home keeps its head, so it reads on). Prints one JSON object (`{"id": null}`: no single rollout of it);
+// `lines` are the rollout's own lines, so this is the only output that carries conversation content.
+//
+// The walk opens every directory relative to its parent with O_NOFOLLOW: the agent owns the volume and could plant a
+// symlink anywhere below the home (`sessions/2026 -> /`). `path` (the cursor's last find) is tried before a full scan.
 export const MIRROR_CODEX_READ = String.raw`# MIRROR_CODEX_READ
-import glob, hashlib, json, os, signal, stat, sys
+import hashlib, json, os, re, signal, stat, sys
 # Below the docker exec timeout (10 s).
 signal.alarm(8)
 home, thread, cur, budget, cap = sys.argv[1], sys.argv[2], json.loads(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
 HEAD = 256
+DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+NAME = re.compile(r"rollout-[^/]*-" + re.escape(thread) + r"\.jsonl")
+CALL = re.compile(rb'"type":\s*"(?:function_call_output|custom_tool_call_output)".*?"call_id":\s*"([^"\\]{1,200})"|"call_id":\s*"([^"\\]{1,200})".*?"type":\s*"(?:function_call_output|custom_tool_call_output)"', re.S)
 
 def emit(o):
     # Not ASCII-escaped: escaping would multiply the size of non-Latin text going through docker exec.
     sys.stdout.buffer.write(json.dumps(o, ensure_ascii=False).encode("utf-8"))
 
-hits = glob.glob(os.path.join(glob.escape(home), "sessions", "*", "*", "*", "rollout-*-" + thread + ".jsonl"))
+def opendir(parent, name):
+    try:
+        return os.open(name, DIR, dir_fd=parent)
+    except OSError:
+        return None
+
+def subdirs(fd):
+    return sorted(n for n in os.listdir(fd) if re.fullmatch(r"\d{2,4}", n))
+
+def find(root):
+    """[(year, month, day, name)] of the thread's rollouts below sessions/."""
+    sessions = opendir(root, "sessions")
+    if sessions is None:
+        return []
+    hint = cur.get("path") if cur.get("sid") == thread else None
+    if isinstance(hint, list) and len(hint) == 4 and all(isinstance(x, str) for x in hint) and NAME.fullmatch(hint[3]):
+        found = walk(sessions, [hint[0]], lambda y: [hint[1]], lambda m: [hint[2]], lambda d: [hint[3]] if hint[3] in os.listdir(d) else [])
+        if found:
+            return found
+    return walk(sessions, subdirs(sessions), subdirs, subdirs, lambda d: [n for n in os.listdir(d) if NAME.fullmatch(n)])
+
+def walk(sessions, years, months, days, names):
+    found = []
+    for y in years:
+        yfd = opendir(sessions, y)
+        if yfd is None:
+            continue
+        for m in months(yfd):
+            mfd = opendir(yfd, m)
+            if mfd is None:
+                continue
+            for d in days(mfd):
+                dfd = opendir(mfd, d)
+                if dfd is None:
+                    continue
+                found += [(y, m, d, n, dfd) for n in names(dfd)]
+    return found
+
+root = os.open(home, DIR)
+hits = find(root)
+if len(hits) != 1:
+    emit({"id": None})
+    sys.exit(0)
+y, m, d, name, dfd = hits[0]
 try:
-    if len(hits) != 1:
-        raise FileNotFoundError()
-    fd = os.open(hits[0], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
 except FileNotFoundError:
     emit({"id": None})
     sys.exit(0)
@@ -52,7 +104,8 @@ head = lambda n: hashlib.sha256(os.pread(fd, n, 0)).hexdigest()
 offset, rewritten = 0, False
 if cur.get("sid") == thread:
     offset = cur.get("offset", 0)
-    if offset > 0 and (st.st_ino != cur.get("ino") or st.st_size < offset or head(cur.get("headLen", 0)) != cur.get("headHash")):
+    moved = st.st_ino != cur.get("ino") and cur.get("home") == home
+    if offset > 0 and (moved or st.st_size < offset or head(cur.get("headLen", 0)) != cur.get("headHash")):
         offset, rewritten = 0, True
 f = os.fdopen(fd, "rb")
 f.seek(offset)
@@ -73,18 +126,24 @@ while pos - offset < budget:
         if not ended:
             break
         pos, skipped = end, skipped + 1
+        # A tool's output too large to read still ends its tool: a stub output in its place.
+        call = CALL.search(line[:65536])
+        if call:
+            lines.append(json.dumps({"type": "response_item", "payload": {"type": "function_call_output", "call_id": (call.group(1) or call.group(2)).decode("utf-8", "replace"),
+                                                                         "output": "(output too large to show)"}}))
+        else:
+            lines.append("{}")  # keeps the line count, which entry ids are built from
         continue
     pos += len(line)
-    if line.strip():
-        lines.append(line[:-1].decode("utf-8", "replace"))
+    lines.append(line[:-1].decode("utf-8", "replace") if line.strip() else "{}")
 n = min(HEAD, st.st_size)
-emit({"id": thread, "ino": st.st_ino, "size": st.st_size, "headLen": n, "headHash": head(n), "next": pos,
+emit({"id": thread, "path": [y, m, d, name], "ino": st.st_ino, "size": st.st_size, "headLen": n, "headHash": head(n), "next": pos,
       "skipped": skipped, "rewritten": rewritten, "lines": lines})
 `;
 
 export type CodexRead =
   | { id: null }
-  | { id: string; ino: number; size: number; headLen: number; headHash: string; next: number; skipped: number; rewritten: boolean; lines: string[] };
+  | { id: string; path: [string, string, string, string]; ino: number; size: number; headLen: number; headHash: string; next: number; skipped: number; rewritten: boolean; lines: string[] };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -96,7 +155,8 @@ export function parseCodexRead(stdout: string): CodexRead | null {
   if (o.id === null) return { id: null };
   const num = (k: string) => typeof o[k] === "number" && Number.isSafeInteger(o[k]) && (o[k] as number) >= 0;
   if (typeof o.id !== "string" || !UUID.test(o.id) || !["ino", "size", "headLen", "next", "skipped"].every(num)
-    || typeof o.headHash !== "string" || typeof o.rewritten !== "boolean" || !Array.isArray(o.lines) || !o.lines.every((l) => typeof l === "string")) return null;
+    || typeof o.headHash !== "string" || typeof o.rewritten !== "boolean" || !Array.isArray(o.lines) || !o.lines.every((l) => typeof l === "string")
+    || !Array.isArray(o.path) || o.path.length !== 4 || !o.path.every((x) => typeof x === "string")) return null;
   return o as CodexRead;
 }
 

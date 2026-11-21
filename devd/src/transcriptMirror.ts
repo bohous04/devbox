@@ -17,6 +17,7 @@ import { join } from "node:path";
 import type { MirrorInfo, MirrorSendError } from "../../shared/mirror";
 import type { BridgeEvent, LoggedEvent } from "../../shared/thread";
 import { AGENT_RUNTIMES, AGENTS } from "./agents";
+import { CODEX_PROFILE_ROOT } from "./codexAccountProfiles";
 import { CODEX_CHUNK_BYTES, CODEX_LINE_CAP, mapCodexLines, MIRROR_CODEX_READ, newCodexMapState, parseCodexRead, type CodexMapState } from "./codexMirror";
 import type { AgentLiveSnapshot } from "./agentEvents";
 import { agentProcsUnder, type ExecResult, type Proc } from "./ccUpkeep";
@@ -50,6 +51,22 @@ import json, os, re, subprocess, sys
 
 ROLLOUT = re.compile(r"/rollout-[^/]*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$")
 
+def main_rollout(path):
+    """A rollout whose session_meta says it is not a subagent's (a spawned agent's thread has a rollout of its own,
+    possibly written by the same process); one whose first line cannot be read is not trusted to be a main one."""
+    # Non-blocking: the fd could be a FIFO the agent named like a rollout.
+    with open(path, "rb", opener=lambda p, flags: os.open(p, flags | os.O_NONBLOCK)) as h:
+        first = h.readline(4 << 20)
+    try:
+        meta = json.loads(first)
+    except ValueError:
+        return False
+    payload = meta.get("payload") if isinstance(meta, dict) else None
+    if not isinstance(meta, dict) or meta.get("type") != "session_meta" or not isinstance(payload, dict):
+        return False
+    source = payload.get("source")
+    return not (isinstance(source, dict) and "subagent" in source)
+
 def locate(session):
     out = {"pane": None, "procs": [], "claude": {}, "codex": {}}
     r = subprocess.run(["tmux", "display-message", "-p", "-t", "=" + session + ":", "#{pane_pid}\t#{pane_in_mode}"],
@@ -78,11 +95,11 @@ def locate(session):
                 for fd in os.listdir("/proc/" + d + "/fd"):
                     try:
                         m = ROLLOUT.search(os.readlink("/proc/" + d + "/fd/" + fd))
+                        if m and m.group(1) not in opened and main_rollout("/proc/" + d + "/fd/" + fd):
+                            opened.append(m.group(1))
                     except OSError:
                         continue
-                    if m:
-                        opened.append(m.group(1))
-                out["codex"][d] = {"home": home, "open": sorted(set(opened))}
+                out["codex"][d] = {"home": home, "start": rest[19], "open": sorted(opened)}
             except (OSError, KeyError, ValueError, UnicodeDecodeError):
                 pass
             continue
@@ -251,7 +268,7 @@ export type PaneAgent =
   | { kind: "other"; runtime: string; inMode: boolean }
   | { kind: "claude"; pid: number; inMode: boolean; sid: string | null; status: "idle" | "busy" | "waiting" | null }
   /** `open`: thread ids of the rollouts the process has open. */
-  | { kind: "codex"; pid: number; inMode: boolean; home: string | null; open: string[] };
+  | { kind: "codex"; pid: number; start: string; inMode: boolean; home: string | null; open: string[] };
 
 /** null when the output is not what MIRROR_LOCATE prints. */
 export function parseLocate(stdout: string): PaneAgent | null {
@@ -271,16 +288,23 @@ export function parseLocate(stdout: string): PaneAgent | null {
   const nearest = agentProcsUnder(pane.pid, procs, AGENT_RUNTIMES)[0];
   if (!nearest) return { kind: "no-agent", inMode: pane.inMode };
   if (nearest.comm === "codex") {
-    const info = (o.codex as Record<string, { home?: unknown; open?: unknown }>)[String(nearest.pid)];
-    const home = typeof info?.home === "string" && info.home.startsWith("/") && !info.home.includes("\0") ? info.home : null;
+    const info = (o.codex as Record<string, { home?: unknown; start?: unknown; open?: unknown }>)[String(nearest.pid)];
+    const home = typeof info?.home === "string" && codexHomeAllowed(info.home) ? info.home : null;
     const open = Array.isArray(info?.open) ? info.open.filter((t): t is string => typeof t === "string" && UUID.test(t)) : [];
-    return { kind: "codex", pid: nearest.pid, inMode: pane.inMode, home, open };
+    return { kind: "codex", pid: nearest.pid, start: typeof info?.start === "string" ? info.start : "", inMode: pane.inMode, home, open };
   }
   if (nearest.comm !== "claude") return { kind: "other", runtime: nearest.comm, inMode: pane.inMode };
   const info = (o.claude as Record<string, { sid?: unknown; status?: unknown }>)[String(nearest.pid)];
   const sid = typeof info?.sid === "string" && UUID.test(info.sid) ? info.sid : null;
   const status = info?.status === "idle" || info?.status === "busy" || info?.status === "waiting" ? info.status : null;
   return { kind: "claude", pid: nearest.pid, inMode: pane.inMode, sid, status };
+}
+
+/** The homes a session's codex may read from: the default one or an account profile's (the rule
+ *  codexSessionAccounts' accountFromEnvironment applies). Any other CODEX_HOME is the agent's own choice and not read. */
+export function codexHomeAllowed(home: string): boolean {
+  if (home === "/home/dev/.codex") return true;
+  return home.startsWith(`${CODEX_PROFILE_ROOT}/`) && UUID.test(home.slice(CODEX_PROFILE_ROOT.length + 1));
 }
 
 const runtimeLabel = (runtime: string): string => Object.values(AGENTS).find((a) => a.runtime === runtime)?.label ?? runtime;
@@ -455,8 +479,13 @@ export interface Cursor {
   headLen: number;
   headHash: string;
   map: MapState | CodexMapState;
-  /** Codex: the process that read last. A turn its predecessor left open (killed mid-turn) never ends otherwise. */
-  pid?: number;
+  /** Codex: the process that read last (`pid:start`). A turn its predecessor left open (killed mid-turn) never ends
+   *  otherwise. */
+  proc?: string;
+  /** Codex: the home read from (another home is another file of the same thread, so a new inode is no rewrite there)
+   *  and where the rollout was found (`[year, month, day, name]`), tried first next time. */
+  home?: string;
+  path?: [string, string, string, string];
 }
 
 /** `status`: the HTTP status the route answers with (409 for a MirrorSendError). */
@@ -495,8 +524,12 @@ export interface MirrorDeps {
 
 interface Pending { text: string; at: number }
 
-/** The Codex conversation the pane is on (null: none known yet), and whether a turn of it runs. */
-interface CodexState { thread: string | null; busy: boolean }
+/** The Codex conversation the pane is on (null: none known yet), whether a turn of it runs, and whether the read has
+ *  reached the rollout's end (until it has, `busy` is not known). */
+interface CodexState { thread: string | null; busy: boolean; caughtUp: boolean }
+
+/** Chunks of a Codex backlog read per refresh. */
+export const CODEX_TICK_CHUNKS = 4;
 
 export class TranscriptMirror {
   private stores = new Map<string, ThreadStore>();
@@ -510,6 +543,9 @@ export class TranscriptMirror {
   private timers = new Map<string, Set<ReturnType<typeof setTimeout>>>();
   /** What the last refresh found in the pane: the agent a send types into. */
   private panes = new Map<string, PaneAgent | null>();
+  /** Per session, for the pane's codex process (`pid:start`): the rollouts it was seen with open, and the newest hook
+   *  row at the time an unchosen one newly opened (see codexThread). */
+  private codexWatch = new Map<string, { proc: string; known: Set<string>; waitAfter: number | null }>();
 
   constructor(private d: MirrorDeps) {}
 
@@ -589,6 +625,7 @@ export class TranscriptMirror {
     this.stores.delete(id);
     this.infos.delete(id);
     this.panes.delete(id);
+    this.codexWatch.delete(id);
     this.pending.delete(id);
     if (ended) for (const x of ["", "-wal", "-shm"]) rmSync(join(this.d.root, "_mirrors", `${id}.sqlite${x}`), { force: true });
   }
@@ -619,6 +656,10 @@ export class TranscriptMirror {
     if (pane.kind === "codex") {
       const agent = AGENTS.codex.label;
       if (codex?.thread == null) return { ...base, state: "unresolved", agent, sendBlock: block("conversation-unknown") };
+      if (!codex.caughtUp) {
+        return { ...base, state: "live", agent, conversationId: codex.thread,
+          sendBlock: block("conversation-unknown", "devd is still reading this conversation. Send again in a moment.") };
+      }
       // Codex reports no status of its own: waiting comes from its hook events, a running turn from the rollout.
       const live = this.d.live(id);
       const waiting = live?.status === "waiting";
@@ -665,30 +706,57 @@ export class TranscriptMirror {
     this.checkPending(id);
   }
 
-  /** The Codex threads this session's hook events named, newest first (codexHarvester attributes usage the same way). */
-  private codexThreads(id: string): string[] {
-    const rows = this.d.db.query(`SELECT agent_session_id AS t FROM notify_log WHERE session_id = ? AND agent_session_id IS NOT NULL
-      GROUP BY agent_session_id ORDER BY MAX(id) DESC LIMIT 10`).all(id) as { t: string }[];
-    return rows.map((r) => r.t).filter((t) => UUID.test(t));
+  /** The Codex threads this session's hook events named, newest first, with the id of each one's newest hook row
+   *  (codexHarvester attributes usage the same way); `last`: the newest hook row of any thread. */
+  private codexHooks(id: string): { threads: { thread: string; hook: number }[]; last: number } {
+    const rows = this.d.db.query(`SELECT agent_session_id AS thread, MAX(id) AS hook FROM notify_log WHERE session_id = ? AND agent_session_id IS NOT NULL
+      GROUP BY agent_session_id ORDER BY hook DESC LIMIT 20`).all(id) as { thread: string; hook: number }[];
+    return { threads: rows.filter((r) => UUID.test(r.thread)), last: rows[0]?.hook ?? 0 };
+  }
+
+  /** The conversation the pane's codex is on: the newest hook-named thread whose rollout the process has open
+   *  (codexMirror.ts), with two guards against showing another conversation as this one. A thread whose newest hook is
+   *  older than the cursor's thread's is never fallen back to (the cursor's rollout missing from a flaky fd listing, a
+   *  `codex resume` of an older thread before its first prompt). A rollout that newly opens (`/resume X`, `/new` at its
+   *  first prompt) without being the choice makes the conversation unknown until a newer hook event names one. */
+  private codexThread(id: string, pane: Extract<PaneAgent, { kind: "codex" }>, cursorSid: string | null): string | null {
+    const { threads, last } = this.codexHooks(id);
+    const proc = `${pane.pid}:${pane.start}`;
+    let watch = this.codexWatch.get(id);
+    if (watch?.proc !== proc) {
+      watch = { proc, known: new Set(pane.open), waitAfter: null };
+      this.codexWatch.set(id, watch);
+    }
+    const chosen = threads.find((t) => pane.open.includes(t.thread));
+    if (pane.open.some((t) => !watch.known.has(t) && t !== chosen?.thread)) watch.waitAfter = Math.max(watch.waitAfter ?? 0, last);
+    for (const t of pane.open) watch.known.add(t);
+    if (!chosen) return null;
+    const cursorHook = threads.find((t) => t.thread === cursorSid)?.hook ?? 0;
+    if (chosen.hook < cursorHook) return null;
+    if (watch.waitAfter !== null) {
+      if (chosen.hook <= watch.waitAfter) return null;
+      watch.waitAfter = null;
+    }
+    return chosen.thread;
   }
 
   /** Reads the pane's Codex rollout from where the cursor stopped, inside the container (the account volume is not
-   *  devd's to read). The thread: the newest one the hook events named whose rollout the pane's process has open
-   *  (codexMirror.ts); none such is no conversation known, never an older one. null when it could not be read. */
+   *  devd's to read), at most CODEX_TICK_CHUNKS chunks per refresh. null when it could not be read. */
   private async readCodex(id: string, s: SessionRow, pane: Extract<PaneAgent, { kind: "codex" }>, current: () => boolean): Promise<CodexState | null> {
-    const thread = this.codexThreads(id).find((t) => pane.open.includes(t));
-    if (pane.home === null || thread === undefined) return { thread: null, busy: false };
     const store = this.store(id);
     const saved = store.mirrorCursor();
     let cur: Cursor = saved ? JSON.parse(saved) as Cursor : { sid: null, ino: 0, offset: 0, headLen: 0, headHash: "", map: newCodexMapState() };
-    for (;;) {
+    const thread = pane.home === null ? null : this.codexThread(id, pane, cur.sid);
+    if (pane.home === null || thread === null) return { thread: null, busy: false, caughtUp: true };
+    const proc = `${pane.pid}:${pane.start}`;
+    for (let chunk = 1; ; chunk++) {
       const r = await this.d.exec(s.container, ["python3", "-I", "-c", MIRROR_CODEX_READ, pane.home, thread,
-        JSON.stringify({ sid: cur.sid, offset: cur.offset, ino: cur.ino, headLen: cur.headLen, headHash: cur.headHash }),
+        JSON.stringify({ sid: cur.sid, offset: cur.offset, ino: cur.ino, headLen: cur.headLen, headHash: cur.headHash, home: cur.home, path: cur.path }),
         String(CODEX_CHUNK_BYTES), String(CODEX_LINE_CAP)], 10_000);
       if (!current()) return null;
       const out = r.code === 0 && !r.timedOut ? parseCodexRead(r.stdout) : null;
       if (out === null) { this.log(`mirror ${id}: the Codex rollout could not be read`); return null; }
-      if (out.id === null) return { thread: null, busy: false };
+      if (out.id === null) return { thread: null, busy: false, caughtUp: true };
       const pre: BridgeEvent[] = [];
       const closeOpenRun = () => {
         if (cur.map.openRun !== null) pre.push({ type: "run.completed", runId: cur.map.openRun, nativeThreadId: cur.sid ?? "", usage: null, costUsd: null });
@@ -705,19 +773,22 @@ export class TranscriptMirror {
       }
       const map = cur.map as CodexMapState;
       // Another codex process now writes the thread (resumed after its predecessor died): that one's turn is over.
-      if (cur.pid !== undefined && cur.pid !== pane.pid && map.turn !== null) {
+      if (cur.proc !== undefined && cur.proc !== proc && map.turn !== null) {
         if (map.openRun !== null) pre.push({ type: "run.interrupted", runId: map.openRun });
         map.openRun = null;
         map.turn = null;
       }
-      cur.pid = pane.pid;
       if (out.skipped > 0) this.log(`mirror ${id}: skipped ${out.skipped} rollout line(s) over ${CODEX_LINE_CAP} bytes`);
       const mapped = mapCodexLines(out.lines, map, out.id, this.now());
       const advanced = out.next !== from;
-      cur = { ...cur, ino: out.ino, offset: out.next, headLen: out.headLen, headHash: out.headHash };
-      if (advanced || pre.length) this.commit(id, store, pre, mapped.events, cur);
+      const moved = cur.proc !== proc || cur.home !== pane.home;
+      cur = { ...cur, ino: out.ino, offset: out.next, headLen: out.headLen, headHash: out.headHash, home: pane.home, path: out.path, proc };
+      if (advanced || pre.length || moved) this.commit(id, store, pre, mapped.events, cur);
       this.markSeen(id, mapped.seen);
-      if (!advanced || out.next >= out.size) return { thread: out.id, busy: map.turn !== null };
+      const done = !advanced || out.next >= out.size;
+      // A long backlog continues on the next refresh, so a send waits for one bounded read, not for all of it.
+      if (done || chunk >= CODEX_TICK_CHUNKS) return { thread: out.id, busy: map.turn !== null, caughtUp: done };
+      if (!current()) return null;
     }
   }
 
