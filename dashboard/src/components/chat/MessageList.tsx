@@ -202,7 +202,8 @@ export function MessageList({ sessionId, items, runs, pending, queued, critic, o
         // A tool right after another (a running run) sits close to it, like the rows of a fold.
         const toolRun = it.kind === "tool" && rows[i - 1]?.type === "item" && (rows[i - 1] as { item: ThreadItem }).item.kind === "tool";
         return (
-          <li key={`${it.seq}:${it.runId}:${it.itemId}:${i}`} className={cn("min-w-0", toolRun && "-mt-4")}>
+          // A prompt opens a turn: a little more room above it, so prompt, work and answer read as one group.
+          <li key={`${it.seq}:${it.runId}:${it.itemId}:${i}`} className={cn("min-w-0", toolRun && "-mt-4", it.kind === "user" && i > 0 && "sm:mt-3")}>
             {it.kind === "user" ? (
               it.runId !== null && critic.has(it.runId)
                 ? <CriticNote sessionId={sessionId} item={it} queued={isQueued} />

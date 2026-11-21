@@ -161,6 +161,9 @@ struct ChatScreen: View {
                                        onAnswer: { try await store.answer(requestId: $0, answer: $1) })
                                 .equatable()
                                 .modifier(ThreadEdge.Track(id: row.id, frames: rowFrames, quiet: r.item.kind == .notice && !r.failedRun && !r.item.warns))
+                                // A prompt opens a turn: a little more room above it, so prompt, work and answer read
+                                // as one group.
+                                .padding(.top, r.item.kind == .user && row.id != store.display.first?.id ? ChatLayout.turnGap : 0)
                             if let anchor = store.changesAnchor, anchor.rowId == r.id {
                                 ChangesCard(sessionId: sessionId, client: client, refreshKey: anchor.endedSeq, open: $changesOpen)
                                     .id(Self.changesId)
