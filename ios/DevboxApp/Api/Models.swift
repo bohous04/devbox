@@ -1132,12 +1132,14 @@ extension ThreadSnapshot {
 
 /// shared/thread.ts ThreadEffort. `supported`: the levels the model takes ([] = none, nil = not known yet);
 /// `effective`: the level the agent runs at, nil when not known (Claude says it with a reply); `chosen`: the user's
-/// pick, nil = the model default. devd sends only levels it knows (shared/effort.ts).
+/// pick, nil = the model default; `unchecked` (bridge 1.8.0): while `supported` is nil, the levels the agent takes
+/// anyway, checked against the model with the next message. devd sends only levels it knows (shared/effort.ts).
 struct ThreadEffort: Codable, Equatable {
     var model: String?
     var supported: [String]?
     var effective: String?
     var chosen: String?
+    var unchecked: [String]? = nil
 }
 
 /// The agent bridge's events (image/agent-bridge/src/events.ts). A type this app does not know decodes to

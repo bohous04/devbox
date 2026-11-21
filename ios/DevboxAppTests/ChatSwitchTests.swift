@@ -152,4 +152,15 @@ final class ChatSwitchTests: XCTestCase {
         XCTAssertEqual(ChatSwitch.effortMenuBlocked(effort(supported: []), new), "claude-opus-5-5 has no effort levels")
         XCTAssertNil(ChatSwitch.effortMenuBlocked(effort(), new))
     }
+
+    func testEffortBeforeTheModelsLevelsAreKnown() {
+        let new = target(bridge: "1.8.0")
+        let early = ThreadEffort(model: nil, supported: nil, effective: nil, chosen: "xhigh", unchecked: ["low", "medium", "high", "xhigh", "max"])
+        XCTAssertNil(ChatSwitch.effortMenuBlocked(early, new))
+        XCTAssertEqual(ChatSwitch.effortOptions(early).map(\.value), ["", "low", "medium", "high", "xhigh", "max"])
+        XCTAssertEqual(ChatSwitch.effortOptions(early).filter(\.current).map(\.value), ["xhigh"])
+        XCTAssertEqual(ChatSwitch.effortChipLabel(early, new), "Extra high")
+        XCTAssertEqual(ChatSwitch.effortFooter(early), "Applies from your next message, which checks it against the model.")
+        XCTAssertEqual(ChatSwitch.effortFooter(effort()), "Applies from your next message.")
+    }
 }

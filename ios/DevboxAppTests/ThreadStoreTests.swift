@@ -74,6 +74,12 @@ final class ThreadStoreTests: XCTestCase {
         XCTAssertEqual(ThreadView.mergeSnapshot(.empty, frame).effort, ThreadEffort(model: "m", supported: ["low"], effective: nil, chosen: "low"))
     }
 
+    func testSnapshotReadsTheUncheckedLevels() throws {
+        let json = #"{"lastSeq":0,"seenSeq":0,"runs":[],"items":[],"pending":[],"background":[],"native":null,"effort":{"model":null,"supported":null,"effective":null,"chosen":"xhigh","unchecked":["low","xhigh"]}}"#
+        XCTAssertEqual(try JSONDecoder().decode(ThreadSnapshot.self, from: Data(json.utf8)).effort,
+                       ThreadEffort(model: nil, supported: nil, effective: nil, chosen: "xhigh", unchecked: ["low", "xhigh"]))
+    }
+
     func testSnapshotWithAnUnreadableEffortStillLoadsWithoutIt() throws {
         for effort in [#"{"model":"m","supported":["low",null],"effective":null,"chosen":null}"#, #"{"model":"m","supported":["low"],"effective":3,"chosen":null}"#] {
             let json = #"{"lastSeq":4,"seenSeq":0,"runs":[],"items":[],"pending":[],"background":[],"native":null,"effort":"# + effort + "}"

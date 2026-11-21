@@ -52,7 +52,7 @@ struct ChatSwitchers<Content: View>: View {
             // Not blocked by a run: the bridge applies the level from the next message. A blocked menu says why in
             // its second line (a disabled submenu cannot be opened to read it).
             menu(.effort, title: "Effort", label: effortBlocked ?? effort ?? "Default", blocked: effortBlocked,
-                 options: thread.effort.map(ChatSwitch.effortOptions), loadError: nil, footer: "Applies from your next message.")
+                 options: thread.effort.map(ChatSwitch.effortOptions), loadError: nil, footer: ChatSwitch.effortFooter(thread.effort))
             menu(.account, title: accountTitle, label: accounts?.first(where: \.current)?.label ?? target.account ?? "no account",
                  blocked: blocked ?? ChatSwitch.accountMenuBlocked(target), options: accounts, loadError: accountsError)
         } label: {
