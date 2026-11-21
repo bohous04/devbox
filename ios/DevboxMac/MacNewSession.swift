@@ -83,14 +83,19 @@ enum MacNewSession {
         private(set) var status: String?
         /// The repo is being cloned (its first open), not fetched.
         private(set) var cloning = false
+        /// devd has echoed this open's `requestId`, so it is new enough to send one.
+        private(set) var seenOwn = false
 
         /// Takes a progress report of the repo. One with another open's `requestId` (the CLI or another window opening the
-        /// same repo) moves nothing. A devd before `requestId` sends none: then every report of the repo counts, as before.
+        /// same repo) moves nothing. A report without one comes from a devd before `requestId` (then every report counts,
+        /// as before) or from a client that sent none: once our own id has shown up, it is someone else's.
         mutating func observe(_ p: OpenProgress, requestId: String) {
-            if let other = p.requestId, other != requestId {
+            let own = p.requestId.map { $0 == requestId } ?? !seenOwn
+            guard own else {
                 status = "Waiting for devd (another open of this repo is running)…"
                 return
             }
+            if p.requestId != nil { seenOwn = true }
             apply(p)
         }
 

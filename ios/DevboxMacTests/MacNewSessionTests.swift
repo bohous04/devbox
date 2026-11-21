@@ -86,7 +86,11 @@ final class MacNewSessionTests: XCTestCase {
         t.observe(OpenProgress(step: "fetch", requestId: "mine"), requestId: "mine")
         XCTAssertEqual(t.stage, .repo)
         t.observe(OpenProgress(step: "worktree", git: .init(phase: "Updating files", percent: 50)), requestId: "mine")
-        XCTAssertEqual(t.stage, .checkout, "an old devd sends no requestId: its progress counts as before")
+        XCTAssertEqual(t.stage, .repo, "after our id showed up, a report without one is another client's")
+
+        var old = N.Tracker()
+        old.observe(OpenProgress(step: "worktree", git: .init(phase: "Updating files", percent: 50)), requestId: "mine")
+        XCTAssertEqual(old.stage, .checkout, "an old devd sends no requestId: its progress counts as before")
     }
 
     /// The request polls the repo's own progress key.

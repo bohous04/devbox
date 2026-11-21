@@ -3,6 +3,7 @@ import { confirm, isCancel, log, outro, select, spinner, type Option } from "@cl
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { AGENT_IDS, agentNameFor, conversationCarries, isAgentName, specFor } from "../../devd/src/agents";
 import { sanitizeSessionName, type AgentName } from "../../devd/src/db";
 import { sh } from "./sh";
@@ -12,7 +13,7 @@ import { agentLabel, altCfg, buildExecArgv, probeArgv, runAttach, sessionPickerO
 import { parseProbe } from "../../devd/src/tmux";
 import { loadCliConfig, type CliConfig } from "./config";
 import { runDoctor } from "./doctor";
-import { clearScreen, endEffect, fitLine, formatDoctor, formatOpenProgress, formatPorts, formatSessions, openProgressPercent, progressBar, sessionLabel } from "./format";
+import { clearScreen, endEffect, fitLine, formatDoctor, formatOpenProgress, formatPorts, formatSessions, isOwnOpenProgress, openProgressPercent, progressBar, sessionLabel } from "./format";
 import { runLocal } from "./local";
 import { promptName, sessionManager } from "./manager";
 import { agentSwitchSummary, exitMenuOptions, type ExitAction } from "./manager-view";
@@ -645,13 +646,20 @@ async function openAndAttach(deps: Deps, t: Target, opts: { ask: boolean; agent?
   let polling = t.repo !== "claudeSolo";
   const started = Date.now();
   let shown = 0;   // never move the bar backwards (a clone's band overlaps the later steps)
+  // Marks this open's progress, so another open of the same repo is not shown as ours (isOwnOpenProgress).
+  const requestId = randomUUID();
+  let seenOwn = false;
   const poll = async () => {
     while (polling) {
       await new Promise((r) => setTimeout(r, 500));
       const p = polling ? await deps.api.openProgress?.({ folder: t.folder, project: t.project, repo: t.repo }) : null;
       if (!polling) break;
-      if (p) shown = Math.max(shown, openProgressPercent(p));
-      const text = p ? formatOpenProgress(p, Date.now() - started, { withPercent: false }) : `${Math.round((Date.now() - started) / 1000)} s`;
+      const own = p && isOwnOpenProgress(p, requestId, seenOwn) ? p : null;
+      if (own?.requestId) seenOwn = true;
+      if (own) shown = Math.max(shown, openProgressPercent(own));
+      const text = own ? formatOpenProgress(own, Date.now() - started, { withPercent: false })
+        : p ? "waiting for devd (another open of this repo is running)"
+        : `${Math.round((Date.now() - started) / 1000)} s`;
       // One terminal line at most: the spinner redraws only the current line, so a wrapped one
       // leaves a copy behind on every frame. Clack adds "◒  " in front and up to three animated
       // dots after the message, hence the margin.
@@ -663,7 +671,7 @@ async function openAndAttach(deps: Deps, t: Target, opts: { ask: boolean; agent?
   try {
     result = t.repo === "claudeSolo"
       ? await deps.api.open({ folder: t.folder, project: t.project, solo: true, agent })
-      : await deps.api.open({ folder: t.folder, project: t.project, repo: t.repo, cloneUrl: t.cloneUrl, agent, fresh: opts.fresh });
+      : await deps.api.open({ folder: t.folder, project: t.project, repo: t.repo, cloneUrl: t.cloneUrl, agent, fresh: opts.fresh, requestId });
   } catch (e) {
     s.stop("Open failed.");
     console.error(`Error: ${(e as Error).message}`);

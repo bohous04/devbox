@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { SessionInfo } from "../src/api";
-import { endEffect, endPrompt, fitLine, formatDoctor, formatOpenProgress, formatPorts, formatSessions, openProgressPercent, progressBar, sessionLabel, uptime } from "../src/format";
+import { endEffect, endPrompt, fitLine, formatDoctor, formatOpenProgress, formatPorts, formatSessions, isOwnOpenProgress, openProgressPercent, progressBar, sessionLabel, uptime } from "../src/format";
 
 const row: SessionInfo = {
   id: "dev-shop-cms", folder: "acme", project: "shop", repo: "cms", container: "dev-shop-cms",
@@ -105,6 +105,14 @@ test("endPrompt: names the session, not the repo, and \"all\" means the windows 
   expect(one).toContain("dev-shop-cms");
   expect(one).not.toContain("agent windows");
   expect(one).toContain("workspace");
+});
+
+test("isOwnOpenProgress: only this open's progress, an old devd's (no requestId) until our id has shown up", () => {
+  expect(isOwnOpenProgress({ step: "fetch", requestId: "mine" }, "mine", false)).toBe(true);
+  expect(isOwnOpenProgress({ step: "fetch", requestId: "other" }, "mine", false)).toBe(false);
+  expect(isOwnOpenProgress({ step: "fetch", requestId: "other" }, "mine", true)).toBe(false);
+  expect(isOwnOpenProgress({ step: "fetch" }, "mine", false)).toBe(true);
+  expect(isOwnOpenProgress({ step: "fetch" }, "mine", true)).toBe(false);
 });
 
 test("formatOpenProgress describes the open() step for the spinner", () => {

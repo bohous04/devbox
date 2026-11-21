@@ -128,6 +128,14 @@ const CONTAINER_STEPS: Record<string, number> = {
   "setting file ownership": 86, "waiting for the docker sidecar": 90, "starting the container": 96,
 };
 
+/** Whether a progress report of the repo belongs to the open sent with `mine`. Another open of the same repo (another
+ *  terminal, the Mac app) carries its own id. A report without one comes from a devd before `requestId` (then every report
+ *  counts, as before) or from a client that sent none: once our own id has shown up, devd is known to echo it, so a
+ *  report without one is someone else's. */
+export function isOwnOpenProgress(p: OpenProgress, mine: string, seenOwn: boolean): boolean {
+  return p.requestId ? p.requestId === mine : !seenOwn;
+}
+
 /** Overall 0–100 for the whole open, from the current step and git's own percentage. */
 export function openProgressPercent(p: OpenProgress): number {
   if (p.step === "clone") {

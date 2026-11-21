@@ -492,6 +492,8 @@ test("POST /api/sessions passes the caller's requestId to open(); a malformed on
     expect((await post({ folder: "games", project: "games", repo: "game_web", requestId: bad })).status).toBe(400);
   }
   expect(calls.length).toBe(2);
+  expect((await post({ folder: "games", project: "games", repo: "game_web", requestId: null })).status).toBe(201);
+  expect(calls[2]!.requestId).toBeUndefined();
 });
 
 test("HTTP Gitea clone URL can be scheduled", async () => {

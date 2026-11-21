@@ -1026,9 +1026,10 @@ export function createApp(d: ApiDeps): Hono {
     const body = (await c.req.json().catch(() => null)) as { folder: string; project: string; repo?: string; cloneUrl?: string; solo?: boolean; agent?: string; fresh?: boolean; host?: string; sessionId?: string; runtime?: unknown; prompt?: unknown; effort?: unknown; requestId?: unknown } | null;
     if (!body) return c.json({ error: "invalid JSON body" }, 400);
     // The caller's id for this open, echoed in its /api/open-progress entries (the Mac sheet shows only its own).
-    if (body.requestId !== undefined && (typeof body.requestId !== "string" || !/^[A-Za-z0-9-]{1,64}$/.test(body.requestId)))
+    // `null` is absent, as for prompt.
+    if (body.requestId !== undefined && body.requestId !== null && (typeof body.requestId !== "string" || !/^[A-Za-z0-9-]{1,64}$/.test(body.requestId)))
       return c.json({ error: "requestId must be 1-64 letters, digits or dashes" }, 400);
-    const requestId = body.requestId as string | undefined;
+    const requestId = typeof body.requestId === "string" ? body.requestId : undefined;
     // The optional first prompt (the dashboard's New session page). Text only, refused explicitly rather than cut or
     // dropped; a chat session gets it as its first turn (linkOpenedChat), a tmux one through the prompt file.
     // `null` is absent, as before the field existed. Control characters are refused, not stripped: what reaches the
