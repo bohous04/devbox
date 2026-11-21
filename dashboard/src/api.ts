@@ -4,6 +4,7 @@ import type { VaultStatus } from "./vaultView";
 import type { OpRow } from "./operationsView";
 import { normalizeForm, type DbCandidate, type DbDiscovery, type DbRequestRow, type ProvisionForm } from "./dbRequestsView";
 import type { IbxJobDto, IbxStatusDto, PlacementDto } from "./instaboxView";
+import type { MirrorResponse } from "../../shared/mirror";
 import type { InboxItem, ThreadSnapshot } from "../../shared/thread";
 
 export interface SessionPort { host: number; container: number }
@@ -596,6 +597,10 @@ export const api = {
   sessionFiles: (id: string, q: string) => j<SessionFiles>(`/api/sessions/${encodeURIComponent(id)}/files?q=${encodeURIComponent(q)}`),
   sessionFileDiff: (id: string, path: string) =>
     j<SessionFileDiff>(`/api/sessions/${encodeURIComponent(id)}/changes/diff?path=${encodeURIComponent(path)}`),
+  /** The Chat view of a tmux session (devd/src/mirrorApi.ts): its Claude transcript as a thread, plus what devd knows
+   *  about the pane. A refused message is a 409 {error, message} (mirrorSendLock in mirrorView.ts). */
+  mirror: (id: string) => j<MirrorResponse>(`/api/sessions/${encodeURIComponent(id)}/mirror`),
+  sendMirrorMessage: (id: string, text: string) => j<{ sent: true }>(`/api/sessions/${encodeURIComponent(id)}/mirror/messages`, post({ text })),
   interrupt: (id: string) => j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/interrupt`, { method: "POST" }),
   answerRequest: (id: string, requestId: string, answer: string) =>
     j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/requests/${encodeURIComponent(requestId)}`, post({ answer })),

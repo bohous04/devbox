@@ -1,7 +1,9 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, MessageSquare, SquareTerminal } from "lucide-react";
 import { Link, useLocation, useParams } from "react-router-dom";
+import type { MirrorInfo } from "../../../shared/mirror";
 import type { ThreadSnapshot } from "../../../shared/thread";
+import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, ApiError } from "../api";
 import { Composer } from "../components/chat/Composer";
@@ -10,9 +12,9 @@ import { Switchers } from "../components/chat/Switchers";
 import { EmptyState, RowsSkeleton } from "../components/primitives";
 import { threadHeading } from "../inboxView";
 import { useStore } from "../store";
-import { terminalTabUrl } from "../terminalRoute";
 import { activeRun, applyCommands, applyEffort, applyNotice, applyThreadEvent, criticRunIds, mergeSnapshot, queuedRunIds } from "../threadView";
 import { useEventStream } from "../useEventStream";
+import { MIRROR_IMAGES_OFF, mirrorFieldOff, mirrorNotice, mirrorSendLock, mirrorUnsupported, type MirrorLock } from "../mirrorView";
 
 // Same lazy import as TerminalPage: xterm stays in its own chunk.
 const Terminal = lazy(() => import("../components/Terminal").then((m) => ({ default: m.Terminal })));
@@ -27,6 +29,14 @@ function ChatPage({ id }: { id: string }) {
   const [loadErr, setLoadErr] = useState<{ status: number; message: string } | null>(null);
   const [seenErr, setSeenErr] = useState<string | null>(null);
   const [tab, setTab] = useState<"chat" | "terminal">("chat");
+  // A tmux session: its Claude transcript mirrored as the thread (devd/src/mirrorApi.ts), null for a chat session.
+  const [mirror, setMirror] = useState<MirrorInfo | null>(null);
+  const [sendLock, setSendLock] = useState<MirrorLock | null>(null);
+  // /mirror itself failed: the error gets an Open terminal button, the way out a tmux session always had.
+  const [mirrorFailed, setMirrorFailed] = useState(false);
+  const mirrored = mirror !== null;
+  const mirrorRef = useRef(mirror);
+  mirrorRef.current = mirror;
   const threadRef = useRef(thread);
   threadRef.current = thread;
   const bottom = useRef<HTMLDivElement | null>(null);
@@ -35,10 +45,14 @@ function ChatPage({ id }: { id: string }) {
 
   useEffect(() => {
     let alive = true;
-    setThread(null); setLoadErr(null);
+    setThread(null); setLoadErr(null); setMirror(null); setSendLock(null); setMirrorFailed(false);
+    const failed = (e: unknown) => { if (alive) setLoadErr({ status: e instanceof ApiError ? e.status : 0, message: (e as Error).message }); };
     api.thread(id).then(
       (t) => { if (alive) setThread(t); },
-      (e) => { if (alive) setLoadErr({ status: e instanceof ApiError ? e.status : 0, message: (e as Error).message }); },
+      (e) => {
+        if (!(e instanceof ApiError && e.status === 409 && e.message === "not-a-chat-session")) { failed(e); return; }
+        api.mirror(id).then((m) => { if (alive) { setMirror(m.mirror); setThread(m.snapshot); } }, (e2) => { if (alive) setMirrorFailed(true); failed(e2); });
+      },
     );
     return () => { alive = false; };
   }, [id]);
@@ -46,6 +60,13 @@ function ChatPage({ id }: { id: string }) {
   const { paused, badFrame } = useEventStream({
     sessionId: id,
     enabled: thread !== null,
+    mirror: mirrored,
+    // devd repeats the info on every (re)connect: a refused send's lock goes only when the pane really changed.
+    onMirror: (info) => {
+      const prev = mirrorRef.current;
+      if (prev && (prev.sendBlock?.code !== info.sendBlock?.code || prev.activity !== info.activity)) setSendLock(null);
+      setMirror(info);
+    },
     afterSeq: () => threadRef.current!.lastSeq,
     onSnapshot: (m) => setThread((t) => (t ? mergeSnapshot(t, m) : t)),
     onThread: (e) => setThread((t) => (t ? applyThreadEvent(t, e) : t)),
@@ -59,6 +80,8 @@ function ChatPage({ id }: { id: string }) {
   const loaded = thread !== null;
   const ended = thread ? lastEndedSeq(thread) : 0;
   useEffect(() => {
+    // A mirror has no seen marker (the inbox shows tmux sessions by their hooks).
+    if (mirrored) return;
     const markSeen = () => {
       const t = threadRef.current;
       if (!t || t.lastSeq <= t.seenSeq || document.visibilityState !== "visible") return;
@@ -67,7 +90,7 @@ function ChatPage({ id }: { id: string }) {
     markSeen();
     document.addEventListener("visibilitychange", markSeen);
     return () => document.removeEventListener("visibilitychange", markSeen);
-  }, [id, loaded, ended]);
+  }, [id, loaded, ended, mirrored]);
 
   // Follow the conversation while the user is at its end (any change: text, tool output, a resolved request);
   // leave them alone when they scrolled up.
@@ -94,7 +117,12 @@ function ChatPage({ id }: { id: string }) {
     return () => ro.disconnect();
   }, [loaded]);
 
-  const running = thread ? activeRun(thread) !== undefined : false;
+  const running = mirror ? mirror.activity === "busy" : thread ? activeRun(thread) !== undefined : false;
+  const unsupported = mirror ? mirrorUnsupported(mirror) : null;
+  const mirrorLine = mirror ? mirrorNotice(mirror, sendLock) : null;
+  const openTerminal = (
+    <Button type="button" variant="outline" size="sm" className="flex-none" onClick={() => setTab("terminal")}>Open terminal</Button>
+  );
   // devd searches the repo on the VPS only; an InstaBox session's repo is elsewhere.
   const vpsRepo = session !== undefined && session.host !== "instabox";
   const searchFiles = useMemo(() => (vpsRepo ? (q: string) => api.sessionFiles(id, q) : undefined), [id, vpsRepo]);
@@ -165,16 +193,19 @@ function ChatPage({ id }: { id: string }) {
       {seenErr && <p role="alert" className="mx-auto mb-3 w-full max-w-[42rem] text-sm text-destructive">could not mark the thread as seen: {seenErr}</p>}
 
       {loadErr ? (
-        loadErr.message === "not-a-chat-session"
-          ? <EmptyState title="This is a tmux session" hint="It has no chat thread; its agent runs in the terminal." action={<a className="text-sm underline" href={terminalTabUrl(id)}>Open the terminal</a>} />
-          : <p role="alert" className="text-sm text-destructive">Could not load the thread: {loadErr.message}</p>
+        <div className="flex items-center gap-3">
+          <p role="alert" className="text-sm text-destructive">Could not load the {mirrorFailed ? "terminal's conversation" : "thread"}: {loadErr.message}</p>
+          {mirrorFailed && openTerminal}
+        </div>
+      ) : unsupported !== null ? (
+        <EmptyState title={unsupported} hint="Its agent runs in the terminal." action={openTerminal} />
       ) : !thread ? (
         <RowsSkeleton rows={4} />
       ) : (
         <>
           <div className="mx-auto w-full max-w-[42rem] flex-1">
             {thread.items.length === 0
-              ? <EmptyState title="No messages yet" hint="Write the first message below." />
+              ? <EmptyState title="No messages yet" hint={mirrored ? "The agent's conversation in the terminal shows up here." : "Write the first message below."} />
               : <MessageList sessionId={id} items={thread.items} runs={thread.runs} pending={thread.pending} queued={queuedRunIds(thread)} critic={criticRunIds(thread)} onAnswer={(rid, a) => api.answerRequest(id, rid, a)} onLayout={pinEnd} />}
             {thread.background.length > 0 && (
               <p className="mt-3 text-xs text-muted-foreground">background: {thread.background.map((b) => b.label).join(", ")}</p>
@@ -187,6 +218,32 @@ function ChatPage({ id }: { id: string }) {
               leave a gap under the dock at the end of the thread. */}
           <div ref={composerBox} className="sticky bottom-16 z-10 -mx-4 -mb-8 mt-8 bg-[var(--dock)] px-4 pb-3 pt-3 [--dock:var(--background)] before:pointer-events-none before:absolute before:inset-x-0 before:-top-8 before:h-8 before:bg-gradient-to-t before:from-[var(--dock)] before:to-transparent sm:-mx-6 sm:px-6 lg:bottom-0 lg:-mx-10 lg:-mb-10 lg:px-10 lg:pb-5 dark:[--dock:color-mix(in_oklab,var(--muted)_35%,var(--background))]">
             <div className="mx-auto w-full max-w-[42rem]">
+              {mirror ? (
+                // The terminal's agent: what is typed here goes into its pane. No switchers, no `/` commands (devd
+                // refuses them: they belong in the terminal), no images.
+                <Composer
+                  running={false} onStop={async () => {}}
+                  onSend={async (text) => {
+                    try { await api.sendMirrorMessage(id, text); setSendLock(null); }
+                    catch (e) {
+                      const lock = mirrorSendLock(e);
+                      if (!lock) throw e;
+                      setSendLock(lock);
+                      return false;
+                    }
+                  }}
+                  fieldOff={mirrorFieldOff(mirror)} imagesOff={MIRROR_IMAGES_OFF} searchFiles={searchFiles}
+                  placeholder="Message the agent in the terminal"
+                  notices={mirrorLine && (
+                    <div className={`flex items-center gap-3 rounded-md border px-3 py-2 text-sm ${mirrorLine.kind === "prompt"
+                      ? "border-amber-600/40 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                      : "border-border bg-muted/50 text-muted-foreground"}`}>
+                      <span role="status" className="min-w-0 flex-1">{mirrorLine.kind === "prompt" ? <><span className="font-medium">Waiting for you in the terminal:</span> {mirrorLine.text}</> : mirrorLine.text}</span>
+                      {openTerminal}
+                    </div>
+                  )}
+                />
+              ) : (
               <Switchers sessionId={id} thread={thread}>
                 {({ menus, status }) => (
                   <Composer
@@ -201,6 +258,7 @@ function ChatPage({ id }: { id: string }) {
                   />
                 )}
               </Switchers>
+              )}
             </div>
           </div>
         </>
