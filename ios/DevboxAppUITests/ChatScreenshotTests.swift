@@ -15,7 +15,7 @@ final class ChatScreenshotTests: XCTestCase {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     }
 
-    // The appearance is the simulator's (`xcrun simctl ui <device> appearance dark|light`); the name only labels the files.
+    // The app takes the appearance from its launch arguments (`-DevboxAppearance`), whatever the simulator's.
     func testDark() throws { try shoot(appearance: "dark") }
     func testLight() throws { try shoot(appearance: "light") }
 
@@ -31,7 +31,8 @@ final class ChatScreenshotTests: XCTestCase {
 
     private func shoot(appearance: String) throws {
         let app = XCUIApplication()
-        openThread(app)
+        let look = ["-DevboxAppearance", appearance]
+        openThread(app, extra: look)
         // The answer's last line: the thread has loaded and opened at its end.
         XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'example.com/docs/sync'")).firstMatch.waitForExistence(timeout: 20))
         sleep(1)
@@ -97,7 +98,7 @@ final class ChatScreenshotTests: XCTestCase {
 
         // A fresh launch (no keyboard, no draft) for the top of the thread.
         app.terminate()
-        openThread(app)
+        openThread(app, extra: look)
         XCTAssertTrue(app.buttons.containing(NSPredicate(format: "label BEGINSWITH 'Worked for'")).firstMatch.waitForExistence(timeout: 20))
 
         // The top: the earlier turn, the notice and the long prompt.
