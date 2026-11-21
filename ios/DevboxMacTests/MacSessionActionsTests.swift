@@ -340,6 +340,15 @@ final class MacSessionActionsTests: XCTestCase {
         XCTAssertEqual(model.codex["dev-shop-cms"], .loaded([.init(id: "default", label: "Codex main", current: true)]))
         XCTAssertEqual(MockURLProtocol.capturedRequests.last?.url?.path, "/api/sessions/dev-shop-cms/codex-account")
     }
+
+    /// A Codex load cancelled with its task stores nothing, so the next run loads it again.
+    func testCancelledCodexLoadIsRetried() async {
+        let (model, _) = makeActions { _ in .init(statusCode: 500) }
+        let task = Task { await model.loadCodexAccounts("dev-shop-cms") }
+        task.cancel()
+        await task.value
+        XCTAssertNil(model.codex["dev-shop-cms"])
+    }
 }
 
 /// A count the mock's handler bumps from URLSession's threads.

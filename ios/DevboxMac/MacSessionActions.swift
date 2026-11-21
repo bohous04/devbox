@@ -211,7 +211,11 @@ final class MacSessionActions: ObservableObject {
     func loadCodexAccounts(_ sessionId: String) async {
         guard let actions else { return }
         do { codex[sessionId] = MacSessionMenu.codexChoices(try await actions.codexAccounts(sessionId)) }
-        catch { codex[sessionId] = .failed(errorText(error)) }
+        catch {
+            // A load cancelled with its task (the host's task id changed) leaves the entry unset, so the next run loads it.
+            if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled { return }
+            codex[sessionId] = .failed(errorText(error))
+        }
     }
 
     // MARK: - Requests from the menu
