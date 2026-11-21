@@ -111,11 +111,13 @@ struct MacWindowContent: View {
             }
             .environmentObject(live)
             .sheet(isPresented: $newSession) {
-                // The same New session flow as the iPhone's; a chat session opens in this window.
-                NewSessionSheet(actions: SessionActions(client: client), onStarted: { await live.refreshNow() },
-                                onOpenChat: { id in thread = id })
+                // The iPhone's cascade with the Mac's own layout and devd's progress; the new session opens in this window.
+                MacNewSessionSheet(actions: SessionActions(client: client), onStarted: { await live.refreshNow() },
+                                   onOpen: { id in
+                                       thread = id
+                                       page = nil
+                                   })
                     .environmentObject(live)
-                    .frame(minWidth: 480, minHeight: 520)
             }
         } else {
             switch appModel.configState {

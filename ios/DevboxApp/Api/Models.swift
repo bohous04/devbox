@@ -283,6 +283,22 @@ struct DevdConfig: Decodable {
     let version: Int?
 }
 
+/// `GET /api/open-progress`: what a running open of a repo is doing (devd/src/sessions.ts `OpenProgress`). `step` stays a
+/// string: a newer devd may add one, shown by its raw name.
+struct OpenProgress: Decodable, Equatable {
+    /// git's own progress line (devd/src/git.ts `CloneProgress`).
+    struct Git: Decodable, Equatable {
+        let phase: String
+        let percent: Double
+        var detail: String? = nil
+    }
+    let step: String
+    var clone: Git? = nil
+    var git: Git? = nil
+    /// What the container step is doing (file ownership, the docker sidecar, the start).
+    var detail: String? = nil
+}
+
 /// `POST /api/sessions` (open/openSolo) response — mirrors `OpenResult` from `dashboard/src/api.ts`.
 struct OpenResult: Decodable {
     struct Session: Decodable {

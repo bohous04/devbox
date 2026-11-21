@@ -130,14 +130,15 @@ struct SessionActions {
         let fresh: Bool?
     }
 
+    /// `timeout`: the first clone of a large repo runs for minutes before devd answers (nil = the client's default).
     func openSession(
         folder: String, project: String, repo: String,
-        cloneUrl: String?, agent: AgentName?, fresh: Bool?
+        cloneUrl: String?, agent: AgentName?, fresh: Bool?, timeout: TimeInterval? = nil
     ) async throws -> OpenResult {
         try await client.post("/api/sessions", body: OpenSessionBody(
             folder: folder, project: project, repo: repo,
             cloneUrl: cloneUrl, agent: agent?.rawValue, fresh: fresh
-        ))
+        ), timeout: timeout)
     }
 
     /// `solo: true` is always present (unlike `agent`) — mirrors `post({ ...t, solo: true })`
@@ -147,6 +148,17 @@ struct SessionActions {
         let project: String
         let agent: String?
         let solo: Bool
+    }
+
+    private struct OpenProgressResponse: Decodable { let progress: OpenProgress? }
+
+    /// What a running `openSession` of this repo is doing (`GET /api/open-progress`, the CLI's spinner source); nil
+    /// when no open of it is running.
+    func openProgress(folder: String, project: String, repo: String) async throws -> OpenProgress? {
+        var q = URLComponents()
+        q.queryItems = [.init(name: "folder", value: folder), .init(name: "project", value: project), .init(name: "repo", value: repo)]
+        let r: OpenProgressResponse = try await client.get("/api/open-progress?\(q.percentEncodedQuery ?? "")")
+        return r.progress
     }
 
     func openSolo(folder: String, project: String, agent: AgentName?) async throws -> OpenResult {
