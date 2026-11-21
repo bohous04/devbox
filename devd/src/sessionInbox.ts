@@ -159,7 +159,7 @@ export class Inbox {
     // Read outside the store's try: a failing DB read is not an unreadable thread store.
     const pr = this.d.prHold?.(s.id) ?? null;
     if (runtime === "tmux") {
-      return { item: { ...base, attention: tmuxAttention(this.d.tmuxLive(s.id), pr), lastText: null, topic: null }, recheckAt: null };
+      return { item: { ...base, attention: tmuxAttention(this.d.tmuxLive(s.id), pr, Math.max(s.last_active_at, s.created_at)), lastText: null, topic: null }, recheckAt: null };
     }
     let built: { item: InboxItem; recheckAt: number | null };
     try { built = this.buildChat(s, base, pr); }
