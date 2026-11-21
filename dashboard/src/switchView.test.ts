@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { RunRow, ThreadEffort } from "../../shared/thread";
 import type { AccountView, ChatTarget, CodexAccountView } from "./api";
 import {
-  effortChipLabel, effortFooter, effortMenuBlocked, effortOptions, newSessionEffort, newSessionEffortBlock,
+  effortChipLabel, effortFooter, effortMenuBlocked, effortOptions, newSessionEffort, newSessionEffortBlock, newSessionEffortHint,
   accountMenuBlocked, claudeAccountOptions, codexAccountOptions, harnessOptions, modelMenuBlocked, modelOptions,
   awaitingTargetText, modelLabel, switchBlocked, switchErrorText, switchResultText,
 } from "./switchView";
@@ -223,4 +223,10 @@ test("effort on /new: offered for Claude in a chat session only, and set with th
   expect(newSessionEffortBlock("", "high")).toBe("Effort is set with your first message: type one, or set it back to Default.");
   expect(newSessionEffortBlock("fix it", "high")).toBeNull();
   expect(newSessionEffortBlock("", null)).toBeNull();
+});
+
+test("effort hint on /new: Codex's levels come with its session, so the line says where to set it", () => {
+  expect(newSessionEffortHint("codex", "chat")).toBe("Effort: set it in the thread once it opens");
+  expect(newSessionEffortHint("codex", "tmux")).toBeNull();
+  expect(newSessionEffortHint("claude", "chat")).toBeNull();
 });

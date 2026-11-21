@@ -210,3 +210,8 @@ export function newSessionEffort(agent: AgentName, runtime: SessionRuntime | nul
 /** devd sets the effort with the first message (POST /api/sessions refuses it without one): said before the press. */
 export const newSessionEffortBlock = (prompt: string, effort: string | null): string | null =>
   effort !== null && prompt === "" ? "Effort is set with your first message: type one, or set it back to Default." : null;
+
+/** The line beside the box for Codex, whose levels come from its model list inside the session: not offered here,
+ *  so the page says where it is set instead of leaving it silently missing. */
+export const newSessionEffortHint = (agent: AgentName, runtime: SessionRuntime | null): string | null =>
+  agent === "codex" && runtime === "chat" ? "Effort: set it in the thread once it opens" : null;

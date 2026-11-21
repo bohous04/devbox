@@ -19,7 +19,7 @@ import { openedNotice } from "../sessionsView";
 import { useStore } from "../store";
 import { Composer } from "../components/chat/Composer";
 import { AgentGlyph } from "../components/chat/Switchers";
-import { effortLabel, newSessionEffort, newSessionEffortBlock, type SwitchOption } from "../switchView";
+import { effortLabel, newSessionEffort, newSessionEffortBlock, newSessionEffortHint, type SwitchOption } from "../switchView";
 import { hostDisabledReason, jobErrorText, JOB_STEP_LABEL, type IbxStatusDto, type PlacementDto } from "../instaboxView";
 
 /** Route /new — start a session: pick the repo, type the first message in the chat composer, go. The interface
@@ -201,6 +201,7 @@ export function NewSession() {
   const effortChoices = onIbx || repo === SOLO ? null : newSessionEffort(agent, choice?.runtime ?? null, effort);
   useEffect(() => { if (effortChoices === null && effort !== null) setEffort(null); }, [effortChoices, effort]);
   const effortBlock = newSessionEffortBlock(prompt, effort);
+  const effortHint = onIbx || repo === SOLO ? null : newSessionEffortHint(agent, choice?.runtime ?? null);
   const startLabel = ibxFailed && onIbx ? "Try again" : onIbx ? "Start on InstaBox" : reusable && prompt === "" ? "Open existing" : "Start session";
   const canStart = !!repo && !busy && !!choice && textBlock === null && effortBlock === null;
   // Continuing takes the message only where devd can deliver it: a running terminal's agent has already started.
@@ -264,6 +265,8 @@ export function NewSession() {
           )}
           {reusable && !busy && prompt === "" && <InlineAction onClick={() => report(startVps(true))}>Create another</InlineAction>}
           {ibxFailed && !busy && <InlineAction onClick={() => { setHost("vps"); report(startVps()); }}>Open on VPS</InlineAction>}
+          {/* Under the box, beside the line: inside the toolbar it squeezed the interface chip to its chevron. */}
+          {effortHint && <p className="ml-auto text-xs text-muted-foreground">{effortHint}</p>}
         </div>
 
         {repoSessions.length > 0 && (
