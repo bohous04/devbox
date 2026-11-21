@@ -136,8 +136,8 @@ struct MacWindowContent: View {
 }
 
 /// The inbox as the sidebar, by the same rules as the web and iPhone (InboxView): needs you, finished (five, then
-/// "N more"), idle, and under a rule the working, snoozed and settled shelves, collapsed until opened (each window
-/// remembers which). Every group is a disclosure group with its count aligned at the right. Rows are MacInboxRow,
+/// "N more"), idle, and the working, snoozed and settled shelves pinned to the bottom over the footer, collapsed until
+/// opened (each window remembers which). Every group is a disclosure group with its count aligned at the right. Rows are MacInboxRow,
 /// with the latest message only in Needs you, Working and Snoozed, and their times tick every 15 s. Above them: the
 /// search field (⌘F) and New session (⌘N). ↑/↓ move the selection (List); the context menu has the row actions and
 /// "Open in New Window".
@@ -159,10 +159,24 @@ struct MacInboxSidebar: View {
     @State private var actionsFor: InboxItem?
     @State private var query = ""
     @FocusState private var searching: Bool
+    @State private var sidebarHeight: CGFloat = 0
+    /// The tools' and the footer's heights: the shelves leave the scrolling groups room under the one and over the other.
+    @State private var toolsHeight: CGFloat = 0
+    @State private var footerHeight: CGFloat = 0
+    /// The pinned shelves' list height with all its rows, once it has measured itself (macOS 15+).
+    @State private var shelfContent: CGFloat?
+    /// Which of the two lists has the keyboard, so ↑/↓ can carry it across their seam.
+    @FocusState private var focusedList: MacSidebarLayout.Part?
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 15)) { context in
-            List(selection: $selection) {
+            let now = InboxView.ms(context.date)
+            let shown = store.items?.filter { InboxView.matches($0, query) }
+            let g = shown.map(InboxView.group)
+            let scrolling = g.map(MacSidebarLayout.scrollingGroups) ?? []
+            let pinned = g.map(MacSidebarLayout.pinnedShelves) ?? []
+            let seam = (groups: scrolling.flatMap(visibleRows).map(\.sessionId), shelves: pinned.flatMap(visibleRows).map(\.sessionId))
+            ScrollViewReader { proxy in List(selection: $selection) {
                 if store.paused || store.badFrame != nil {
                     Text(store.paused ? "Live updates paused — refreshing every 5 s\(store.loadError.map { " (last refresh failed: \($0))" } ?? "")"
                          : "Live update dropped: \(store.badFrame ?? "")")
@@ -170,13 +184,11 @@ struct MacInboxSidebar: View {
                         .foregroundStyle(Theme.C.warnText)
                         .listRowSeparator(.hidden)
                 }
-                if let items = store.items {
-                    let shown = items.filter { InboxView.matches($0, query) }
+                if let shown {
                     if shown.isEmpty, !query.isEmpty {
                         Text("No session matches “\(query)”").font(.callout).foregroundStyle(Theme.C.mutedForeground)
                     } else {
-                        groups(InboxView.group(shown), now: InboxView.ms(context.date))
-                            .environment(\.inboxShowsAgent, InboxView.mixedAgents(items))
+                        groups(scrolling, now: now)
                     }
                 } else if let error = store.loadError {
                     Label { Text("Can't load the inbox: \(error)") } icon: { Image(systemName: "exclamationmark.triangle") }
@@ -192,12 +204,25 @@ struct MacInboxSidebar: View {
                 }
             }
             .listStyle(.sidebar)
+            .focused($focusedList, equals: .groups)
+            .onKeyPress(.downArrow) { cross(down: true, seam) }
+            .onChange(of: focusedList) { _, part in reveal(in: part, .groups, proxy) }
+            } // ScrollViewReader
             // An opaque sidebar, one tone with the window, instead of the translucent material.
             .scrollContentBackground(.hidden)
             .background(MacTone.sidebar)
-            .safeAreaInset(edge: .top, spacing: 0) { tools }
-            .safeAreaInset(edge: .bottom, spacing: 0) { footer }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                tools.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { toolsHeight = $0 }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(spacing: 0) {
+                    shelves(pinned, now: now, seam: seam)
+                    footer.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { footerHeight = $0 }
+                }
+            }
+            .environment(\.inboxShowsAgent, store.items.map(InboxView.mixedAgents) ?? false)
         }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { sidebarHeight = $0 }
         .navigationTitle("Inbox")
         .onChange(of: findPending, initial: true) { _, pending in
             guard pending else { return }
@@ -259,48 +284,86 @@ struct MacInboxSidebar: View {
     }
 
     @ViewBuilder
-    private func groups(_ g: InboxView.Groups, now: Int) -> some View {
-        let split = InboxView.splitNeedsYou(g.needsYou)
-        if split.action.isEmpty, query.isEmpty {
+    private func groups(_ scrolling: [MacSidebarLayout.Group], now: Int) -> some View {
+        if query.isEmpty, !scrolling.contains(where: { $0.label == "Needs you" }) {
             Label { Text("Nothing waiting for you") } icon: { Image(systemName: "checkmark.circle").foregroundStyle(InboxTone.doneIcon) }
                 .font(.callout)
                 .foregroundStyle(Theme.C.mutedForeground)
                 .padding(.vertical, 4)
         }
-        group("Needs you", split.action, now: now, preview: true)
-        group("Finished", split.finished, now: now, preview: false, cap: 5)
-        group("Idle", g.idle, now: now, preview: false)
-        if !(g.working.isEmpty && g.snoozed.isEmpty && g.settled.isEmpty) {
-            // The shelves sit apart, under a rule: what runs on its own, and what was put aside.
-            Rectangle().fill(Theme.C.border).frame(height: 1 / 3).padding(.top, 6).listRowSeparator(.hidden)
-                .accessibilityHidden(true)
-        }
-        group("Working", g.working, now: now, preview: true)
-        group("Snoozed", g.snoozed, now: now, preview: true)
-        group("Settled", g.settled, now: now, preview: false)
+        ForEach(scrolling, id: \.label) { group($0, now: now) }
     }
 
-    /// A disclosure group, not shown while empty; open while searching, so every match shows. With `cap`, rows past it
-    /// hide behind "N more".
+    /// The shelves, pinned under the scrolling groups and over the footer, under a rule: what runs on its own, and
+    /// what was put aside. A list of their own, sharing the selection, as tall as its rows up to `shelfShare` of the
+    /// sidebar and scrolling inside beyond that. Nothing, rule included, while every shelf is empty.
     @ViewBuilder
-    private func group(_ label: String, _ items: [InboxItem], now: Int, preview: Bool, cap: Int? = nil) -> some View {
-        if !items.isEmpty {
-            let open = isOpen(label) || !query.isEmpty
-            let all = showAll.contains(label)
-            Section {
-                if open {
-                    rows(cap.map { all ? items : Array(items.prefix($0)) } ?? items, now: now, preview: preview)
-                    if let cap, items.count > cap {
-                        Button(all ? "Show fewer" : "\(items.count - cap) more") { flip(label, in: &showAll) }
-                            .buttonStyle(.plain)
-                            .font(.callout)
-                            .foregroundStyle(Theme.C.mutedForeground)
-                            .accessibilityValue(all ? "expanded" : "collapsed")
-                    }
+    private func shelves(_ pinned: [MacSidebarLayout.Group], now: Int, seam: (groups: [String], shelves: [String])) -> some View {
+        if !pinned.isEmpty {
+            let estimate = MacSidebarLayout.estimatedContent(headers: pinned.count, rows: seam.shelves.count)
+            ScrollViewReader { proxy in
+                List(selection: $selection) {
+                    ForEach(pinned, id: \.label) { group($0, now: now) }
                 }
-            } header: {
-                MacGroupHead(label: label, count: items.count, open: open) { toggle(label) }
+                .listStyle(.sidebar)
+                .focused($focusedList, equals: .shelves)
+                .onKeyPress(.upArrow) { cross(down: false, seam) }
+                .onChange(of: focusedList) { _, part in reveal(in: part, .shelves, proxy) }
             }
+            .scrollContentBackground(.hidden)
+            .modifier(MacListContentHeight(height: $shelfContent))
+            // Measured afresh when shelves come back, not sized by the rows they had before.
+            .onDisappear { shelfContent = nil }
+            .frame(height: MacSidebarLayout.shelfHeight(content: shelfContent ?? estimate, sidebar: sidebarHeight,
+                                                        chrome: toolsHeight + footerHeight))
+            .background(MacTone.sidebar)
+            .overlay(alignment: .top) { Rectangle().fill(Theme.C.border).frame(height: 1 / 3).accessibilityHidden(true) }
+        }
+    }
+
+    /// Moves the selection and the keyboard to the other list when ↑/↓ reaches the seam; elsewhere the list moves it.
+    private func cross(down: Bool, _ seam: (groups: [String], shelves: [String])) -> KeyPress.Result {
+        guard let next = MacSidebarLayout.crossing(from: selection, down: down, groups: seam.groups, shelves: seam.shelves) else {
+            return .ignored
+        }
+        selection = next
+        focusedList = down ? .shelves : .groups
+        return .handled
+    }
+
+    /// Scrolls the selected row into view in the list that just took the keyboard (after ↑/↓ crossed into it); a row
+    /// of the other list is not in this one, and scrolling to it does nothing.
+    private func reveal(in part: MacSidebarLayout.Part?, _ list: MacSidebarLayout.Part, _ proxy: ScrollViewProxy) {
+        guard part == list, let selection else { return }
+        proxy.scrollTo(selection)
+    }
+
+    /// The rows a group shows: none while shut (it is open while searching, so every match shows), and with `cap`
+    /// only that many until "N more".
+    private func visibleRows(_ group: MacSidebarLayout.Group) -> [InboxItem] {
+        guard isOpen(group.label) || !query.isEmpty else { return [] }
+        guard let cap = group.cap, !showAll.contains(group.label) else { return group.items }
+        return Array(group.items.prefix(cap))
+    }
+
+    /// A disclosure group (MacSidebarLayout leaves out the empty ones); open while searching, so every match shows.
+    /// With `cap`, rows past it hide behind "N more".
+    @ViewBuilder
+    private func group(_ group: MacSidebarLayout.Group, now: Int) -> some View {
+        let (label, items) = (group.label, group.items)
+        let open = isOpen(label) || !query.isEmpty
+        let all = showAll.contains(label)
+        Section {
+            rows(visibleRows(group), now: now, preview: group.preview)
+            if open, let cap = group.cap, items.count > cap {
+                Button(all ? "Show fewer" : "\(items.count - cap) more") { flip(label, in: &showAll) }
+                    .buttonStyle(.plain)
+                    .font(.callout)
+                    .foregroundStyle(Theme.C.mutedForeground)
+                    .accessibilityValue(all ? "expanded" : "collapsed")
+            }
+        } header: {
+            MacGroupHead(label: label, count: items.count, open: open) { toggle(label) }
         }
     }
 
@@ -338,8 +401,67 @@ struct MacInboxSidebar: View {
     }
 }
 
-/// The groups about you (Needs you, Finished, Idle) start open; the shelves under them stay shut until opened.
+/// The groups about you (Needs you, Finished, Idle) start open and scroll; the shelves under them stay shut until
+/// opened and are pinned to the bottom of the sidebar, over the footer.
 enum MacSidebarLayout {
+    struct Group {
+        let label: String
+        let items: [InboxItem]
+        /// Whether the rows show the latest message.
+        let preview: Bool
+        /// Rows past it hide behind "N more".
+        var cap: Int?
+    }
+
+    /// The sidebar's two lists.
+    enum Part { case groups, shelves }
+
+    /// The share of the sidebar's height the pinned shelves may take before they scroll inside.
+    static let shelfShare: CGFloat = 0.45
+    /// The height the scrolling groups keep at least, so Needs you stays in reach in a short window.
+    static let groupsMinimum: CGFloat = 120
+    /// A sidebar list's group header, its two-line row and its own padding, as macOS draws them at the default
+    /// sidebar size (measured on the screenshot test's render).
+    static let headerHeight: CGFloat = 24, rowHeight: CGFloat = 50, listPadding: CGFloat = 36
+
+    /// The groups that scroll, in order, the empty ones left out: needs you (the runs that merely finished apart,
+    /// five then "N more"), then idle.
+    static func scrollingGroups(_ g: InboxView.Groups) -> [Group] {
+        let split = InboxView.splitNeedsYou(g.needsYou)
+        return [Group(label: "Needs you", items: split.action, preview: true),
+                Group(label: "Finished", items: split.finished, preview: false, cap: 5),
+                Group(label: "Idle", items: g.idle, preview: false)].filter { !$0.items.isEmpty }
+    }
+
+    /// The shelves pinned to the bottom, in order, the empty ones left out.
+    static func pinnedShelves(_ g: InboxView.Groups) -> [Group] {
+        [Group(label: "Working", items: g.working, preview: true),
+         Group(label: "Snoozed", items: g.snoozed, preview: true),
+         Group(label: "Settled", items: g.settled, preview: false)].filter { !$0.items.isEmpty }
+    }
+
+    /// Where ↑/↓ goes across the seam between the lists' visible rows: from the last scrolling row down to the first
+    /// shelf row, and back up. Nil elsewhere, where the list itself moves the selection.
+    static func crossing(from id: String?, down: Bool, groups: [String], shelves: [String]) -> String? {
+        guard let id else { return nil }
+        if down, id == groups.last { return shelves.first }
+        if !down, id == shelves.first { return groups.last }
+        return nil
+    }
+
+    /// The shelves' list height from its headers and visible rows, for before it has measured itself (its first
+    /// layout) and for macOS 14, which cannot measure a list. Off only at a non-default sidebar size.
+    static func estimatedContent(headers: Int, rows: Int) -> CGFloat {
+        CGFloat(headers) * headerHeight + CGFloat(rows) * rowHeight + listPadding
+    }
+
+    /// The pinned shelves' height: their content, up to `shelfShare` of the sidebar and never into the room the
+    /// scrolling groups keep between the tools and the footer (`chrome`).
+    static func shelfHeight(content: CGFloat, sidebar: CGFloat, chrome: CGFloat) -> CGFloat {
+        let cap = min(sidebar * shelfShare, sidebar - chrome - groupsMinimum)
+        return max(0, min(content, cap)).rounded()
+    }
+
     /// Whether a shelf is open in a new window: never, except a shelf the screenshot test opens.
     static func startsOpen(_ shelf: String) -> Bool {
         #if DEBUG
@@ -351,6 +473,20 @@ enum MacSidebarLayout {
     #if DEBUG
     nonisolated(unsafe) static var debugOpenShelves: Set<String> = []
     #endif
+}
+
+/// Reports a list's full height (its rows and its insets) on macOS 15+, which can read a scroll view's geometry.
+private struct MacListContentHeight: ViewModifier {
+    @Binding var height: CGFloat?
+
+    func body(content: Content) -> some View {
+        if #available(macOS 15, *) {
+            content.onScrollGeometryChange(for: CGFloat.self) { $0.contentSize.height + $0.contentInsets.top + $0.contentInsets.bottom }
+                action: { _, new in height = new }
+        } else {
+            content
+        }
+    }
 }
 
 /// A group heading as a disclosure button: small and muted, a step below the row titles, with room above it; the

@@ -28,12 +28,97 @@ final class MacScreenshotTests: XCTestCase {
         MacSidebarLayout.debugOpenShelves = []
     }
 
-    /// The sidebar as a new window shows it (shelves shut), then with Working opened.
+    /// The sidebar as a new window shows it (shelves shut), then with Working opened and its row selected. The inbox is
+    /// short, so the shelves must still sit at the bottom, right over the footer, not under Idle. Then a short window
+    /// with every shelf open: the shelves stop short of the groups' room and scroll inside.
     func testSidebarShelves() throws {
-        for look in ["light", "dark"] { try shoot(name: "sidebar-\(look)", look: look, thread: nil) }
+        for look in ["light", "dark"] { try shoot(name: "sidebar-\(look)", look: look, thread: nil, inspect: Self.shelvesPinned()) }
         MacSidebarLayout.debugOpenShelves = ["Working"]
-        try shoot(name: "sidebar-working-open-dark", look: "dark", thread: nil)
+        for look in ["light", "dark"] {
+            try shoot(name: "sidebar-working-open-\(look)", look: look, thread: "dev-lumen-app", inspect: Self.shelvesPinned())
+        }
+        MacSidebarLayout.debugOpenShelves = ["Working", "Snoozed", "Settled"]
+        try shoot(name: "sidebar-short-window-light", look: "light", thread: nil, height: 420, inspect: Self.shelvesPinned(capped: true))
     }
+
+    /// ↓ on the last scrolling row goes on into the open Working shelf, and ↑ comes back, scrolled into view: real key
+    /// events into the lists of a short window, where the last Idle row is out of sight.
+    func testArrowsCrossIntoThePinnedShelves() throws {
+        MacSidebarLayout.debugOpenShelves = ["Working"]
+        var selected: String? = "dev-lumen-onboarding" // the last Idle row of the fixtures
+        let state = MacAppState(isTestRun: false, isFixtureRun: true)
+        state.appModel.reloadConfiguration()
+        let root = MacWindowContent(thread: Binding(get: { selected }, set: { selected = $0 }), page: .constant(nil),
+                                    newSession: .constant(false), findPending: .constant(false))
+            .environmentObject(state)
+            .environmentObject(state.appModel)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 420), styleMask: [.titled, .resizable],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: root)
+        window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close(); state.inbox?.stop(); state.live?.stop() }
+        func spin(_ seconds: TimeInterval) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
+        let deadline = Date().addingTimeInterval(8)
+        while state.inbox?.items == nil, Date() < deadline { spin(0.1) }
+        spin(1)
+        // Ordered by their scroll views, which stay put when the lists scroll.
+        let lists = Self.sidebarLists(in: window.contentView!)
+        XCTAssertEqual(lists.count, 2)
+        guard lists.count == 2 else { return }
+        func press(_ key: Int, in list: NSView) throws {
+            window.makeFirstResponder(list)
+            let arrow = String(UnicodeScalar(key)!)
+            let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.numericPad, .function], timestamp: 0,
+                                                       windowNumber: window.windowNumber, context: nil, characters: arrow,
+                                                       charactersIgnoringModifiers: arrow, isARepeat: false,
+                                                       keyCode: key == NSDownArrowFunctionKey ? 125 : 126))
+            window.sendEvent(event)
+            spin(0.5)
+        }
+        try press(NSDownArrowFunctionKey, in: lists[0])
+        XCTAssertEqual(selected, "dev-lumen-app", "↓ goes on from Idle into Working")
+        XCTAssertTrue(window.firstResponder === lists[1], "the keyboard follows into the shelves")
+        // The selected row lies in its list's room: inside the scroll view, clear of the insets over it.
+        func inSight(_ table: NSTableView) -> Bool {
+            guard table.selectedRow >= 0, let scroll = table.enclosingScrollView else { return false }
+            let row = table.convert(table.rect(ofRow: table.selectedRow), to: nil), frame = scroll.convert(scroll.bounds, to: nil)
+            return row.minY >= frame.minY + scroll.contentInsets.bottom - 1 && row.maxY <= frame.maxY - scroll.contentInsets.top + 1
+        }
+        XCTAssertTrue(inSight(lists[1]), "the Working row is in sight")
+        try press(NSUpArrowFunctionKey, in: lists[1])
+        XCTAssertEqual(selected, "dev-lumen-onboarding", "↑ comes back to the last Idle row")
+        XCTAssertTrue(inSight(lists[0]), "the last Idle row is scrolled into sight")
+    }
+
+    /// The sidebar's two lists, the groups that scroll over the shelves pinned under them, ordered by their scroll views
+    /// (which stay put when the lists scroll).
+    private static func sidebarLists(in view: NSView) -> [NSTableView] {
+        func top(_ list: NSView) -> CGFloat { let v = list.enclosingScrollView ?? list; return v.convert(v.bounds, to: nil).maxY }
+        return views(in: view, named: "SwiftUIOutlineListView").compactMap { $0 as? NSTableView }.sorted { top($0) > top($1) }
+    }
+
+    /// The groups' list spans the column under its insets; the shelves' list sits in its bottom inset with only the
+    /// footer under it, as tall as its rows (or, `capped`, shorter and scrolling), at most `shelfShare` of the sidebar,
+    /// and leaving the groups at least `groupsMinimum` of visible room.
+    private static func shelvesPinned(capped: Bool = false) -> (NSView) throws -> Void { { frame in
+        let tables = sidebarLists(in: frame)
+        XCTAssertEqual(tables.count, 2, "expected the groups' list and the shelves' list")
+        guard tables.count == 2, let groups = tables[0].enclosingScrollView, let shelves = tables[1].enclosingScrollView else { return }
+        let (g, s) = (groups.convert(groups.bounds, to: nil), shelves.convert(shelves.bounds, to: nil))
+        XCTAssertEqual(s.maxY, g.minY + groups.contentInsets.bottom, accuracy: 1, "the shelves sit right under the groups' room")
+        XCTAssertGreaterThan(s.minY, g.minY + 20, "the footer is under the shelves")
+        if capped {
+            XCTAssertLessThan(s.height, tables[1].frame.height - 1, "capped: the shelves scroll inside")
+        } else {
+            XCTAssertEqual(s.height, tables[1].frame.height, accuracy: 1, "the shelves take their rows' height")
+        }
+        XCTAssertLessThanOrEqual(s.height, g.height * MacSidebarLayout.shelfShare + 1)
+        XCTAssertGreaterThanOrEqual(g.height - groups.contentInsets.top - groups.contentInsets.bottom, MacSidebarLayout.groupsMinimum - 1,
+                                    "the groups keep their room")
+    } }
 
     /// Dashboard mode on a few of its native screens.
     func testDashboard() throws {
@@ -74,14 +159,14 @@ final class MacScreenshotTests: XCTestCase {
         }
     }
 
-    private func shoot(name: String, look: String, thread: String?, page: MacDashboardPage? = nil, draft: String? = nil, width: CGFloat = 1440,
+    private func shoot(name: String, look: String, thread: String?, page: MacDashboardPage? = nil, draft: String? = nil, width: CGFloat = 1440, height: CGFloat = 900,
                        inspect: ((NSView) throws -> Void)? = nil) throws {
         let state = MacAppState(isTestRun: false, isFixtureRun: true)
         state.appModel.reloadConfiguration()
         let root = MacWindowContent(thread: .constant(thread), page: .constant(page), newSession: .constant(false), findPending: .constant(false))
             .environmentObject(state)
             .environmentObject(state.appModel)
-        let size = NSSize(width: width, height: 900)
+        let size = NSSize(width: width, height: height)
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
