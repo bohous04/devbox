@@ -2,6 +2,7 @@ import type { Context, Hono } from "hono";
 import type { MirrorResponse } from "../../shared/mirror";
 import type { LoggedEvent } from "../../shared/thread";
 import { SSE_PING_MS, sseFrame } from "./threadApi";
+import type { ThreadStore } from "./threadStore";
 import { MirrorSendRefused, type TranscriptMirror } from "./transcriptMirror";
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -25,6 +26,15 @@ export function registerMirrorRoutes(app: Hono, mirror: TranscriptMirror): void 
     return c.json({ error: r.error }, r.error === "unknown-session" ? 404 : 409);
   };
 
+  /** store() refuses a session that started ending after the check above: the same 409 as session(). */
+  const openStore = (c: Context, id: string): ThreadStore | Response => {
+    try { return mirror.store(id); }
+    catch (e) {
+      if ("error" in mirror.session(id)) return session(c, id)!;
+      throw e;
+    }
+  };
+
   app.get("/api/sessions/:id/mirror", async (c) => {
     const id = c.req.param("id");
     const bad = session(c, id);
@@ -41,7 +51,9 @@ export function registerMirrorRoutes(app: Hono, mirror: TranscriptMirror): void 
     // The session may have started ending while the pane was read.
     const after = session(c, id);
     if (after) return after;
-    return c.json({ snapshot: mirror.store(id).snapshot(opts), mirror: mirror.info(id) } satisfies MirrorResponse);
+    const store = openStore(c, id);
+    if (store instanceof Response) return store;
+    return c.json({ snapshot: store.snapshot(opts), mirror: mirror.info(id) } satisfies MirrorResponse);
   });
 
   app.post("/api/sessions/:id/mirror/messages", async (c) => {
@@ -71,7 +83,8 @@ export function registerMirrorRoutes(app: Hono, mirror: TranscriptMirror): void 
       if (n === null) return c.json({ error: `${what} must be a non-negative integer` }, 400);
       replayAfter ??= n; // the header (checked first) wins
     }
-    const store = mirror.store(id);
+    const store = openStore(c, id);
+    if (store instanceof Response) return store;
     const enc = new TextEncoder();
     let stop = () => {};
     const body = new ReadableStream<Uint8Array>({

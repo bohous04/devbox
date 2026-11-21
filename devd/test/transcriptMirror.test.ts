@@ -148,13 +148,13 @@ function setup(pane: Pane) {
   const exec = async (_c: string, cmd: string[], _t: number, stdin?: string): Promise<ExecResult> => {
     calls.push({ cmd, stdin });
     const ok = (stdout: string): ExecResult => ({ code: 0, stdout, stderr: "", timedOut: false });
-    if (cmd[2] === MIRROR_LOCATE) {
+    if (cmd[3] === MIRROR_LOCATE) {
       if (pane.noPane) return ok(locateOut({ pane: null }));
       const agent = pane.agent ?? "claude";
       return ok(locateOut({ pane: { pid: 10, inMode: pane.inMode ?? false }, procs: agent === "none" ? [[10, 1, "bash"]] : [[10, 1, "bash"], [20, 10, agent]],
         claude: agent === "claude" ? { "20": { sid: pane.sid, status: pane.status ?? "idle" } } : {} }));
     }
-    if (cmd[2] === MIRROR_SEND) return ok(pane.sendResult ?? '{"ok": true}');
+    if (cmd[3] === MIRROR_SEND) return ok(pane.sendResult ?? '{"ok": true}');
     throw new Error(`unexpected exec ${cmd.join(" ")}`);
   };
   const bus = new EventBus();
@@ -228,6 +228,20 @@ test("a rewritten transcript is read again from the start with a notice", async 
   expect(t.mirror.store(TMUX.id).lastSeq()).toBe(seq);
 });
 
+test("re-reading a replaced transcript does not duplicate its notices", async () => {
+  const t = setup({ sid: SID });
+  t.write(SID, fixtureLines());
+  await t.mirror.refresh(TMUX.id);
+  rmSync(join(t.projects, `${SID}.jsonl`));
+  t.write(SID, fixtureLines());
+  await t.mirror.refresh(TMUX.id);
+  const shown = items(t.mirror);
+  expect(shown.filter((i) => i === "notice: Ran /model")).toHaveLength(1);
+  expect(shown.filter((i) => i === "notice: Conversation compacted")).toHaveLength(1);
+  expect(shown.filter((i) => i.startsWith("notice: The transcript was rewritten"))).toHaveLength(1);
+  expect(shown.filter((i) => i === "user: List the files in the repository")).toHaveLength(1);
+});
+
 test("a transcript the agent replaced with a symlink is not followed", async () => {
   const t = setup({ sid: SID });
   const secret = join(t.root, "secret.txt");
@@ -253,13 +267,16 @@ test("the info names an exited agent, another agent and a waiting agent", async 
 });
 
 const refusal = async (p: Promise<unknown>) => { try { await p; } catch (e) { return e instanceof MirrorSendRefused ? e.code : `other: ${(e as Error).message}`; } return "sent"; };
-const typed = (t: ReturnType<typeof setup>) => t.calls.filter((c) => c.cmd[2] === MIRROR_SEND);
+const typed = (t: ReturnType<typeof setup>) => t.calls.filter((c) => c.cmd[3] === MIRROR_SEND);
 
 test("send refuses commands, control characters, an exited, waiting or unknown agent without typing", async () => {
   for (const [pane, text, want] of [
     [{ sid: SID }, "/exit", "bad-request"],
     [{ sid: SID }, "  !rm -rf x", "bad-request"],
     [{ sid: SID }, "# remember", "bad-request"],
+    [{ sid: SID }, "fine first line\n/exit", "bad-request"],
+    [{ sid: SID }, "notes\n   # heading", "bad-request"],
+    [{ sid: SID }, "notes\n  !ls", "bad-request"],
     [{ sid: SID, agent: "none" }, "hi", "agent-not-running"],
     [{ sid: SID, noPane: true }, "hi", "agent-not-running"],
     [{ sid: SID, status: "waiting" }, "hi", "agent-waiting-in-terminal"],
@@ -277,16 +294,17 @@ test("send refuses commands, control characters, an exited, waiting or unknown a
 test("send types the text through the send script's stdin and maps its refusals", async () => {
   const pane: Pane = { sid: SID };
   const t = setup(pane);
-  expect(await refusal(t.mirror.send(TMUX.id, "line one\nline 'two'"))).toBe("sent");
+  expect(await refusal(t.mirror.send(TMUX.id, "line one\r\nline 'two' / not a command"))).toBe("sent");
   expect(typed(t)).toHaveLength(1);
-  expect(typed(t)[0]!.stdin).toBe("line one\nline 'two'");
-  expect(typed(t)[0]!.cmd.slice(3, 5)).toEqual(["main", "20"]);
+  expect(typed(t)[0]!.stdin).toBe("line one\nline 'two' / not a command");
+  expect(typed(t)[0]!.cmd.slice(0, 3)).toEqual(["python3", "-I", "-c"]);
+  expect(typed(t)[0]!.cmd.slice(4, 6)).toEqual(["main", "20"]);
   pane.sendResult = '{"error": "pane-changed"}';
   expect(await refusal(t.mirror.send(TMUX.id, "again"))).toBe("pane-changed");
   pane.sendResult = '{"error": "terminal-has-draft"}';
   expect(await refusal(t.mirror.send(TMUX.id, "again"))).toBe("terminal-has-draft");
-  pane.sendResult = '{"error": "dialog-after-paste"}';
-  expect(await refusal(t.mirror.send(TMUX.id, "again"))).toBe("agent-waiting-in-terminal");
+  pane.sendResult = '{"error": "not-submitted"}';
+  expect(await refusal(t.mirror.send(TMUX.id, "again"))).toBe("pane-changed");
   pane.sendResult = "garbage";
   expect(await refusal(t.mirror.send(TMUX.id, "again"))).toBe("pane-changed");
 });
@@ -379,7 +397,8 @@ exec(compile(script, "<mirror>", "exec"), {"__name__": "__main__"})
 const RULE = "─".repeat(40);
 const READY = `⏺ done\n${RULE}\n\x1b[39m❯\u00a0\x1b[2mTry "create a util"\x1b[0m\n${RULE}\n  Opus [high]\n`;
 
-function fakeContainer(opts: { status: string; procStart?: string; inMode?: boolean; screen?: string; screenAfterPaste?: string }) {
+/** `onLoad`/`onPaste`: shell run by the fake tmux on load-buffer/paste-buffer (`$PROC` is the fake /proc). */
+function fakeContainer(opts: { status: string; procStart?: string; inMode?: boolean; screen?: string; screenAfterPaste?: string; onLoad?: string; onPaste?: string }) {
   const dir = tmp("mirror-py-");
   const proc = join(dir, "proc");
   const home = join(dir, "home");
@@ -397,7 +416,7 @@ function fakeContainer(opts: { status: string; procStart?: string; inMode?: bool
   writeFileSync(join(dir, "screen"), opts.screen ?? READY);
   writeFileSync(join(dir, "screen-after"), opts.screenAfterPaste ?? `${RULE}\n❯ pasted\n${RULE}\n`);
   // capture-pane shows `screen` until a paste, then `screen-after`.
-  writeFileSync(join(bin, "tmux"), `#!/bin/sh\necho "$@" >> '${log}'\ncase "$1" in\n  display-message) printf '10\\t${opts.inMode ? 1 : 0}\\n' ;;\n  load-buffer) cat > '${join(dir, "pasted")}' ;;\n  paste-buffer) cp '${join(dir, "screen-after")}' '${join(dir, "screen")}' ;;\n  capture-pane) cat '${join(dir, "screen")}' ;;\nesac\n`, { mode: 0o755 });
+  writeFileSync(join(bin, "tmux"), `#!/bin/sh\necho "$@" >> '${log}'\ncase "$1" in\n  display-message) printf '10\\t${opts.inMode ? 1 : 0}\\n' ;;\n  load-buffer) cat > '${join(dir, "pasted")}'; PROC='${proc}'; ${opts.onLoad ?? ":"} ;;\n  paste-buffer) cp '${join(dir, "screen-after")}' '${join(dir, "screen")}'; PROC='${proc}'; ${opts.onPaste ?? ":"} ;;\n  capture-pane) cat '${join(dir, "screen")}' ;;\nesac\n`, { mode: 0o755 });
   const run = (script: string, args: string[], stdin = "") => {
     const r = Bun.spawnSync(["python3", "-I", "-c", HARNESS, script, ...args], {
       stdin: Buffer.from(stdin), env: { FAKE_PROC: proc, PATH: `${bin}:/usr/bin:/bin` },
@@ -452,6 +471,18 @@ test.skipIf(!Bun.which("python3"))("MIRROR_SEND reads the screen: a draft, a dia
   }
   // A dialog that opens while the paste lands: Enter is not pressed.
   const late = fakeContainer({ status: "idle", screenAfterPaste: "Enter to confirm · Esc to cancel\n" });
-  expect(late.run(MIRROR_SEND, ["main", "20", "claude"], "x").out.trim()).toBe('{"error": "dialog-after-paste"}');
+  expect(late.run(MIRROR_SEND, ["main", "20", "claude"], "x").out.trim()).toBe('{"error": "not-submitted"}');
   expect(late.tmuxLog()).not.toContain("send-keys");
+});
+
+test.skipIf(!Bun.which("python3"))("MIRROR_SEND: an agent that exits during the send gets no paste or no Enter, so nothing reaches the shell", () => {
+  // Exits while the buffer loads: the check before the paste stops it, and the buffer is dropped.
+  const atLoad = fakeContainer({ status: "idle", onLoad: 'rm -rf "$PROC/20" "$PROC/30"' });
+  expect(atLoad.run(MIRROR_SEND, ["main", "20", "claude"], "x").out.trim()).toBe('{"error": "pane-changed"}');
+  expect(atLoad.tmuxLog()).not.toContain("paste-buffer");
+  expect(atLoad.tmuxLog()).toContain("delete-buffer");
+  // Exits while the paste lands (the shell got the bracketed paste, which it does not run): no Enter, no other key.
+  const atPaste = fakeContainer({ status: "idle", onPaste: 'rm -rf "$PROC/20" "$PROC/30"', screenAfterPaste: "dev@box:/workspace$ x" });
+  expect(atPaste.run(MIRROR_SEND, ["main", "20", "claude"], "x").out.trim()).toBe('{"error": "not-submitted"}');
+  expect(atPaste.tmuxLog()).not.toContain("send-keys");
 });

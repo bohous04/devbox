@@ -83,6 +83,9 @@ def locate(session):
 `;
 
 export const MIRROR_LOCATE = `# MIRROR_LOCATE${PY_LOCATE_FN}
+import signal
+# Below the docker exec timeout (10 s).
+signal.alarm(8)
 print(json.dumps(locate(sys.argv[1])))
 `;
 
@@ -92,11 +95,15 @@ print(json.dumps(locate(sys.argv[1])))
 // (never through a shell) as a bracketed paste, so its newlines do not submit; Enter submits it unless a dialog
 // opened meanwhile.
 //
+// Multi-line text relies on Claude enabling bracketed paste (verified on 2.1.325: a pasted multi-line text stays one
+// draft). tmux exposes no way to check that per pane, so without it each line would be submitted on its own; that is
+// why send() refuses a command at the start of ANY line, not only the first.
+//
 // The screen: Claude's selection dialogs (trust, question, permission) end with a "Enter to confirm/select … Esc to
 // cancel" footer; its prompt box is a `❯` line right below a rule, running to the next rule, and the placeholder in an
 // empty prompt is dim (`\e[2m` up to a reset). Verified on Claude Code 2.1.325.
 export const MIRROR_SEND = String.raw`# MIRROR_SEND${PY_LOCATE_FN}
-import re, time, uuid
+import re, signal, time, uuid
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
 DIM = re.compile(r"\x1b\[2m.*?(?:\x1b\[0?m|\x1b\[22m|$)")
@@ -125,44 +132,63 @@ def screen(target):
         return "draft" if any(t.strip() for t in typed) else "ready"
     return "unknown"
 
+def fail(code):
+    print(json.dumps({"error": code}))
+    sys.exit(0)
+
+def check(session, expected, agents):
+    """None when the pane still runs the expected claude, not waiting and not scrolled back; else the refusal."""
+    now = locate(session)
+    pane = now["pane"]
+    if pane is None:
+        return "pane-changed"
+    children, comm = {}, {}
+    for pid, ppid, c in now["procs"]:
+        children.setdefault(ppid, []).append(pid)
+        comm[pid] = c
+    nearest, queue, seen = None, [pane["pid"]], set()
+    while queue:
+        p = queue.pop(0)
+        if p in seen:
+            continue
+        seen.add(p)
+        if comm.get(p) in agents:
+            nearest = p
+            break
+        queue.extend(sorted(children.get(p, [])))
+    if nearest != expected:
+        return "pane-changed"
+    if (now["claude"].get(str(expected)) or {}).get("status") == "waiting":
+        return "agent-waiting-in-terminal"
+    if pane["inMode"]:
+        return "terminal-scrolled"
+    return None
+
+# Below the docker exec timeout (15 s), so a hung tmux never leaves this running to type later.
+signal.alarm(12)
 session, expected, agents = sys.argv[1], int(sys.argv[2]), set(sys.argv[3].split(","))
 text = sys.stdin.buffer.read()
-now = locate(session)
-pane = now["pane"]
-if pane is None:
-    print(json.dumps({"error": "pane-changed"})); sys.exit(0)
-children = {}
-comm = {}
-for pid, ppid, c in now["procs"]:
-    children.setdefault(ppid, []).append(pid)
-    comm[pid] = c
-nearest, queue, seen = None, [pane["pid"]], set()
-while queue:
-    p = queue.pop(0)
-    if p in seen:
-        continue
-    seen.add(p)
-    if comm.get(p) in agents:
-        nearest = p
-        break
-    queue.extend(sorted(children.get(p, [])))
-if nearest != expected:
-    print(json.dumps({"error": "pane-changed"})); sys.exit(0)
-if (now["claude"].get(str(expected)) or {}).get("status") == "waiting":
-    print(json.dumps({"error": "agent-waiting-in-terminal"})); sys.exit(0)
-if pane["inMode"]:
-    print(json.dumps({"error": "terminal-scrolled"})); sys.exit(0)
 target = "=" + session + ":"
+refused = check(session, expected, agents)
+if refused:
+    fail(refused)
 state = screen(target)
 if state != "ready":
-    print(json.dumps({"error": {"dialog": "agent-waiting-in-terminal", "draft": "terminal-has-draft"}.get(state, "terminal-not-ready")})); sys.exit(0)
+    fail({"dialog": "agent-waiting-in-terminal", "draft": "terminal-has-draft"}.get(state, "terminal-not-ready"))
 buf = "devd-mirror-" + uuid.uuid4().hex
 subprocess.run(["tmux", "load-buffer", "-b", buf, "-"], input=text, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+# The last check before the paste: the agent may have exited while the buffer loaded.
+refused = check(session, expected, agents)
+if refused:
+    subprocess.run(["tmux", "delete-buffer", "-b", buf], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    fail(refused)
 subprocess.run(["tmux", "paste-buffer", "-p", "-d", "-b", buf, "-t", target], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 # Claude takes the paste asynchronously; an Enter right behind it can land before the pasted text.
 time.sleep(0.3)
-if screen(target) == "dialog":
-    print(json.dumps({"error": "dialog-after-paste"})); sys.exit(0)
+# Enter only into the same claude whose prompt now holds the paste. Otherwise nothing more is typed: the pasted text
+# is not cleared either, since a key sent to whatever now has the pane (a shell, a dialog) is exactly what this avoids.
+if check(session, expected, agents) or screen(target) != "draft":
+    fail("not-submitted")
 subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 print(json.dumps({"ok": True}))
 `;
@@ -387,8 +413,8 @@ export const SEND_MESSAGES: Record<MirrorSendError, string> = {
   "unsupported-host": "Chat view isn't supported on InstaBox sessions yet.",
   "pane-changed": "The terminal changed while the message was being sent; nothing was typed. Check the terminal.",
 };
-/** MIRROR_SEND's own outcome beyond the shared codes. */
-const DIALOG_AFTER_PASTE = "The agent opened a prompt while the message was being typed; it was not submitted. Check the terminal.";
+/** MIRROR_SEND's own outcome beyond the shared codes: the paste went in, Enter did not. */
+const NOT_SUBMITTED = "The terminal changed while the message was being typed; it was not submitted and may still be in the terminal's prompt. Check the terminal.";
 
 export interface MirrorDeps {
   db: Parameters<typeof getSession>[0];
@@ -498,7 +524,7 @@ export class TranscriptMirror {
   }
 
   private async locate(s: SessionRow): Promise<PaneAgent | null> {
-    const r = await this.d.exec(s.container, ["python3", "-c", MIRROR_LOCATE, MIRROR_PANE], 10_000);
+    const r = await this.d.exec(s.container, ["python3", "-I", "-c", MIRROR_LOCATE, MIRROR_PANE], 10_000);
     if (r.code !== 0 || r.timedOut) return null;
     return parseLocate(r.stdout);
   }
@@ -614,7 +640,10 @@ export class TranscriptMirror {
     const now = this.now();
     const logged: LoggedEvent[] = [
       ...pre.map((event): LoggedEvent => ({ seq: ++seq, ts: now, event })),
-      ...mapped.map((e): LoggedEvent => ({ seq: ++seq, ts: e.ts, event: e.event })),
+      // A re-read (rewritten transcript, a conversation resumed again) maps the same entries again: their items
+      // and runs dedupe by id in the store, a notice has none, so it is matched by text and entry time.
+      ...mapped.filter((e) => e.event.type !== "bridge.notice" || !store.hasNotice(e.event.text, e.ts))
+        .map((e): LoggedEvent => ({ seq: ++seq, ts: e.ts, event: e.event })),
     ];
     store.applyBatch(logged, JSON.stringify(cur));
     for (const e of logged) this.d.bus.publish(`mirror:${id}`, e);
@@ -651,8 +680,8 @@ export class TranscriptMirror {
     if (/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(text)) {
       throw new MirrorSendRefused("bad-request", "text must not contain control characters other than newlines and tabs");
     }
-    if (/^[/!#]/.test(text.trimStart())) {
-      throw new MirrorSendRefused("bad-request", "Commands (starting with /, ! or #) can't be sent from the chat; type them in the terminal.");
+    if (text.split("\n").some((line) => /^[/!#]/.test(line.trimStart()))) {
+      throw new MirrorSendRefused("bad-request", "Commands (a line starting with /, ! or #) can't be sent from the chat; type them in the terminal.");
     }
     const r = this.session(id);
     if ("error" in r) throw new MirrorSendRefused(r.error, r.error);
@@ -669,7 +698,7 @@ export class TranscriptMirror {
         const b = info.sendBlock ?? { code: "agent-not-running" as const, message: SEND_MESSAGES["agent-not-running"] };
         throw new MirrorSendRefused(b.code, b.message);
       }
-      const sent = await this.d.exec(s.container, ["python3", "-c", MIRROR_SEND, MIRROR_PANE, String(pane.pid), AGENT_RUNTIMES.join(",")], 15_000, text);
+      const sent = await this.d.exec(s.container, ["python3", "-I", "-c", MIRROR_SEND, MIRROR_PANE, String(pane.pid), AGENT_RUNTIMES.join(",")], 15_000, text);
       let out: { ok?: unknown; error?: unknown } | null = null;
       try { out = JSON.parse(sent.stdout); } catch { out = null; }
       if (sent.code !== 0 || sent.timedOut || out === null) {
@@ -677,7 +706,7 @@ export class TranscriptMirror {
         throw new MirrorSendRefused("pane-changed", "devd could not confirm the message reached the terminal. Check the terminal before sending again.");
       }
       if (out.ok !== true) {
-        if (out.error === "dialog-after-paste") throw new MirrorSendRefused("agent-waiting-in-terminal", DIALOG_AFTER_PASTE);
+        if (out.error === "not-submitted") throw new MirrorSendRefused("pane-changed", NOT_SUBMITTED);
         const code = typeof out.error === "string" && out.error in SEND_MESSAGES ? out.error as MirrorSendError : "pane-changed";
         throw new MirrorSendRefused(code, SEND_MESSAGES[code]);
       }

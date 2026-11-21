@@ -160,6 +160,11 @@ export class ThreadStore {
     })();
   }
 
+  /** A notice with this text at this time exists (the mirror's re-read check). */
+  hasNotice(text: string, ts: number): boolean {
+    return this.db.query(`SELECT 1 FROM items WHERE kind='notice' AND text=? AND ts=? LIMIT 1`).get(text, ts) !== null;
+  }
+
   /** The cursor the last applyBatch saved; null before one. */
   mirrorCursor(): string | null {
     if (!this.db.query(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='mirror_cursor'`).get()) return null;
