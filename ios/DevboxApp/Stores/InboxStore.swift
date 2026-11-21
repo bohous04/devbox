@@ -146,8 +146,23 @@ enum InboxView {
     }
 
     /// The meta line's trailing parts after the state, each set off by a "·": the agent, and "tmux" for a terminal.
-    static func metaTail(_ i: InboxItem) -> [String] {
-        [AgentProfiles.profile(for: AgentName(rawValue: i.agent)).short] + (i.runtime == .tmux ? ["tmux"] : [])
+    static func metaTail(_ i: InboxItem, showAgent: Bool) -> [String] {
+        (showAgent ? [AgentProfiles.profile(for: AgentName(rawValue: i.agent)).short] : []) + (i.runtime == .tmux ? ["tmux"] : [])
+    }
+
+    /// Whether the rows shown use more than one agent: only then does a row name its agent (inboxView.ts
+    /// mixedAgents). With one agent everywhere the label or glyph says nothing.
+    static func mixedAgents(_ items: [InboxItem]) -> Bool { Set(items.map(\.agent)).count > 1 }
+
+    /// What a row says of its branch: devd's own `session/<repo>-<n>` repeats the repo, so only "#n", and nothing
+    /// when the title already ends in it ("api #14"); any other branch as recorded; nil without one.
+    static func branchLabel(_ i: InboxItem) -> String? {
+        guard let branch = i.branch, !branch.isEmpty else { return nil }
+        let own = "session/\(i.repo)-"
+        guard branch.hasPrefix(own) else { return branch }
+        let n = branch.dropFirst(own.count)
+        guard !n.isEmpty, n.allSatisfy(\.isASCII), n.allSatisfy(\.isNumber) else { return branch }
+        return rowTitle(i).hasSuffix(" #\(n)") ? nil : "#\(n)"
     }
 
     /// Compact elapsed time: "now", "7m", "3h", "2d".

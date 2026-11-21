@@ -27,6 +27,7 @@ struct InboxScreen: View {
         Group {
             if let items = store.items {
                 content(InboxView.group(items))
+                    .environment(\.inboxShowsAgent, InboxView.mixedAgents(items))
             } else if let error = store.loadError {
                 ContentUnavailableView("Can't load the inbox", systemImage: "tray", description: Text(error))
             } else {
@@ -262,10 +263,21 @@ enum InboxTone {
 
 /// One row, the dashboard's shape: a meta line (project badge and path, state, time, agent), the title, and in
 /// groups where the latest message is the point (Needs you, Working, Snoozed) a dimmer preview line.
+/// Whether inbox rows name their agent (InboxView.mixedAgents over the rows shown), set where the list is built.
+private struct InboxShowsAgentKey: EnvironmentKey { static let defaultValue = true }
+
+extension EnvironmentValues {
+    var inboxShowsAgent: Bool {
+        get { self[InboxShowsAgentKey.self] }
+        set { self[InboxShowsAgentKey.self] = newValue }
+    }
+}
+
 struct InboxRow: View {
     let item: InboxItem
     let now: Int
     let preview: Bool
+    @Environment(\.inboxShowsAgent) private var showAgent
     /// The project badge's letters: small, but they grow with Dynamic Type.
     @ScaledMetric(relativeTo: .caption2) private var badgeText: CGFloat = 9
 
@@ -298,7 +310,7 @@ struct InboxRow: View {
                     status(parts)
                     dot
                 }
-                ForEach(Array(InboxView.metaTail(item).enumerated()), id: \.offset) { n, part in
+                ForEach(Array(InboxView.metaTail(item, showAgent: showAgent).enumerated()), id: \.offset) { n, part in
                     if n > 0 { dot }
                     Text(part).fixedSize()
                 }
@@ -321,7 +333,7 @@ struct InboxRow: View {
         .padding(.leading, 12)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Self.spokenLabel(item, now: now, title: title, detail: preview ? detail : ""))
+        .accessibilityLabel(Self.spokenLabel(item, now: now, title: title, detail: preview ? detail : "", showAgent: showAgent))
     }
 
     private var dot: some View { Text("·").opacity(0.5).accessibilityHidden(true) }
@@ -348,11 +360,11 @@ struct InboxRow: View {
 
     /// One spoken line per row: title, state in words, when, where, which agent. The Mac's sidebar row also shows it
     /// as its tooltip.
-    static func spokenLabel(_ item: InboxItem, now: Int, title: String, detail: String) -> String {
+    static func spokenLabel(_ item: InboxItem, now: Int, title: String, detail: String, showAgent: Bool) -> String {
         let a = item.attention
         let state = InboxView.reasonLabel(a.reason)
         let when = a.until.map { "snoozed until \(Self.untilLabel($0))" } ?? (a.since > 0 ? Format.agoLabel(Double(now - a.since)) : "")
-        let agent = AgentProfiles.profile(for: AgentName(rawValue: item.agent)).short
+        let agent = showAgent ? AgentProfiles.profile(for: AgentName(rawValue: item.agent)).short : ""
         return [title, state, when, "\(item.project)/\(item.repo)", agent, item.runtime == .tmux ? "tmux" : "", detail == state ? "" : detail]
             .filter { !$0.isEmpty }.joined(separator: ", ")
     }

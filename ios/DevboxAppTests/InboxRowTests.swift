@@ -88,9 +88,40 @@ final class InboxRowTests: XCTestCase {
         let json: [String: Any] = ["sessionId": "dev-p-r-3", "runtime": "tmux", "title": "p/r", "project": "p", "repo": "r", "agent": "claude",
                                    "attention": ["section": "idle", "since": 1, "reason": NSNull()], "lastText": NSNull()]
         let tmux = try JSONDecoder().decode(InboxItem.self, from: JSONSerialization.data(withJSONObject: json))
-        XCTAssertEqual(InboxView.metaTail(tmux).count, 2)
-        XCTAssertEqual(InboxView.metaTail(tmux).last, "tmux")
-        XCTAssertEqual(InboxView.metaTail(try item("a", "idle", reason: nil, since: 1)).count, 1)
+        XCTAssertEqual(InboxView.metaTail(tmux, showAgent: true), ["Claude", "tmux"])
+        XCTAssertEqual(InboxView.metaTail(try item("a", "idle", reason: nil, since: 1), showAgent: true), ["Claude"])
+        // One agent on every visible row says nothing: left out.
+        XCTAssertEqual(InboxView.metaTail(tmux, showAgent: false), ["tmux"])
+    }
+
+    /// inboxView.test.ts mixedAgents: the agent is shown only while the visible rows use more than one.
+    func testAgentShownOnlyWhenTheVisibleRowsMixAgents() throws {
+        let claude = try item("a", "idle", reason: nil, since: 1)
+        XCTAssertFalse(InboxView.mixedAgents([claude, try item("b", "idle", reason: nil, since: 1)]))
+        XCTAssertFalse(InboxView.mixedAgents([]))
+        let json: [String: Any] = ["sessionId": "c", "runtime": "chat", "title": "p/r", "project": "p", "repo": "r", "agent": "codex",
+                                   "attention": ["section": "idle", "since": 1, "reason": NSNull()], "lastText": NSNull()]
+        let codex = try JSONDecoder().decode(InboxItem.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertTrue(InboxView.mixedAgents([claude, codex]))
+    }
+
+    /// devd's own branch (`session/<repo>-<n>`) says only its number; nothing when the title already ends in it.
+    func testBranchLabelKeepsWhatDistinguishes() throws {
+        func branched(_ branch: String?, title: String = "p/r", id: String = "dev-p-r-14", topic: String? = nil) throws -> InboxItem {
+            var json: [String: Any] = ["sessionId": id, "runtime": "tmux", "title": title, "project": "p", "repo": "r", "agent": "claude",
+                                       "attention": ["section": "idle", "since": 1, "reason": NSNull()], "lastText": NSNull()]
+            if let branch { json["branch"] = branch }
+            if let topic { json["topic"] = topic }
+            return try JSONDecoder().decode(InboxItem.self, from: JSONSerialization.data(withJSONObject: json))
+        }
+        XCTAssertEqual(InboxView.branchLabel(try branched("session/r-14", title: "Boosting")), "#14")
+        XCTAssertEqual(InboxView.branchLabel(try branched("session/r-14")), nil, "the title is already “r #14”")
+        XCTAssertEqual(InboxView.branchLabel(try branched("retry-queue")), "retry-queue")
+        XCTAssertEqual(InboxView.branchLabel(try branched("main", title: "Boosting")), "main")
+        XCTAssertEqual(InboxView.branchLabel(try branched("session/other-3", title: "Boosting")), "session/other-3")
+        XCTAssertEqual(InboxView.branchLabel(try branched("feature/x-12", title: "Boosting")), "feature/x-12")
+        XCTAssertNil(InboxView.branchLabel(try branched(nil)))
+        XCTAssertNil(InboxView.branchLabel(try branched("")))
     }
 
     func testStatusParts() throws {

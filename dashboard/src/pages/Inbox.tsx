@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { createContext, useContext, useState } from "react";
 import { Link } from "react-router-dom";
 import { AlarmClock, CircleAlert, CircleCheck, Ellipsis, LoaderCircle, MessageCircleQuestion } from "lucide-react";
 import type { InboxItem } from "../../../shared/thread";
@@ -9,7 +9,7 @@ import {
 import { api } from "../api";
 import { AppPage, Chevron, Collapse, RowsSkeleton } from "../components/primitives";
 import { agoLabel } from "../format";
-import { groupInbox, inboxHref, plainPreview, projectBadge, reasonLabel, rowTitle, shelfBlock, snoozeTimes, statusParts, splitNeedsYou, upsertInbox, type StatusTone } from "../inboxView";
+import { groupInbox, inboxHref, mixedAgents, plainPreview, projectBadge, reasonLabel, rowTitle, shelfBlock, snoozeTimes, statusParts, splitNeedsYou, upsertInbox, type StatusTone } from "../inboxView";
 import { cn } from "@/lib/utils";
 import { profileFor } from "../newSession";
 import { useNow } from "../store";
@@ -119,7 +119,11 @@ const Dot = () => <span className="flex-none opacity-50" aria-hidden="true">·</
 
 /** One fixed shape per group: a meta line (project, state, time, agent), the title, and in groups where the latest
  *  message is the point (Needs you, Working, Snoozed) a dimmer preview line. */
+/** Whether rows name their agent (mixedAgents over the whole inbox). */
+const ShowAgent = createContext(true);
+
 function Row({ item, now, onItem, preview }: { item: InboxItem; now: number; onItem: (i: InboxItem) => void; preview: boolean }) {
+  const showAgent = useContext(ShowAgent);
   const a = item.attention;
   const badge = projectBadge(item.project);
   const title = rowTitle(item);
@@ -139,9 +143,8 @@ function Row({ item, now, onItem, preview }: { item: InboxItem; now: number; onI
             {badge.letters}
           </span>
           <span className="min-w-0 truncate">{item.project}<span className="opacity-60"> / </span>{item.repo}</span>
-          <Dot />
-          {parts && <><Status item={item} now={now} parts={parts} /><Dot /></>}
-          <span className="flex-none">{profileFor(item.agent).short}</span>
+          {parts && <><Dot /><Status item={item} now={now} parts={parts} /></>}
+          {showAgent && <><Dot /><span className="flex-none">{profileFor(item.agent).short}</span></>}
           {item.runtime === "tmux" && <span className="flex-none opacity-80"><span className="sr-only">in </span>tmux</span>}
         </span>
         {/* Groups below Needs you get a quieter title so they read as background. */}
@@ -240,6 +243,7 @@ export function Inbox() {
       )}
       {!g ? (pollError ? <p role="alert" className="text-sm text-destructive">{pollError}</p> : <RowsSkeleton rows={4} />) : (
         <>
+          <ShowAgent.Provider value={mixedAgents(items!)}>
           <div className="-mx-3 max-w-[720px]">
             {split!.action.length === 0 && (
               <p className="mb-5 flex min-h-9 items-center gap-2 px-3 text-sm text-muted-foreground">
@@ -257,6 +261,7 @@ export function Inbox() {
               </div>
             )}
           </div>
+          </ShowAgent.Provider>
         </>
       )}
     </AppPage>

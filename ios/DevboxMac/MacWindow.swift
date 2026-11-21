@@ -96,8 +96,13 @@ struct MacWindowContent: View {
                     MacThreadDetail(threadId: id, client: client, inbox: inbox)
                         .id("\(id)|\(appModel.clientIdentity)")
                 } else {
-                    ContentUnavailableView("No thread selected", systemImage: "bubble.left.and.bubble.right",
-                                           description: Text("Pick a session in the inbox."))
+                    ContentUnavailableView {
+                        Label("No thread open", systemImage: "bubble.left.and.bubble.right").symbolRenderingMode(.hierarchical)
+                    } description: {
+                        Text("Pick a thread on the left, or start one with ⌘N.")
+                    } actions: {
+                        Button("New Session") { newSession = true }
+                    }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(Theme.C.background)
                         .toolbarBackground(Theme.C.background, for: .windowToolbar)
@@ -171,6 +176,7 @@ struct MacInboxSidebar: View {
                         Text("No session matches “\(query)”").font(.callout).foregroundStyle(Theme.C.mutedForeground)
                     } else {
                         groups(InboxView.group(shown), now: InboxView.ms(context.date))
+                            .environment(\.inboxShowsAgent, InboxView.mixedAgents(shown))
                     }
                 } else if let error = store.loadError {
                     Label { Text("Can't load the inbox: \(error)") } icon: { Image(systemName: "exclamationmark.triangle") }
@@ -379,13 +385,14 @@ private struct MacGroupHead: View {
 }
 
 /// A sidebar row: the title with its state on the right (one coloured word when the row needs you, otherwise how long
-/// ago, after a live dot while it works) and one muted line (`secondLine`) ending in the agent's glyph. Every title is
-/// regular: a row that needs you stands out by its coloured word. The agent's name, "tmux" and the message are also
-/// in the tooltip and the spoken label.
+/// ago, after a live dot while it works) and one muted line (`secondLine`) ending in the agent's glyph while the rows
+/// shown mix agents. Every title is regular: a row that needs you stands out by its coloured word. "tmux", the message
+/// and (with mixed agents) the agent's name are also in the tooltip and the spoken label.
 struct MacInboxRow: View {
     let item: InboxItem
     let now: Int
     let preview: Bool
+    @Environment(\.inboxShowsAgent) private var showAgent
 
     /// The word for a row that needs you, by its reason; nil for every other row (it shows its age).
     static func word(_ i: InboxItem) -> (text: String, tone: InboxView.Tone)? {
@@ -414,12 +421,12 @@ struct MacInboxRow: View {
     }
 
     /// The second line. A row that needs you says what it asks (the message, or the reason without one): that is
-    /// the point of the row. Any other row says where it runs: the repo and the branch devd recorded, else the
-    /// latest message in the groups about it.
+    /// the point of the row. Any other row says where it runs: the repo and what distinguishes its branch
+    /// (InboxView.branchLabel), else the latest message in the groups about it. The tooltip has the full branch.
     static func secondLine(_ i: InboxItem, detail: String) -> String {
         if word(i) != nil, !detail.isEmpty { return "\(i.repo)  ·  \(detail)" }
         let place = "\(i.project)/\(i.repo)"
-        if let branch = i.branch, !branch.isEmpty { return "\(place)  ·  \(branch)" }
+        if let branch = InboxView.branchLabel(i) { return "\(place)  ·  \(branch)" }
         return detail.isEmpty ? place : "\(place)  ·  \(detail)"
     }
 
@@ -458,7 +465,7 @@ struct MacInboxRow: View {
         let title = InboxView.rowTitle(item)
         let message = item.lastText.map(InboxView.plainPreview) ?? ""
         let detail = preview ? (message.isEmpty ? InboxView.reasonLabel(item.attention.reason) : message) : ""
-        let spoken = InboxRow.spokenLabel(item, now: now, title: title, detail: detail)
+        let spoken = InboxRow.spokenLabel(item, now: now, title: title, detail: detail, showAgent: showAgent)
             + (item.branch.map { $0.isEmpty ? "" : ", branch \($0)" } ?? "")
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -484,9 +491,11 @@ struct MacInboxRow: View {
                     .foregroundStyle(Self.style(.secondary))
                     .lineLimit(1)
                 Spacer(minLength: 0)
-                Image(systemName: Self.agentGlyph(item.agent)).font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Self.style(.tertiary))
-                    .accessibilityHidden(true)
+                if showAgent {
+                    Image(systemName: Self.agentGlyph(item.agent)).font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Self.style(.tertiary))
+                        .accessibilityHidden(true)
+                }
             }
         }
         .padding(.vertical, 5)
