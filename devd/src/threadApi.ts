@@ -54,7 +54,7 @@ function commandError(c: Context, e: unknown): Response {
   throw e;
 }
 
-const sseFrame = (event: string, data: unknown, id?: number) =>
+export const sseFrame = (event: string, data: unknown, id?: number) =>
   `event: ${event}\n${id === undefined ? "" : `id: ${id}\n`}data: ${JSON.stringify(data)}\n\n`;
 
 /** Chat thread routes, the inbox and the SSE stream. Registered by createApp after its middleware. */

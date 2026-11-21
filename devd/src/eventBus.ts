@@ -1,4 +1,4 @@
-export type BusTopic = "inbox" | `thread:${string}`;
+export type BusTopic = "inbox" | `thread:${string}` | `mirror:${string}`;
 export type BusListener = (topic: BusTopic, data: unknown) => void;
 
 /** In-process fan-out from devd's event sources (bridge links, the inbox) to SSE connections. Synchronous:

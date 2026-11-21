@@ -20,6 +20,8 @@ import { discoverDatabaseTargets, listCoolifyDatabases, type CoolifyInstance } f
 import { addDatabase, type Engine } from "./prodDb";
 import { getOperation, listOperations, proposeOperation, setOperationStatus } from "./operationStore";
 import type { Database } from "bun:sqlite";
+import { registerMirrorRoutes } from "./mirrorApi";
+import type { TranscriptMirror } from "./transcriptMirror";
 import { createBridge, terminalGuard, terminalTarget, type Bridge, type SpawnPty } from "./terminal";
 import { execInContainer } from "./docker";
 import { createReadStream, mkdtempSync, openSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -211,6 +213,8 @@ export interface ApiDeps { mgr: SessionManager; db: Database; cfg: DevConfig; ro
   untilReset?: ThreadApiDeps["untilReset"];
   bridgeVersion?: ThreadApiDeps["bridgeVersion"];
   switcher?: ThreadApiDeps["switcher"];
+  /** The Chat view of tmux sessions (transcriptMirror.ts); without it its routes are not registered. */
+  mirror?: TranscriptMirror;
   // "Update now": status of the server checkout vs origin/main and a manual start of devbox-update.service
   // (the nightly unit). `run` returns null when an update is already running.
   selfUpdate?: { status: () => Promise<SelfUpdateStatus>; run: () => Promise<{ ok: true } | null> };
@@ -393,6 +397,7 @@ export function createApp(d: ApiDeps): Hono {
     return c.json(buildWeeklyUsage(d.db,range.from,range.to,now));
   });
   app.route("/api/live-activities", liveActivitiesRoutes(d.db, d.liveActivities));
+  if (d.mirror) registerMirrorRoutes(app, d.mirror);
   registerThreadRoutes(app, d.links && d.threads && d.bus && d.inbox && d.bridgeVersion
     ? { db: d.db, root: d.root, mgr: d.mgr, links: d.links, threads: d.threads, bus: d.bus, inbox: d.inbox, bridgeVersion: d.bridgeVersion, switcher: d.switcher, untilReset: d.untilReset } : null);
 
@@ -1830,6 +1835,7 @@ export function createApp(d: ApiDeps): Hono {
       }
     }
     d.agentEvents.handle(s, body.event as AgentEvent, hookMeta(body));
+    d.mirror?.poke(s.id);
     d.liveActivities?.request();
     d.inbox?.changedSafe(s.id);
     return c.json({ ok: true });
