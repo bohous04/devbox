@@ -176,6 +176,8 @@ export interface CodexMapState extends MapState {
   turn: string | null;
   /** Lines mapped so far: the id of an entry that has none of its own. */
   line: number;
+  /** The last user message's text and which entry type carried it, for dropping the same prompt in the other type. */
+  lastUser?: { legacy: boolean; text: string } | null;
 }
 
 export const newCodexMapState = (): CodexMapState => ({ openRun: null, lastRun: null, turn: null, line: 0 });
@@ -251,6 +253,11 @@ export function mapCodexLines(lines: string[], st: CodexMapState, thread: string
         if (item?.type !== "UserMessage" && !legacy) continue;
         const input = legacy ? { text: p.message as string, images: Array.isArray(p.images) ? p.images.length : 0 } : userInput(item!.content);
         if (input.text.trim() === "" && input.images === 0) continue;
+        // No 0.154–0.166 rollout seen writes both `user_message` and `UserMessage`, but a version that does would
+        // otherwise show each prompt twice: the same text right after itself in the other type is one prompt.
+        const last = st.lastUser;
+        st.lastUser = { legacy, text: input.text };
+        if (last && last.legacy !== legacy && last.text === input.text) continue;
         const text = [input.text, ...Array(input.images).fill("[image]")].filter(Boolean).join("\n");
         const key = typeof item?.id === "string" ? item.id : lineId;
         // A message sent into a running turn (a steer): a run holds one prompt, so what follows is a run of its own.

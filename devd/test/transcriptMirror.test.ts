@@ -923,3 +923,18 @@ test.skipIf(!Bun.which("python3"))("MIRROR_CODEX_READ stubs a tool call over the
   const events = mapCodexLines((JSON.parse(r2.stdout.toString()) as { lines: string[] }).lines, newCodexMapState(), TID, 0).events.map((e) => e.event);
   expect(events.filter((e) => e.type === "tool.started")).toEqual([expect.objectContaining({ itemId: "call-8", tool: "shell" })]);
 });
+
+test("a Codex prompt carried by both user_message and UserMessage shows once; a repeated prompt in one type shows twice", () => {
+  const snap = renderCodex([
+    ev({ type: "task_started", turn_id: "d1" }),
+    ev({ type: "user_message", message: "Same prompt" }),
+    userMsg("u1", "Same prompt"),
+    ev({ type: "task_complete", turn_id: "d1" }),
+    ev({ type: "task_started", turn_id: "d2" }),
+    userMsg("u2", "Again"),
+    userMsg("u3", "Again"),
+    ev({ type: "task_complete", turn_id: "d2" }),
+  ]);
+  expect(snap.items.map(brief)).toEqual(["user: Same prompt", "user: Again", "user: Again"]);
+  expect(snap.seen).toEqual(["Same prompt", "Again", "Again"]);
+});

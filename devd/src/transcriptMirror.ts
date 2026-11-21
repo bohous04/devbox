@@ -715,12 +715,15 @@ export class TranscriptMirror {
   }
 
   /** The Codex threads this session's hook events named, newest first, with the id of each one's newest hook row and
-   *  newest prompt row (codexHarvester attributes usage the same way); `last`: the newest hook row of any thread. */
+   *  newest prompt row (codexHarvester attributes usage the same way); `last`: the newest hook row of any thread. The
+   *  pane's thread falls out of the limit only after 100 other threads (Claude's included) had hooks in this session
+   *  since its last one; hooks carry no pid to key by. notify_log keeps 14 days, so a thread with no hook for that long
+   *  is unknown until its next prompt. */
   private codexHooks(id: string): { threads: { thread: string; hook: number; prompt: number }[]; last: number } {
     const rows = this.d.db.query(`SELECT agent_session_id AS thread, MAX(id) AS hook,
       COALESCE(MAX(CASE WHEN event = 'user_prompt_submit' THEN id END), 0) AS prompt
       FROM notify_log WHERE session_id = ? AND agent_session_id IS NOT NULL
-      GROUP BY agent_session_id ORDER BY hook DESC LIMIT 20`).all(id) as { thread: string; hook: number; prompt: number }[];
+      GROUP BY agent_session_id ORDER BY hook DESC LIMIT 100`).all(id) as { thread: string; hook: number; prompt: number }[];
     return { threads: rows.filter((r) => UUID.test(r.thread)), last: rows[0]?.hook ?? 0 };
   }
 
