@@ -3,7 +3,7 @@ import { capText, HOST_SESSION_VARS } from "./claude.ts";
 import { ResumeFailedError, type HarnessSession } from "./claudeSession.ts";
 import { spawnCodex, type CodexProcess } from "./codexSession.ts";
 import { EffortState } from "./effort.ts";
-import type { BridgeEvent, Capabilities, RunOrigin, TokenUsage } from "./events.ts";
+import type { AgentCommand, BridgeEvent, Capabilities, RunOrigin, TokenUsage } from "./events.ts";
 import { readImageBase64 } from "./images.ts";
 import { JsonRpcError, JsonRpcPeer, type Id } from "./jsonRpc.ts";
 
@@ -51,7 +51,6 @@ const IGNORED_UPDATES = new Set([
   "agent_thought",
   "user_message_chunk",
   "user_message",
-  "available_commands_update",
   "current_mode_update",
   "config_option_update",
   "session_info_update",
@@ -202,6 +201,36 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
   let endReason: string | null = null;
   // Until the first prompt got through.
   let instructions = o.instructions ?? null;
+  // The agent's latest command list; it goes out once the thread is announced (an agent may send it while session/new
+  // is still open), and again only when it changes.
+  let latestCommands: AgentCommand[] | null = null;
+  let sentCommands: string | null = null;
+  let announced = false;
+  function sendCommands(): void {
+    if (!announced || latestCommands === null) return;
+    const key = JSON.stringify(latestCommands);
+    if (key === sentCommands) return;
+    sentCommands = key;
+    emit({ type: "commands.changed", commands: latestCommands });
+  }
+  // ACP AvailableCommand: { name, description, input?: { hint } }; a command runs as a prompt starting with "/name".
+  function commandsUpdate(u: Json): void {
+    if (!Array.isArray(u.availableCommands)) {
+      logError(`${spec.id}: available_commands_update without a command list dropped`);
+      return;
+    }
+    const commands: AgentCommand[] = [];
+    for (const c of u.availableCommands) {
+      if (!isObject(c) || typeof c.name !== "string" || c.name === "") {
+        logError(`${spec.id}: available command without a name dropped`);
+        continue;
+      }
+      const hint = isObject(c.input) ? c.input.hint : undefined;
+      commands.push({ name: c.name, ...(typeof c.description === "string" && c.description ? { description: c.description } : {}), ...(typeof hint === "string" && hint ? { hint } : {}) });
+    }
+    latestCommands = commands;
+    sendCommands();
+  }
 
   let markReady: () => void = () => {};
   let failReady: (e: Error) => void = () => {};
@@ -512,11 +541,14 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
       logError(`${spec.id}: notification ${method} ignored`);
       return;
     }
-    if (replaying) return;
     const u = params?.update;
     const kind = isObject(u) ? u.sessionUpdate : undefined;
     // Before the session check: Vibe reports usage for the session session/new is still creating.
     if (typeof kind === "string" && IGNORED_UPDATES.has(kind)) return;
+    // Also before it (Grok and Vibe send the list while session/new is open), and during a replay: it is the
+    // session's state, not history.
+    if (kind === "available_commands_update" && (sessionId === null || params?.sessionId === sessionId)) return commandsUpdate(u);
+    if (replaying) return;
     if (params?.sessionId !== sessionId) {
       logError(`${spec.id}: ${String(kind)} for session ${String(params?.sessionId)}, not ${sessionId}, dropped`);
       return;
@@ -584,6 +616,8 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
     () => {
       starting = null;
       emit({ type: "thread.native", harness: spec.id, nativeThreadId: sessionId!, account: null, model: appliedModel, caps });
+      announced = true;
+      sendCommands();
       markReady();
       startNext();
     },

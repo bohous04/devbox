@@ -8,6 +8,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { CLAUDE_EFFORT_LEVELS as SHARED_CLAUDE_EFFORT_LEVELS } from "../../../shared/effort";
 import { CLAUDE_CAPABILITIES, CLAUDE_EFFORT_LEVELS, openClaudeSession, PLAN_UNAVAILABLE, ResumeFailedError, type ClaudeSessionOptions } from "../src/claudeSession.ts";
 import type { BridgeEvent, UsageBaseline } from "../src/events.ts";
+import LOCAL_COMMAND_TURN from "./fixtures/sdk-local-command.json";
 
 // Scripted SDK: the test pushes output messages and reads what the session wrote to the input stream.
 function fakeSdk() {
@@ -26,6 +27,11 @@ function fakeSdk() {
       { value: "claude-opus-4-5", displayName: "Opus", description: "", supportsEffort: true, supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] },
     ] as Record<string, unknown>[],
     flagSettings: [] as Record<string, unknown>[],
+    // The CLI's slash commands (supportedCommands), or the error asking for them fails with.
+    commandList: [] as Record<string, unknown>[],
+    commandError: undefined as Error | undefined,
+    // While set, supportedCommands waits on it: a push can come meanwhile.
+    commandGate: undefined as Promise<void> | undefined,
     // While set, applyFlagSettings waits on it (after recording the setting): what the CLI does meanwhile can race it.
     flagGate: undefined as Promise<void> | undefined,
     onInterrupt: undefined as (() => Promise<void>) | undefined,
@@ -63,6 +69,11 @@ function fakeSdk() {
           sdk.models.push(m);
         },
         supportedModels: async () => sdk.modelInfo,
+        supportedCommands: async () => {
+          await sdk.commandGate;
+          if (sdk.commandError) throw sdk.commandError;
+          return sdk.commandList;
+        },
         applyFlagSettings: async (f: Record<string, unknown>) => {
           sdk.flagSettings.push(f);
           await sdk.flagGate;
@@ -83,6 +94,7 @@ async function until(cond: () => boolean) {
 function open(sdk: ReturnType<typeof fakeSdk>, now = () => 0, extra: Partial<ClaudeSessionOptions> = {}) {
   const events: BridgeEvent[] = [];
   const efforts: BridgeEvent[] = [];
+  const commands: BridgeEvent[] = [];
   const logs: string[] = [];
   const session = openClaudeSession(
     {
@@ -93,15 +105,15 @@ function open(sdk: ReturnType<typeof fakeSdk>, now = () => 0, extra: Partial<Cla
       resume: null,
       mcpServers: { devbox: { type: "stdio", command: "agent-bridge", args: ["mcp"] } },
       appendSystemPrompt: "call devbox_wait",
-      // effort.state is asserted on its own (the effort tests); the other tests read the thread's events.
-      emit: (e) => (e.type === "effort.state" ? efforts : events).push(e),
+      // effort.state and commands.changed are asserted on their own; the other tests read the thread's events.
+      emit: (e) => (e.type === "effort.state" ? efforts : e.type === "commands.changed" ? commands : events).push(e),
       now,
       logError: (m) => logs.push(m),
       ...extra,
     },
     sdk.queryFn,
   );
-  return { session, events, logs, efforts };
+  return { session, events, logs, efforts, commands };
 }
 
 /** A config dir whose project dir for /workspace holds the transcripts of `sessions`. */
@@ -780,4 +792,119 @@ describe("Claude effort (1.7.0)", () => {
 
 test("the bridge's unchecked Claude levels are shared/effort.ts's, all of them known levels", () => {
   expect([...CLAUDE_EFFORT_LEVELS] as string[]).toEqual([...SHARED_CLAUDE_EFFORT_LEVELS]);
+});
+
+describe("Claude commands (1.9.0)", () => {
+  // As Claude Code 2.1.325 lists them (supportedCommands) and tags the terminal-only ones (init).
+  const COMPACT = { name: "compact", description: "Clear conversation history but keep a summary in context", argumentHint: "<optional custom summarization instructions>", builtin: true };
+  const COLOR = { name: "color", description: "Set the prompt bar color for this session", argumentHint: "", builtin: true };
+  const REVIEW = { name: "code-review", description: "Review the current diff", argumentHint: "", builtin: true };
+  const initWith = (terminal?: string[]) => ({ ...init(), slash_commands: ["compact", "color", "code-review"], ...(terminal ? { terminal_slash_commands: terminal } : {}) });
+
+  test("after the CLI's init: its command list without the terminal-only commands, an argument hint only when it has one", async () => {
+    const sdk = fakeSdk();
+    sdk.commandList = [COMPACT, COLOR, REVIEW];
+    const { session, commands } = open(sdk);
+    await flush();
+    // Which commands are terminal-only is known only from init.
+    expect(commands).toEqual([]);
+    await session.startTurn("run-1", "hi", "user");
+    sdk.push(initWith(["color"]));
+    await until(() => commands.length > 0);
+    expect(commands).toEqual([{
+      type: "commands.changed",
+      commands: [
+        { name: "compact", description: COMPACT.description, hint: COMPACT.argumentHint },
+        { name: "code-review", description: REVIEW.description },
+      ],
+    }]);
+  });
+
+  test("an init without terminal_slash_commands hides none (the CLI leaves the field out when none is tagged)", async () => {
+    const sdk = fakeSdk();
+    sdk.commandList = [COLOR];
+    const { session, commands } = open(sdk);
+    await session.startTurn("run-1", "hi", "user");
+    sdk.push(initWith());
+    await until(() => commands.length > 0);
+    expect(commands).toEqual([{ type: "commands.changed", commands: [{ name: "color", description: COLOR.description }] }]);
+  });
+
+  test("a commands_changed push replaces the list; the same list again is not sent again", async () => {
+    const sdk = fakeSdk();
+    sdk.commandList = [COMPACT];
+    const { session, commands } = open(sdk);
+    await session.startTurn("run-1", "hi", "user");
+    sdk.push(initWith(["color"]));
+    await until(() => commands.length === 1);
+    sdk.push({ type: "system", subtype: "commands_changed", commands: [COMPACT, COLOR, REVIEW], uuid: "u-2", session_id: "sess-1" });
+    await until(() => commands.length === 2);
+    expect(commands[1]).toEqual({ type: "commands.changed", commands: [
+      { name: "compact", description: COMPACT.description, hint: COMPACT.argumentHint },
+      { name: "code-review", description: REVIEW.description },
+    ] });
+    sdk.push({ type: "system", subtype: "commands_changed", commands: [COMPACT, REVIEW], uuid: "u-3", session_id: "sess-1" }, init());
+    await flush();
+    await flush();
+    expect(commands).toHaveLength(2);
+  });
+
+  test("a push before init is kept until init says which commands are terminal-only", async () => {
+    const sdk = fakeSdk();
+    const { session, commands } = open(sdk);
+    sdk.push({ type: "system", subtype: "commands_changed", commands: [COLOR, REVIEW], uuid: "u-1", session_id: "sess-1" });
+    await flush();
+    expect(commands).toEqual([]);
+    await session.startTurn("run-1", "hi", "user");
+    sdk.push(initWith(["color"]));
+    await until(() => commands.length > 0);
+    expect(commands).toEqual([{ type: "commands.changed", commands: [{ name: "code-review", description: REVIEW.description }] }]);
+  });
+
+  test("a push that comes while the asked-for list is on its way is the newer list and stays", async () => {
+    const sdk = fakeSdk();
+    sdk.commandList = [COMPACT];
+    let release = () => {};
+    sdk.commandGate = new Promise((r) => (release = r));
+    const { session, commands } = open(sdk);
+    await session.startTurn("run-1", "hi", "user");
+    sdk.push(initWith(), { type: "system", subtype: "commands_changed", commands: [REVIEW], uuid: "u-2", session_id: "sess-1" });
+    await until(() => commands.length === 1);
+    release();
+    await flush();
+    await flush();
+    expect(commands).toEqual([{ type: "commands.changed", commands: [{ name: "code-review", description: REVIEW.description }] }]);
+  });
+
+  test("rows sharing a name are one command: the CLI's own row, which is the one /name runs", async () => {
+    const sdk = fakeSdk();
+    sdk.commandList = [{ name: "review", description: "a user's skill", argumentHint: "" }, { name: "review", description: "Claude Code's review", argumentHint: "", builtin: true }];
+    const { session, commands } = open(sdk);
+    await session.startTurn("run-1", "hi", "user");
+    sdk.push(initWith());
+    await until(() => commands.length > 0);
+    expect(commands).toEqual([{ type: "commands.changed", commands: [{ name: "review", description: "Claude Code's review" }] }]);
+  });
+
+  test("a command list the CLI cannot give is logged, and no list is sent", async () => {
+    const sdk = fakeSdk();
+    const { session, commands, logs } = open(sdk);
+    sdk.commandError = new Error("control request failed");
+    await session.startTurn("run-1", "hi", "user");
+    sdk.push(initWith());
+    await until(() => logs.length > 0);
+    expect(logs).toEqual(["claude: reading the command list failed: control request failed"]);
+    expect(commands).toEqual([]);
+  });
+
+  test("a local command's output (local_command_output) is the run's reply, not a run that ends silently", async () => {
+    const sdk = fakeSdk();
+    const { session, events } = open(sdk);
+    await session.startTurn("run-1", "/voice", "user");
+    sdk.push(init(), ...LOCAL_COMMAND_TURN);
+    await until(() => events.some((e) => e.type === "run.completed"));
+    expect(events.filter((e) => e.type === "message.final")).toEqual([
+      { type: "message.final", runId: "run-1", itemId: "b2c0d4e6-0000-4000-8000-000000000001", role: "assistant", text: "Voice mode is not available in this environment." },
+    ]);
+  });
 });

@@ -33,6 +33,14 @@ export interface BackgroundWork {
   until?: number;
 }
 
+/** A slash command the agent runs when a message starts with `/name` (bridge 1.9.0). `description` and `hint` (what
+ *  goes after the name) only when the agent gives them. */
+export interface AgentCommand {
+  name: string;
+  description?: string;
+  hint?: string;
+}
+
 export type BridgeEvent =
   // harness: "claude", "codex" or an ACP agent's id (ACP_AGENTS).
   | { type: "thread.native"; harness: "claude" | "codex" | (string & {}); nativeThreadId: string; account: string | null; model: string | null; caps?: Capabilities }
@@ -61,7 +69,10 @@ export type BridgeEvent =
   | { type: "bridge.notice"; text: string }
   // (bridge 1.7.0) Reasoning effort of the current harness and model (effort.ts EffortState).
   // `unchecked` (1.8.0): levels taken before the model is known, checked against its list on the next message.
-  | { type: "effort.state"; model: string | null; supported: string[] | null; effective: string | null; chosen: string | null; unchecked?: string[] };
+  | { type: "effort.state"; model: string | null; supported: string[] | null; effective: string | null; chosen: string | null; unchecked?: string[] }
+  // (bridge 1.9.0) The current harness's slash commands, replacing any earlier list; sent after its thread.native. A
+  // harness that runs none (Codex) sends no list.
+  | { type: "commands.changed"; commands: AgentCommand[] };
 
 export interface LoggedEvent {
   seq: number;

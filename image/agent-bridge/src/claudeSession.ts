@@ -1,11 +1,11 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { query, type CanUseTool, type EffortLevel, type HookCallback, type ModelInfo, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type CanUseTool, type EffortLevel, type HookCallback, type ModelInfo, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage, type SlashCommand } from "@anthropic-ai/claude-agent-sdk";
 import { BackgroundTracker, WAKEUP_ID } from "./background.ts";
 import { EffortState } from "./effort.ts";
 import { claudeQueryOptions, mapSdkMessage, resultError, sumModelUsage, type ClaudeSdkOptions, type QueryFn } from "./claude.ts";
-import type { BridgeEvent, Capabilities, RunOrigin, TokenUsage, UsageBaseline } from "./events.ts";
+import type { AgentCommand, BridgeEvent, Capabilities, RunOrigin, TokenUsage, UsageBaseline } from "./events.ts";
 import { readImageBase64 } from "./images.ts";
 
 /** Claude Code's effort levels (the SDK's EffortLevel), taken before the CLI names the model it runs: its model list
@@ -122,6 +122,18 @@ function isRootFrame(msg: SDKMessage): boolean {
   return false;
 }
 
+/** The commands a remote UI offers: without the terminal-only ones, one row per name (the CLI's own row is the one
+ *  `/name` runs, sdk.d.ts SlashCommand.builtin). */
+export function remoteCommands(all: SlashCommand[], terminal: ReadonlySet<string>): AgentCommand[] {
+  const byName = new Map<string, SlashCommand>();
+  for (const c of all) {
+    if (terminal.has(c.name)) continue;
+    const seen = byName.get(c.name);
+    if (seen === undefined || (c.builtin === true && seen.builtin !== true)) byName.set(c.name, c);
+  }
+  return [...byName.values()].map((c) => ({ name: c.name, ...(c.description ? { description: c.description } : {}), ...(c.argumentHint ? { hint: c.argumentHint } : {}) }));
+}
+
 function subtractUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
   return { input: a.input - b.input, output: a.output - b.output, cacheCreation: a.cacheCreation - b.cacheCreation, cacheRead: a.cacheRead - b.cacheRead };
 }
@@ -232,10 +244,41 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
     if (next) writeTurn(next);
   }
 
+  // The command list goes out once init has said which commands are terminal-only (absent = none), so a remote UI
+  // never offers those; until then a list (asked for, or pushed) waits.
+  let allCommands: SlashCommand[] | null = null;
+  let terminalCommands: Set<string> | null = null;
+  let sentCommands: string | null = null;
+  function sendCommands(): void {
+    if (allCommands === null || terminalCommands === null) return;
+    const commands = remoteCommands(allCommands, terminalCommands);
+    const key = JSON.stringify(commands);
+    if (key === sentCommands) return;
+    sentCommands = key;
+    emit({ type: "commands.changed", commands });
+  }
+
   function handle(msg: SDKMessage): void {
     if (msg.type === "system" && msg.subtype === "init" && msg.session_id !== nativeThreadId) {
       nativeThreadId = msg.session_id;
       emit({ type: "thread.native", harness: "claude", nativeThreadId, account: null, model: msg.model, caps: CLAUDE_CAPABILITIES });
+    }
+    if (msg.type === "system" && msg.subtype === "init") {
+      const first = terminalCommands === null;
+      terminalCommands = new Set(msg.terminal_slash_commands ?? []);
+      if (first && allCommands === null) {
+        stream.supportedCommands().then(
+          (list) => {
+            allCommands ??= list; // a push that came meanwhile is newer
+            sendCommands();
+          },
+          (e) => logError(`claude: reading the command list failed: ${e instanceof Error ? e.message : String(e)}`),
+        );
+      } else sendCommands();
+    }
+    if (msg.type === "system" && msg.subtype === "commands_changed") {
+      allCommands = msg.commands;
+      sendCommands();
     }
     // Launched on the CLI's default model: its levels are known once the CLI names it.
     if (msg.type === "system" && msg.subtype === "init" && model === null) {

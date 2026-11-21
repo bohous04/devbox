@@ -1,0 +1,20 @@
+[
+  {
+    "type": "system",
+    "subtype": "local_command_output",
+    "content": "Voice mode is not available in this environment.",
+    "uuid": "b2c0d4e6-0000-4000-8000-000000000001",
+    "session_id": "sess-1"
+  },
+  {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "duration_api_ms": 0,
+    "num_turns": 0,
+    "session_id": "sess-1",
+    "total_cost_usd": 0,
+    "modelUsage": {},
+    "permission_denials": []
+  }
+]

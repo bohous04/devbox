@@ -154,6 +154,9 @@ const MCP = [{ name: "devbox", command: "agent-bridge", args: ["mcp"], env: { DE
 function open(fake: ReturnType<typeof fakeAgent>, o: { spec?: AcpAgentSpec; resume?: string | null; model?: string | null; instructions?: string; onInstructionsDelivered?: () => void; effort?: string | null } = {}) {
   const events: BridgeEvent[] = [];
   const efforts: BridgeEvent[] = [];
+  const commands: BridgeEvent[] = [];
+  // Every event in the order sent, for the tests that check where the command list goes.
+  const all: BridgeEvent[] = [];
   const logs: string[] = [];
   const session = openAcpSession(
     {
@@ -164,14 +167,17 @@ function open(fake: ReturnType<typeof fakeAgent>, o: { spec?: AcpAgentSpec; resu
       mcpServers: MCP,
       ...(o.instructions === undefined ? {} : { instructions: o.instructions }),
       ...(o.onInstructionsDelivered === undefined ? {} : { onInstructionsDelivered: o.onInstructionsDelivered }),
-      // effort.state is asserted on its own; the other tests read the thread's events.
-      emit: (e) => (e.type === "effort.state" ? efforts : events).push(e),
+      // effort.state and commands.changed are asserted on their own; the other tests read the thread's events.
+      emit: (e) => {
+        all.push(e);
+        (e.type === "effort.state" ? efforts : e.type === "commands.changed" ? commands : events).push(e);
+      },
       logError: (m) => logs.push(m),
       ...(o.effort !== undefined ? { effort: o.effort } : {}),
     },
     fake.spawn,
   );
-  return { session, events, logs, efforts };
+  return { session, events, logs, efforts, commands, all };
 }
 
 const types = (events: BridgeEvent[]) => events.map((e) => e.type);
@@ -973,5 +979,66 @@ describe("ACP effort (1.7.0)", () => {
     expect(events).toContainEqual({ type: "bridge.notice", text: "Effort high is not available on this model; back to its default." });
     await expect(session.setEffort("low")).rejects.toThrow("has no effort levels");
     await session.setEffort(null);
+  });
+});
+
+describe("ACP commands (1.9.0)", () => {
+  const GROK_COMMANDS = ["compact", "always-approve", "flush", "dream", "memory", "context", "hooks-trust", "hooks-list"];
+  const names = (e: BridgeEvent | undefined) => (e as Extract<BridgeEvent, { type: "commands.changed" }>).commands.map((c) => c.name);
+
+  test("Grok's list, sent while session/new is still open, goes out after its thread.native and once per change", async () => {
+    const fake = fakeAgent();
+    replay(fake, recording("acp-grok-live.jsonl"));
+    const { session, commands, all, events, logs } = open(fake, { spec: ACP_AGENTS.grok });
+    await session.ready;
+    await until(() => commands.length > 0);
+    const kinds = all.map((e) => e.type).filter((t) => t === "thread.native" || t === "commands.changed");
+    expect(kinds).toEqual(["thread.native", "commands.changed"]);
+    expect(names(commands[0])).toEqual(GROK_COMMANDS);
+    // Grok sends the same list again during the turn and after a restart: nothing new to send.
+    await session.startTurn("run-1", "list the files", "user");
+    await until(() => events.some((e) => e.type === "run.completed"));
+    fake.exit(137);
+    await until(() => logs.some((l) => l.includes("restarting it with the next message")));
+    await session.startTurn("run-2", "which file?", "user");
+    await until(() => events.filter((e) => e.type === "run.completed").length === 2);
+    expect(commands).toHaveLength(1);
+  });
+
+  test("Antigravity's list comes during the first turn; Vibe's during session/new", async () => {
+    for (const [agent, file, first] of [["antigravity", "acp-antigravity-live.jsonl", "goal"], ["vibe", "acp-vibe-live.jsonl", "compact"]] as const) {
+      const fake = fakeAgent();
+      replay(fake, recording(file));
+      const { session, commands, events } = open(fake, { spec: ACP_AGENTS[agent], ...(agent === "vibe" ? { model: "mistral-medium-3.5" } : {}) });
+      await session.ready;
+      await session.startTurn("run-1", "list the files", "user");
+      await until(() => events.some((e) => e.type === "run.completed"));
+      expect(commands).toHaveLength(1);
+      expect(names(commands[0])[0]).toBe(first);
+    }
+  });
+
+  test("description and input hint are passed on; an entry without a name is dropped and logged", async () => {
+    const fake = fakeAgent();
+    const { session, commands, logs } = open(fake);
+    await session.ready;
+    fake.push({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "sess-1", update: { sessionUpdate: "available_commands_update", availableCommands: [
+      { name: "web", description: "Search the web", input: { hint: "query to search for" } },
+      { name: "plan", description: "" },
+      { description: "nameless" },
+    ] } } });
+    await until(() => commands.length > 0);
+    expect(commands).toEqual([{ type: "commands.changed", commands: [{ name: "web", description: "Search the web", hint: "query to search for" }, { name: "plan" }] }]);
+    expect(logs).toEqual(["example: available command without a name dropped"]);
+  });
+
+  test("an update without a command list is logged, not sent as an empty list", async () => {
+    const fake = fakeAgent();
+    const { session, commands, logs } = open(fake);
+    await session.ready;
+    fake.push({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "sess-1", update: { sessionUpdate: "available_commands_update" } } });
+    await until(() => logs.length > 0);
+    expect(logs).toEqual(["example: available_commands_update without a command list dropped"]);
+    expect(commands).toEqual([]);
   });
 });
