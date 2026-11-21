@@ -176,7 +176,7 @@ struct MacInboxSidebar: View {
                         Text("No session matches “\(query)”").font(.callout).foregroundStyle(Theme.C.mutedForeground)
                     } else {
                         groups(InboxView.group(shown), now: InboxView.ms(context.date))
-                            .environment(\.inboxShowsAgent, InboxView.mixedAgents(shown))
+                            .environment(\.inboxShowsAgent, InboxView.mixedAgents(items))
                     }
                 } else if let error = store.loadError {
                     Label { Text("Can't load the inbox: \(error)") } icon: { Image(systemName: "exclamationmark.triangle") }

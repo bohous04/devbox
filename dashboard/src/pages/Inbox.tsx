@@ -119,7 +119,8 @@ const Dot = () => <span className="flex-none opacity-50" aria-hidden="true">·</
 
 /** One fixed shape per group: a meta line (project, state, time, agent), the title, and in groups where the latest
  *  message is the point (Needs you, Working, Snoozed) a dimmer preview line. */
-/** Whether rows name their agent (mixedAgents over the whole inbox). */
+/** Whether rows name their agent (mixedAgents over the whole inbox). True by default on purpose: a row outside the
+ *  provider names its agent rather than hide which one runs. */
 const ShowAgent = createContext(true);
 
 function Row({ item, now, onItem, preview }: { item: InboxItem; now: number; onItem: (i: InboxItem) => void; preview: boolean }) {

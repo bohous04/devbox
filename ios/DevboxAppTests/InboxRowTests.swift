@@ -107,8 +107,8 @@ final class InboxRowTests: XCTestCase {
 
     /// devd's own branch (`session/<repo>-<n>`) says only its number; nothing when the title already ends in it.
     func testBranchLabelKeepsWhatDistinguishes() throws {
-        func branched(_ branch: String?, title: String = "p/r", id: String = "dev-p-r-14", topic: String? = nil) throws -> InboxItem {
-            var json: [String: Any] = ["sessionId": id, "runtime": "tmux", "title": title, "project": "p", "repo": "r", "agent": "claude",
+        func branched(_ branch: String?, title: String = "p/r", id: String = "dev-p-r-14", repo: String = "r", topic: String? = nil) throws -> InboxItem {
+            var json: [String: Any] = ["sessionId": id, "runtime": "tmux", "title": title, "project": "p", "repo": repo, "agent": "claude",
                                        "attention": ["section": "idle", "since": 1, "reason": NSNull()], "lastText": NSNull()]
             if let branch { json["branch"] = branch }
             if let topic { json["topic"] = topic }
@@ -120,6 +120,13 @@ final class InboxRowTests: XCTestCase {
         XCTAssertEqual(InboxView.branchLabel(try branched("main", title: "Boosting")), "main")
         XCTAssertEqual(InboxView.branchLabel(try branched("session/other-3", title: "Boosting")), "session/other-3")
         XCTAssertEqual(InboxView.branchLabel(try branched("feature/x-12", title: "Boosting")), "feature/x-12")
+        XCTAssertEqual(InboxView.branchLabel(try branched("session/r-14", title: "Fix bug #14")), "#14", "a name that only ends like it")
+        XCTAssertEqual(InboxView.branchLabel(try branched("session/r-014")), "#014", "the title says r #14, not r #014")
+        XCTAssertNil(InboxView.branchLabel(try branched("session/my-app-3", title: "p/my-app", id: "dev-p-my-app-3", repo: "my-app")))
+        XCTAssertNil(InboxView.branchLabel(try branched("session/r-0", id: "dev-p-r-0")))
+        XCTAssertEqual(InboxView.branchLabel(try branched("session/r-14", title: "R #14")), "#14", "a name in other case")
+        XCTAssertEqual(InboxView.branchLabel(try branched("session/R-14", title: "Boosting")), "session/R-14")
+        XCTAssertEqual(InboxView.branchLabel(try branched("session/r-")), "session/r-")
         XCTAssertNil(InboxView.branchLabel(try branched(nil)))
         XCTAssertNil(InboxView.branchLabel(try branched("")))
     }

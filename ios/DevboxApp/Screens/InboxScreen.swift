@@ -263,7 +263,8 @@ enum InboxTone {
 
 /// One row, the dashboard's shape: a meta line (project badge and path, state, time, agent), the title, and in
 /// groups where the latest message is the point (Needs you, Working, Snoozed) a dimmer preview line.
-/// Whether inbox rows name their agent (InboxView.mixedAgents over the rows shown), set where the list is built.
+/// Whether inbox rows name their agent (InboxView.mixedAgents: the inbox mixes agents), set where the list is built.
+/// True by default on purpose: a row outside such a list names its agent rather than hide which one runs.
 private struct InboxShowsAgentKey: EnvironmentKey { static let defaultValue = true }
 
 extension EnvironmentValues {
