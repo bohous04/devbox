@@ -8,9 +8,9 @@ import { Composer } from "../components/chat/Composer";
 import { MessageList } from "../components/chat/MessageList";
 import { Switchers } from "../components/chat/Switchers";
 import { EmptyState, RowsSkeleton } from "../components/primitives";
+import { threadHeading } from "../inboxView";
 import { useStore } from "../store";
 import { terminalTabUrl } from "../terminalRoute";
-import { threadTitle } from "../threadTitle";
 import { activeRun, applyEffort, applyNotice, applyThreadEvent, criticRunIds, mergeSnapshot, queuedRunIds } from "../threadView";
 import { useEventStream } from "../useEventStream";
 
@@ -93,15 +93,13 @@ function ChatPage({ id }: { id: string }) {
     return () => ro.disconnect();
   }, [loaded]);
 
-  useEffect(() => { document.title = `devbox · ${session?.name?.trim() || id}`; }, [id, session?.name]);
-
   const running = thread ? activeRun(thread) !== undefined : false;
   const title = session?.name?.trim() || (session ? `${session.project}/${session.repo}` : id);
-  // The header names the thread like a breadcrumb: where it runs, then what it is about (its nickname, else the
-  // first line of its first message).
-  const firstMessage = thread?.items.find((i) => i.kind === "user")?.text;
-  // null while the thread loads (no nickname): the crumb alone stands in, so it never shows twice.
-  const heading = session?.name?.trim() || (firstMessage !== undefined ? threadTitle(firstMessage) : null) || (session ? null : id);
+  // The header names the thread like a breadcrumb: where it runs, then what it is called, as in the inbox
+  // (threadHeading). null while the thread loads (no nickname): the crumb alone stands in.
+  const heading = threadHeading(id, session, thread?.items);
+  const firstMessage = thread?.items.find((i) => i.kind === "user" && i.text !== "")?.text;
+  useEffect(() => { document.title = `devbox · ${heading ?? id}`; }, [id, heading]);
   const place = session ? `${session.project} / ${session.repo}` : null;
 
   return (

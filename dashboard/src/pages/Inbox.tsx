@@ -123,7 +123,7 @@ function Row({ item, now, onItem, preview }: { item: InboxItem; now: number; onI
   const a = item.attention;
   const badge = projectBadge(item.project);
   const title = rowTitle(item);
-  const message = item.lastText !== null && !title.fromMessage ? plainPreview(item.lastText) : "";
+  const message = item.lastText !== null ? plainPreview(item.lastText) : "";
   const detail = message || reasonLabel(a.reason);
   const parts = statusParts(item, now, !preview);
   const [error, setError] = useState<string | null>(null);
@@ -144,12 +144,11 @@ function Row({ item, now, onItem, preview }: { item: InboxItem; now: number; onI
           <span className="flex-none">{profileFor(item.agent).short}</span>
           {item.runtime === "tmux" && <span className="flex-none opacity-80"><span className="sr-only">in </span>tmux</span>}
         </span>
-        {/* lastText may be the agent's reply (the inbox data does not say whose it is): as a stand-in title it stays muted.
-            Groups below Needs you get a quieter title so they read as background. */}
-        <span className={cn("truncate text-sm", title.fromMessage ? "text-muted-foreground" : preview ? "font-medium text-foreground" : "text-foreground/85")}>{title.text}</span>
+        {/* Groups below Needs you get a quieter title so they read as background. */}
+        <span className={cn("truncate text-sm", preview ? "font-medium text-foreground" : "text-foreground/85")}>{title}</span>
         {preview && <span className="truncate text-xs text-muted-foreground/75">{detail}</span>}
       </Link>
-      <RowMenu item={item} label={title.text} onItem={onItem} setError={setError} />
+      <RowMenu item={item} label={title} onItem={onItem} setError={setError} />
       {error && <p role="alert" className="basis-full px-3 pb-2 text-xs text-destructive">{error}</p>}
     </li>
   );

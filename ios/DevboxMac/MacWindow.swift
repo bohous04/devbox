@@ -456,14 +456,14 @@ struct MacInboxRow: View {
 
     var body: some View {
         let title = InboxView.rowTitle(item)
-        let message = item.lastText.flatMap { title.fromMessage ? nil : InboxView.plainPreview($0) } ?? ""
+        let message = item.lastText.map(InboxView.plainPreview) ?? ""
         let detail = preview ? (message.isEmpty ? InboxView.reasonLabel(item.attention.reason) : message) : ""
-        let spoken = InboxRow.spokenLabel(item, now: now, title: title.text, detail: detail)
+        let spoken = InboxRow.spokenLabel(item, now: now, title: title, detail: detail)
             + (item.branch.map { $0.isEmpty ? "" : ", branch \($0)" } ?? "")
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 // Hierarchical styles: on the focused list's accent selection they turn light, as the system's rows do.
-                Text(title.text)
+                Text(title)
                     .font(.system(size: 13))
                     .foregroundStyle(Self.style(.primary))
                     .lineLimit(1)
@@ -570,9 +570,9 @@ struct MacThreadDetail: View {
             }
         }
         // The window names its thread, as the inbox row does, and where it runs.
-        .navigationTitle(item.map { InboxView.rowTitle($0).text } ?? threadId)
+        .navigationTitle(item.map(InboxView.rowTitle) ?? threadId)
         .navigationSubtitle(item.map(Self.place) ?? "")
-        .modifier(MacThreadHeading(title: item.map { InboxView.rowTitle($0).text } ?? threadId, place: item.map(Self.place)))
+        .modifier(MacThreadHeading(title: item.map(InboxView.rowTitle) ?? threadId, place: item.map(Self.place)))
         // Opaque, as the thread fades out under it (ChatScreen).
         .toolbarBackground(Theme.C.background, for: .windowToolbar)
         .toolbarBackground(.visible, for: .windowToolbar)

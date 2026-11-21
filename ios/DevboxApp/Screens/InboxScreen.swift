@@ -181,7 +181,7 @@ struct InboxScreen: View {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Actions for \(InboxView.rowTitle(item).text)")
+                    .accessibilityLabel("Actions for \(InboxView.rowTitle(item))")
                 }
             }
         }
@@ -276,7 +276,7 @@ struct InboxRow: View {
     var body: some View {
         let a = item.attention
         let title = InboxView.rowTitle(item)
-        let message = item.lastText.flatMap { title.fromMessage ? nil : InboxView.plainPreview($0) } ?? ""
+        let message = item.lastText.map(InboxView.plainPreview) ?? ""
         let detail = message.isEmpty ? InboxView.reasonLabel(a.reason) : message
         let parts = InboxView.statusParts(item, now: now, compact: !preview)
         let badge = InboxView.projectBadge(item.project)
@@ -305,9 +305,9 @@ struct InboxRow: View {
             }
             .font(.caption)
             .foregroundStyle(Theme.C.mutedForeground)
-            Text(title.text)
-                .font(.subheadline.weight(preview && !title.fromMessage ? .medium : .regular))
-                .foregroundStyle(title.fromMessage ? Theme.C.mutedForeground : preview ? Theme.C.foreground : Theme.C.foreground.opacity(0.85))
+            Text(title)
+                .font(.subheadline.weight(preview ? .medium : .regular))
+                .foregroundStyle(preview ? Theme.C.foreground : Theme.C.foreground.opacity(0.85))
                 .lineLimit(1)
             if preview && !detail.isEmpty {
                 Text(detail)
@@ -321,7 +321,7 @@ struct InboxRow: View {
         .padding(.leading, 12)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Self.spokenLabel(item, now: now, title: title.text, detail: preview ? detail : ""))
+        .accessibilityLabel(Self.spokenLabel(item, now: now, title: title, detail: preview ? detail : ""))
     }
 
     private var dot: some View { Text("·").opacity(0.5).accessibilityHidden(true) }

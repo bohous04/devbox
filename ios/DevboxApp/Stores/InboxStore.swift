@@ -173,12 +173,12 @@ enum InboxView {
         ("`+", ""), (#"\*\*(.+?)\*\*"#, "$1"), (#"(?<=^|\s)__(\S(?:.*?\S)?)__(?=$|\s|[,;:!?)])"#, "$1"), (#"^#+\s+"#, ""), (#"\s+"#, " "),
     ].map { (try! NSRegularExpression(pattern: $0.0), $0.1) }
 
-    /// The Mac sidebar's search: every word of `query` in the row's title, project, repo, branch or last message, ignoring
+    /// The Mac sidebar's search: every word of `query` in the row's title, topic, project, repo, branch or last message, ignoring
     /// case and diacritics. An empty query matches every row.
     static func matches(_ i: InboxItem, _ query: String) -> Bool {
         let words = query.split(whereSeparator: \.isWhitespace)
         guard !words.isEmpty else { return true }
-        let hay = [i.title, i.project, i.repo, i.branch ?? "", i.lastText ?? ""].joined(separator: " ")
+        let hay = [i.title, i.topic ?? "", i.project, i.repo, i.branch ?? "", i.lastText ?? ""].joined(separator: " ")
         return words.allSatisfy { hay.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
     }
 
@@ -190,19 +190,22 @@ enum InboxView {
         }.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// What a row names the session by. A custom name wins; a session still named after its repo path takes its
-    /// newest message instead, or with none (tmux) the repo and the session's number from its id ("api #14").
-    /// `fromMessage` tells the row not to repeat that message as its preview.
-    static func rowTitle(_ i: InboxItem) -> (text: String, fromMessage: Bool) {
-        if i.title != "\(i.project)/\(i.repo)" { return (i.title, false) }
-        // A message of only whitespace or markdown marks names nothing: the repo fallback below takes over.
-        if let last = i.lastText, case let text = plainPreview(last), !text.isEmpty { return (text, true) }
-        let suffix = "-\(i.repo)-"
-        if let r = i.sessionId.range(of: suffix, options: .backwards) {
-            let n = i.sessionId[r.upperBound...]
-            if !n.isEmpty, n.allSatisfy(\.isASCII), n.allSatisfy(\.isNumber) { return ("\(i.repo) #\(n)", false) }
+    /// What a session is called, in the sidebar, the inbox and the thread headers alike (inboxView.ts rowTitle): a
+    /// custom name, else devd's `topic` (from the first message, stable for the thread's life), else the repo and the
+    /// session's number from its id ("api #14"). Never `lastText`: it changes with every reply.
+    static func rowTitle(_ i: InboxItem) -> String {
+        sessionTitle(sessionId: i.sessionId, name: i.title == "\(i.project)/\(i.repo)" ? nil : i.title, project: i.project, repo: i.repo, topic: i.topic)
+    }
+
+    /// The chain behind `rowTitle`, for a screen that has the session but not its inbox item (the iPhone thread).
+    static func sessionTitle(sessionId: String, name: String?, project: String, repo: String, topic: String?) -> String {
+        if let name = name?.trimmingCharacters(in: .whitespaces), !name.isEmpty { return name }
+        if let topic, !topic.isEmpty { return topic }
+        if let r = sessionId.range(of: "-\(repo)-", options: .backwards) {
+            let n = sessionId[r.upperBound...]
+            if !n.isEmpty, n.allSatisfy(\.isASCII), n.allSatisfy(\.isNumber) { return "\(repo) #\(n)" }
         }
-        return (i.repo, false)
+        return repo
     }
 }
 

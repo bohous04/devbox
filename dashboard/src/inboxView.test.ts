@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Attention, InboxItem } from "../../shared/thread";
-import { groupInbox, inboxHref, plainPreview, projectBadge, reasonLabel, reasonStatus, rowStatus, rowTitle, statusParts, shelfBlock, shortAgo, snoozeTimes, splitNeedsYou, upsertInbox } from "./inboxView";
+import { groupInbox, inboxHref, plainPreview, projectBadge, reasonLabel, reasonStatus, rowStatus, rowTitle, statusParts, shelfBlock, shortAgo, snoozeTimes, splitNeedsYou, threadHeading, upsertInbox } from "./inboxView";
 
 const item = (sessionId: string, attention: Attention, runtime: InboxItem["runtime"] = "chat"): InboxItem => ({
   sessionId, runtime, title: sessionId, project: "p", repo: "r", agent: "claude", attention, lastText: null,
@@ -112,15 +112,15 @@ test("plainPreview drops markdown marks from a one-line preview", () => {
   expect(plainPreview("## Summary: all `green`")).toBe("Summary: all green");
 });
 
-test("rowTitle: custom name, else the newest message, else repo and session number", () => {
+test("rowTitle: custom name, else the topic from the first message, else repo and session number; never the newest message", () => {
   const base = item("dev-p-r-14", { section: "idle", reason: null, since: 1 });
-  expect(rowTitle({ ...base, title: "Boosting" })).toEqual({ text: "Boosting", fromMessage: false });
-  expect(rowTitle({ ...base, title: "p/r", lastText: "Fixed the `test`" })).toEqual({ text: "Fixed the test", fromMessage: true });
-  expect(rowTitle({ ...base, title: "p/r" })).toEqual({ text: "r #14", fromMessage: false });
-  // A message of only whitespace names nothing (as on iOS): the repo and session number instead.
-  expect(rowTitle({ ...base, title: "p/r", lastText: "  \n " })).toEqual({ text: "r #14", fromMessage: false });
-  expect(rowTitle({ ...base, sessionId: "dev-p-r", title: "p/r" })).toEqual({ text: "r", fromMessage: false });
-  expect(rowTitle({ ...base, sessionId: "dev-p-notes-13", repo: "notes-13", title: "p/notes-13" })).toEqual({ text: "notes-13", fromMessage: false });
+  expect(rowTitle({ ...base, title: "Boosting", topic: "Add a retry queue" })).toBe("Boosting");
+  expect(rowTitle({ ...base, title: "p/r", topic: "Add a retry queue", lastText: "OK" })).toBe("Add a retry queue");
+  // The newest message changes with every reply (often the agent's "OK"): it is the preview, never the title.
+  expect(rowTitle({ ...base, title: "p/r", lastText: "Fixed the `test`" })).toBe("r #14");
+  expect(rowTitle({ ...base, title: "p/r", topic: null })).toBe("r #14");
+  expect(rowTitle({ ...base, sessionId: "dev-p-r", title: "p/r" })).toBe("r");
+  expect(rowTitle({ ...base, sessionId: "dev-p-notes-13", repo: "notes-13", title: "p/notes-13" })).toBe("notes-13");
 });
 
 test("plainPreview keeps __ inside words", () => {
@@ -146,7 +146,19 @@ test("statusParts: nothing for an untouched idle row; snooze end; compact keeps 
     .toEqual({ mark: null, showLabel: false, until: null, ago: "2m" });
 });
 
-test("rowTitle: a failed session named after its path takes the error message as a stand-in title", () => {
+test("rowTitle: a failed session's error stays in the preview, not the title", () => {
   const failed = { ...item("dev-p-r", { section: "needs_you", reason: "failed", since: 1 }), title: "p/r", lastText: "Error: **build** failed" };
-  expect(rowTitle(failed)).toEqual({ text: "Error: build failed", fromMessage: true });
+  expect(rowTitle(failed)).toBe("r");
+});
+
+test("threadHeading: the thread page names the thread like its inbox row, the topic from the first message with text", () => {
+  const session = { name: null, project: "p", repo: "r" };
+  const user = (text: string, seq: number) => ({ seq, runId: `r${seq}`, itemId: `user:r${seq}`, kind: "user" as const, text, status: "done" as const, ts: seq });
+  expect(threadHeading("dev-p-r-14", session, [user("", 1), user("Fix the login redirect. Then test it", 2)])).toBe("Fix the login redirect");
+  expect(threadHeading("dev-p-r-14", session, [])).toBe("r #14");
+  expect(threadHeading("dev-p-r-14", { ...session, name: " Boosting " }, undefined)).toBe("Boosting");
+  // Loading, no name: the crumb stands in.
+  expect(threadHeading("dev-p-r-14", session, undefined)).toBeNull();
+  // Not a known session: its id.
+  expect(threadHeading("dev-p-r-14", undefined, undefined)).toBe("dev-p-r-14");
 });

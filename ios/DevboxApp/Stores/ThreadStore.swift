@@ -451,7 +451,8 @@ final class ThreadStore: ObservableObject {
         }
         display = WorkGroups.rows(rows, runs: t.runs)
         changesAnchor = ChangesView.anchor(rows, runs: t.runs)
-        let first = t.items.first(where: { $0.kind == .user })?.text
+        // As devd's topic: an attachment-only first message (empty text) names nothing; the next one does.
+        let first = t.items.first(where: { $0.kind == .user && !$0.text.isEmpty })?.text
         if first != titleSource {
             titleSource = first
             title = first.flatMap(ThreadTitle.from)

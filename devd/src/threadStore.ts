@@ -440,6 +440,13 @@ export class ThreadStore {
   }
 
   /** Text of the newest user or assistant item (also one still streaming); null for a thread without messages. */
+  /** The start of the thread's first user message with text (an attachment-only one has none); null before one.
+   *  400 characters are plenty for a title (shared/threadTitle.ts). */
+  firstUserText(): string | null {
+    const r = this.db.query(`SELECT substr(text, 1, 400) AS text FROM items WHERE kind = 'user' AND text <> '' ORDER BY id LIMIT 1`).get() as { text: string } | null;
+    return r ? r.text : null;
+  }
+
   lastMessageText(): string | null {
     const r = this.db.query(`SELECT text FROM items WHERE kind IN ('user', 'assistant') ORDER BY id DESC LIMIT 1`).get() as { text: string } | null;
     return r ? r.text : null;
