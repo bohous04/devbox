@@ -54,13 +54,34 @@ final class MacScreenshotTests: XCTestCase {
         try shoot(name: "thread-typed-light", look: "light", thread: "dev-orchard-sync", draft: "Pin Node 22 in the Dockerfile too")
     }
 
-    private func shoot(name: String, look: String, thread: String?, page: MacDashboardPage? = nil, draft: String? = nil) throws {
+    /// The thread's heading (title and place) at a normal and a narrow width. On macOS 26 it is a plain title: a
+    /// Liquid Glass capsule (drawn plain here, so checked in the view tree) was too short for its two lines.
+    func testThreadHeadingWidths() throws {
+        for (width, look) in [(1440.0, "dark"), (900.0, "light"), (900.0, "dark"), (720.0, "light")] {
+            try shoot(name: "thread-heading-\(Int(width))-\(look)", look: look, thread: "dev-orchard-sync", width: width) { frame in
+                // The heading is the toolbar's only item that is text alone: every control there (sidebar toggle, changes
+                // chip, Chat/Terminal) hosts a view of its own. Offscreen SwiftUI exposes no accessibility tree to find it by.
+                let items = Self.views(in: frame, prefixed: "ToolbarItemHostingView").filter { $0.subviews.isEmpty }
+                XCTAssertEqual(items.count, 1, "expected one text-only toolbar item, the heading")
+                let item = try XCTUnwrap(items.first)
+                if #available(macOS 26, *) {
+                    XCTAssertFalse(Self.ancestors(item).contains { String(describing: type(of: $0)) == "NSGlassEffectView" },
+                                   "the heading sits in a glass capsule")
+                }
+                // Both lines fit the item's height.
+                XCTAssertGreaterThanOrEqual(item.bounds.height, 30)
+            }
+        }
+    }
+
+    private func shoot(name: String, look: String, thread: String?, page: MacDashboardPage? = nil, draft: String? = nil, width: CGFloat = 1440,
+                       inspect: ((NSView) throws -> Void)? = nil) throws {
         let state = MacAppState(isTestRun: false, isFixtureRun: true)
         state.appModel.reloadConfiguration()
         let root = MacWindowContent(thread: .constant(thread), page: .constant(page), newSession: .constant(false), findPending: .constant(false))
             .environmentObject(state)
             .environmentObject(state.appModel)
-        let size = NSSize(width: 1440, height: 900)
+        let size = NSSize(width: width, height: 900)
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
@@ -97,6 +118,7 @@ final class MacScreenshotTests: XCTestCase {
         }
 
         let frame = try XCTUnwrap(window.contentView?.superview, "the window has no frame view")
+        try inspect?(frame)
         // The sidebar list makes its rows when it is drawn on a screen; offscreen they are made here.
         for case let table as NSTableView in Self.views(in: frame, named: "SwiftUIOutlineListView") {
             for row in 0..<table.numberOfRows { _ = table.rowView(atRow: row, makeIfNecessary: true) }
@@ -188,6 +210,14 @@ final class MacScreenshotTests: XCTestCase {
     }
 
     private static func allViews(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(allViews) }
+
+    private static func views(in view: NSView, prefixed prefix: String) -> [NSView] {
+        (String(describing: type(of: view)).hasPrefix(prefix) ? [view] : []) + view.subviews.flatMap { views(in: $0, prefixed: prefix) }
+    }
+
+    private static func ancestors(_ view: NSView) -> [NSView] {
+        sequence(first: view, next: \.superview).map { $0 }
+    }
 
     private static func views(in view: NSView, named name: String) -> [NSView] {
         (String(describing: type(of: view)) == name ? [view] : []) + view.subviews.flatMap { views(in: $0, named: name) }
