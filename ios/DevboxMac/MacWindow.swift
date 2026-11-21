@@ -160,6 +160,9 @@ struct MacInboxSidebar: View {
     @State private var query = ""
     @FocusState private var searching: Bool
     @State private var sidebarHeight: CGFloat = 0
+    /// The tools' and the footer's heights: the shelves leave the scrolling groups room under the one and over the other.
+    @State private var toolsHeight: CGFloat = 0
+    @State private var footerHeight: CGFloat = 0
     /// The pinned shelves' list height with all its rows, once it has measured itself (macOS 15+).
     @State private var shelfContent: CGFloat?
     /// Which of the two lists has the keyboard, so ↑/↓ can carry it across their seam.
@@ -173,7 +176,7 @@ struct MacInboxSidebar: View {
             let scrolling = g.map(MacSidebarLayout.scrollingGroups) ?? []
             let pinned = g.map(MacSidebarLayout.pinnedShelves) ?? []
             let seam = (groups: scrolling.flatMap(visibleRows).map(\.sessionId), shelves: pinned.flatMap(visibleRows).map(\.sessionId))
-            List(selection: $selection) {
+            ScrollViewReader { proxy in List(selection: $selection) {
                 if store.paused || store.badFrame != nil {
                     Text(store.paused ? "Live updates paused — refreshing every 5 s\(store.loadError.map { " (last refresh failed: \($0))" } ?? "")"
                          : "Live update dropped: \(store.badFrame ?? "")")
@@ -203,14 +206,18 @@ struct MacInboxSidebar: View {
             .listStyle(.sidebar)
             .focused($focusedList, equals: .groups)
             .onKeyPress(.downArrow) { cross(down: true, seam) }
+            .onChange(of: focusedList) { _, part in reveal(in: part, .groups, proxy) }
+            } // ScrollViewReader
             // An opaque sidebar, one tone with the window, instead of the translucent material.
             .scrollContentBackground(.hidden)
             .background(MacTone.sidebar)
-            .safeAreaInset(edge: .top, spacing: 0) { tools }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                tools.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { toolsHeight = $0 }
+            }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
                     shelves(pinned, now: now, seam: seam)
-                    footer
+                    footer.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { footerHeight = $0 }
                 }
             }
             .environment(\.inboxShowsAgent, store.items.map(InboxView.mixedAgents) ?? false)
@@ -293,17 +300,22 @@ struct MacInboxSidebar: View {
     @ViewBuilder
     private func shelves(_ pinned: [MacSidebarLayout.Group], now: Int, seam: (groups: [String], shelves: [String])) -> some View {
         if !pinned.isEmpty {
-            List(selection: $selection) {
-                ForEach(pinned, id: \.label) { group($0, now: now) }
+            let estimate = MacSidebarLayout.estimatedContent(headers: pinned.count, rows: seam.shelves.count)
+            ScrollViewReader { proxy in
+                List(selection: $selection) {
+                    ForEach(pinned, id: \.label) { group($0, now: now) }
+                }
+                .listStyle(.sidebar)
+                .focused($focusedList, equals: .shelves)
+                .onKeyPress(.upArrow) { cross(down: false, seam) }
+                .onChange(of: focusedList) { _, part in reveal(in: part, .shelves, proxy) }
             }
-            .listStyle(.sidebar)
-            .focused($focusedList, equals: .shelves)
-            .onKeyPress(.upArrow) { cross(down: false, seam) }
             .scrollContentBackground(.hidden)
             .modifier(MacListContentHeight(height: $shelfContent))
             // Measured afresh when shelves come back, not sized by the rows they had before.
             .onDisappear { shelfContent = nil }
-            .frame(height: MacSidebarLayout.shelfHeight(content: shelfContent, sidebar: sidebarHeight))
+            .frame(height: MacSidebarLayout.shelfHeight(content: shelfContent ?? estimate, sidebar: sidebarHeight,
+                                                        chrome: toolsHeight + footerHeight))
             .background(MacTone.sidebar)
             .overlay(alignment: .top) { Rectangle().fill(Theme.C.border).frame(height: 1 / 3).accessibilityHidden(true) }
         }
@@ -317,6 +329,13 @@ struct MacInboxSidebar: View {
         selection = next
         focusedList = down ? .shelves : .groups
         return .handled
+    }
+
+    /// Scrolls the selected row into view in the list that just took the keyboard (after ↑/↓ crossed into it); a row
+    /// of the other list is not in this one, and scrolling to it does nothing.
+    private func reveal(in part: MacSidebarLayout.Part?, _ list: MacSidebarLayout.Part, _ proxy: ScrollViewProxy) {
+        guard part == list, let selection else { return }
+        proxy.scrollTo(selection)
     }
 
     /// The rows a group shows: none while shut (it is open while searching, so every match shows), and with `cap`
@@ -399,6 +418,11 @@ enum MacSidebarLayout {
 
     /// The share of the sidebar's height the pinned shelves may take before they scroll inside.
     static let shelfShare: CGFloat = 0.45
+    /// The height the scrolling groups keep at least, so Needs you stays in reach in a short window.
+    static let groupsMinimum: CGFloat = 120
+    /// A sidebar list's group header, its two-line row and its own padding, as macOS draws them at the default
+    /// sidebar size (measured on the screenshot test's render).
+    static let headerHeight: CGFloat = 24, rowHeight: CGFloat = 50, listPadding: CGFloat = 36
 
     /// The groups that scroll, in order, the empty ones left out: needs you (the runs that merely finished apart,
     /// five then "N more"), then idle.
@@ -425,11 +449,17 @@ enum MacSidebarLayout {
         return nil
     }
 
-    /// The pinned shelves' height: their content, up to `shelfShare` of the sidebar. Until the content is measured
-    /// (and on macOS 14, which cannot measure a list) the cap, as a list given no height lays out no rows to measure.
-    static func shelfHeight(content: CGFloat?, sidebar: CGFloat) -> CGFloat {
-        let cap = (sidebar * shelfShare).rounded()
-        return min(content ?? cap, cap)
+    /// The shelves' list height from its headers and visible rows, for before it has measured itself (its first
+    /// layout) and for macOS 14, which cannot measure a list. Off only at a non-default sidebar size.
+    static func estimatedContent(headers: Int, rows: Int) -> CGFloat {
+        CGFloat(headers) * headerHeight + CGFloat(rows) * rowHeight + listPadding
+    }
+
+    /// The pinned shelves' height: their content, up to `shelfShare` of the sidebar and never into the room the
+    /// scrolling groups keep between the tools and the footer (`chrome`).
+    static func shelfHeight(content: CGFloat, sidebar: CGFloat, chrome: CGFloat) -> CGFloat {
+        let cap = min(sidebar * shelfShare, sidebar - chrome - groupsMinimum)
+        return max(0, min(content, cap)).rounded()
     }
 
     /// Whether a shelf is open in a new window: never, except a shelf the screenshot test opens.

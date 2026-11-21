@@ -131,12 +131,25 @@ final class MacAppTests: XCTestCase {
     }
 
     /// The pinned block is as tall as its content, up to 45 % of the sidebar; it scrolls inside beyond that.
-    func testPinnedBlockGrowsUpToNearlyHalfTheSidebar() {
-        XCTAssertEqual(MacSidebarLayout.shelfHeight(content: 90, sidebar: 800), 90)
-        XCTAssertEqual(MacSidebarLayout.shelfHeight(content: 500, sidebar: 800), 360)
-        XCTAssertEqual(MacSidebarLayout.shelfHeight(content: 360, sidebar: 800), 360)
-        // Before the list has measured itself it takes the cap, never zero (a zero-high list lays out no rows).
-        XCTAssertEqual(MacSidebarLayout.shelfHeight(content: nil, sidebar: 800), 360)
+    func testPinnedBlockGrowsUpTo45PercentOfTheSidebar() {
+        XCTAssertEqual(MacSidebarLayout.shelfHeight(content: 90, sidebar: 800, chrome: 90), 90)
+        XCTAssertEqual(MacSidebarLayout.shelfHeight(content: 500, sidebar: 800, chrome: 90), 360)
+        XCTAssertEqual(MacSidebarLayout.shelfHeight(content: 360, sidebar: 800, chrome: 90), 360)
+    }
+
+    /// In a short window the scrolling groups keep 120 pt between the tools and the footer, so Needs you stays in reach.
+    func testPinnedBlockLeavesTheGroupsRoomInAShortWindow() {
+        // 350 − 90 (tools and footer) − 120 = 140, under 45 % (157.5).
+        XCTAssertEqual(MacSidebarLayout.shelfHeight(content: 400, sidebar: 350, chrome: 90), 140)
+        XCTAssertEqual(MacSidebarLayout.shelfHeight(content: 108, sidebar: 350, chrome: 90), 108)
+        XCTAssertEqual(MacSidebarLayout.shelfHeight(content: 400, sidebar: 150, chrome: 90), 0, "no room at all: no block")
+    }
+
+    /// Before the list measures itself (and on macOS 14) its height comes from its headers and visible rows.
+    func testPinnedBlockEstimateMatchesTheDrawnList() {
+        // The screenshot test's render: three shut shelves are 108 pt, with Working's one row open 158 pt.
+        XCTAssertEqual(MacSidebarLayout.estimatedContent(headers: 3, rows: 0), 108)
+        XCTAssertEqual(MacSidebarLayout.estimatedContent(headers: 3, rows: 1), 158)
     }
 
     func testFocusingAThreadLeavesTheDashboardOnlyInItsWindow() {
