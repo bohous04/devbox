@@ -13,9 +13,6 @@ export type ThreadRow =
 
 const ENDED: ReadonlySet<string> = new Set<WorkStatus>(["completed", "interrupted", "failed"]);
 
-/** The thread's rows. A run folds only once it ended and only when it called a tool; a running run stays expanded
- *  (its last message may still turn out to be prose before the next tool). The fold sits where its first item was;
- *  user messages, requests and notices never fold. */
 /** Whether row `i` opens a turn: a prompt after another row, not right after a notice (which already sets it off).
  *  It gets a little more room above it (the Apple apps' WorkGroups.turnStarts). */
 export function opensTurn(rows: ThreadRow[], i: number): boolean {
@@ -23,6 +20,9 @@ export function opensTurn(rows: ThreadRow[], i: number): boolean {
   return i > 0 && row?.type === "item" && row.item.kind === "user" && !(prev?.type === "item" && prev.item.kind === "notice");
 }
 
+/** The thread's rows. A run folds only once it ended and only when it called a tool; a running run stays expanded
+ *  (its last message may still turn out to be prose before the next tool). The fold sits where its first item was;
+ *  user messages, requests and notices never fold. */
 export function threadRows(all: ThreadItem[], runs: RunRow[]): ThreadRow[] {
   const items = all.filter((i) => !isHousekeepingNotice(i));
   const ended = new Map(runs.filter((r) => ENDED.has(r.status)).map((r) => [r.runId, r]));
