@@ -113,7 +113,7 @@ export function Switchers({ sessionId, thread, children }: {
           {busy !== null ? <LoaderCircle className="size-4 animate-spin" aria-hidden="true" /> : <AgentGlyph agent={target.agent} />}
           {/* On a phone's one-row composer with text, only the agent mark and the chevron (the box sets data-chip). */}
           <span className="truncate max-sm:group-data-[chip=mark]/box:hidden">
-            {model}{effort !== null && <><span className="text-muted-foreground"> · </span><span className="font-semibold">{effort}</span></>}
+            {model}{effort !== null && <><span className="text-muted-foreground"> · </span><span className="font-normal text-muted-foreground">{effort}</span></>}
           </span>
           <ChevronDown aria-hidden="true" className="size-3.5 opacity-50" />
         </Button>
