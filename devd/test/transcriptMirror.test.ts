@@ -135,7 +135,7 @@ const CHAT: SessionRow = { ...TMUX, id: "dev-a-chat", container: "dev-a-chat", r
 
 interface Pane { sid: string | null; status?: string; agent?: string; inMode?: boolean; sendResult?: string; noPane?: boolean }
 
-function setup(pane: Pane) {
+function setup(pane: Pane, isEnding: (id: string) => boolean = () => false) {
   const root = tmp("mirror-root-");
   const projects = join(root, "_claude-projects", TMUX.id);
   mkdirSync(projects, { recursive: true });
@@ -158,7 +158,7 @@ function setup(pane: Pane) {
     throw new Error(`unexpected exec ${cmd.join(" ")}`);
   };
   const bus = new EventBus();
-  const mirror = new TranscriptMirror({ db, root, bus, exec, isEnding: () => false, live: () => null, now: () => now, log: (m) => logs.push(m) });
+  const mirror = new TranscriptMirror({ db, root, bus, exec, isEnding, live: () => null, now: () => now, log: (m) => logs.push(m) });
   cleanups.push(() => { mirror.release(TMUX.id); mirror.release(CHAT.id); });
   const write = (sid: string, lines: string[]) => appendFileSync(join(projects, `${sid}.jsonl`), lines.map((l) => `${l}\n`).join(""));
   return { mirror, calls, logs, bus, projects, write, root, advance: (ms: number) => { now += ms; } };
@@ -232,8 +232,10 @@ test("re-reading a replaced transcript does not duplicate its notices", async ()
   const t = setup({ sid: SID });
   t.write(SID, fixtureLines());
   await t.mirror.refresh(TMUX.id);
+  // The replacement starts differently, so the head hash detects it on every filesystem: a Linux filesystem reuses
+  // the freed inode number, so the same bytes at the same inode would be (rightly) no rewrite at all.
   rmSync(join(t.projects, `${SID}.jsonl`));
-  t.write(SID, fixtureLines());
+  t.write(SID, [JSON.stringify({ type: "file-history-snapshot", messageId: "m-replaced", snapshot: {} }), ...fixtureLines()]);
   await t.mirror.refresh(TMUX.id);
   const shown = items(t.mirror);
   expect(shown.filter((i) => i === "notice: Ran /model")).toHaveLength(1);
@@ -304,7 +306,7 @@ test("send types the text through the send script's stdin and maps its refusals"
   pane.sendResult = '{"error": "terminal-has-draft"}';
   expect(await refusal(t.mirror.send(TMUX.id, "again"))).toBe("terminal-has-draft");
   pane.sendResult = '{"error": "not-submitted"}';
-  expect(await refusal(t.mirror.send(TMUX.id, "again"))).toBe("pane-changed");
+  expect(await refusal(t.mirror.send(TMUX.id, "again"))).toBe("not-submitted");
   pane.sendResult = "garbage";
   expect(await refusal(t.mirror.send(TMUX.id, "again"))).toBe("pane-changed");
 });
@@ -345,6 +347,15 @@ test("routes: 404 unknown, 409 for a chat session, the snapshot with its info, 4
   const locked = await post("hi");
   expect([locked.status, ((await locked.json()) as { error: string }).error]).toEqual([409, "agent-not-running"]);
   expect((await post(5)).status).toBe(400);
+});
+
+test("routes: a session that starts ending between the check and opening the store answers 409, not 500", async () => {
+  // The first isEnding (the route's check) says no, every later one yes: the store refuses to open.
+  let calls = 0;
+  const t = setup({ sid: SID }, () => calls++ > 0);
+  const res = await app(t).request(`/api/sessions/${TMUX.id}/mirror/stream`);
+  expect([res.status, await res.json()]).toEqual([409, { error: "session-ending" }]);
+  expect(existsSync(join(t.root, "_mirrors", `${TMUX.id}.sqlite`))).toBe(false);
 });
 
 test("routes: the stream replays the snapshot, then sends live events and the info; watching stops with the stream", async () => {

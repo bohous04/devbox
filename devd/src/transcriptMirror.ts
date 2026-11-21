@@ -412,9 +412,9 @@ export const SEND_MESSAGES: Record<MirrorSendError, string> = {
   "unsupported-agent": "Chat view isn't supported for this agent yet.",
   "unsupported-host": "Chat view isn't supported on InstaBox sessions yet.",
   "pane-changed": "The terminal changed while the message was being sent; nothing was typed. Check the terminal.",
+  // MIRROR_SEND pasted the text, then did not press Enter.
+  "not-submitted": "The terminal changed while the message was being typed; it was not submitted and may still be in the terminal's prompt. Check the terminal.",
 };
-/** MIRROR_SEND's own outcome beyond the shared codes: the paste went in, Enter did not. */
-const NOT_SUBMITTED = "The terminal changed while the message was being typed; it was not submitted and may still be in the terminal's prompt. Check the terminal.";
 
 export interface MirrorDeps {
   db: Parameters<typeof getSession>[0];
@@ -706,7 +706,6 @@ export class TranscriptMirror {
         throw new MirrorSendRefused("pane-changed", "devd could not confirm the message reached the terminal. Check the terminal before sending again.");
       }
       if (out.ok !== true) {
-        if (out.error === "not-submitted") throw new MirrorSendRefused("pane-changed", NOT_SUBMITTED);
         const code = typeof out.error === "string" && out.error in SEND_MESSAGES ? out.error as MirrorSendError : "pane-changed";
         throw new MirrorSendRefused(code, SEND_MESSAGES[code]);
       }

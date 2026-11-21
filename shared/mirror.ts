@@ -5,7 +5,7 @@ import type { ThreadSnapshot } from "./thread";
  *  reason, next to Open terminal. */
 export type MirrorSendError =
   | "agent-not-running" | "agent-waiting-in-terminal" | "terminal-has-draft" | "terminal-not-ready" | "terminal-scrolled"
-  | "conversation-unknown" | "unsupported-agent" | "unsupported-host" | "pane-changed";
+  | "conversation-unknown" | "unsupported-agent" | "unsupported-host" | "pane-changed" | "not-submitted";
 
 /** What the mirror of a tmux session's `main` pane knows (devd/src/transcriptMirror.ts).
  *  - `live`: the pane runs Claude Code and its transcript is being read;
