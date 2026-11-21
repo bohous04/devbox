@@ -37,15 +37,18 @@ final class ChatScreenshotTests: XCTestCase {
         sleep(1)
         try save(app, "ios-\(appearance)-end")
 
-        // The changed-files card: collapsed, then open with one file's diff.
+        // The changed-files card, one row at the end; the header's +/− opens it, then one file's diff.
         let card = app.buttons.containing(NSPredicate(format: "label CONTAINS 'changed files'")).firstMatch
+        let file = app.buttons["src/sync/queue.ts"]
         if card.waitForExistence(timeout: 5) {
-            card.tap()
+            XCTAssertFalse(file.exists, "the changes card starts as its one row")
+            let chip = app.navigationBars.buttons.containing(NSPredicate(format: "label CONTAINS 'lines added'")).firstMatch
+            XCTAssertTrue(chip.waitForExistence(timeout: 3), "the header carries the changes")
+            chip.tap()
+            XCTAssertTrue(file.waitForExistence(timeout: 3), "the header's changes open the card")
             sleep(1)
             try save(app, "ios-\(appearance)-changes")
-            card.tap()
-            let file = app.buttons["src/sync/queue.ts"]
-            if file.waitForExistence(timeout: 3) {
+            if file.exists {
                 file.tap()
                 sleep(2)
                 app.swipeUp(velocity: .slow)

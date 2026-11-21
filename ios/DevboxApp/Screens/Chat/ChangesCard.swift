@@ -8,12 +8,15 @@ struct ChangesCard: View {
     /// The latest run's end seq: a new one refetches the card (and drops its cached diffs).
     let refreshKey: Int?
     @StateObject private var store: ChangesStore
-    /// nil until the user toggles: then a short list starts open.
-    @State private var userOpen: Bool?
+    /// Each new value (the header's changes chip) opens the card.
+    let openKey: Int
+    /// The card starts as its one header row (totals, Open diffs); the list opens on a tap or from the chip.
+    @State private var open = false
     @State private var shown: Set<String> = []
 
-    init(sessionId: String, client: DevdClient, refreshKey: Int?) {
+    init(sessionId: String, client: DevdClient, refreshKey: Int?, openKey: Int = 0) {
         self.refreshKey = refreshKey
+        self.openKey = openKey
         _store = StateObject(wrappedValue: ChangesStore(sessionId: sessionId, client: client))
     }
 
@@ -23,6 +26,7 @@ struct ChangesCard: View {
                 await store.load()
                 shown = []
             }
+            .onChange(of: openKey) { _, _ in withAnimation(.snappy) { open = true } }
             // Off screen (scrolled away, the thread closed): no diff keeps downloading for nobody.
             .onDisappear { store.cancelDiffs() }
     }
@@ -46,12 +50,11 @@ struct ChangesCard: View {
     }
 
     private func card(_ c: SessionChanges) -> some View {
-        let open = userOpen ?? (c.files.count <= ChangesView.openMax)
         let groups = ChangesView.groupByFolder(c.files)
         let allShown = c.files.allSatisfy { shown.contains($0.path) }
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 4) {
-                Button { withAnimation(.snappy) { userOpen = !open } } label: {
+                Button { withAnimation(.snappy) { open.toggle() } } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "doc.badge.plus").foregroundStyle(Theme.C.mutedForeground).accessibilityHidden(true)
                         Text(ChangesView.title(c)).fontWeight(.medium).foregroundStyle(Theme.C.foreground).fixedSize()
@@ -74,7 +77,7 @@ struct ChangesCard: View {
                 if c.files.count <= ChangesView.openAllMax {
                     Button(allShown ? "Hide diffs" : "Open diffs") {
                         withAnimation(.snappy) {
-                            userOpen = true
+                            open = true
                             shown = allShown ? [] : Set(c.files.map(\.path))
                         }
                     }

@@ -581,7 +581,7 @@ struct MacThreadDetail: View {
             // the system title (MacThreadHeading) nothing else pushes them there.
             if #available(macOS 26, *) { ToolbarSpacer(.flexible, placement: .primaryAction) }
             ToolbarItem(placement: .primaryAction) {
-                MacChangesChip(store: state.windows.store(for: threadId, client: client), client: client) {
+                ChangesChip(store: state.windows.store(for: threadId, client: client), client: client) {
                     tab = .chat
                     revealChanges += 1
                 }
@@ -639,53 +639,6 @@ private struct MacThreadHeading: ViewModifier {
         .fixedSize(horizontal: false, vertical: true)
         .padding(.leading, 4)
         .accessibilityElement(children: .combine)
-    }
-}
-
-/// The header's changes: the worktree's +/− against its base, when it has any; a click shows the changes card. Loads
-/// with the thread and again when a run ends, as the card does.
-private struct MacChangesChip: View {
-    @ObservedObject var thread: ThreadStore
-    @StateObject private var changes: ChangesStore
-    let show: () -> Void
-    @State private var hover = false
-
-    init(store: ThreadStore, client: DevdClient, show: @escaping () -> Void) {
-        thread = store
-        _changes = StateObject(wrappedValue: ChangesStore(sessionId: store.sessionId, client: client))
-        self.show = show
-    }
-
-    var body: some View {
-        Group {
-            if thread.changesAnchor != nil, case .loaded(let c) = changes.state {
-                Button(action: show) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "doc.badge.plus").foregroundStyle(Theme.C.mutedForeground)
-                        Text("+\(c.totals.added)").foregroundStyle(InboxTone.doneIcon)
-                        Text("−\(c.totals.removed)").foregroundStyle(c.totals.removed > 0 ? InboxTone.danger : Theme.C.mutedForeground)
-                    }
-                    .font(.system(size: 12, weight: .medium)).monospacedDigit()
-                    .padding(.horizontal, 8).frame(height: 26)
-                    // A button, not a label: an outline, filled on hover.
-                    .background(Theme.C.foreground.opacity(hover ? 0.08 : 0.03), in: RoundedRectangle(cornerRadius: 7))
-                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.C.border))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .onHover { hover = $0 }
-                .help("\(ChangesView.title(c)) — show the changes")
-                .accessibilityLabel("\(ChangesView.title(c)), \(c.totals.added) lines added, \(c.totals.removed) removed")
-            } else {
-                // Not empty: an empty view never appears, so its task (the fetch) would never run.
-                Color.clear.frame(width: 0, height: 0).accessibilityHidden(true)
-            }
-        }
-        // A run that starts takes the anchor away: the chip goes, without a fetch, until the run ends.
-        .task(id: thread.changesAnchor) {
-            guard thread.changesAnchor != nil else { return changes.reset() }
-            await changes.load()
-        }
     }
 }
 

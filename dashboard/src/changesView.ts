@@ -62,5 +62,3 @@ export function groupByFolder(files: ChangedFile[]): FolderGroup[] {
   return [...groups.values()];
 }
 
-/** The list starts open when it is short enough to read at a glance. */
-export const CHANGES_OPEN_MAX = 6;
