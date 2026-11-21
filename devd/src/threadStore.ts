@@ -22,6 +22,8 @@ export interface ProviderThread {
   resumeFailed: boolean;
 }
 
+export type StoreDir = "_threads" | "_mirrors";
+
 /** The thread store's schema (`PRAGMA user_version`). A change to the schema raises it and adds a migration from the
  *  previous version in `open`; a store with a higher version (written by a newer devd) is refused, never guessed at. */
 export const THREAD_STORE_SCHEMA = 3;
@@ -37,21 +39,23 @@ export class ThreadStore {
 
   private constructor(private db: Database, private onNotice: (item: ThreadItem) => void) {}
 
-  static path(root: string, sessionId: string): string {
-    return join(root, "_threads", `${sessionId}.sqlite`);
+  /** `dir`: `_threads` for chat sessions, `_mirrors` for a tmux session's transcript mirror (transcriptMirror.ts). */
+  static path(root: string, sessionId: string, dir: StoreDir = "_threads"): string {
+    return join(root, dir, `${sessionId}.sqlite`);
   }
 
   /** `onNotice`: a notice devd added (addNotice), for the session's SSE stream (index.ts publishes it). */
-  static open(root: string, sessionId: string, opts: { onNotice?: (item: ThreadItem) => void } = {}): ThreadStore {
-    mkdirSync(join(root, "_threads"), { recursive: true });
-    const db = new Database(ThreadStore.path(root, sessionId));
+  static open(root: string, sessionId: string, opts: { onNotice?: (item: ThreadItem) => void; dir?: StoreDir } = {}): ThreadStore {
+    const dir = opts.dir ?? "_threads";
+    mkdirSync(join(root, dir), { recursive: true });
+    const db = new Database(ThreadStore.path(root, sessionId, dir));
     db.run("PRAGMA busy_timeout = 5000");
     db.run("PRAGMA journal_mode = WAL");
     db.run("PRAGMA synchronous = NORMAL");
     const version = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
     if (version > THREAD_STORE_SCHEMA) {
       db.close();
-      throw new Error(`thread store schema ${version} is newer than this devd's (${THREAD_STORE_SCHEMA}): ${ThreadStore.path(root, sessionId)}`);
+      throw new Error(`thread store schema ${version} is newer than this devd's (${THREAD_STORE_SCHEMA}): ${ThreadStore.path(root, sessionId, dir)}`);
     }
     if (version === 0) db.transaction(() => ThreadStore.createSchema1(db))();
     if (version <= 1) db.transaction(() => ThreadStore.migrateTo2(db))();
@@ -143,6 +147,24 @@ export class ThreadStore {
       this.setMeta("last_seq", e.seq);
     })();
     return true;
+  }
+
+  /** Mirror stores only (transcriptMirror.ts): applies `events` and saves the transcript reader's `cursor` in one
+   *  transaction, so a crash never leaves the cursor ahead of or behind the items it produced. The cursor table lives
+   *  only in mirror stores and is outside the thread schema (`user_version`): it is created when first written. */
+  applyBatch(events: LoggedEvent[], cursor: string): void {
+    this.db.transaction(() => {
+      this.db.run(`CREATE TABLE IF NOT EXISTS mirror_cursor (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL)`);
+      for (const e of events) this.apply(e);
+      this.db.query(`INSERT INTO mirror_cursor (id, value) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET value=excluded.value`).run(cursor);
+    })();
+  }
+
+  /** The cursor the last applyBatch saved; null before one. */
+  mirrorCursor(): string | null {
+    if (!this.db.query(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='mirror_cursor'`).get()) return null;
+    const r = this.db.query(`SELECT value FROM mirror_cursor WHERE id=1`).get() as { value: string } | null;
+    return r ? r.value : null;
   }
 
   private dispatch({ seq, ts, event: ev }: LoggedEvent) {

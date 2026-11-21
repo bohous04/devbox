@@ -73,6 +73,7 @@ import { predictDisk } from "./aggregate";
 import { DEFAULT_CONTROL_ROOT, DEFAULT_DEVD_URL, DEFAULT_OPENROUTER_URL, SessionManager, storedRuntime, upstreamKey } from "./sessions";
 import { BridgeLinks, LEGACY_BRIDGE_UNTIL, legacyBridgeStartupLine, USER_FIRST_PROMPT_TAG } from "./bridgeLink";
 import { ThreadStore } from "./threadStore";
+import { TranscriptMirror } from "./transcriptMirror";
 import { ChatHub } from "./chatHub";
 import { ChatSwitch } from "./chatSwitch";
 import { EventBus } from "./eventBus";
@@ -526,6 +527,7 @@ reportPrunedFirstPrompts({ db, threads: threadStore, notify }, prunedFirstTurns)
   if (legacy) console.error(legacy);
 }
 const releaseThread = (id: string, ended = false) => {
+  transcriptMirror.release(id, ended);
   bridgeLinks.drop(id);
   if (ended) bridgeLinks.forget(id);
   chatHub.drop(id);
@@ -864,6 +866,12 @@ const refreshAccount = (id: string): Promise<void> => {
 const dockerExec = (container: string, cmd: string[], timeoutMs: number) =>
   runDocker(container, ["exec", container, ...cmd], { timeoutMs });
 const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+// The Chat view of tmux sessions. `-i` only when the command reads stdin (the message typed into the pane).
+const transcriptMirror = new TranscriptMirror({
+  db, root, bus, isEnding: (id) => mgr.isEnding(id), live: (id) => agentEvents.liveSnapshot(id),
+  exec: (container, cmd, timeoutMs, stdin) =>
+    runDocker(container, ["exec", ...(stdin === undefined ? [] : ["-i"]), container, ...cmd], stdin === undefined ? { timeoutMs } : { timeoutMs, stdin }),
+});
 
 // cc upkeep: once a day in the night window. Run state is only in memory — after a devd
 // restart it may start once more in the same window, which is a no-op (the version already matches).
@@ -1130,6 +1138,7 @@ const apiDeps: ApiDeps = {
   },
   agentEvents, liveActivities, gitea, spawnPty: realSpawnPty, scheduler, critic, codexAuth,
   links: bridgeLinks, threads: threadStore, bus, inbox, switcher: chatSwitch, bridgeVersion: (id) => chatSwitch.bridgeVersion(id),
+  mirror: transcriptMirror,
   untilReset: (s) => untilReset(s, resetDeps({ db, threads: threadStore, codexAccounts }), Date.now()),
   codexUsage: { view: () => buildCodexView(db) },
   codexAccounts,
