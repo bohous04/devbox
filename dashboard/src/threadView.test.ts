@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import type { BridgeEvent, LoggedEvent, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 import fixture from "../../shared/fixtures/thread-events.json";
-import { activeRun, applyEffort, applyNotice, applyThreadEvent, composerErrorText, criticRunIds, emptyThread, mergeSnapshot, queuedRunIds } from "./threadView";
+import { activeRun, applyCommands, applyEffort, applyNotice, applyThreadEvent, composerErrorText, criticRunIds, emptyThread, mergeSnapshot, queuedRunIds } from "./threadView";
 
 /** The shared cases (also run by ios/DevboxAppTests/ThreadStoreTests.swift): each starts from an empty thread. */
 type Step = { event: LoggedEvent } | { snapshot: { afterSeq: number; snapshot: ThreadSnapshot } } | { notice: ThreadItem };
@@ -70,4 +70,15 @@ test("effort: a thread-effort replaces the thread's effort; an effort.state thre
   expect(after.items).toEqual([]);
   const merged = mergeSnapshot(emptyThread(), { afterSeq: 0, snapshot: { ...emptyThread(), effort } });
   expect(merged.effort).toEqual(effort);
+});
+
+test("commands: thread-commands replaces the list (null = none: no / menu); a replay snapshot carries its own or none", () => {
+  const list = [{ name: "compact", hint: "<instructions>" }];
+  const t = applyCommands(emptyThread(), list);
+  expect(t.commands).toEqual(list);
+  expect("commands" in applyCommands(t, null)).toBe(false);
+  expect(run(t, [{ type: "commands.changed", commands: [] }]).commands).toEqual(list);
+  expect(mergeSnapshot(emptyThread(), { afterSeq: 0, snapshot: { ...emptyThread(), commands: list } }).commands).toEqual(list);
+  // A snapshot without commands (the harness sent none, e.g. after a switch to Codex) drops the old list.
+  expect("commands" in mergeSnapshot(t, { afterSeq: 0, snapshot: emptyThread() })).toBe(false);
 });

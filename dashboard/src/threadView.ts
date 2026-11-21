@@ -1,4 +1,4 @@
-import type { LoggedEvent, RunRow, ThreadEffort, ThreadItem, ThreadSnapshot } from "../../shared/thread";
+import type { AgentCommand, LoggedEvent, RunRow, ThreadEffort, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
 export const emptyThread = (): ThreadSnapshot => ({
   lastSeq: 0, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: null, effort: null,
@@ -191,7 +191,16 @@ export function mergeSnapshot(t: ThreadSnapshot, m: { afterSeq: number; snapshot
     if (idx >= 0) runs[idx] = r;
     else runs.push(r);
   }
-  return { lastSeq: Math.max(t.lastSeq, s.lastSeq), seenSeq: s.seenSeq, items, runs, pending: s.pending, background: s.background, native: s.native, effort: s.effort };
+  return {
+    lastSeq: Math.max(t.lastSeq, s.lastSeq), seenSeq: s.seenSeq, items, runs, pending: s.pending, background: s.background, native: s.native, effort: s.effort,
+    ...(s.commands ? { commands: s.commands } : {}),
+  };
+}
+
+/** The current harness's commands from the stream (`thread-commands`, parsed by devd's store); null = it sent none. */
+export function applyCommands(t: ThreadSnapshot, commands: AgentCommand[] | null): ThreadSnapshot {
+  const { commands: _old, ...rest } = t;
+  return commands ? { ...rest, commands } : rest;
 }
 
 /** The agent's effort from the stream (`thread-effort`, already parsed by devd's store). */

@@ -204,10 +204,17 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
   // The agent's latest command list; it goes out once the thread is announced (an agent may send it while session/new
   // is still open), and again only when it changes.
   let latestCommands: AgentCommand[] | null = null;
+  // The session a list sent before session/new answered names (undefined: none); kept only if it is the one that opened.
+  let latestCommandsFor: unknown;
   let sentCommands: string | null = null;
   let announced = false;
   function sendCommands(): void {
     if (!announced || latestCommands === null) return;
+    if (latestCommandsFor !== undefined && latestCommandsFor !== sessionId) {
+      logError(`${spec.id}: available_commands_update for session ${String(latestCommandsFor)}, not ${sessionId}, dropped`);
+      latestCommands = null;
+      return;
+    }
     const key = JSON.stringify(latestCommands);
     if (key === sentCommands) return;
     sentCommands = key;
@@ -547,7 +554,10 @@ export function openAcpSession(o: AcpSessionOptions, spawn: SpawnFn = spawnAgent
     if (typeof kind === "string" && IGNORED_UPDATES.has(kind)) return;
     // Also before it (Grok and Vibe send the list while session/new is open), and during a replay: it is the
     // session's state, not history.
-    if (kind === "available_commands_update" && (sessionId === null || params?.sessionId === sessionId)) return commandsUpdate(u);
+    if (kind === "available_commands_update" && (sessionId === null || params?.sessionId === sessionId)) {
+      latestCommandsFor = params?.sessionId;
+      return commandsUpdate(u);
+    }
     if (replaying) return;
     if (params?.sessionId !== sessionId) {
       logError(`${spec.id}: ${String(kind)} for session ${String(params?.sessionId)}, not ${sessionId}, dropped`);

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { InboxItem, InboxRemoved, LoggedEvent, ThreadEffort, ThreadItem, ThreadSnapshot } from "../../shared/thread";
+import type { AgentCommand, InboxItem, InboxRemoved, LoggedEvent, ThreadEffort, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 import { api } from "./api";
 
 export const STREAM_POLL_MS = 5000;
@@ -18,6 +18,8 @@ export interface EventStreamOptions {
   onNotice?: (item: ThreadItem) => void;
   /** The agent's reasoning effort changed (devd's parsed ThreadEffort): no seq of its own, see applyEffort. */
   onEffort?: (effort: ThreadEffort | null) => void;
+  /** The current harness's slash commands changed (null: it runs none): no seq of its own, see applyCommands. */
+  onCommands?: (commands: AgentCommand[] | null) => void;
   onInbox?: (item: InboxItem | InboxRemoved) => void;
   /** The whole inbox: fetched when the stream (re)opens and every 5 s while it is down. */
   onInboxList?: (items: InboxItem[]) => void;
@@ -82,6 +84,7 @@ export function useEventStream(opts: EventStreamOptions): { paused: boolean; pol
       on<LoggedEvent>("thread", (d) => h.current.onThread?.(d));
       on<ThreadItem>("thread-notice", (d) => h.current.onNotice?.(d));
       on<ThreadEffort | null>("thread-effort", (d) => h.current.onEffort?.(d));
+      on<AgentCommand[] | null>("thread-commands", (d) => h.current.onCommands?.(d));
       on<InboxItem | InboxRemoved>("inbox", (d) => h.current.onInbox?.(d));
       src.onerror = () => {
         if (disposed) return;

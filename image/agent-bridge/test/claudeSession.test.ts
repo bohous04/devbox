@@ -876,6 +876,29 @@ describe("Claude commands (1.9.0)", () => {
     expect(commands).toEqual([{ type: "commands.changed", commands: [{ name: "code-review", description: REVIEW.description }] }]);
   });
 
+  test("a command list that could not be read is asked for again with the next init", async () => {
+    const sdk = fakeSdk();
+    sdk.commandList = [REVIEW];
+    sdk.commandError = new Error("control request failed");
+    const { session, commands, logs } = open(sdk);
+    await session.startTurn("run-1", "hi", "user");
+    sdk.push(initWith());
+    await until(() => logs.length > 0);
+    sdk.commandError = undefined;
+    sdk.push(initWith());
+    await until(() => commands.length > 0);
+    expect(commands).toEqual([{ type: "commands.changed", commands: [{ name: "code-review", description: REVIEW.description }] }]);
+  });
+
+  test("an empty local_command_output adds no empty reply", async () => {
+    const sdk = fakeSdk();
+    const { session, events } = open(sdk);
+    await session.startTurn("run-1", "/voice", "user");
+    sdk.push(init(), { ...LOCAL_COMMAND_TURN[0], content: "  \n" }, LOCAL_COMMAND_TURN[1]!);
+    await until(() => events.some((e) => e.type === "run.completed"));
+    expect(events.filter((e) => e.type === "message.final")).toEqual([]);
+  });
+
   test("a list that arrives after the session closed is not sent: a switch's next harness would get it", async () => {
     const sdk = fakeSdk();
     sdk.commandList = [COMPACT];
@@ -890,6 +913,16 @@ describe("Claude commands (1.9.0)", () => {
     await flush();
     await flush();
     expect(commands).toEqual([]);
+  });
+
+  test("/model, /effort and /clear are left out: devd's own controls and thread own what they change", async () => {
+    const sdk = fakeSdk();
+    sdk.commandList = ["model", "effort", "clear"].map((name) => ({ name, description: name, argumentHint: "", builtin: true })).concat([COMPACT]);
+    const { session, commands } = open(sdk);
+    await session.startTurn("run-1", "hi", "user");
+    sdk.push(initWith());
+    await until(() => commands.length > 0);
+    expect(commands).toEqual([{ type: "commands.changed", commands: [{ name: "compact", description: COMPACT.description, hint: COMPACT.argumentHint }] }]);
   });
 
   test("rows sharing a name are one command: the CLI's own row, which is the one /name runs", async () => {

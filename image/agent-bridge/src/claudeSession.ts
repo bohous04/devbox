@@ -122,12 +122,19 @@ function isRootFrame(msg: SDKMessage): boolean {
   return false;
 }
 
-/** The commands a remote UI offers: without the terminal-only ones, one row per name (the CLI's own row is the one
- *  `/name` runs, sdk.d.ts SlashCommand.builtin). */
+/** Commands a chat session does not offer, because devd owns what they change and would not hear of it (checked with
+ *  Claude Code 2.1.325 over the SDK): /model switches the CLI's model while the bridge keeps reporting the old one (the
+ *  model chip and run.started go wrong, and the effort levels are the old model's); /effort sets the level behind the
+ *  effort chip; /clear starts a new conversation (a new session id) while the thread keeps showing the old one, which
+ *  the agent no longer knows. Typed by hand they still run. */
+export const DEVD_OWNED_COMMANDS: ReadonlySet<string> = new Set(["model", "effort", "clear"]);
+
+/** The commands a remote UI offers: without the terminal-only ones and DEVD_OWNED_COMMANDS, one row per name (the CLI's
+ *  own row is the one `/name` runs, sdk.d.ts SlashCommand.builtin). */
 export function remoteCommands(all: SlashCommand[], terminal: ReadonlySet<string>): AgentCommand[] {
   const byName = new Map<string, SlashCommand>();
   for (const c of all) {
-    if (terminal.has(c.name)) continue;
+    if (terminal.has(c.name) || DEVD_OWNED_COMMANDS.has(c.name)) continue;
     const seen = byName.get(c.name);
     if (seen === undefined || (c.builtin === true && seen.builtin !== true)) byName.set(c.name, c);
   }
@@ -249,6 +256,7 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
   let allCommands: SlashCommand[] | null = null;
   let terminalCommands: Set<string> | null = null;
   let sentCommands: string | null = null;
+  let askingCommands = false;
   function sendCommands(): void {
     // After close, a switch's next harness may already be current in devd, which files a list under the current one.
     if (ended || allCommands === null || terminalCommands === null) return;
@@ -265,15 +273,20 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
       emit({ type: "thread.native", harness: "claude", nativeThreadId, account: null, model: msg.model, caps: CLAUDE_CAPABILITIES });
     }
     if (msg.type === "system" && msg.subtype === "init") {
-      const first = terminalCommands === null;
       terminalCommands = new Set(msg.terminal_slash_commands ?? []);
-      if (first && allCommands === null) {
+      // Asked until one answer (or push) came: a failed read is asked again with the next init.
+      if (allCommands === null && !askingCommands) {
+        askingCommands = true;
         stream.supportedCommands().then(
           (list) => {
+            askingCommands = false;
             allCommands ??= list; // a push that came meanwhile is newer
             sendCommands();
           },
-          (e) => logError(`claude: reading the command list failed: ${e instanceof Error ? e.message : String(e)}`),
+          (e) => {
+            askingCommands = false;
+            logError(`claude: reading the command list failed: ${e instanceof Error ? e.message : String(e)}`);
+          },
         );
       } else sendCommands();
     }
