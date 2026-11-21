@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Attention, InboxItem } from "../../shared/thread";
-import { groupInbox, inboxHref, plainPreview, projectBadge, reasonLabel, reasonStatus, rowStatus, rowTitle, statusParts, shelfBlock, shortAgo, snoozeTimes, splitNeedsYou, upsertInbox } from "./inboxView";
+import { groupInbox, inboxHref, plainPreview, projectBadge, reasonLabel, reasonStatus, rowStatus, rowTitle, statusParts, shelfBlock, shortAgo, snoozeTimes, splitNeedsYou, threadHeading, upsertInbox } from "./inboxView";
 
 const item = (sessionId: string, attention: Attention, runtime: InboxItem["runtime"] = "chat"): InboxItem => ({
   sessionId, runtime, title: sessionId, project: "p", repo: "r", agent: "claude", attention, lastText: null,
@@ -149,4 +149,16 @@ test("statusParts: nothing for an untouched idle row; snooze end; compact keeps 
 test("rowTitle: a failed session's error stays in the preview, not the title", () => {
   const failed = { ...item("dev-p-r", { section: "needs_you", reason: "failed", since: 1 }), title: "p/r", lastText: "Error: **build** failed" };
   expect(rowTitle(failed)).toBe("r");
+});
+
+test("threadHeading: the thread page names the thread like its inbox row, the topic from the first message with text", () => {
+  const session = { name: null, project: "p", repo: "r" };
+  const user = (text: string, seq: number) => ({ seq, runId: `r${seq}`, itemId: `user:r${seq}`, kind: "user" as const, text, status: "done" as const, ts: seq });
+  expect(threadHeading("dev-p-r-14", session, [user("", 1), user("Fix the login redirect. Then test it", 2)])).toBe("Fix the login redirect");
+  expect(threadHeading("dev-p-r-14", session, [])).toBe("r #14");
+  expect(threadHeading("dev-p-r-14", { ...session, name: " Boosting " }, undefined)).toBe("Boosting");
+  // Loading, no name: the crumb stands in.
+  expect(threadHeading("dev-p-r-14", session, undefined)).toBeNull();
+  // Not a known session: its id.
+  expect(threadHeading("dev-p-r-14", undefined, undefined)).toBe("dev-p-r-14");
 });

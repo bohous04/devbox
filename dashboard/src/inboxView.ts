@@ -1,4 +1,5 @@
-import type { Attention, InboxItem, InboxRemoved } from "../../shared/thread";
+import type { Attention, InboxItem, InboxRemoved, ThreadItem } from "../../shared/thread";
+import { threadTitle } from "../../shared/threadTitle";
 
 /** The inbox's sections and its two shelves. Ordering mirrors `sortInbox` in devd/src/sessionInbox.ts: needs-you
  *  oldest first (the longest wait on top), the rest newest first. */
@@ -135,12 +136,29 @@ export function projectBadge(project: string): { letters: string; slot: number }
  *  `__x__` only between spaces or line edges, so names like `__init__.py` stay whole. */
 export const plainPreview = (t: string): string => t.replace(/`+/g, "").replace(/\*\*(.+?)\*\*/g, "$1").replace(/(?<=^|\s)__(\S(?:.*?\S)?)__(?=$|\s|[,;:!?)])/g, "$1").replace(/^#+\s+/, "").replace(/\s+/g, " ").trim();
 
+/** The thread page's heading, by the same chain with the topic from the thread it holds (as devd works it out:
+ *  the first user message with text). null while a session without a name has its thread loading: the crumb
+ *  stands in, so the heading does not change from "repo #n" to the topic as it arrives. */
+export function threadHeading(id: string, session: { name?: string | null; project: string; repo: string } | undefined, items: ThreadItem[] | undefined): string | null {
+  if (!session) return id;
+  const name = session.name?.trim() || null;
+  if (!name && items === undefined) return null;
+  const first = items?.find((i) => i.kind === "user" && i.text !== "")?.text;
+  return sessionTitle({ sessionId: id, name, project: session.project, repo: session.repo, topic: first === undefined ? null : threadTitle(first) });
+}
+
 /** What a session is called, in the inbox and the thread header alike: a custom name, else devd's `topic` (from the
  *  first message, stable for the thread's life), else the repo and the session's number from its id
  *  ("harbor_api #14") so sibling sessions of one repo stay apart. Never `lastText`: it changes with every reply. */
 export function rowTitle(i: InboxItem): string {
-  if (i.title !== `${i.project}/${i.repo}`) return i.title;
-  if (i.topic) return i.topic;
-  const n = new RegExp(`-${i.repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-(\\d+)$`).exec(i.sessionId)?.[1];
-  return n ? `${i.repo} #${n}` : i.repo;
+  return sessionTitle({ sessionId: i.sessionId, name: i.title === `${i.project}/${i.repo}` ? null : i.title, project: i.project, repo: i.repo, topic: i.topic ?? null });
+}
+
+/** The chain behind `rowTitle`, for a screen with the session but not its inbox item. */
+export function sessionTitle(s: { sessionId: string; name: string | null; project: string; repo: string; topic: string | null }): string {
+  const name = s.name?.trim();
+  if (name) return name;
+  if (s.topic) return s.topic;
+  const n = new RegExp(`-${s.repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-(\\d+)$`).exec(s.sessionId)?.[1];
+  return n ? `${s.repo} #${n}` : s.repo;
 }

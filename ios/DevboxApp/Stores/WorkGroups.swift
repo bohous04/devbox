@@ -164,6 +164,8 @@ struct ToolLabel: Equatable {
 /// words, not as a command. Presentation only; there is no title generator.
 enum ThreadTitle {
     private static let maxWords = 6
+    /// A hard cap in code points (shared/threadTitle.ts MAX_CHARS), the ellipsis included.
+    private static let maxChars = 60
 
     private static func codeLike(_ clause: String) -> Bool {
         if clause.range(of: #"[$=|&<>{}()\[\]\\`#*~^]"#, options: .regularExpression) != nil { return true }
@@ -176,14 +178,36 @@ enum ThreadTitle {
     private static func clip(_ words: [Substring]) -> String {
         var t = words.prefix(maxWords).joined(separator: " ")
         while let last = t.last, ",;:–—-".contains(last) { t.removeLast() }
-        return words.count > maxWords ? t + "…" : t
+        var cut = words.count > maxWords
+        let scalars = Array(t.unicodeScalars)
+        if scalars.count + (cut ? 1 : 0) > maxChars {
+            var kept = String.UnicodeScalarView()
+            kept.append(contentsOf: scalars.prefix(maxChars - 1))
+            t = String(kept)
+            while t.last?.isWhitespace == true { t.removeLast() }
+            cut = true
+        }
+        return cut ? t + "…" : t
+    }
+
+    /// The first non-empty line outside a ``` fence.
+    private static func firstProseLine(_ message: String) -> String {
+        var fenced = false
+        for raw in message.components(separatedBy: "\n") {
+            let l = raw.trimmingCharacters(in: .whitespaces)
+            if l.hasPrefix("```") { fenced.toggle(); continue }
+            if !fenced, !l.isEmpty { return l }
+        }
+        return ""
     }
 
     private static func capitalized(_ s: String) -> String { s.prefix(1).uppercased() + s.dropFirst() }
 
     static func from(_ firstMessage: String) -> String? {
-        let line = firstMessage.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty } ?? ""
-        let text = line.replacingOccurrences(of: "`[^`]*`", with: " ", options: .regularExpression)
+        let text = firstProseLine(firstMessage)
+            .replacingOccurrences(of: #"^#+\s+"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\*\*(.+?)\*\*"#, with: "$1", options: .regularExpression)
+            .replacingOccurrences(of: "`[^`]*`", with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"https?://\S+"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespaces)

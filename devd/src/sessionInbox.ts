@@ -39,6 +39,8 @@ export class Inbox {
   /** Sessions whose store is unreadable: the logged message (logged once per message, not per inbox read) and since
    *  when it fails (the item's `since`, so an unchanged failure is not published again). Cleared once it reads again. */
   private broken = new Map<string, { msg: string; since: number }>();
+  /** Each chat session's topic once known: it never changes, so the store is read only while it is still null. */
+  private topics = new Map<string, string>();
   private coalesceMs: number;
   private log: (msg: string) => void;
 
@@ -185,13 +187,22 @@ export class Inbox {
     const now = this.now();
     const attention = chatAttention(t, this.d.chatLink(s.id), now, pr);
     const text = store.lastMessageText();
-    const first = store.firstUserText();
+    const topic = this.topic(s.id, store);
     const last = lastEndedRun(t);
     const graceEnd = last && last.endedAt !== null ? last.endedAt + WORKING_GRACE_MS : null;
     return {
-      item: { ...base, attention, lastText: text === null ? null : clip(text), topic: first === null ? null : threadTitle(first) },
+      item: { ...base, attention, lastText: text === null ? null : clip(text), topic },
       recheckAt: graceEnd !== null && graceEnd > now ? graceEnd : null,
     };
+  }
+
+  private topic(sessionId: string, store: ThreadStore): string | null {
+    const known = this.topics.get(sessionId);
+    if (known !== undefined) return known;
+    const first = store.firstUserText();
+    const topic = first === null ? null : threadTitle(first);
+    if (topic !== null) this.topics.set(sessionId, topic);
+    return topic;
   }
 
   changed(sessionId: string): void {
@@ -218,6 +229,7 @@ export class Inbox {
     if (!s) {
       this.lastPublished.delete(sessionId);
       this.broken.delete(sessionId);
+      this.topics.delete(sessionId);
       const recheck = this.rechecks.get(sessionId);
       if (recheck !== undefined) { this.timers.clear(recheck); this.rechecks.delete(sessionId); }
       const removed: InboxRemoved = { sessionId, removed: true };

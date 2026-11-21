@@ -16,12 +16,14 @@ final class InboxStoreTests: XCTestCase {
     func testSearchMatchesEveryWordInTitleProjectRepoBranchOrMessageIgnoringCaseAndAccents() throws {
         let json: [String: Any] = ["sessionId": "dev-acme-web", "runtime": "chat", "title": "Café menu redesign", "project": "acme",
                                    "repo": "web", "agent": "claude", "attention": ["section": "idle", "since": 0], "lastText": "Tests pass",
-                                   "branch": "menu-redesign"]
+                                   "branch": "menu-redesign", "topic": "Fix the login redirect"]
         let i = try JSONDecoder().decode(InboxItem.self, from: JSONSerialization.data(withJSONObject: json))
         XCTAssertTrue(InboxView.matches(i, ""))
         XCTAssertTrue(InboxView.matches(i, "cafe ACME"))
         XCTAssertTrue(InboxView.matches(i, "tests web"))
         XCTAssertTrue(InboxView.matches(i, "menu-redesign"))
+        // The topic is what the row may be titled by.
+        XCTAssertTrue(InboxView.matches(i, "login redirect"))
         XCTAssertFalse(InboxView.matches(i, "cafe billing"))
     }
 
