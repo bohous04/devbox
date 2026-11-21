@@ -99,6 +99,11 @@ actor DevdClient {
         return try JSONDecoder().decode(T.self, from: data)
     }
 
+    /// POST whose answer is either empty (204) or a body worth reading (202): the raw body, empty for 204.
+    func postData(_ path: String, body: (any Encodable)?) async throws -> Data {
+        try await request(path: path, method: "POST", body: body)
+    }
+
     func postVoid(_ path: String, body: (any Encodable)?, timeout: TimeInterval? = nil) async throws {
         _ = try await request(path: path, method: "POST", body: body, timeout: timeout)
     }

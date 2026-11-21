@@ -157,6 +157,8 @@ struct MacInboxSidebar: View {
     @State private var shut: Set<String> = []
     @State private var showAll: Set<String> = []
     @State private var actionsFor: InboxItem?
+    /// The terminal's F9 actions in the row menu (MacSessionActions.swift).
+    @StateObject private var sessionActions = MacSessionActions()
     @State private var query = ""
     @FocusState private var searching: Bool
     @State private var sidebarHeight: CGFloat = 0
@@ -232,6 +234,7 @@ struct MacInboxSidebar: View {
         .sheet(item: $actionsFor) { item in
             InboxRowActions(item: item, store: store).frame(minWidth: 360, minHeight: 320)
         }
+        .macSessionActions(sessionActions)
     }
 
     /// Search and New session, above the groups.
@@ -396,6 +399,7 @@ struct MacInboxSidebar: View {
                 .contextMenu {
                     Button("Open in New Window") { state.openThread(item.sessionId) }
                     Button("Settle or Snooze…") { actionsFor = item }
+                    MacSessionMenuItems(item: item, actions: sessionActions)
                 }
         }
     }

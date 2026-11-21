@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { createApp } from "../src/api";
 import type { SwitchAgentResult } from "../src/agentSwitch";
 import { DEFAULT_CONFIG } from "../src/config";
-import { openDb } from "../src/db";
+import { insertSession, openDb } from "../src/db";
 
 // Thin routing layer over agentSwitch.switchAgent (the business logic is tested
 // in agentSwitch.test.ts with a fake exec/db) — here only input validation and the
@@ -78,4 +78,32 @@ test("id from the URL and a valid agent reach switchAgent", async () => {
     body: JSON.stringify({ agent: "claude-openrouter" }),
   });
   expect(seen).toEqual([["dev-shop-cms", "claude-openrouter"]]);
+});
+
+// The inbox item carries the agent and the title (the nickname): both changes are published, so the Mac sidebar's row
+// updates over the inbox stream without a reload.
+test("a switch that reached the DB and a rename are published to the inbox; a failed switch is not", async () => {
+  const db = openDb(":memory:");
+  insertSession(db, { id: "dev-shop-cms", folder: "acme", project: "shop", repo: "cms", container: "dev-shop-cms",
+    port_base: 40100, status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0, agent: "claude" });
+  const published: string[] = [];
+  let status: "switched" | "failed" = "switched";
+  const a = createApp({
+    mgr: {} as never, db, cfg: DEFAULT_CONFIG, root: "/tmp", tree: async () => [],
+    listener: {} as never, notify: () => {}, stats: () => ({}),
+    cloneQueue: {} as never, configRepo: {} as never, dashboardDir: "/tmp",
+    backup: { build: async () => "/tmp/x", restore: async () => {} },
+    switchAgent: async () => ({ status, panes: [] }),
+    inbox: { changedSafe: (id: string) => published.push(id) },
+  } as never);
+  const req = (path: string, body: unknown) => a.request(`/api/sessions/dev-shop-cms/${path}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  await req("agent", { agent: "codex" });
+  expect(published).toEqual(["dev-shop-cms"]);
+  status = "failed";
+  await req("agent", { agent: "codex" });
+  expect(published).toEqual(["dev-shop-cms"]);
+  expect((await req("name", { name: "billing fix" })).status).toBe(204);
+  expect(published).toEqual(["dev-shop-cms", "dev-shop-cms"]);
 });

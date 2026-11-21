@@ -159,6 +159,34 @@ final class MacScreenshotTests: XCTestCase {
         }
     }
 
+    /// The row menu's Rename and End sheets (MacSessionActions.swift), drawn on their own as the sheet shows them.
+    func testSessionActionSheets() throws {
+        let actions = MacSessionActions()
+        let item = try JSONDecoder().decode(InboxItem.self, from: Data(#"""
+            {"sessionId":"dev-acme-billing","runtime":"tmux","title":"Run the invoice table migration","project":"acme","repo":"billing",
+             "agent":"claude","attention":{"section":"idle","since":0}}
+            """#.utf8))
+        let rename = MacRenameSheet(rename: .init(sessionId: item.sessionId, name: "Run the invoice table migration"),
+                                    actions: actions)
+        actions.requestEnd(item, MacSessionMenu.EndConfirmation(title: "End session dev-acme-billing?",
+                                                                message: "Permanent — \(MacSessionMenu.endEffect(worktree: true))."), worktree: true)
+        for look in ["light", "dark"] {
+            try shootView(rename, name: "rename-sheet-\(look)", look: look)
+            try shootView(MacSessionTaskSheet(actions: actions), name: "end-sheet-\(look)", look: look)
+        }
+    }
+
+    private func shootView(_ view: some View, name: String, look: String) throws {
+        let host = NSHostingView(rootView: view.background(Color(nsColor: .windowBackgroundColor)))
+        host.appearance = NSAppearance(named: look == "dark" ? .darkAqua : .aqua)
+        host.frame = NSRect(origin: .zero, size: host.fittingSize)
+        host.layoutSubtreeIfNeeded()
+        let rep = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        host.cacheDisplay(in: host.bounds, to: rep)
+        let png = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+        try png.write(to: dir.appending(path: "mac-\(name).png"))
+    }
+
     private func shoot(name: String, look: String, thread: String?, page: MacDashboardPage? = nil, draft: String? = nil, width: CGFloat = 1440, height: CGFloat = 900,
                        inspect: ((NSView) throws -> Void)? = nil) throws {
         let state = MacAppState(isTestRun: false, isFixtureRun: true)

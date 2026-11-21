@@ -99,11 +99,14 @@ struct SessionLive: Decodable {
     /// The container was shared and has not been rebuilt yet → still restricted (devd/src/shareTaint.ts).
     /// Missing on older devd → nil = no.
     let tainted: Bool?
+    /// The session's own git worktree, which ending the session deletes; nil = a shared workspace (repo in the old
+    /// shape), which ending leaves alone (devd/src/db.ts `worktree`).
+    let worktree: String?
 
     private enum CodingKeys: String, CodingKey {
         case id, folder, project, repo, container, port_base, status, solo, created_at,
              last_active_at, ports, claudeState, cpuPct, memBytes, workspace, important,
-             accountId, name, critic, agent, host, tainted
+             accountId, name, critic, agent, host, tainted, worktree
     }
 
     /// Custom `init(from:)`: `cpuPct`/`memBytes` tolerantly `decodeIfPresent ?? 0` — devd
@@ -134,6 +137,7 @@ struct SessionLive: Decodable {
         agent = try c.decodeIfPresent(AgentName.self, forKey: .agent)
         host = try c.decodeIfPresent(SessionHost.self, forKey: .host)
         tainted = try c.decodeIfPresent(Bool.self, forKey: .tainted)
+        worktree = try c.decodeIfPresent(String.self, forKey: .worktree)
     }
 }
 
@@ -1362,6 +1366,29 @@ struct CodexAccountView: Decodable {
 
 struct CodexAccountsResponse: Decodable {
     let accounts: [CodexAccountView]
+}
+
+/// `POST /api/sessions/:id/codex-account` (devd/src/codexSessionAccounts.ts CodexSessionAccountSwitchResult), or
+/// `{running: true}` (202) while the switch goes on in the background. A failure from a background switch is
+/// `{ok: false, error}`.
+struct CodexSessionSwitchResult: Decodable, Equatable {
+    struct Pane: Decodable, Equatable {
+        let target: String
+        let outcome: String
+    }
+    var running: Bool? = nil
+    var ok: Bool? = nil
+    var label: String? = nil
+    var unchanged: Bool? = nil
+    var panes: [Pane]? = nil
+    var error: String? = nil
+}
+
+/// The part of `GET /api/sessions/:id/codex-account` that follows a background switch: `switching` while it runs,
+/// then `lastSwitch` once (devd/src/api.ts).
+struct CodexSessionAccountPoll: Decodable {
+    let switching: Bool?
+    let lastSwitch: CodexSessionSwitchResult?
 }
 
 // MARK: - Unpushed commits (mirror of dashboard/src/api.ts UnpushedStatus)
