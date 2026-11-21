@@ -8,7 +8,7 @@ import {
 import { api, ApiError, type ChatSwitchResult, type ChatTarget } from "../../api";
 import { profileFor } from "../../newSession";
 import {
-  accountMenuBlocked, awaitingTargetText, claudeAccountOptions, codexAccountOptions, effortChipLabel, effortMenuBlocked, effortOptions, harnessOptions,
+  accountMenuBlocked, awaitingTargetText, claudeAccountOptions, codexAccountOptions, effortChipLabel, effortFooter, effortMenuBlocked, effortOptions, harnessOptions,
   modelLabel, modelMenuBlocked, modelOptions, switchBlocked, switchErrorText, switchResultText, type SwitchOption,
 } from "../../switchView";
 
@@ -139,7 +139,7 @@ export function Switchers({ sessionId, thread, children }: {
           render={(o) => <span className="truncate">{o.label}</span>}
           onPick={(o) => void setEffort(o.value === "" ? null : o.value, o.label)}
         />
-        {effortBlocked === null && <p className="px-2 pb-1.5 text-xs text-muted-foreground">Applies from your next message.</p>}
+        {effortBlocked === null && thread.effort && <p className="px-2 pb-1.5 text-xs text-muted-foreground">{effortFooter(thread.effort)}</p>}
         <DropdownMenuSeparator />
         <Section
           title={accountTitle} blocked={blocked ?? accountBlocked}

@@ -6,7 +6,7 @@ import type { Socket } from "bun";
 import type { BridgeCommand, ClientFrame, ServerFrame } from "../../image/agent-bridge/src/protocol";
 import { bridgeProof, proofMatches } from "../../image/agent-bridge/src/binding";
 import { BRIDGE_VERSION } from "../../image/agent-bridge/src/version";
-import { ACK_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
+import { ACK_MIN_BRIDGE_VERSION, EFFORT_MIN_BRIDGE_VERSION, effortBridgeTooOld, versionAtLeast } from "../../shared/bridgeVersion";
 import type { LinkStatus, LoggedEvent } from "../../shared/thread";
 import { CONTAINER_UID } from "./sshAgent";
 import type { ThreadStore } from "./threadStore";
@@ -82,7 +82,13 @@ interface Link {
   /** The current refusal episode was said (log, thread); reset once a link is accepted. */
   refused: boolean;
   bindTimer: ReturnType<typeof setTimeout> | null;
+  /** The version this connection's handshake (`ready`) named; undefined until it arrived, null = older than 1.1.0. */
+  version?: string | null;
 }
+
+/** devd's own first message of a session, with the effort to set before it (/new); null = none, and once the thread
+ *  said why it was not set (a retry of the message does not say it again). */
+interface FirstTurn { text: string; effort: string | null }
 
 class MalformedFrame extends Error {}
 
@@ -151,7 +157,7 @@ export const USER_FIRST_PROMPT_TAG = "\u0001user-first-prompt";
 export class BridgeLinks {
   private links = new Map<string, Link>();
   /** devd's own first message per session (startTurnWhenConnected), until the bridge took it. */
-  private firstTurns = new Map<string, string>();
+  private firstTurns = new Map<string, FirstTurn>();
   private firstTurnDone = new Map<string, (err: Error | null) => void>();
   private legacyLogged = new Set<string>();
   private refusedNotifiedAt = new Map<string, number>();
@@ -183,8 +189,8 @@ export class BridgeLinks {
     onHandshake?: (sessionId: string, h: BridgeHandshake) => void;
     /** Where devd's first message survives a devd restart (main DB); without it the message is memory only. */
     pendingTurns?: {
-      save: (id: string, text: string, seq: number, tag: string | null) => void;
-      load: (id: string) => { text: string; seq: number; tag: string | null } | null;
+      save: (id: string, text: string, seq: number, tag: string | null, effort: string | null) => void;
+      load: (id: string) => { text: string; seq: number; tag: string | null; effort: string | null } | null;
       remove: (id: string) => void;
     };
     /** Outcome of a first message that was loaded from `pendingTurns` after a restart and carries a tag
@@ -218,7 +224,7 @@ export class BridgeLinks {
           this.d.pendingTurns?.remove(sessionId);
           this.log(`bridge link ${sessionId}: dropped a persisted first message, the thread already has a run since it was queued`);
         } else {
-          this.firstTurns.set(sessionId, saved.text);
+          this.firstTurns.set(sessionId, { text: saved.text, effort: saved.effort });
           const { tag } = saved;
           if (tag !== null && this.d.onRestoredTurnDone) this.firstTurnDone.set(sessionId, (err) => this.d.onRestoredTurnDone!(sessionId, tag, err));
         }
@@ -286,12 +292,14 @@ export class BridgeLinks {
    *  tried again on the next connection, also after a devd restart (persisted until the bridge answered). Timed out
    *  (outcome unknown) or refused: logged, never resent. `onDone` hears the outcome once: null = the bridge accepted
    *  the turn, an Error = it was refused, timed out, discarded or dropped. It is memory only; `tag` is persisted
-   *  and reaches `onRestoredTurnDone` instead after a restart. */
-  startTurnWhenConnected(sessionId: string, text: string, onDone?: (err: Error | null) => void, tag: string | null = null): void {
+   *  and reaches `onRestoredTurnDone` instead after a restart.
+   *  `effort` (/new): sent as setEffort right before the turn, once the handshake shows a bridge that takes it. The
+   *  message goes either way: an effort the bridge cannot take or refuses is said in the thread, never dropped quietly. */
+  startTurnWhenConnected(sessionId: string, text: string, onDone?: (err: Error | null) => void, tag: string | null = null, effort: string | null = null): void {
     // One first message per session: a second (a scheduled run's) must not replace one still waiting (the user's).
     if (this.hasFirstTurn(sessionId)) throw new FirstTurnPending(`${sessionId} already has a first message waiting to be sent`);
-    this.d.pendingTurns?.save(sessionId, text, this.d.store(sessionId).lastSeq(), tag);
-    this.firstTurns.set(sessionId, text);
+    this.d.pendingTurns?.save(sessionId, text, this.d.store(sessionId).lastSeq(), tag, effort);
+    this.firstTurns.set(sessionId, { text, effort });
     if (onDone) this.firstTurnDone.set(sessionId, onDone);
     if (this.status(sessionId) === "connected") this.sendFirstTurn(sessionId);
   }
@@ -318,15 +326,34 @@ export class BridgeLinks {
   }
 
   private sendFirstTurn(sessionId: string) {
-    const text = this.firstTurns.get(sessionId);
-    if (text === undefined) return;
+    const first = this.firstTurns.get(sessionId);
+    if (first === undefined) return;
+    // An effort goes only to a bridge that takes setEffort (an older one drops the link on the unknown command): it
+    // waits for the handshake, which calls this again.
+    const version = this.links.get(sessionId)?.version;
+    if (first.effort !== null && version === undefined) return;
     this.firstTurns.delete(sessionId);
-    this.send(sessionId, { kind: "startTurn", text }).then(() => {
+    const { text, effort } = first;
+    const effortSet = async (): Promise<void> => {
+      if (effort === null) return;
+      const notSet = (why: string) => {
+        first.effort = null;
+        this.d.store(sessionId).addNotice(`Effort ${effort} was not set: ${why}`, this.now());
+      };
+      if (version === null || version === undefined || !versionAtLeast(version, EFFORT_MIN_BRIDGE_VERSION)) return notSet(effortBridgeTooOld(version ?? null));
+      try { await this.send(sessionId, { kind: "setEffort", effort }); }
+      catch (err) {
+        // Not connected: the whole first message waits for the next connection (the caller below).
+        if (err instanceof AgentDisconnected && !(err instanceof CommandTimeout)) throw err;
+        notSet((err as Error).message);
+      }
+    };
+    effortSet().then(() => this.send(sessionId, { kind: "startTurn", text })).then(() => {
       this.d.pendingTurns?.remove(sessionId);
       this.settleFirstTurn(sessionId, null);
     }, (err: Error) => {
       if (err instanceof AgentDisconnected && !(err instanceof CommandTimeout) && this.links.has(sessionId)) {
-        this.firstTurns.set(sessionId, text);
+        this.firstTurns.set(sessionId, first);
         this.log(`bridge link ${sessionId}: devd's first message not sent (${err.message}); retrying on the next connection`);
         return;
       }
@@ -430,6 +457,8 @@ export class BridgeLinks {
     link.buffer = "";
     link.decoder = new TextDecoder();
     link.outbound = [];
+    // The last connection's version says nothing about this one (the container may have been recreated).
+    link.version = undefined;
     if (link.secret !== null) {
       // Connected only once the bridge's `bind` proved the session (onData); until then nothing is sent or applied.
       link.nonce = randomBytes(16).toString("hex");
@@ -624,6 +653,9 @@ export class BridgeLinks {
       case "ready":
         this.checkBehind(sessionId, link, f.lastSeq);
         this.checkVersion(sessionId, f.version ?? null);
+        link.version = f.version ?? null;
+        // A first message with an effort waited for this (sendFirstTurn).
+        this.sendFirstTurn(sessionId);
         this.stopAcks(link);
         if (f.version !== undefined && versionAtLeast(f.version, ACK_MIN_BRIDGE_VERSION)) {
           link.ackTimer = setInterval(() => this.sendAck(sessionId, link), this.ackMs);

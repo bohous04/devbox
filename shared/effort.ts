@@ -5,6 +5,11 @@ import type { ThreadEffort } from "./thread";
  *  bridge, the thread store or the UI: a new one is added here first. */
 export const KNOWN_EFFORT_LEVELS: readonly string[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
+/** Claude Code's levels (its SDK's EffortLevel): what a Claude session takes before it names its model (the bridge's
+ *  CLAUDE_EFFORT_LEVELS, pinned to this list) and what /new offers for Claude. Checked against the model's own list on
+ *  the first message. */
+export const CLAUDE_EFFORT_LEVELS: readonly string[] = ["low", "medium", "high", "xhigh", "max"];
+
 export const isKnownEffort = (v: unknown): v is string => typeof v === "string" && KNOWN_EFFORT_LEVELS.includes(v);
 
 const MAX_MODEL_LENGTH = 128;
@@ -33,5 +38,15 @@ export function parseEffortState(raw: unknown): { effort: ThreadEffort; dropped:
       if (l !== null && !supported.includes(l)) supported.push(l);
     }
   } else if (r.supported !== null && r.supported !== undefined) dropped.push(`supported ${shown(r.supported)}`);
-  return { effort: { model, supported, effective: level("effective", r.effective), chosen: level("chosen", r.chosen) }, dropped };
+  const effort: ThreadEffort = { model, supported, effective: level("effective", r.effective), chosen: level("chosen", r.chosen) };
+  // Unchecked levels mean something only while the model's own are not known.
+  if (Array.isArray(r.unchecked) && supported === null) {
+    const unchecked: string[] = [];
+    for (const v of r.unchecked) {
+      const l = level("unchecked", v);
+      if (l !== null && !unchecked.includes(l)) unchecked.push(l);
+    }
+    if (unchecked.length > 0) effort.unchecked = unchecked;
+  } else if (r.unchecked !== null && r.unchecked !== undefined && !Array.isArray(r.unchecked)) dropped.push(`unchecked ${shown(r.unchecked)}`);
+  return { effort, dropped };
 }

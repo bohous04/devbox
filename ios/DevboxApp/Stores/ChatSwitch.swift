@@ -209,6 +209,8 @@ enum ChatSwitch {
     static func effortMenuBlocked(_ e: ThreadEffort?, _ t: ChatTarget) -> String? {
         if !effortBridge(t) { return "This session's agent bridge (\(t.bridgeVersion ?? "unknown version")) cannot change the effort: recreate the session's container" }
         guard let e else { return "The agent has not reported its effort levels yet" }
+        // Before the model names its levels the bridge (1.8.0) may take unchecked ones (effortFooter says when they are checked).
+        if e.supported == nil, e.unchecked != nil { return nil }
         guard let supported = e.supported else { return "The agent has not reported the effort levels of \(e.model ?? "this model")" }
         if supported.isEmpty { return "\(e.model ?? "This model") has no effort levels" }
         return nil
@@ -225,12 +227,22 @@ enum ChatSwitch {
         }
     }
 
-    /// "Default" (value "": the model's own level, sent as null) and the levels the model lists.
+    /// "Default" (value "": the model's own level, sent as null) and the levels the model lists, or before it does, the
+    /// unchecked ones the agent takes.
     static func effortOptions(_ e: ThreadEffort) -> [Option] {
         let detail: String? = e.chosen != nil ? nil
             : e.effective.map { "\(effortLabel($0)) for \(e.model ?? "this model")" } ?? "The level shows after the agent's first reply"
         return [Option(value: "", label: "Default", detail: detail, current: e.chosen == nil)]
-            + (e.supported ?? []).map { Option(value: $0, label: effortLabel($0), current: e.chosen == $0) }
+            + (e.supported ?? e.unchecked ?? []).map { Option(value: $0, label: effortLabel($0), current: e.chosen == $0) }
+    }
+
+    /// The line under the Effort menu (switchView.ts effortFooter): when a pick applies, and for unchecked levels, that
+    /// the next message checks it (a level the model lacks goes back to its default, said in the thread), or, once a
+    /// model is named and its levels are still unknown, that its list could not check it.
+    static func effortFooter(_ e: ThreadEffort?) -> String {
+        guard let e, e.supported == nil, e.unchecked != nil else { return "Applies from your next message." }
+        guard let model = e.model else { return "Checked against the model on your next message." }
+        return "Applies from your next message; \(model)'s levels could not be read, so it is not checked."
     }
 
     /// What the switchers show when devd refused or the bridge did not confirm; the code stays visible.

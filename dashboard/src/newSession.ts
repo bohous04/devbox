@@ -167,6 +167,14 @@ export function sendPlan(prompt: string, reusable: unknown | null, onInstabox: b
   return prompt === "" ? "open" : "ask";
 }
 
+/** The Continue choice's line when typed text meets an existing session: whether the message goes there, and that an
+ *  effort chosen on this page does not (devd takes it on a new session only; it is set in that thread instead). */
+export function continueDetail(s: { host?: "vps" | "instabox" }, takesPrompt: boolean, effortChosen: boolean): string {
+  const message = takesPrompt ? "Your message goes to that session."
+    : `Opens it without your message: ${s.host === "instabox" ? "an InstaBox session takes no message" : "its agent is already running, so the message would not reach it"}.`;
+  return effortChosen ? `${message} Effort applies to a new session only — set it in the thread.` : message;
+}
+
 /** Whether continuing `s` can take the typed message: InstaBox sessions take none, and a running terminal's agent has
  *  already read its prompt file (devd refuses one there). */
 export function continueTakesPrompt(s: { status: "running" | "stopped"; host?: "vps" | "instabox" }, runtime: "tmux" | "chat"): boolean {

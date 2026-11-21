@@ -1,6 +1,6 @@
 import type { Context, Hono } from "hono";
 import type { Database } from "bun:sqlite";
-import { EFFORT_MIN_BRIDGE_VERSION, IMAGES_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
+import { EFFORT_MIN_BRIDGE_VERSION, effortBridgeTooOld, IMAGES_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
 import { isKnownEffort, KNOWN_EFFORT_LEVELS } from "../../shared/effort";
 import type { LoggedEvent } from "../../shared/thread";
 import { AgentDisconnected, CommandFailed, CommandTimeout, type BridgeLinks } from "./bridgeLink";
@@ -188,7 +188,8 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
 
   /** The agent's reasoning effort from the next message on: `effort` a level, or null for the model default. Allowed
    *  during a run (the running turn keeps its level). 202 once the bridge took it; 400 for a level the model's latest
-   *  effort.state does not list; 409 bridge-too-old before 1.7.0, command-failed when the bridge refuses it. */
+   *  effort.state does not list (before the model's levels are known: its `unchecked` ones, bridge 1.8.0); 409
+   *  bridge-too-old before 1.7.0, command-failed when the bridge refuses it. */
   app.post("/api/sessions/:id/thread/effort", async (c) => {
     const id = c.req.param("id");
     const r = chat(c, id);
@@ -201,12 +202,16 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
     }
     const version = d.bridgeVersion(id);
     if (version === null || !versionAtLeast(version, EFFORT_MIN_BRIDGE_VERSION)) {
-      return c.json({ error: "bridge-too-old", message: `this session's agent bridge (${version ?? "unknown version"}) cannot change the effort; it needs ${EFFORT_MIN_BRIDGE_VERSION} — recreate the session's container` }, 409);
+      return c.json({ error: "bridge-too-old", message: effortBridgeTooOld(version) }, 409);
     }
     const known = r.store.effort();
     if (effort !== null && known?.supported && !known.supported.includes(effort)) {
       const takes = known.supported.length === 0 ? "takes no effort levels" : `takes ${known.supported.join(", ")}`;
       return c.json({ error: "unsupported-effort", message: `${known.model ?? "this model"} ${takes}` }, 400);
+    }
+    // Before the model's levels are known (bridge 1.8.0): the levels the bridge takes unchecked.
+    if (effort !== null && known?.supported === null && known.unchecked && !known.unchecked.includes(effort)) {
+      return c.json({ error: "unsupported-effort", message: `before its first reply the agent takes ${known.unchecked.join(", ")} (checked on that message)` }, 400);
     }
     try { await d.links.send(id, { kind: "setEffort", effort }); }
     catch (e) { return commandError(c, e); }

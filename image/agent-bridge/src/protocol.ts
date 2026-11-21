@@ -37,7 +37,8 @@ export type BridgeCommand =
   // Refused while a run is active or queued.
   | { kind: "setModel"; model: string }
   // 1.7.0: reasoning effort from the next message on; null = the harness's default. Refused for a level the current
-  // model does not offer.
+  // model does not offer; 1.8.0: before the model is known, taken from effort.state's `unchecked` and checked with
+  // the next message.
   | { kind: "setEffort"; effort: string | null }
   | { kind: "switchTarget"; target: SwitchTarget; resume: string | null; handoff: HandoffDelivery | null };
 

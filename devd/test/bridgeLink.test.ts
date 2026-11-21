@@ -24,7 +24,7 @@ const ev = (seq: number): LoggedEvent => ({ seq, ts: 1000 + seq, event: { type: 
 type CmdReply = { ok: true } | { ok: false; error: string } | "never";
 
 /** A unix socket server speaking the bridge's frame protocol, with knobs the real one has no need for. */
-function fakeBridge(path: string, o: { events?: LoggedEvent[]; ignoreAfterSeq?: boolean; ready?: Record<string, unknown>; binding?: { session: string; secret: string }; onHello?: string } = {}) {
+function fakeBridge(path: string, o: { events?: LoggedEvent[]; ignoreAfterSeq?: boolean; ready?: Record<string, unknown>; binding?: { session: string; secret: string }; onHello?: string; replyFor?: (cmd: { kind: string }) => CmdReply | undefined } = {}) {
   const events = [...(o.events ?? [])];
   const hellos: number[] = [];
   const nonces: (string | undefined)[] = [];
@@ -58,7 +58,8 @@ function fakeBridge(path: string, o: { events?: LoggedEvent[]; ignoreAfterSeq?: 
             acks.push(f.seq);
           } else if (f.t === "cmd") {
             cmds.push(f.cmd);
-            if (reply !== "never") write(s, { t: "res", id: f.id, ...reply });
+            const r = o.replyFor?.(f.cmd) ?? reply;
+            if (r !== "never") write(s, { t: "res", id: f.id, ...r });
           }
         }
       },
@@ -355,11 +356,11 @@ test("devd's first message on a connected link goes out at once; a refused one i
   expect(b.cmds).toHaveLength(1);
 });
 
-type Saved = { text: string; seq: number; tag: string | null };
+type Saved = { text: string; seq: number; tag: string | null; effort: string | null };
 function persistence() {
   const saved = new Map<string, Saved>();
   return { saved, pendingTurns: {
-    save: (id: string, text: string, seq: number, tag: string | null) => { saved.set(id, { text, seq, tag }); },
+    save: (id: string, text: string, seq: number, tag: string | null, effort: string | null) => { saved.set(id, { text, seq, tag, effort }); },
     load: (id: string) => saved.get(id) ?? null,
     remove: (id: string) => { saved.delete(id); },
   } };
@@ -386,7 +387,7 @@ test("devd's first message is persisted, survives a restart and is deleted once 
   const { saved, pendingTurns } = persistence();
   const root = tmpRoot();
   devdOver(root, pendingTurns).links.startTurnWhenConnected(ID, "scheduled prompt");
-  expect(saved.get(ID)).toMatchObject({ text: "scheduled prompt", seq: 0 });
+  expect(saved.get(ID)).toMatchObject({ text: "scheduled prompt", seq: 0, effort: null });
   const second = devdOver(root, pendingTurns);
   const b = fakeBridge(second.sock);
   cleanups.push(() => b.close());
@@ -405,7 +406,7 @@ test("a reused thread with old runs still gets its persisted first turn after a 
   first.links.startTurnWhenConnected(ID, "scheduled prompt");
   expect(saved.get(ID)!.seq).toBe(2);
   first.links.drop(ID); first.store.close();
-  saved.set(ID, { text: "scheduled prompt", seq: 2, tag: null }); // drop() discards the row, as a real crash would not
+  saved.set(ID, { text: "scheduled prompt", seq: 2, tag: null, effort: null }); // drop() discards the row, as a real crash would not
   const second = devdOver(root, pendingTurns);
   const b = fakeBridge(second.sock);
   cleanups.push(() => b.close());
@@ -420,7 +421,7 @@ test("a persisted first turn is dropped on ensure when a run started after it wa
   first.store.apply(started(1, "old")); first.store.apply(completed(2, "old"));
   first.store.apply(started(3, "new"));   // the bridge accepted the turn, devd died before deleting the row
   first.links.drop(ID); first.store.close();
-  saved.set(ID, { text: "scheduled prompt", seq: 2, tag: null });
+  saved.set(ID, { text: "scheduled prompt", seq: 2, tag: null, effort: null });
   const second = devdOver(root, pendingTurns);
   const b = fakeBridge(second.sock);
   cleanups.push(() => b.close());
@@ -435,7 +436,7 @@ test("a persisted first turn is dropped on ensure when a run started after it wa
 test("a restored first turn reports its outcome with the saved tag", async () => {
   const { saved, pendingTurns } = persistence();
   const root = tmpRoot();
-  saved.set(ID, { text: "scheduled prompt", seq: 0, tag: "Nightly bump" });
+  saved.set(ID, { text: "scheduled prompt", seq: 0, tag: "Nightly bump", effort: null });
   const heard: [string, string, Error | null][] = [];
   const second = devdOver(root, pendingTurns, { onRestoredTurnDone: (id, tag, err) => { heard.push([id, tag, err]); } });
   const b = fakeBridge(second.sock);
@@ -874,4 +875,77 @@ test("binding: forget(id) after a session ended lets a session reusing the id be
   serve({ binding: { session: "dev-harbor-api", secret: SECRET } });
   links.ensure(ID);
   await waitFor(() => refusals.length === 2, "notified again for the new session");
+});
+
+// --- a first message with an effort (/new) ---
+
+test("a first message with an effort sends setEffort, then the turn, once the handshake names a bridge that takes it", async () => {
+  const { links, serve, store } = setup();
+  links.ensure(ID);
+  links.startTurnWhenConnected(ID, "fix it", undefined, null, "xhigh");
+  const b = serve();
+  await waitFor(() => b.cmds.length === 2, "effort and turn sent");
+  expect(b.cmds).toEqual([{ kind: "setEffort", effort: "xhigh" }, { kind: "startTurn", text: "fix it" }]);
+  expect(notices(store)).toEqual([]);
+});
+
+test("a first message's effort a bridge older than 1.7.0 cannot take: the message goes, the thread says why the effort did not", async () => {
+  const { links, serve, store } = setup();
+  links.ensure(ID);
+  links.startTurnWhenConnected(ID, "fix it", undefined, null, "high");
+  const b = serve({ ready: { version: "1.6.0" } });
+  await waitFor(() => b.cmds.length === 1, "turn sent");
+  expect(b.cmds).toEqual([{ kind: "startTurn", text: "fix it" }]);
+  expect(notices(store)).toContainEqual("Effort high was not set: this session's agent bridge (1.6.0) cannot change the effort; it needs 1.7.0 — recreate the session's container");
+});
+
+test("a first message's effort the bridge refuses: the message still goes, with the refusal in the thread", async () => {
+  const { links, serve, store } = setup();
+  links.ensure(ID);
+  links.startTurnWhenConnected(ID, "fix it", undefined, null, "max");
+  const b = serve({ replyFor: (c) => (c.kind === "setEffort" ? { ok: false, error: "effort max is not one of low, high" } : undefined) });
+  await waitFor(() => b.cmds.length === 2, "effort tried, turn sent");
+  expect(b.cmds.at(-1)).toEqual({ kind: "startTurn", text: "fix it" });
+  expect(notices(store)).toContainEqual("Effort max was not set: effort max is not one of low, high");
+});
+
+test("a first message cut off mid-effort waits for the next connection's handshake, not the last one's version", async () => {
+  const { links, serve, store } = setup();
+  links.ensure(ID);
+  links.startTurnWhenConnected(ID, "fix it", undefined, null, "high");
+  const first = serve({ replyFor: (c) => (c.kind === "setEffort" ? "never" : undefined) });
+  await waitFor(() => first.cmds.length === 1, "effort sent to the first bridge");
+  first.close();
+  // The container came back with an older bridge: it must not get setEffort on the strength of the first's version.
+  const second = serve({ ready: { version: "1.6.0" } });
+  await waitFor(() => second.cmds.some((c) => (c as { kind: string }).kind === "startTurn"), "turn sent to the second bridge");
+  expect(second.cmds).toEqual([{ kind: "startTurn", text: "fix it" }]);
+  expect(notices(store)).toContainEqual("Effort high was not set: this session's agent bridge (1.6.0) cannot change the effort; it needs 1.7.0 — recreate the session's container");
+});
+
+test("a first message whose effort was refused, retried on the next connection, says the refusal once", async () => {
+  const { links, serve, store } = setup();
+  links.ensure(ID);
+  links.startTurnWhenConnected(ID, "fix it", undefined, null, "max");
+  const refuse = (c: { kind: string }): CmdReply | undefined => (c.kind === "setEffort" ? { ok: false, error: "effort max is not one of low, high" } : undefined);
+  const first = serve({ replyFor: (c) => refuse(c) ?? "never" });
+  await waitFor(() => first.cmds.length === 2, "effort refused, turn sent");
+  first.close();
+  const second = serve({ replyFor: refuse });
+  await waitFor(() => second.cmds.some((c) => (c as { kind: string }).kind === "startTurn"), "turn sent again");
+  expect(second.cmds).toEqual([{ kind: "startTurn", text: "fix it" }]);
+  expect(notices(store).filter((n) => n.startsWith("Effort max was not set"))).toHaveLength(1);
+});
+
+test("a first message's effort survives a devd restart with it", async () => {
+  const { saved, pendingTurns } = persistence();
+  const root = tmpRoot();
+  devdOver(root, pendingTurns).links.startTurnWhenConnected(ID, "scheduled prompt", undefined, USER_FIRST_PROMPT_TAG, "low");
+  expect(saved.get(ID)).toMatchObject({ effort: "low" });
+  const second = devdOver(root, pendingTurns);
+  const b = fakeBridge(second.sock);
+  cleanups.push(() => b.close());
+  second.links.ensure(ID);
+  await waitFor(() => b.cmds.length === 2, "effort and turn after the restart");
+  expect(b.cmds).toEqual([{ kind: "setEffort", effort: "low" }, { kind: "startTurn", text: "scheduled prompt" }]);
 });

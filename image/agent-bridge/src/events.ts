@@ -60,7 +60,8 @@ export type BridgeEvent =
   // asked for events the log no longer holds.
   | { type: "bridge.notice"; text: string }
   // (bridge 1.7.0) Reasoning effort of the current harness and model (effort.ts EffortState).
-  | { type: "effort.state"; model: string | null; supported: string[] | null; effective: string | null; chosen: string | null };
+  // `unchecked` (1.8.0): levels taken before the model is known, checked against its list on the next message.
+  | { type: "effort.state"; model: string | null; supported: string[] | null; effective: string | null; chosen: string | null; unchecked?: string[] };
 
 export interface LoggedEvent {
   seq: number;

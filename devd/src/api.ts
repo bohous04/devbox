@@ -26,6 +26,7 @@ import { createReadStream, mkdtempSync, openSync, rmSync, statSync, writeFileSyn
 import { Readable } from "node:stream";
 import { liveActivitiesRoutes, type LiveActivities } from "./liveActivities";
 import { USER_FIRST_PROMPT_TAG } from "./bridgeLink";
+import { CLAUDE_EFFORT_LEVELS } from "../../shared/effort";
 import { AGENT_EVENTS, type AgentEvent, type AgentEventHub, type HookMeta, type NotifyFn } from "./agentEvents";
 import { AGENT_IDS, AGENTS, chatRuntimeBlock, instaboxAgentBlock, runtimeForOmitted, specFor, tmuxRuntimeBlock, type Upstream } from "./agents";
 import { buildProjectLeaderboard, buildRange, buildSessionUsage, buildTotals, buildWorkHours, predictDisk, PROMPT_CHARS, PROMPT_WAIT } from "./aggregate";
@@ -998,7 +999,7 @@ export function createApp(d: ApiDeps): Hono {
   // conflict) reaches a chat session as its first message, as the prompt file does for tmux.
   // `prompt`: the request's first prompt for a chat session; devd's own (a pull conflict) goes first, in the same turn.
   // Its outcome is not lost: a refusal or timeout lands in the thread, the event log and a notification.
-  const linkOpenedChat = (r: { session: SessionRow; claudePrompt?: string }, prompt?: string) => {
+  const linkOpenedChat = (r: { session: SessionRow; claudePrompt?: string }, prompt?: string, effort: string | null = null) => {
     const s = r.session;
     const onDone = prompt === undefined ? undefined : (err: Error | null) => { if (err) reportFirstPromptFailed(d, s, err); };
     try {
@@ -1008,7 +1009,7 @@ export function createApp(d: ApiDeps): Hono {
       if (storedRuntime(s) === "chat" && (s.status === "running" || prompt !== undefined)) {
         const first = r.claudePrompt !== undefined && prompt !== undefined ? `${r.claudePrompt}\n\n${prompt}` : r.claudePrompt ?? prompt;
         // Tagged only when it carries the user's prompt, so a devd restart still reports its outcome (index.ts).
-        if (first !== undefined) d.links?.startTurnWhenConnected(s.id, first, onDone, prompt !== undefined ? USER_FIRST_PROMPT_TAG : null);
+        if (first !== undefined) d.links?.startTurnWhenConnected(s.id, first, onDone, prompt !== undefined ? USER_FIRST_PROMPT_TAG : null, effort);
       }
     }
     catch (e) { console.error(`bridge link of opened session ${s.id} failed:`, e); onDone?.(e as Error); }
@@ -1016,7 +1017,7 @@ export function createApp(d: ApiDeps): Hono {
   };
   app.post("/api/sessions", async (c) => {
     noIdleTimeout(c);
-    const body = (await c.req.json().catch(() => null)) as { folder: string; project: string; repo?: string; cloneUrl?: string; solo?: boolean; agent?: string; fresh?: boolean; host?: string; sessionId?: string; runtime?: unknown; prompt?: unknown } | null;
+    const body = (await c.req.json().catch(() => null)) as { folder: string; project: string; repo?: string; cloneUrl?: string; solo?: boolean; agent?: string; fresh?: boolean; host?: string; sessionId?: string; runtime?: unknown; prompt?: unknown; effort?: unknown } | null;
     if (!body) return c.json({ error: "invalid JSON body" }, 400);
     // The optional first prompt (the dashboard's New session page). Text only, refused explicitly rather than cut or
     // dropped; a chat session gets it as its first turn (linkOpenedChat), a tmux one through the prompt file.
@@ -1045,6 +1046,19 @@ export function createApp(d: ApiDeps): Hono {
     if (body.agent !== undefined && !isAgentName(body.agent))
       return c.json({ error: `invalid agent (${AGENT_IDS.join("|")})` }, 400);
     const agent = body.agent as AgentName | undefined;
+    // The optional effort (/new): Claude's levels only, set right before the first message (startTurnWhenConnected),
+    // which the model's own list checks on that message. `null` is absent.
+    let effort: string | null = null;
+    if (body.effort !== undefined && body.effort !== null) {
+      if (typeof body.effort !== "string" || !CLAUDE_EFFORT_LEVELS.includes(body.effort)) return c.json({ error: `effort must be null or one of ${CLAUDE_EFFORT_LEVELS.join(", ")}` }, 400);
+      // Joining or continuing a session would change an existing thread's effort from here.
+      if (body.fresh !== true) return c.json({ error: "effort is set on a new session only: an existing session's effort is set in its thread" }, 400);
+      if (prompt === undefined) return c.json({ error: "effort is set with the first message: send one with it" }, 400);
+      if (body.runtime !== "chat") return c.json({ error: "effort is set only for a chat session" }, 400);
+      const remembered = body.folder && body.project && body.repo ? getRepoAgent(d.db, body.folder, body.project, body.repo) : null;
+      if (resolveAgent(agent, remembered) !== "claude") return c.json({ error: "effort on a new session is offered for Claude only: set it in the thread" }, 400);
+      effort = body.effort;
+    }
     // agy takes the prompt as the value of `-i`, and its flag parser reads a value starting with '-' as flags
     // (`agy -i --version` → "flags provided but not defined"); the other CLIs get it after `--`.
     if (prompt !== undefined && body.runtime === "tmux" && prompt.startsWith("-") && body.folder && body.project && body.repo
@@ -1120,7 +1134,7 @@ export function createApp(d: ApiDeps): Hono {
             return c.json({ error: `${r.session.id} ${busyRun ? "has a run in progress" : "already has a first message waiting"}, so your message was not sent: open it and send it there, or create another session` }, 409);
           }
         }
-        linkOpenedChat(r, runtime === "chat" ? prompt : undefined);
+        linkOpenedChat(r, runtime === "chat" ? prompt : undefined, effort);
         return c.json(r, r.created ? 201 : 200);
       }
       // No runtime named: an existing session of either runtime is joined (one the agent can run in, the
