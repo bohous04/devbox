@@ -39,12 +39,17 @@ final class ChatScreenshotTests: XCTestCase {
         try save(app, "ios-\(appearance)-end")
 
         // The changed-files card, one row at the end; the header's +/− opens it, then one file's diff.
-        let card = app.buttons.containing(NSPredicate(format: "label CONTAINS 'changed files'")).firstMatch
+        // In the thread, not the header's chip (whose label also names the changed files).
+        let card = app.scrollViews.buttons.containing(NSPredicate(format: "label CONTAINS 'changed files'")).firstMatch
         let file = app.buttons["src/sync/queue.ts"]
         if card.waitForExistence(timeout: 5) {
             XCTAssertFalse(file.exists, "the changes card starts as its one row")
             let chip = app.navigationBars.buttons.containing(NSPredicate(format: "label CONTAINS 'lines added'")).firstMatch
             XCTAssertTrue(chip.waitForExistence(timeout: 3), "the header carries the changes")
+            // From the top of the thread, where the lazy stack has not built the card: the chip still opens it.
+            for _ in 0..<6 { app.swipeDown(velocity: .fast) }
+            sleep(1)
+            XCTAssertFalse(card.exists && card.isHittable, "the card is scrolled off")
             chip.tap()
             XCTAssertTrue(file.waitForExistence(timeout: 3), "the header's changes open the card")
             sleep(1)

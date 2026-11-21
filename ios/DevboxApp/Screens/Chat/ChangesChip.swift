@@ -28,8 +28,8 @@ struct ChangesChip: View {
                         .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.C.border))
                         .contentShape(Rectangle())
                     #else
-                    // The navigation bar's own glass is the button; an icon there would leave the numbers no room.
-                    totals(c).font(.system(size: 14, weight: .semibold)).fixedSize()
+                    // The navigation bar's own glass is the button; numbers only and tight, so the title keeps its room.
+                    totals(c).font(.system(size: 13, weight: .medium)).fixedSize()
                     #endif
                 }
                 .buttonStyle(.plain)
@@ -48,9 +48,15 @@ struct ChangesChip: View {
         }
     }
 
+    #if os(macOS)
+    private static let gap: CGFloat = 6
+    #else
+    private static let gap: CGFloat = 3
+    #endif
+
     @ViewBuilder
     private func totals(_ c: SessionChanges) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: Self.gap) {
             #if os(macOS)
             Image(systemName: "doc.badge.plus").foregroundStyle(Theme.C.mutedForeground)
             #endif

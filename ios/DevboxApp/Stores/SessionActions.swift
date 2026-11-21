@@ -159,18 +159,6 @@ struct AgentProfile {
 }
 
 enum AgentProfiles {
-    /// The agent's glyph, the dashboard's shapes (Switchers.tsx AgentGlyph) as SF Symbols: Claude's asterisk,
-    /// Codex's hexagon, Grok's bolt, Antigravity's atom, Vibe's wind.
-    static func glyph(_ agent: String) -> String {
-        switch AgentName(rawValue: agent) ?? .unknown {
-        case .claude, .claudeGemini, .claudeOpenrouter: return "asterisk"
-        case .codex: return "hexagon"
-        case .grok: return "bolt"
-        case .antigravity: return "atom"
-        case .vibe, .unknown: return "wind"
-        }
-    }
-
     static let all: [AgentName: AgentProfile] = [
         .claude: AgentProfile(label: "Claude Code", short: "Claude", yolo: true),
         .claudeGemini: AgentProfile(label: "Claude Code + Gemini", short: "Claude+Gemini", yolo: true),

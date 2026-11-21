@@ -8,15 +8,14 @@ struct ChangesCard: View {
     /// The latest run's end seq: a new one refetches the card (and drops its cached diffs).
     let refreshKey: Int?
     @StateObject private var store: ChangesStore
-    /// Each new value (the header's changes chip) opens the card.
-    let openKey: Int
-    /// The card starts as its one header row (totals, Open diffs); the list opens on a tap or from the chip.
-    @State private var open = false
+    /// The list is open. The thread keeps it: a lazy stack builds the card only on screen, so the header's changes
+    /// chip opens it there, before the card exists.
+    @Binding var open: Bool
     @State private var shown: Set<String> = []
 
-    init(sessionId: String, client: DevdClient, refreshKey: Int?, openKey: Int = 0) {
+    init(sessionId: String, client: DevdClient, refreshKey: Int?, open: Binding<Bool>) {
         self.refreshKey = refreshKey
-        self.openKey = openKey
+        _open = open
         _store = StateObject(wrappedValue: ChangesStore(sessionId: sessionId, client: client))
     }
 
@@ -26,7 +25,6 @@ struct ChangesCard: View {
                 await store.load()
                 shown = []
             }
-            .onChange(of: openKey) { _, _ in withAnimation(.snappy) { open = true } }
             // Off screen (scrolled away, the thread closed): no diff keeps downloading for nobody.
             .onDisappear { store.cancelDiffs() }
     }

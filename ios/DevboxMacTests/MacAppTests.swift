@@ -74,10 +74,10 @@ final class MacAppTests: XCTestCase {
     }
 
     func testSidebarAgentGlyphAndConnection() {
-        XCTAssertEqual(AgentProfiles.glyph("claude"), "asterisk")
-        XCTAssertEqual(AgentProfiles.glyph("codex"), "hexagon")
-        XCTAssertEqual(AgentProfiles.glyph("grok"), "bolt")
-        XCTAssertEqual(AgentProfiles.glyph("something-new"), "wind")
+        XCTAssertEqual(MacInboxRow.agentGlyph("claude"), "asterisk")
+        XCTAssertEqual(MacInboxRow.agentGlyph("codex"), "hexagon")
+        XCTAssertEqual(MacInboxRow.agentGlyph("grok"), "bolt")
+        XCTAssertEqual(MacInboxRow.agentGlyph("something-new"), "wind")
         XCTAssertEqual(MacInboxSidebar.connection(paused: false, loadError: nil, loaded: true).text, "Connected")
         XCTAssertEqual(MacInboxSidebar.connection(paused: true, loadError: "x", loaded: true).text, "Reconnecting — refreshing every 5 s")
         XCTAssertEqual(MacInboxSidebar.connection(paused: false, loadError: "x", loaded: false).text, "Can't reach devd")
