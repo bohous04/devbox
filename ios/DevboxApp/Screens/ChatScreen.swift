@@ -235,6 +235,14 @@ struct ChatScreen: View {
             })
             // The header's bottom edge: a hairline the thread scrolls under.
             .overlay(alignment: .top) {
+                #if os(iOS)
+                // The thread fades out just under the header, as it does above the composer, instead of a line of
+                // text cut at the hairline (the Mac rests clear of the edge instead, ThreadEdge).
+                LinearGradient(colors: [Theme.C.background, Theme.C.background.opacity(0)], startPoint: .top, endPoint: .bottom)
+                    .frame(height: ChatLayout.top).allowsHitTesting(false).accessibilityHidden(true)
+                #endif
+            }
+            .overlay(alignment: .top) {
                 Rectangle().fill(Theme.C.border).frame(height: 1 / 3).accessibilityHidden(true)
                     // The header's edge, where a row would show cut (ThreadEdge), in the rows' space.
                     .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: {

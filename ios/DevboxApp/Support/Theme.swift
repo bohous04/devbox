@@ -103,7 +103,8 @@ enum ChatLayout {
     #else
     static let column: CGFloat = .infinity
     static let bubble: CGFloat = .infinity
-    static let top: CGFloat = 0
+    /// The header's fade (ChatScreen) over the thread's start: the first message begins below it.
+    static let top: CGFloat = 20
     static let bubbleLines = 6
     static let bubbleText: CGFloat = 16
     static let composerTwoRows = false

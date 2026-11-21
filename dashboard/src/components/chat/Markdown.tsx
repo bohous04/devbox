@@ -1,7 +1,7 @@
 import { Fragment } from "react";
 import { CircleCheck, CircleX, TriangleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { isPathLike, parseInline, parseMarkdown, type MdBlock, type StatusKind } from "../../markdown";
+import { codeOnly, isPathLike, parseInline, parseMarkdown, type MdBlock, type StatusKind } from "../../markdown";
 
 const STATUS_ICON: Record<StatusKind, { Icon: typeof CircleCheck; className: string }> = {
   ok: { Icon: CircleCheck, className: "text-emerald-600 dark:text-emerald-400" },
@@ -53,6 +53,15 @@ function Inline({ text, plain, nowrap = NOWRAP_PROSE }: { text: string; plain?: 
 }
 
 const ALIGN = { left: "text-left", center: "text-center", right: "text-right" } as const;
+
+/** A desktop table cell: a lone command or path on one line, cut at its end with the whole in its tooltip, so a long
+ *  one does not wrap and push its row out of line with the others; prose wraps. The phone's stacked table (no hover)
+ *  keeps such cells wrapping. */
+function Cell({ text }: { text: string }) {
+  const code = codeOnly(text);
+  if (code === null) return <Inline text={text} plain nowrap={NOWRAP_TABLE} />;
+  return <span title={code} className="block max-w-[28rem] truncate"><Inline text={text} plain nowrap={Infinity} /></span>;
+}
 
 function StackedTable({ table }: { table: Extract<MdBlock, { type: "table" }> }) {
   return (
@@ -108,13 +117,13 @@ export function Markdown({ text }: { text: string }) {
                 <table className="w-full border-collapse text-left text-sm">
                   <thead>
                     <tr className="border-b border-border">
-                      {b.header.map((h, j) => <th key={j} scope="col" className={cn("py-2 pr-5 align-bottom font-medium text-foreground last:pr-0", b.align[j] && ALIGN[b.align[j]])}><Inline text={h} plain nowrap={NOWRAP_TABLE} /></th>)}
+                      {b.header.map((h, j) => <th key={j} scope="col" className={cn("py-2 pr-5 align-bottom font-semibold text-foreground last:pr-0", b.align[j] && ALIGN[b.align[j]])}><Inline text={h} plain nowrap={NOWRAP_TABLE} /></th>)}
                     </tr>
                   </thead>
                   <tbody>
                     {b.rows.map((r, j) => (
                       <tr key={j} className="border-b border-border/50 last:border-0">
-                        {r.map((c, k) => <td key={k} className={cn("py-2 pr-5 align-top text-foreground/80 last:pr-0", b.align[k] && ALIGN[b.align[k]])}><Inline text={c} plain nowrap={NOWRAP_TABLE} /></td>)}
+                        {r.map((c, k) => <td key={k} className={cn("py-2 pr-5 align-top text-foreground/80 last:pr-0", b.align[k] && ALIGN[b.align[k]])}><Cell text={c} /></td>)}
                       </tr>
                     ))}
                   </tbody>

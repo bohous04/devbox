@@ -137,3 +137,10 @@ export function isPathLike(code: string): boolean {
   if (code.includes("/")) return /[A-Za-z]/.test(code);
   return /^[\w.@~-]*[A-Za-z_][\w-]*\.[A-Za-z][A-Za-z0-9]{1,5}$/.test(code);
 }
+
+/** A table cell that is one code span and nothing else (a command, a path): its text, shown on one line and cut at
+ *  its end with the whole in a tooltip; null for anything else, which wraps (the Apple apps' isCodeOnly). */
+export function codeOnly(cell: string): string | null {
+  const t = cell.trim();
+  return t.length > 2 && t.startsWith("`") && t.endsWith("`") && !t.slice(1, -1).includes("`") ? t.slice(1, -1) : null;
+}

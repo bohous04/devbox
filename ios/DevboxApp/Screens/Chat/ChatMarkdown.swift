@@ -60,20 +60,27 @@ struct ChatMarkdown: View {
 
     #if os(macOS)
     /// A Mac window has room for columns: plain rules, no box (the header over a hairline, rows apart by hairlines),
-    /// within the thread's column. Columns share the width by their content (TableColumns); a cell that has to give
-    /// way wraps, a command or path after its separators, so nothing in a table is cut.
+    /// within the thread's column. Columns share the width by their content (TableColumns); a prose cell that has to
+    /// give way wraps. A lone command or path stays on one line, cut at its end with the whole in its tooltip, so it
+    /// does not push its row out of line with the others.
     private func grid(_ header: [String], _ rows: [[String]]) -> some View {
         let columns = max(header.count, rows.map(\.count).max() ?? 0)
         let hasHeader = !header.allSatisfy { $0.trimmingCharacters(in: .whitespaces).isEmpty }
-        func cell(_ s: String) -> some View {
-            ChatInline.text(s).cutLinkHelp(s).padding(.trailing, 16).padding(.vertical, 6)
+        @ViewBuilder func cell(_ s: String) -> some View {
+            if ChatMarkdownParse.isCodeOnly(s) {
+                ChatInline.text(s).lineLimit(1).truncationMode(.tail).help(Self.codeText(s))
+                    .padding(.trailing, 16).padding(.vertical, 6)
+            } else {
+                ChatInline.text(s).cutLinkHelp(s).padding(.trailing, 16).padding(.vertical, 6)
+            }
         }
         return TableColumns(columns: columns, hasHeader: hasHeader) {
             if hasHeader {
                 ForEach(0..<columns, id: \.self) { j in
-                    Text(j < header.count ? header[j] : "").font(.system(size: ChatType.s(12), weight: .medium))
-                        .foregroundStyle(Theme.C.mutedForeground)
-                        .padding(.trailing, 16).padding(.vertical, 5)
+                    // The column names read as strongly as the cells, a step heavier.
+                    ChatInline.text(j < header.count ? header[j] : "").font(font.weight(.semibold))
+                        .foregroundStyle(Theme.C.foreground)
+                        .padding(.trailing, 16).padding(.vertical, 6)
                 }
             }
             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
@@ -84,6 +91,11 @@ struct ChatMarkdown: View {
     }
     #endif
 
+    /// A code-only cell's command, without its backticks.
+    private static func codeText(_ cell: String) -> String {
+        String(cell.trimmingCharacters(in: .whitespaces).dropFirst().dropLast())
+    }
+
     #if !os(macOS)
     /// A phone has no room for columns: each row stacks its cells (the first, the check, above the result) inside one
     /// bordered group headed by the column names, rows apart by hairlines, so it reads as a table, not as a list of
@@ -91,8 +103,8 @@ struct ChatMarkdown: View {
     private func table(_ header: [String], _ rows: [[String]]) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             if !header.allSatisfy({ $0.trimmingCharacters(in: .whitespaces).isEmpty }) {
-                Text(header.prefix(2).joined(separator: " · "))
-                    .font(.system(size: ChatType.s(12), weight: .medium)).foregroundStyle(Theme.C.mutedForeground)
+                ChatInline.text(header.prefix(2).joined(separator: " · "))
+                    .font(font.weight(.semibold)).foregroundStyle(Theme.C.foreground)
                     .padding(.horizontal, 12).padding(.vertical, 7)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background { Rectangle().fill(Theme.C.muted.opacity(0.6)) }
@@ -101,9 +113,7 @@ struct ChatMarkdown: View {
                 VStack(alignment: .leading, spacing: 4) {
                     if let first = row.first {
                         if ChatMarkdownParse.isCodeOnly(first) {
-                            // A command or path on one line, cut in the middle where it does not fit: never wrapped
-                            // mid-path, never clipped at the edge.
-                            ChatInline.text(first).lineLimit(1).truncationMode(.middle)
+                            codeCell(first)
                         } else {
                             ChatInline.text(first).font(font.weight(.medium))
                         }
@@ -111,6 +121,8 @@ struct ChatMarkdown: View {
                     ForEach(Array(row.dropFirst().enumerated()), id: \.offset) { j, cell in
                         if header.count > 2, j + 1 < header.count {
                             (Text(header[j + 1] + ": ").foregroundColor(Theme.C.mutedForeground) + ChatInline.text(cell))
+                        } else if ChatMarkdownParse.isCodeOnly(cell) {
+                            codeCell(cell)
                         } else {
                             ChatInline.text(cell)
                         }
@@ -123,6 +135,16 @@ struct ChatMarkdown: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: Theme.R.lg))
         .overlay(RoundedRectangle(cornerRadius: Theme.R.lg).strokeBorder(Theme.C.border))
+    }
+
+    /// A command or path on one line, cut in the middle where it does not fit (never wrapped mid-path, never clipped
+    /// at the edge); a long press shows the whole and copies it.
+    private func codeCell(_ s: String) -> some View {
+        ChatInline.text(s).lineLimit(1).truncationMode(.middle)
+            .contextMenu {
+                Text(Self.codeText(s))
+                Button { UIPasteboard.general.string = Self.codeText(s) } label: { Label("Copy", systemImage: "doc.on.doc") }
+            }
     }
     #endif
 }
