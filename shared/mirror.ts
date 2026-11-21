@@ -4,22 +4,24 @@ import type { ThreadSnapshot } from "./thread";
  *  and `MirrorInfo.sendBlock` names it ahead of time when devd already knows). Clients show it as the composer's lock
  *  reason, next to Open terminal. */
 export type MirrorSendError =
-  | "agent-not-running" | "agent-waiting-in-terminal" | "terminal-has-draft" | "terminal-not-ready" | "terminal-scrolled"
+  | "agent-not-running" | "agent-waiting-in-terminal" | "agent-busy" | "terminal-has-draft" | "terminal-not-ready" | "terminal-scrolled"
   | "conversation-unknown" | "unsupported-agent" | "unsupported-host" | "pane-changed" | "not-submitted";
 
 /** What the mirror of a tmux session's `main` pane knows (devd/src/transcriptMirror.ts).
- *  - `live`: the pane runs Claude Code and its transcript is being read;
+ *  - `live`: the pane runs Claude Code or Codex and its transcript (Codex: rollout) is being read;
  *  - `agent-exited`: the pane is there, but no agent runs in it (a shell);
  *  - `no-pane`: no `main` pane (stopped container, killed tmux session);
- *  - `unresolved`: Claude runs, but devd could not tell which conversation it is on;
- *  - `unsupported`: another agent (Codex, Grok, …) or an InstaBox session: no mirror yet. */
+ *  - `unresolved`: Claude or Codex runs, but devd could not tell which conversation it is on (Codex: until a hook
+ *    event of it names one);
+ *  - `unsupported`: another agent (Grok, Antigravity, …) or an InstaBox session: no mirror yet. */
 export interface MirrorInfo {
   state: "live" | "agent-exited" | "no-pane" | "unresolved" | "unsupported";
   /** The pane agent's label ("Claude Code", "Codex"); null when none runs. */
   agent: string | null;
-  /** Claude's session id the mirror reads; null when none. */
+  /** Claude's session id or the Codex thread id the mirror reads; null when none. */
   conversationId: string | null;
-  /** What Claude reports in its session file; null when unknown. */
+  /** Claude: what it reports in its session file. Codex: `waiting` from its hook events, else `busy` while the
+   *  rollout's turn runs. null when unknown. */
   activity: "idle" | "busy" | "waiting" | null;
   /** The agent waits for an answer only the terminal can give (a permission prompt, a question). */
   terminalPrompt: { text: string } | null;

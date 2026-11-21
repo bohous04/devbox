@@ -1,0 +1,29 @@
+{"timestamp": "2026-01-01T00:00:01Z", "type": "session_meta", "payload": {"id": "01aaaaaa-0000-7000-8000-000000000001", "cwd": "/workspace", "originator": "codex-tui", "cli_version": "0.166.0", "source": "cli", "base_instructions": {"text": "base instructions"}}}
+{"timestamp": "2026-01-01T00:00:02Z", "type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-1"}}
+{"timestamp": "2026-01-01T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "developer", "id": "msg-d", "content": [{"type": "input_text", "text": "developer instructions"}]}}
+{"timestamp": "2026-01-01T00:00:04Z", "type": "response_item", "payload": {"type": "message", "role": "user", "id": "msg-e", "content": [{"type": "input_text", "text": "<environment_context>cwd</environment_context>"}]}}
+{"timestamp": "2026-01-01T00:00:05Z", "type": "turn_context", "payload": {"model": "gpt-x", "turn_id": "turn-1"}}
+{"timestamp": "2026-01-01T00:00:06Z", "type": "response_item", "payload": {"type": "message", "role": "user", "id": "msg-u1", "content": [{"type": "input_text", "text": "List the files"}]}}
+{"timestamp": "2026-01-01T00:00:07Z", "type": "event_msg", "payload": {"type": "item_completed", "thread_id": "t", "turn_id": "x", "item": {"type": "UserMessage", "id": "um-1", "content": [{"type": "text", "text": "List the files", "text_elements": []}]}}}
+{"timestamp": "2026-01-01T00:00:08Z", "type": "response_item", "payload": {"type": "reasoning", "id": "rs-1", "summary": [], "encrypted_content": "private reasoning"}}
+{"timestamp": "2026-01-01T00:00:09Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "AgentMessage", "id": "am-1", "content": [{"type": "Text", "text": "I'll list them."}], "phase": "commentary"}}}
+{"timestamp": "2026-01-01T00:00:10Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "id": "msg-1", "phase": "commentary", "content": [{"type": "output_text", "text": "I'll list them."}]}}
+{"timestamp": "2026-01-01T00:00:11Z", "type": "response_item", "payload": {"type": "custom_tool_call", "id": "ctc-1", "status": "completed", "call_id": "call-1", "name": "exec", "input": "ls"}}
+{"timestamp": "2026-01-01T00:00:12Z", "type": "response_item", "payload": {"type": "custom_tool_call_output", "id": "ctco-1", "call_id": "call-1", "output": "README.md\nsrc"}}
+{"timestamp": "2026-01-01T00:00:13Z", "type": "event_msg", "payload": {"type": "token_count", "info": null}}
+{"timestamp": "2026-01-01T00:00:14Z", "type": "response_item", "payload": {"type": "message", "role": "user", "id": "msg-u2", "content": [{"type": "input_text", "text": "Also count them"}]}}
+{"timestamp": "2026-01-01T00:00:15Z", "type": "event_msg", "payload": {"type": "item_completed", "thread_id": "t", "turn_id": "x", "item": {"type": "UserMessage", "id": "um-2", "content": [{"type": "text", "text": "Also count them", "text_elements": []}]}}}
+{"timestamp": "2026-01-01T00:00:16Z", "type": "response_item", "payload": {"type": "function_call", "id": "fc-2", "status": "completed", "call_id": "call-2", "name": "view_image", "arguments": "{\"path\":\"a.png\"}"}}
+{"timestamp": "2026-01-01T00:00:17Z", "type": "response_item", "payload": {"type": "function_call_output", "id": "fco-2", "call_id": "call-2", "output": [{"type": "input_text", "text": "Viewed"}, {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}]}}
+{"timestamp": "2026-01-01T00:00:18Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "id": "msg-2", "phase": "final_answer", "content": [{"type": "output_text", "text": "Two entries."}]}}
+{"timestamp": "2026-01-01T00:00:19Z", "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-1", "last_agent_message": "Two entries."}}
+{"timestamp": "2026-01-01T00:00:20Z", "type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-2"}}
+{"timestamp": "2026-01-01T00:00:21Z", "type": "event_msg", "payload": {"type": "item_completed", "thread_id": "t", "turn_id": "x", "item": {"type": "UserMessage", "id": "um-3", "content": [{"type": "text", "text": "What is in this screenshot?", "text_elements": []}, {"type": "local_image", "path": "/tmp/shot.png"}]}}}
+{"timestamp": "2026-01-01T00:00:22Z", "type": "event_msg", "payload": {"type": "turn_aborted", "turn_id": "turn-2", "reason": "interrupted"}}
+{"timestamp": "2026-01-01T00:00:23Z", "type": "compacted", "payload": {"message": "Summary: earlier work", "replacement_history": []}}
+{"timestamp": "2026-01-01T00:00:24Z", "type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-3"}}
+{"timestamp": "2026-01-01T00:00:25Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "id": "msg-3", "phase": "final_answer", "content": [{"type": "output_text", "text": "The background task finished."}]}}
+{"timestamp": "2026-01-01T00:00:26Z", "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-3"}}
+{"timestamp": "2026-01-01T00:00:27Z", "type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn-4"}}
+{"timestamp": "2026-01-01T00:00:28Z", "type": "event_msg", "payload": {"type": "item_completed", "thread_id": "t", "turn_id": "x", "item": {"type": "UserMessage", "id": "um-4", "content": [{"type": "text", "text": "Use the other model", "text_elements": []}]}}}
+{"timestamp": "2026-01-01T00:00:29Z", "type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-4", "last_agent_message": null, "error": {"message": "The model is not available.", "codex_error_info": "model_not_found"}}}
