@@ -612,25 +612,33 @@ private struct MacThreadHeading: ViewModifier {
     let place: String?
 
     func body(content: Content) -> some View {
-        if #available(macOS 15, *) {
+        if #available(macOS 26, *) {
+            // A plain title, as the system's own: macOS 26 puts a toolbar item in a Liquid Glass capsule sized for one
+            // control, too short for two lines, which it clipped.
             content
                 .toolbar(removing: .title)
-                .toolbar {
-                    ToolbarItem(placement: .navigation) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.C.foreground)
-                            if let place {
-                                Text(place).font(.system(size: 12)).foregroundStyle(Theme.C.mutedForeground)
-                            }
-                        }
-                        .lineLimit(1)
-                        .padding(.leading, 4)
-                        .accessibilityElement(children: .combine)
-                    }
-                }
+                .toolbar { ToolbarItem(placement: .navigation) { heading }.sharedBackgroundVisibility(.hidden) }
+        } else if #available(macOS 15, *) {
+            content
+                .toolbar(removing: .title)
+                .toolbar { ToolbarItem(placement: .navigation) { heading } }
         } else {
             content
         }
+    }
+
+    /// One line each, never cut vertically; a narrow window shortens a line at its end (the place, the longer one).
+    private var heading: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.C.foreground)
+            if let place {
+                Text(place).font(.system(size: 12)).foregroundStyle(Theme.C.mutedForeground).truncationMode(.tail)
+            }
+        }
+        .lineLimit(1)
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(.leading, 4)
+        .accessibilityElement(children: .combine)
     }
 }
 
