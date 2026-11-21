@@ -54,14 +54,11 @@ struct ChatScreen: View {
         return "\(s.project)/\(s.repo)"
     }
 
-    /// The header names the thread like the web's: its nickname, else a short title from its first message, with
-    /// where it runs under it. nil until the thread and the session are known.
+    /// The header names the thread as the inbox and the Mac do (InboxView.sessionTitle): its nickname, else a short
+    /// title from its first message, else the repo and session number, with where it runs under it.
     private var heading: (title: String, place: String?) {
-        let s = live.live?.sessions.first(where: { $0.id == sessionId })
-        let place = s.map { "\($0.project) / \($0.repo)" }
-        if let name = s?.name?.trimmingCharacters(in: .whitespaces), !name.isEmpty { return (name, place) }
-        if let t = store.title { return (t, place) }
-        return (place ?? sessionId, nil)
+        guard let s = live.live?.sessions.first(where: { $0.id == sessionId }) else { return (sessionId, nil) }
+        return (InboxView.sessionTitle(sessionId: s.id, name: s.name, project: s.project, repo: s.repo, topic: store.title), "\(s.project) / \(s.repo)")
     }
 
     var body: some View {

@@ -4,11 +4,12 @@ import XCTest
 /// The inbox row's presentation rules, ported from dashboard/src/inboxView.ts with the same cases as its tests.
 final class InboxRowTests: XCTestCase {
     private func item(_ id: String, _ section: String, reason: String?, since: Int, until: Int? = nil,
-                      title: String? = nil, repo: String = "r", lastText: String? = nil) throws -> InboxItem {
+                      title: String? = nil, repo: String = "r", lastText: String? = nil, topic: String? = nil) throws -> InboxItem {
         var attention: [String: Any] = ["section": section, "since": since, "reason": reason.map { $0 as Any } ?? NSNull()]
         if let until { attention["until"] = until }
-        let json: [String: Any] = ["sessionId": id, "runtime": "chat", "title": title ?? id, "project": "p", "repo": repo,
+        var json: [String: Any] = ["sessionId": id, "runtime": "chat", "title": title ?? id, "project": "p", "repo": repo,
                                    "agent": "claude", "attention": attention, "lastText": lastText.map { $0 as Any } ?? NSNull()]
+        if let topic { json["topic"] = topic }
         return try JSONDecoder().decode(InboxItem.self, from: JSONSerialization.data(withJSONObject: json))
     }
 
@@ -57,16 +58,22 @@ final class InboxRowTests: XCTestCase {
         XCTAssertEqual(InboxView.plainPreview("a __bold__ word"), "a bold word")
     }
 
+    /// inboxView.test.ts rowTitle: name, else topic, else repo #n; never the newest message.
     func testRowTitle() throws {
-        XCTAssertTrue(try InboxView.rowTitle(item("dev-p-r-14", "idle", reason: nil, since: 1, title: "Boosting")) == ("Boosting", false))
-        XCTAssertTrue(try InboxView.rowTitle(item("dev-p-r-14", "idle", reason: nil, since: 1, title: "p/r", lastText: "Fixed the `test`")) == ("Fixed the test", true))
-        XCTAssertTrue(try InboxView.rowTitle(item("dev-p-r-14", "idle", reason: nil, since: 1, title: "p/r")) == ("r #14", false))
-        XCTAssertTrue(try InboxView.rowTitle(item("dev-p-r", "idle", reason: nil, since: 1, title: "p/r")) == ("r", false))
-        XCTAssertTrue(try InboxView.rowTitle(item("dev-p-notes-13", "idle", reason: nil, since: 1, title: "p/notes-13", repo: "notes-13")) == ("notes-13", false))
-        // A message of only whitespace names nothing: the repo and session number instead.
-        XCTAssertTrue(try InboxView.rowTitle(item("dev-p-r-14", "idle", reason: nil, since: 1, title: "p/r", lastText: "  \n ")) == ("r #14", false))
-        // A failed session named after its path takes the error message as a stand-in title.
-        XCTAssertTrue(try InboxView.rowTitle(item("dev-p-r", "needs_you", reason: "failed", since: 1, title: "p/r", lastText: "Error: **build** failed")) == ("Error: build failed", true))
+        XCTAssertEqual(try InboxView.rowTitle(item("dev-p-r-14", "idle", reason: nil, since: 1, title: "Boosting", topic: "Add a retry queue")), "Boosting")
+        XCTAssertEqual(try InboxView.rowTitle(item("dev-p-r-14", "idle", reason: nil, since: 1, title: "p/r", lastText: "OK", topic: "Add a retry queue")), "Add a retry queue")
+        // The newest message changes with every reply: it is the preview, never the title.
+        XCTAssertEqual(try InboxView.rowTitle(item("dev-p-r-14", "idle", reason: nil, since: 1, title: "p/r", lastText: "Fixed the `test`")), "r #14")
+        XCTAssertEqual(try InboxView.rowTitle(item("dev-p-r", "idle", reason: nil, since: 1, title: "p/r")), "r")
+        XCTAssertEqual(try InboxView.rowTitle(item("dev-p-notes-13", "idle", reason: nil, since: 1, title: "p/notes-13", repo: "notes-13")), "notes-13")
+        XCTAssertEqual(try InboxView.rowTitle(item("dev-p-r", "needs_you", reason: "failed", since: 1, title: "p/r", lastText: "Error: **build** failed")), "r")
+    }
+
+    /// The iPhone thread header names the thread by the same chain, with the topic from the thread's first message.
+    func testSessionTitleIsTheRowTitleChain() {
+        XCTAssertEqual(InboxView.sessionTitle(sessionId: "dev-p-r-14", name: nil, project: "p", repo: "r", topic: "Add a retry queue"), "Add a retry queue")
+        XCTAssertEqual(InboxView.sessionTitle(sessionId: "dev-p-r-14", name: " Boosting ", project: "p", repo: "r", topic: "Add a retry queue"), "Boosting")
+        XCTAssertEqual(InboxView.sessionTitle(sessionId: "dev-p-r-14", name: "  ", project: "p", repo: "r", topic: nil), "r #14")
     }
 
     /// One rule set with the dashboard (inboxView.ts statusParts): a compact row shows its reason's mark whatever its

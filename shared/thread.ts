@@ -108,6 +108,10 @@ export interface InboxItem {
   branch?: string | null;
   attention: Attention;
   lastText: string | null;
+  /** A short title from the session's first user message (shared/threadTitle.ts): stable for the thread's life,
+   *  unlike lastText. null for tmux sessions, an empty thread, or a first message with nothing that reads as words.
+   *  Optional: older devd does not send it. */
+  topic?: string | null;
 }
 
 /** Bridge housekeeping that once went into threads as notices: a restart (resumed, nothing to act on) and devd's

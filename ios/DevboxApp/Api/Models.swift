@@ -1282,6 +1282,9 @@ struct InboxItem: Decodable, Equatable, Identifiable {
     let attention: Attention
     /// Newest user or assistant message of a chat session, clipped; nil for tmux sessions and empty threads.
     let lastText: String?
+    /// A short title from the first user message (devd, shared/threadTitle.ts), stable for the thread's life; nil
+    /// for tmux, an empty thread, or an older devd.
+    let topic: String?
 
     var id: String { sessionId }
 }

@@ -440,6 +440,12 @@ export class ThreadStore {
   }
 
   /** Text of the newest user or assistant item (also one still streaming); null for a thread without messages. */
+  /** The text of the thread's first user message; null before one. */
+  firstUserText(): string | null {
+    const r = this.db.query(`SELECT text FROM items WHERE kind = 'user' ORDER BY id LIMIT 1`).get() as { text: string } | null;
+    return r ? r.text : null;
+  }
+
   lastMessageText(): string | null {
     const r = this.db.query(`SELECT text FROM items WHERE kind IN ('user', 'assistant') ORDER BY id DESC LIMIT 1`).get() as { text: string } | null;
     return r ? r.text : null;

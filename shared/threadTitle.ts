@@ -1,5 +1,6 @@
-// A short thread title for the session header, derived from the first message when the session has no nickname.
-// Presentation only: there is no title generator; this picks the first clause that reads as words, not as a command.
+// A short thread title from the session's first message: devd's inbox `topic`, and the web thread header when the
+// session has no nickname. No title generator: this picks the first clause that reads as words, not as a command.
+// The Apple apps copy it (ThreadTitle); shared/fixtures/thread-titles.json pins both.
 
 const MAX_WORDS = 6;
 

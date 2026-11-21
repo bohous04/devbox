@@ -10,7 +10,7 @@ import { Switchers } from "../components/chat/Switchers";
 import { EmptyState, RowsSkeleton } from "../components/primitives";
 import { useStore } from "../store";
 import { terminalTabUrl } from "../terminalRoute";
-import { threadTitle } from "../threadTitle";
+import { threadTitle } from "../../../shared/threadTitle";
 import { activeRun, applyEffort, applyNotice, applyThreadEvent, criticRunIds, mergeSnapshot, queuedRunIds } from "../threadView";
 import { useEventStream } from "../useEventStream";
 

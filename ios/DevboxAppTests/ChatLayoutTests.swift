@@ -66,11 +66,13 @@ final class ChatLayoutTests: XCTestCase {
         XCTAssertEqual(ToolLabel("mcp__docs__search", .object(["q": .string("x")])).verb, "docs · search")
     }
 
-    func testThreadTitle() {
-        XCTAssertEqual(ThreadTitle.from("Add a retry queue for the offline sync: create src/sync/queue.ts"), "Add a retry queue for the…")
-        XCTAssertEqual(ThreadTitle.from("Run: for i in 1 2 3; do echo $i; done — then tell me the last step."), "Then tell me the last step")
-        XCTAssertEqual(ThreadTitle.from("fix it"), "Fix it")
-        XCTAssertNil(ThreadTitle.from("   \n `ls`"))
+    /// shared/fixtures/thread-titles.json: the cases devd's inbox `topic` (shared/threadTitle.ts) runs too.
+    func testThreadTitle() throws {
+        struct Case: Decodable { let message: String; let title: String? }
+        let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "thread-titles", withExtension: "json"))
+        for c in try JSONDecoder().decode([Case].self, from: Data(contentsOf: url)) {
+            XCTAssertEqual(ThreadTitle.from(c.message), c.title, c.message)
+        }
     }
 
     func testMarkdownBlocks() {

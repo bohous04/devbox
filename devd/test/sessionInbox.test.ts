@@ -22,6 +22,7 @@ const TMUX: SessionRow = { ...BASE, id: "dev-a-tmux", container: "dev-a-tmux", r
 const started = (runId: string): BridgeEvent => ({ type: "run.started", runId, origin: "user", nativeThreadId: null, model: null });
 const completed = (runId: string): BridgeEvent => ({ type: "run.completed", runId, nativeThreadId: "n", usage: null, costUsd: null });
 const said = (runId: string, text: string): BridgeEvent => ({ type: "message.final", runId, itemId: `m-${runId}`, role: "assistant", text });
+const asked = (runId: string, text: string): BridgeEvent => ({ type: "run.queued", runId, text, attachments: [] });
 
 function setup(opts: { link?: LinkState | null; now?: () => number; coalesceMs?: number } = {}) {
   const db = openDb(":memory:");
@@ -75,8 +76,24 @@ test("chat item: attention from the thread and the link, lastText is the newest 
   const it = t.inbox.item(getSession(t.db, BASE.id)!);
   expect(it).toEqual({
     sessionId: BASE.id, runtime: "chat", title: "a/chat", project: "a", repo: "chat", agent: "claude", branch: null,
-    attention: { section: "needs_you", reason: "completed", since: 3000 }, lastText: `${"x".repeat(LAST_TEXT_MAX)}…`,
+    attention: { section: "needs_you", reason: "completed", since: 3000 }, lastText: `${"x".repeat(LAST_TEXT_MAX)}…`, topic: null,
   });
+});
+
+test("chat item: the topic is a short title from the first user message and stays while the thread goes on", () => {
+  const t = setup();
+  const s = chat(t, BASE, [asked("r1", "Add a retry queue for the offline sync: create src/sync/queue.ts"), started("r1"), said("r1", "OK"), completed("r1")]);
+  const first = t.inbox.item(getSession(t.db, BASE.id)!);
+  expect(first.topic).toBe("Add a retry queue for the…");
+  expect(first.lastText).toBe("OK");
+  s.apply({ seq: 5, ts: 5000, event: asked("r2", "Now rename the module") });
+  expect(t.inbox.item(getSession(t.db, BASE.id)!).topic).toBe("Add a retry queue for the…");
+});
+
+test("chat item: a first message with nothing that reads as words has no topic", () => {
+  const t = setup();
+  chat(t, BASE, [asked("r1", "`ls -la`")]);
+  expect(t.inbox.item(getSession(t.db, BASE.id)!).topic).toBeNull();
 });
 
 test("an item carries the branch devd recorded for the session", () => {
@@ -94,6 +111,7 @@ test("tmux item uses the hub's live state and carries runtime tmux", () => {
   expect(it.runtime).toBe("tmux");
   expect(it.title).toBe("Old school");
   expect(it.lastText).toBeNull();
+  expect(it.topic).toBeNull();
   expect(it.attention.section).toBe("working");
 });
 

@@ -127,6 +127,9 @@ targets:
       # Bridge housekeeping notices the thread leaves out (ThreadStoreTests; dashboard/src/workGroups.test.ts).
       - path: ../shared/fixtures/housekeeping-notices.json
         buildPhase: resources
+      # The thread title rule's cases (ChatLayoutTests; dashboard/src/threadTitle.test.ts runs them too).
+      - path: ../shared/fixtures/thread-titles.json
+        buildPhase: resources
     dependencies:
       - target: DevboxApp
     settings:
@@ -223,6 +226,8 @@ targets:
       - path: ../shared/fixtures/chat-tables.json
         buildPhase: resources
       - path: ../shared/fixtures/housekeeping-notices.json
+        buildPhase: resources
+      - path: ../shared/fixtures/thread-titles.json
         buildPhase: resources
     dependencies:
       - target: DevboxMac

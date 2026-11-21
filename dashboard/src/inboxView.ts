@@ -135,15 +135,12 @@ export function projectBadge(project: string): { letters: string; slot: number }
  *  `__x__` only between spaces or line edges, so names like `__init__.py` stay whole. */
 export const plainPreview = (t: string): string => t.replace(/`+/g, "").replace(/\*\*(.+?)\*\*/g, "$1").replace(/(?<=^|\s)__(\S(?:.*?\S)?)__(?=$|\s|[,;:!?)])/g, "$1").replace(/^#+\s+/, "").replace(/\s+/g, " ").trim();
 
-/** What a row names the session by. A custom name wins. A session still named after its repo path says nothing its
- *  meta line does not, so it takes its newest message instead, or, with none (tmux), the repo and the session's
- *  number from its id ("harbor_api #14") so sibling sessions of one repo stay apart. `fromMessage` tells the row
- *  not to repeat that message as a preview. */
-export function rowTitle(i: InboxItem): { text: string; fromMessage: boolean } {
-  if (i.title !== `${i.project}/${i.repo}`) return { text: i.title, fromMessage: false };
-  // A message of only whitespace or markdown marks names nothing: the repo fallback below takes over.
-  const message = i.lastText ? plainPreview(i.lastText) : "";
-  if (message) return { text: message, fromMessage: true };
+/** What a session is called, in the inbox and the thread header alike: a custom name, else devd's `topic` (from the
+ *  first message, stable for the thread's life), else the repo and the session's number from its id
+ *  ("harbor_api #14") so sibling sessions of one repo stay apart. Never `lastText`: it changes with every reply. */
+export function rowTitle(i: InboxItem): string {
+  if (i.title !== `${i.project}/${i.repo}`) return i.title;
+  if (i.topic) return i.topic;
   const n = new RegExp(`-${i.repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-(\\d+)$`).exec(i.sessionId)?.[1];
-  return { text: n ? `${i.repo} #${n}` : i.repo, fromMessage: false };
+  return n ? `${i.repo} #${n}` : i.repo;
 }
