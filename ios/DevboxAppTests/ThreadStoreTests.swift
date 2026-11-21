@@ -95,6 +95,23 @@ final class ThreadStoreTests: XCTestCase {
         XCTAssertNotEqual(ThreadView.switchKey(more), ThreadView.switchKey(snapshot))
     }
 
+    /// The iPhone header's state after the place: working, or how the last run ended and when; nothing before a run.
+    func testHeaderRunState() throws {
+        func thread(_ runs: String) throws -> ThreadSnapshot {
+            try JSONDecoder().decode(ThreadSnapshot.self, from: Data(#"{"lastSeq":1,"seenSeq":0,"runs":\#(runs),"items":[],"pending":[],"background":[],"native":null}"#.utf8))
+        }
+        func run(_ id: String, _ status: String, ended: Int?) -> String {
+            #"{"runId":"\#(id)","origin":"user","status":"\#(status)","harness":"claude","nativeThreadId":null,"model":null,"queuedAt":null,"startedAt":1,"endedAt":\#(ended.map(String.init) ?? "null"),"endedSeq":null,"usage":null,"error":null}"#
+        }
+        let now = 10 * 60_000
+        XCTAssertNil(ThreadView.runState(try thread("[]"), now: now))
+        XCTAssertEqual(ThreadView.runState(try thread("[\(run("a", "completed", ended: 1)),\(run("b", "running", ended: nil))]"), now: now), "Working…")
+        XCTAssertEqual(ThreadView.runState(try thread("[\(run("a", "completed", ended: now - 3 * 60_000))]"), now: now), "Finished 3m ago")
+        XCTAssertEqual(ThreadView.runState(try thread("[\(run("a", "completed", ended: 1)),\(run("b", "failed", ended: now))]"), now: now), "Failed now")
+        XCTAssertEqual(ThreadView.runState(try thread("[\(run("a", "interrupted", ended: 1))]"), now: 2 * 3_600_000 + 1), "Stopped 2h ago")
+        XCTAssertEqual(ThreadView.runState(try thread("[\(run("a", "queued", ended: nil))]"), now: now), "Queued")
+    }
+
     func testANoticeKeepsItsTone() throws {
         let json = #"{"seq":3,"runId":null,"itemId":"notice:1","kind":"notice","text":"Send it again.","status":"done","ts":1,"tone":"warn"}"#
         XCTAssertTrue(try JSONDecoder().decode(ThreadItem.self, from: Data(json.utf8)).warns)

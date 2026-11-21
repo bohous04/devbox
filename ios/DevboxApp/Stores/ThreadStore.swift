@@ -55,6 +55,22 @@ enum ThreadView {
     /// The run the Stop button interrupts.
     static func activeRun(_ t: ThreadSnapshot) -> RunRow? { t.runs.first { $0.status == .running } }
 
+    /// The thread's state for the iPhone header, after the place: "Working…", "Queued", or how the last run ended and
+    /// when ("Finished 3m ago"); nil before any run.
+    static func runState(_ t: ThreadSnapshot, now: Int) -> String? {
+        if activeRun(t) != nil { return "Working…" }
+        if t.runs.contains(where: { $0.status == .queued }) { return "Queued" }
+        guard let last = t.runs.last(where: { $0.endedAt != nil }), let ended = last.endedAt else { return nil }
+        let word: String
+        switch last.status {
+        case .failed: word = "Failed"
+        case .interrupted: word = "Stopped"
+        default: word = "Finished"
+        }
+        let ago = InboxView.shortAgo(now - ended)
+        return "\(word) \(ago == "now" ? ago : "\(ago) ago")"
+    }
+
     /// Runs waiting behind the active one: their user messages show as queued.
     static func queuedRunIds(_ t: ThreadSnapshot) -> [String] { t.runs.filter { $0.status == .queued }.map(\.runId) }
 

@@ -102,8 +102,13 @@ struct ChatScreen: View {
                 // Title and place share one left edge, next to the back button.
                 VStack(alignment: .leading, spacing: 0) {
                     Text(heading.title).font(.system(size: 16, weight: .semibold)).lineLimit(1)
-                    if let place = heading.place {
-                        Text(place).font(.system(size: 12)).foregroundStyle(Theme.C.mutedForeground).lineLimit(1)
+                    // Where it runs and what it is doing ("Working…", "Finished 3m ago"), as the inbox row says.
+                    TimelineView(.periodic(from: .now, by: 30)) { context in
+                        let state = store.thread.flatMap { ThreadView.runState($0, now: InboxView.ms(context.date)) }
+                        let line = [heading.place, state].compactMap { $0 }.joined(separator: " · ")
+                        if !line.isEmpty {
+                            Text(line).font(.system(size: 12)).foregroundStyle(Theme.C.mutedForeground).lineLimit(1)
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
