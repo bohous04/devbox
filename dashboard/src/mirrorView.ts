@@ -32,12 +32,17 @@ export function mirrorComposerProps(info: MirrorInfo) {
     placeholder: fieldOff ?? "Message the agent in the terminal" } as const;
 }
 
-/** The mirror composer's onSend: a refusal becomes the lock and keeps the text (`false`); a sent message clears it. */
+/** A mirror send devd never answered (the network failed or dropped): it may have been typed into the pane. */
+export const MIRROR_SEND_UNCONFIRMED = "The message may have reached the terminal — check it before sending again.";
+
+/** The mirror composer's onSend: a refusal becomes the lock and keeps the text (`false`); a sent message clears it.
+ *  No answer at all is said as possibly sent, never retried. */
 export async function sendToMirror(send: () => Promise<unknown>, setLock: (lock: MirrorLock | null) => void): Promise<void | false> {
   try {
     await send();
     setLock(null);
   } catch (e) {
+    if (!(e instanceof ApiError)) throw new Error(MIRROR_SEND_UNCONFIRMED, { cause: e });
     const lock = mirrorSendLock(e);
     if (!lock) throw e;
     setLock(lock);

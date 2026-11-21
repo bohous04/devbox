@@ -77,6 +77,8 @@ struct ChatScreen: View {
                 } actions: {
                     if let closeWindow { Button("Close window", action: closeWindow) }
                 }
+            } else if store.noLongerTmux {
+                ContentUnavailableView(MirrorView.noLongerTmux, systemImage: "terminal")
             } else if let reason = store.mirror.flatMap(MirrorView.unsupported) {
                 ContentUnavailableView {
                     Label(reason, systemImage: "terminal")
@@ -315,7 +317,8 @@ struct ChatScreen: View {
                          onStop: {},
                          placeholder: MirrorView.placeholder, fieldOff: MirrorView.fieldOff(mirror), imagesOff: MirrorView.imagesOff)
         }
-        // VoiceOver hears each new line once, as the web's live region says it.
+        // VoiceOver hears each new line once, as the web's live region says it: the one there on opening too.
+        .onAppear { if let text = notice?.announcement { AccessibilityNotification.Announcement(text).post() } }
         .onChange(of: notice?.announcement) { _, text in
             if let text { AccessibilityNotification.Announcement(text).post() }
         }

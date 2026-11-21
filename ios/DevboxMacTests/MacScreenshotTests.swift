@@ -209,8 +209,8 @@ final class MacScreenshotTests: XCTestCase {
         try png.write(to: dir.appending(path: "mac-\(name).png"))
     }
 
-    /// `chat`: the Chat tab of that session alone (the window opens a tmux session on its terminal); `refuse` sends the
-    /// draft, which the fixture refuses.
+    /// `chat`: the Chat tab of that session alone (the window opens a tmux session on its terminal); `refuse` presses
+    /// Send on the draft, which the fixture refuses.
     private func shoot(name: String, look: String, thread: String?, chat: String? = nil, page: MacDashboardPage? = nil, draft: String? = nil,
                        refuse: Bool = false, width: CGFloat = 1440, height: CGFloat = 900, inspect: ((NSView) throws -> Void)? = nil) throws {
         let state = MacAppState(isTestRun: false, isFixtureRun: true)
@@ -252,6 +252,7 @@ final class MacScreenshotTests: XCTestCase {
         }
         RunLoop.main.run(until: Date().addingTimeInterval(1.5))
         XCTAssertNotNil(state.inbox?.items, "the fixture inbox did not load")
+        var fieldFrame: NSRect?
         if let draft {
             // Typed as a user would: the field's editor takes the text and SwiftUI's binding follows.
             let field = try XCTUnwrap(Self.allViews(window.contentView!).first {
@@ -264,13 +265,22 @@ final class MacScreenshotTests: XCTestCase {
             let editor = try XCTUnwrap(window.firstResponder as? NSTextView, "the composer has no editor")
             editor.insertText(draft, replacementRange: NSRange(location: NSNotFound, length: 0))
             RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+            fieldFrame = field.convert(field.bounds, to: nil)
         }
-        if refuse, let chat {
+        if refuse, let chat, let fieldFrame {
+            // The composer's Send button, clicked: offscreen SwiftUI has no accessibility tree to find it by, so it is
+            // found where the Mac's two-tier box puts it, at the right end of the controls row under the field
+            // (ComposerView: 6 pt padding, 4 pt spacing, a 34 pt button).
             let store = state.windows.store(for: chat, client: state.appModel.client!)
-            Task { _ = try await store.sendToPane(text: draft ?? "") }
+            let send = NSPoint(x: fieldFrame.maxX - 17, y: fieldFrame.minY - 6 - 4 - 17)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: send, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                             windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+                window.sendEvent(event)
+            }
             let until = Date().addingTimeInterval(5)
             while store.sendLock == nil, Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
-            XCTAssertNotNil(store.sendLock, "the fixture refuses the send")
+            XCTAssertEqual(store.sendLock?.code, "terminal-has-draft", "the Send button's message is refused by the fixture")
             RunLoop.main.run(until: Date().addingTimeInterval(0.5))
         }
 

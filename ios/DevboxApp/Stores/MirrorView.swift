@@ -1,5 +1,10 @@
 import Foundation
 
+/// A mirror send with no answer from devd (a timeout, a dropped connection): it may have been typed into the pane.
+struct MirrorSendUnconfirmed: Error, CustomStringConvertible {
+    var description: String { MirrorView.sendUnconfirmed }
+}
+
 /// A refused send's reason, shown as the composer's lock next to Open terminal.
 struct MirrorLock: Equatable {
     let code: String
@@ -14,12 +19,14 @@ enum MirrorView {
     static let imagesOff = "Images can't be sent to a terminal session; paste them in the terminal."
     static let placeholder = "Message the agent in the terminal"
     static let promptLead = "Waiting for you in the terminal:"
+    static let noLongerTmux = "This is no longer a terminal session; reopen it."
+    static let sendUnconfirmed = "The message may have reached the terminal — check it before sending again."
 
     /// devd's session-level refusals (devd/src/mirrorApi.ts) come as bare codes: what they mean for the user.
     static let sessionRefusals: [String: String] = [
         "session-ending": "This session is ending; nothing more can be sent to it.",
         "unknown-session": "devd no longer has this session.",
-        "not-a-tmux-session": "This is no longer a terminal session; reopen it.",
+        "not-a-tmux-session": noLongerTmux,
     ]
 
     /// The lock a refused send (404/409) puts on the composer; nil for any other failure, which the composer shows as

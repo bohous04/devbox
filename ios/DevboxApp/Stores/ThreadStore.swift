@@ -336,6 +336,9 @@ final class ThreadStore: ObservableObject {
     /// devd answered 409 session-ending: an end is under way, but a failed end leaves the session alive, so the
     /// stream keeps trying every `endingRetry` until devd accepts it (resume) or says 404 (ended).
     @Published private(set) var ending = false
+    /// The mirror stream refused a session that is no longer a tmux session (409 not-a-tmux-session): the session
+    /// lives on, so this is not "ended", but this screen cannot read it. Final: no reconnect.
+    @Published private(set) var noLongerTmux = false
     /// Derived from `thread` once per update (set before it, so a render sees them together), not on every render.
     private(set) var rows: [ChatRow] = []
     /// `rows` laid out: finished runs' work folded (WorkGroups.rows).
@@ -461,8 +464,8 @@ final class ThreadStore: ObservableObject {
     }
 
     /// One stream connect. nil: the session is ending (409 session-ending), try again later. Throws
-    /// CancellationError when the session is gone (404), or is no longer what the store reads (409 not-a-chat-session,
-    /// or not-a-tmux-session for a mirror), which ends EventStream's loop.
+    /// CancellationError when the session is gone (404, 409 not-a-chat-session) or is no longer a tmux session (a
+    /// mirror's 409 not-a-tmux-session), which ends EventStream's loop.
     private func connectOnce(session: String, lastEventId: String?) async throws -> AsyncThrowingStream<String, Error>? {
         // Each (re)connect asks from the seq the store holds now; devd prefers Last-Event-ID when sent.
         let after = thread?.lastSeq ?? 0
@@ -475,8 +478,12 @@ final class ThreadStore: ObservableObject {
             Self.logger.info("thread stream: session is ending, retrying")
             ending = true
             return nil
-        } catch let e as DevdHTTPError where e.statusCode == 404
-                    || (e.statusCode == 409 && (e.serverMessage == "not-a-chat-session" || e.serverMessage == "not-a-tmux-session")) {
+        } catch let e as DevdHTTPError where e.statusCode == 409 && e.serverMessage == "not-a-tmux-session" {
+            Self.logger.notice("mirror stream refused: no longer a tmux session")
+            ending = false
+            noLongerTmux = true
+            throw CancellationError()
+        } catch let e as DevdHTTPError where e.statusCode == 404 || (e.statusCode == 409 && e.serverMessage == "not-a-chat-session") {
             Self.logger.notice("thread stream refused (HTTP \(e.statusCode) \(e.serverMessage ?? "", privacy: .public)): session ended")
             ending = false
             ended = true
@@ -583,10 +590,16 @@ final class ThreadStore: ObservableObject {
             let _: Sent = try await client.post("\(base)/mirror/messages", body: MirrorMessage(text: text))
             sendLock = nil
             return true
-        } catch {
-            guard let lock = MirrorView.sendLock(error) else { throw error }
+        } catch let e as DevdHTTPError {
+            guard let lock = MirrorView.sendLock(e) else { throw e }
             sendLock = lock
             return false
+        } catch let e as DecodingError {
+            // devd answered, with a body this app does not read: said as such (errorText), not as unconfirmed.
+            throw e
+        } catch {
+            // No answer (a timeout, a dropped connection): devd may have typed it already, and nothing is retried.
+            throw MirrorSendUnconfirmed()
         }
     }
 

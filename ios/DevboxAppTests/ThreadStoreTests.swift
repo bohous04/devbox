@@ -494,6 +494,43 @@ final class ThreadStoreLiveTests: XCTestCase {
         store.stop()
     }
 
+    /// A send devd never answered (a timeout, a dropped connection) may have reached the pane: the composer says so,
+    /// and no lock stands in for it.
+    func testSendToPaneWithoutAnAnswerSaysItMayHaveArrived() async throws {
+        MockURLProtocol.handler = { _ in .init(statusCode: 0, error: URLError(.timedOut)) }
+        let store = ThreadStore(sessionId: "s1", client: client(), connect: { _, _ in AsyncThrowingStream { _ in } })
+        do {
+            _ = try await store.sendToPane(text: "hi")
+            XCTFail("no answer is not a sent message")
+        } catch {
+            XCTAssertEqual(chatErrorText(error), "The message may have reached the terminal — check it before sending again.")
+        }
+        XCTAssertNil(store.sendLock)
+    }
+
+    /// The mirror stream refusing a session that is no longer a tmux session: final, but not "Session ended" (the
+    /// session lives on), and the Mac does not forget its window.
+    func testMirrorStreamRefusedAsNoLongerTmuxIsNotEnded() async throws {
+        MockURLProtocol.handler = { req in
+            switch req.url?.path {
+            case "/api/sessions/s1/thread": return .init(statusCode: 409, data: Data(#"{"error":"not-a-chat-session"}"#.utf8))
+            case "/api/sessions/s1/mirror": return .init(statusCode: 200, data: self.mirrorBody(lastSeq: 1))
+            default: return .init(statusCode: 204)
+            }
+        }
+        var connects = 0
+        let store = ThreadStore(sessionId: "s1", client: client(), connect: { _, _ in
+            connects += 1
+            throw DevdHTTPError(statusCode: 409, serverMessage: "not-a-tmux-session")
+        })
+        await store.start()
+        try await waitUntil { store.noLongerTmux }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertFalse(store.ended)
+        XCTAssertEqual(connects, 1)
+        store.stop()
+    }
+
     /// /mirror itself failing leaves the load error (the screen offers Open terminal), not a silent empty thread.
     func testMirrorLoadFailureIsShown() async throws {
         MockURLProtocol.handler = { req in

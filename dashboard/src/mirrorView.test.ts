@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import type { MirrorInfo } from "../../shared/mirror";
 import { ApiError } from "./api";
 import { activeTrigger, offeredTrigger } from "./composerTrigger";
-import { MIRROR_IMAGES_OFF, mirrorComposerProps, mirrorFieldOff, mirrorNotice, mirrorSendLock, mirrorUnsupported, sendToMirror, type MirrorLock } from "./mirrorView";
+import { MIRROR_IMAGES_OFF, MIRROR_SEND_UNCONFIRMED, mirrorComposerProps, mirrorFieldOff, mirrorNotice, mirrorSendLock, mirrorUnsupported, sendToMirror, type MirrorLock } from "./mirrorView";
 import { streamUrl } from "./useEventStream";
 
 const live: MirrorInfo = { state: "live", agent: "Claude Code", conversationId: "c", activity: "idle", terminalPrompt: null, sendBlock: null };
@@ -78,4 +78,10 @@ test("the mirror composer opens no / or @ menu and takes no images; its placehol
   expect(props.placeholder).toBe("Message the agent in the terminal");
   const codex = mirrorComposerProps({ ...live, agent: "Codex", sendBlock: { code: "codex-send-unsupported", message: "Read-only." } });
   expect([codex.fieldOff, codex.placeholder]).toEqual(["Read-only.", "Read-only."]);
+});
+
+test("a mirror send with no answer (network failure) may have reached the terminal: said so, no lock", async () => {
+  const locks: (MirrorLock | null)[] = [];
+  await expect(sendToMirror(() => Promise.reject(new TypeError("Failed to fetch")), (l) => locks.push(l))).rejects.toThrow(MIRROR_SEND_UNCONFIRMED);
+  expect(locks).toEqual([]);
 });
