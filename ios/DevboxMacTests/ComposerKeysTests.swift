@@ -13,6 +13,7 @@ final class ComposerKeysTests: XCTestCase {
 
     override func setUpWithError() throws {
         FixtureMode.requested = "demo"
+        CaretField.debugWithoutSelection = name.contains("WithoutTheSystemsCaret")
         state = MacAppState(isTestRun: false, isFixtureRun: true)
         state.appModel.reloadConfiguration()
         let root = MacWindowContent(thread: .constant(ThreadFixtures.sessionId), page: .constant(nil), newSession: .constant(false),
@@ -36,6 +37,7 @@ final class ComposerKeysTests: XCTestCase {
         state?.inbox?.stop()
         state?.live?.stop()
         FixtureMode.requested = nil
+        CaretField.debugWithoutSelection = false
     }
 
     private func spin(_ seconds: TimeInterval) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
@@ -86,6 +88,22 @@ final class ComposerKeysTests: XCTestCase {
         let field = try XCTUnwrap(editor.delegate as? NSTextField, "the editor edits no text field")
         try press("\t", 48)
         XCTAssertEqual(field.stringValue, "@sync", "Tab after Escape picks nothing")
+    }
+
+    /// macOS 14's path (no TextField selection; setUp picks it by the name): typed at the end the menu works; a click
+    /// elsewhere in the text closes it, so Tab is the field's again.
+    func testWithoutTheSystemsCaretAClickElsewhereClosesTheMenu() throws {
+        let editor = try type("see @sync")
+        spin(0.5)
+        try press("\t", 48)
+        XCTAssertEqual(editor.string, "see @src/sync/manifest.ts ", "typed at the end, Tab picks")
+        editor.insertText("@mer", replacementRange: NSRange(location: NSNotFound, length: 0))
+        spin(0.6)
+        editor.setSelectedRange(NSRange(location: 2, length: 0))
+        spin(0.3)
+        let field = try XCTUnwrap(editor.delegate as? NSTextField)
+        try press("\t", 48)
+        XCTAssertEqual(field.stringValue, "see @src/sync/manifest.ts @mer", "the caret left the word: Tab picks nothing")
     }
 }
 #endif

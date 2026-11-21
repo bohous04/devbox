@@ -39,8 +39,8 @@ struct ComposerView: View {
     @State private var oneLine: CGFloat = 0
     // The `/` and `@` menu: what is at the caret while the field has focus, unless Escape closed it for that word.
     @FocusState private var focused: Bool
-    /// The caret (UTF-16 offset; a selection's start, as the web's selectionStart), where the system says it (iOS 18 and
-    /// macOS 15 on); before that nil, read as the end of the text.
+    /// The caret (UTF-16 offset; a selection's start, as the web's selectionStart); nil while not known (no menu).
+    /// CaretField says how it is found.
     @State private var caret: Int?
     @State private var setCaret: Int?
     @State private var dismissed: String?
@@ -50,7 +50,7 @@ struct ComposerView: View {
     private var hasCommands: Bool { commands?.isEmpty == false }
     /// The trigger at the caret that this session offers, Escape or not.
     private var offeredTrigger: ComposerTrigger? {
-        guard focused, let t = ComposerTriggers.active(text, caret: caret ?? text.utf16.count) else { return nil }
+        guard focused, let caret, let t = ComposerTriggers.active(text, caret: caret) else { return nil }
         return (t.kind == .slash ? hasCommands : searchFiles != nil) ? t : nil
     }
     private static func key(_ t: ComposerTrigger) -> String { "\(t.kind.rawValue)\(t.start)" }
@@ -137,6 +137,8 @@ struct ComposerView: View {
         .onChange(of: [trigger.map(Self.key), trigger?.query, menu.map { String($0.options.count) }]) { activeOption = 0 }
         // Escape closed the menu only for the word it was pressed on: no trigger word at the caret (or no focus) ends it.
         .onChange(of: offeredTrigger.map(Self.key)) { _, k in if k == nil { dismissed = nil } }
+        // VoiceOver hears the menu open and change (the web's live region), and the option the arrows move to.
+        .onChange(of: menu.map(ComposerTriggers.announcement)) { _, s in if let s { AccessibilityNotification.Announcement(s).post() } }
         .onChange(of: picks) { _, items in
             guard !items.isEmpty else { return }
             picks = []
@@ -209,6 +211,8 @@ struct ComposerView: View {
             guard let m, !m.options.isEmpty else { return .ignored }
             let n = m.options.count
             activeOption = (clamped(m) + (press.key == .downArrow ? 1 : n - 1)) % n
+            let o = m.options[activeOption]
+            AccessibilityNotification.Announcement(o.detail.map { "\(o.label), \($0)" } ?? o.label).post()
             return .handled
         case .pick:
             guard let m, m.options.indices.contains(clamped(m)) else { return .ignored }
@@ -217,13 +221,12 @@ struct ComposerView: View {
         }
     }
 
-    /// An input method is composing in the field (marked text): its keys are its own. Not known on iOS, where these keys
-    /// come only from a hardware keyboard: there Return during a composition picks.
-    private static var composing: Bool {
+    /// An input method is composing in the focused field (marked text): its keys are its own.
+    static var composing: Bool {
         #if os(macOS)
         (NSApp.keyWindow?.firstResponder as? NSTextView)?.hasMarkedText() ?? false
         #else
-        false
+        (UIResponder.devboxFirstResponder() as? UITextInput)?.markedTextRange != nil
         #endif
     }
 
@@ -327,21 +330,58 @@ private struct SendButtonStyle: ButtonStyle {
     }
 }
 
-/// The message field, reporting its caret where the system can (TextField's selection, iOS 18 and macOS 15 on) and
-/// placing it after a pick (`setCaret`). Before those, the caret counts as the end of the text: the menus open for a
-/// word typed at the end, the common case.
-private struct CaretField: View {
+#if os(iOS)
+extension UIResponder {
+    private static weak var found: UIResponder?
+    @objc private func devboxReportFirstResponder() { UIResponder.found = self }
+    /// The app's first responder: an action sent to nil goes to it.
+    static func devboxFirstResponder() -> UIResponder? {
+        found = nil
+        UIApplication.shared.sendAction(#selector(devboxReportFirstResponder), to: nil, from: nil, for: nil)
+        return found
+    }
+}
+#endif
+
+/// The message field, reporting its caret: TextField's selection from iOS 18 and macOS 15, placed after a pick
+/// (`setCaret`). Before those, the field does not say: an edit at the end puts it at the end, any other edit makes it
+/// unknown (ComposerTriggers.caretAfterEdit), and on the Mac the field editor's selection says where a click or an
+/// arrow key put it.
+struct CaretField: View {
     @Binding var text: String
     @Binding var caret: Int?
     @Binding var setCaret: Int?
     let prompt: Text
+    #if DEBUG
+    /// Tests take the older systems' path on a newer one.
+    static var debugWithoutSelection = false
+    #endif
 
     var body: some View {
-        if #available(iOS 18, macOS 15, *) {
+        if #available(iOS 18, macOS 15, *), !Self.withoutSelection {
             SelectionField(text: $text, caret: $caret, setCaret: $setCaret, prompt: prompt)
         } else {
             TextField("Message", text: $text, prompt: prompt, axis: .vertical)
+                .onChange(of: text) { old, new in caret = ComposerTriggers.caretAfterEdit(from: old, to: new) }
+                .onChange(of: setCaret) { _, c in if c != nil { setCaret = nil } }
+                #if os(macOS)
+                .onReceive(NotificationCenter.default.publisher(for: NSTextView.didChangeSelectionNotification)) { n in
+                    // A focused editor holding this composer's text: the notification names no SwiftUI field. A
+                    // selection change inside an edit comes before the text change, which then decides.
+                    guard let editor = n.object as? NSTextView, editor.window?.firstResponder === editor,
+                          editor.string == text else { return }
+                    caret = editor.selectedRange().location
+                }
+                #endif
         }
+    }
+
+    private static var withoutSelection: Bool {
+        #if DEBUG
+        debugWithoutSelection
+        #else
+        false
+        #endif
     }
 }
 
@@ -356,6 +396,8 @@ private struct SelectionField: View {
     var body: some View {
         TextField("Message", text: $text, selection: $selection, prompt: prompt, axis: .vertical)
             .onChange(of: selection) { _, s in if let o = Self.offset(s, in: text) { caret = o } }
+            // The text can change before the selection does: read the caret again against the new text.
+            .onChange(of: text) { _, t in if let o = Self.offset(selection, in: t) { caret = o } }
             .onChange(of: setCaret) { _, c in
                 guard let c else { return }
                 setCaret = nil

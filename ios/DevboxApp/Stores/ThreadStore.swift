@@ -36,6 +36,16 @@ enum ThreadView {
                               pending: s.pending, background: s.background, native: s.native, effort: s.effort, commands: s.commands)
     }
 
+    /// A `thread-commands` frame's list; one of an unexpected shape is logged and read as none, as the snapshot reads it.
+    static func commands(from data: Data) -> [AgentCommand]? {
+        do {
+            return try JSONDecoder().decode([AgentCommand]?.self, from: data)
+        } catch {
+            logger.error("unreadable thread-commands frame, read as none: \(String(describing: error), privacy: .public)")
+            return nil
+        }
+    }
+
     /// The current harness's commands from the stream (`thread-commands`, devd's parsed list; nil = it sent none).
     static func applyCommands(_ t: ThreadSnapshot, _ commands: [AgentCommand]?) -> ThreadSnapshot {
         var n = t
@@ -451,7 +461,7 @@ final class ThreadStore: ObservableObject {
             case "thread": update(ThreadView.apply(t, try JSONDecoder().decode(LoggedEvent.self, from: data)))
             case "thread-notice": update(ThreadView.applyNotice(t, try JSONDecoder().decode(ThreadItem.self, from: data)))
             case "thread-effort": update(ThreadView.applyEffort(t, try JSONDecoder().decode(ThreadEffort?.self, from: data)))
-            case "thread-commands": update(ThreadView.applyCommands(t, try JSONDecoder().decode([AgentCommand]?.self, from: data)))
+            case "thread-commands": update(ThreadView.applyCommands(t, ThreadView.commands(from: data)))
             case "inbox", "ping": break
             default: Self.logger.notice("thread stream: ignoring event \(e.name, privacy: .public)")
             }

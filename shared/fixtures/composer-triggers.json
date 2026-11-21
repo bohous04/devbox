@@ -130,6 +130,31 @@
     "start": 0,
     "end": 2
    }
+  },
+  {
+   "text": "hi 👋 @fi",
+   "caret": 9,
+   "expected": {
+    "kind": "@",
+    "query": "fi",
+    "start": 6,
+    "end": 9
+   }
+  },
+  {
+   "text": "👋@x",
+   "caret": 4,
+   "expected": null
+  },
+  {
+   "text": "@👋r",
+   "caret": 4,
+   "expected": {
+    "kind": "@",
+    "query": "👋r",
+    "start": 0,
+    "end": 4
+   }
   }
  ],
  "filter": {
@@ -255,6 +280,20 @@
    "expected": {
     "text": "@\"docs/my notes.md\" ",
     "caret": 20
+   }
+  },
+  {
+   "text": "hi 👋 @fi",
+   "trigger": {
+    "kind": "@",
+    "query": "fi",
+    "start": 6,
+    "end": 9
+   },
+   "value": "docs/👋 hi.md",
+   "expected": {
+    "text": "hi 👋 @\"docs/👋 hi.md\" ",
+    "caret": 23
    }
   }
  ],

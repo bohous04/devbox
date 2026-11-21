@@ -85,6 +85,18 @@ enum ComposerTriggers {
         return (next, t.start + word.utf16.count + 1)
     }
 
+    /// Where the caret is after an edit, for a field that does not say (iOS 17, macOS 14): text added or removed at the
+    /// end leaves it at the end; any other edit (in the middle, a paste over a range, a pick) puts it somewhere unknown,
+    /// nil, and then no menu opens until the next edit at the end.
+    static func caretAfterEdit(from old: String, to new: String) -> Int? {
+        new.hasPrefix(old) || old.hasPrefix(new) ? new.utf16.count : nil
+    }
+
+    /// What VoiceOver says of the open menu (the web's live region): its status, else how many options it shows.
+    static func announcement(_ m: TriggerMenuModel) -> String {
+        m.status ?? "\(m.options.count) \(m.title == "Commands" ? "commands" : "files")"
+    }
+
     /// The empty composer names the triggers this session has (a Codex chat runs no slash commands, so no `/`).
     static func placeholder(running: Bool, commands: Bool, files: Bool) -> String {
         if running { return "Queue a message for after this run" }

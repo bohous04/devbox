@@ -99,4 +99,53 @@ final class ComposerTriggerTests: XCTestCase {
         XCTAssertEqual(ThreadView.mergeSnapshot(.empty, ThreadSnapshotFrame(afterSeq: 0, snapshot: ok)).commands, ok.commands)
         XCTAssertNil(ThreadView.applyCommands(ok, nil).commands)
     }
+
+    /// Without the system's caret: an edit at the end keeps it there, any other makes it unknown (no menu).
+    func testCaretAfterEdit() {
+        XCTAssertEqual(ComposerTriggers.caretAfterEdit(from: "", to: "/"), 1)
+        XCTAssertEqual(ComposerTriggers.caretAfterEdit(from: "see @sy", to: "see @syn"), 8)
+        XCTAssertEqual(ComposerTriggers.caretAfterEdit(from: "see @syn", to: "see @sy"), 7, "a deletion at the end")
+        XCTAssertEqual(ComposerTriggers.caretAfterEdit(from: "hi 👋", to: "hi 👋 @"), 7, "UTF-16")
+        XCTAssertNil(ComposerTriggers.caretAfterEdit(from: "see @sy", to: "xsee @sy"), "typed at the start")
+        XCTAssertEqual(ComposerTriggers.caretAfterEdit(from: "/co", to: "/compact "), 9, "a pick at the end")
+        XCTAssertNil(ComposerTriggers.caretAfterEdit(from: "/co rest", to: "/compact rest"), "a pick before more text")
+        XCTAssertNil(ComposerTriggers.caretAfterEdit(from: "@a and", to: "@ab and"), "typed in the middle")
+    }
+
+    func testAnnouncement() {
+        let slash = ComposerTrigger(kind: .slash, query: "", start: 0, end: 1)
+        XCTAssertEqual(ComposerTriggers.announcement(TriggerMenuModel.make(slash, commands: [AgentCommand(name: "a"), AgentCommand(name: "b")], files: nil)),
+                       "2 commands")
+        let at = ComposerTrigger(kind: .at, query: "x", start: 0, end: 2)
+        XCTAssertEqual(ComposerTriggers.announcement(TriggerMenuModel.make(at, commands: [], files: nil)), "Searching…")
+        XCTAssertEqual(ComposerTriggers.announcement(TriggerMenuModel.make(at, commands: [], files: FileSearchResult(query: "x", files: SessionFiles(files: ["x.ts"])))),
+                       "1 files")
+    }
+
+    /// A `thread-commands` frame of the wrong shape is none, as in the snapshot, not an unreadable-update error.
+    func testCommandsFrame() {
+        XCTAssertEqual(ThreadView.commands(from: Data(#"[{"name":"review"}]"#.utf8)), [AgentCommand(name: "review")])
+        XCTAssertNil(ThreadView.commands(from: Data("null".utf8)))
+        XCTAssertNil(ThreadView.commands(from: Data(#"{"name":"review"}"#.utf8)))
+    }
+
+    #if os(iOS)
+    /// Marked text in the focused field (an input method composing) is what keyAction's `composing` reads.
+    @MainActor
+    func testComposingReadsTheFirstRespondersMarkedText() throws {
+        // In the host app's scene, as the composer is: a window outside it is not on the responder chain's way.
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene, "the test host has no scene")
+        let window = UIWindow(windowScene: scene)
+        let field = UITextField(frame: CGRect(x: 0, y: 0, width: 300, height: 40))
+        window.addSubview(field)
+        window.makeKeyAndVisible()
+        defer { field.resignFirstResponder(); window.isHidden = true }
+        XCTAssertTrue(field.becomeFirstResponder())
+        XCTAssertFalse(ComposerView.composing)
+        field.setMarkedText("か", selectedRange: NSRange(location: 1, length: 0))
+        XCTAssertTrue(ComposerView.composing)
+        field.unmarkText()
+        XCTAssertFalse(ComposerView.composing)
+    }
+    #endif
 }
