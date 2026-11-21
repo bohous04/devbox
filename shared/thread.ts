@@ -1,6 +1,6 @@
-import type { BackgroundWork, RequestKind, RunOrigin, TokenUsage } from "../image/agent-bridge/src/events";
+import type { AgentCommand, BackgroundWork, RequestKind, RunOrigin, TokenUsage } from "../image/agent-bridge/src/events";
 
-export type { BackgroundWork, BridgeEvent, Capabilities, LoggedEvent, RequestKind, RunOrigin, TokenUsage } from "../image/agent-bridge/src/events";
+export type { AgentCommand, BackgroundWork, BridgeEvent, Capabilities, LoggedEvent, RequestKind, RunOrigin, TokenUsage } from "../image/agent-bridge/src/events";
 
 export interface ThreadItem {
   seq: number;
@@ -62,6 +62,9 @@ export interface ThreadSnapshot {
   native: { harness: string; nativeThreadId: string; account: string | null; model: string | null } | null;
   /** The agent's reasoning effort from the bridge's latest `effort.state` (bridge 1.7.0+); null before one. */
   effort: ThreadEffort | null;
+  /** The current harness's slash commands from the bridge's latest `commands.changed` (bridge 1.9.0+). Absent when it
+   *  sent none (an older bridge, or a harness that runs none, such as Codex): then the app offers no "/" menu. */
+  commands?: AgentCommand[];
 }
 
 /** `supported`: the levels the current model takes ([] = none, null = not known yet); `effective`: the level the agent

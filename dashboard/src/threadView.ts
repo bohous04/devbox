@@ -158,7 +158,8 @@ function dispatch(n: ThreadSnapshot, { seq, ts, event: ev }: LoggedEvent) {
       insertItem(n, seq, ts, { runId: null, itemId: null, kind: "notice", text: ev.text, status: "done" });
       return;
     case "effort.state":
-      // devd never sends it as a thread event (older apps would show it as unknown): see applyEffort.
+    case "commands.changed":
+      // devd never sends these as thread events (older apps would show them as unknown): see applyEffort.
       return;
     default: {
       const unknown: never = ev;

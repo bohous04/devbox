@@ -1,8 +1,9 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { parseCommands } from "../../shared/commands";
 import { parseEffortState } from "../../shared/effort";
-import type { BackgroundWork, Capabilities, LoggedEvent, PendingRequest, RunRow, ThreadEffort, ThreadItem, ThreadSnapshot } from "../../shared/thread";
+import type { AgentCommand, BackgroundWork, Capabilities, LoggedEvent, PendingRequest, RunRow, ThreadEffort, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
 const TERMINAL: ReadonlySet<string> = new Set(["completed", "interrupted", "failed"]);
 /** A user item's images; no field when the message has none (same rule in dashboard/src/threadView.ts). */
@@ -24,7 +25,7 @@ export interface ProviderThread {
 
 /** The thread store's schema (`PRAGMA user_version`). A change to the schema raises it and adds a migration from the
  *  previous version in `open`; a store with a higher version (written by a newer devd) is refused, never guessed at. */
-export const THREAD_STORE_SCHEMA = 3;
+export const THREAD_STORE_SCHEMA = 4;
 
 /** Per-session conversation store: `<root>/_threads/<id>.sqlite`. Conversation data stays out of the
  *  main devd DB on purpose. Items are ordered by their own `id`; `seq` is the log seq of the event that created them (one event can create
@@ -34,6 +35,7 @@ export class ThreadStore {
   /** Effort fields (model, supported, effective, chosen) already logged with a dropped value: one line per field per
    *  session, so a bridge sending ever new values cannot grow the log or this set. */
   private effortLogged = new Set<string>();
+  private commandsLogged = new Set<string>();
 
   private constructor(private db: Database, private onNotice: (item: ThreadItem) => void) {}
 
@@ -56,6 +58,7 @@ export class ThreadStore {
     if (version === 0) db.transaction(() => ThreadStore.createSchema1(db))();
     if (version <= 1) db.transaction(() => ThreadStore.migrateTo2(db))();
     if (version <= 2) db.transaction(() => ThreadStore.migrateTo3(db))();
+    if (version <= 3) db.transaction(() => ThreadStore.migrateTo4(db))();
     return new ThreadStore(db, opts.onNotice ?? (() => {}));
   }
 
@@ -108,6 +111,12 @@ export class ThreadStore {
       db.run("ALTER TABLE items ADD COLUMN tone TEXT");
     }
     db.run(`PRAGMA user_version = 3`);
+  }
+
+  /** Schema 4: each harness's latest slash commands (commands.changed), kept per harness so a switch back finds its own. */
+  private static migrateTo4(db: Database) {
+    db.run(`CREATE TABLE IF NOT EXISTS commands (harness TEXT PRIMARY KEY, list TEXT NOT NULL)`);
+    db.run(`PRAGMA user_version = 4`);
   }
 
   lastSeq(): number { return this.meta("last_seq"); }
@@ -260,6 +269,16 @@ export class ThreadStore {
         db.query("INSERT INTO effort (id, state) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET state=excluded.state").run(JSON.stringify(state));
         return;
       }
+      case "commands.changed": {
+        const n = db.query("SELECT harness FROM native WHERE id=1").get() as { harness: string } | null;
+        if (n === null) {
+          console.error(`thread store: commands.changed at seq ${seq} before any thread.native dropped`);
+          return;
+        }
+        const list = this.parseCommands(ev.commands, `seq ${seq}`);
+        db.query("INSERT INTO commands (harness, list) VALUES (?, ?) ON CONFLICT(harness) DO UPDATE SET list=excluded.list").run(n.harness, JSON.stringify(list));
+        return;
+      }
       default: {
         const unknown: never = ev;
         const type = (unknown as { type?: unknown }).type;
@@ -386,12 +405,33 @@ export class ThreadStore {
       });
     const bg = this.db.query("SELECT work FROM background WHERE id=1").get() as { work: string } | null;
     const n = this.db.query("SELECT * FROM native WHERE id=1").get() as Record<string, any> | null;
+    const commands = this.commands();
     return {
       lastSeq: this.lastSeq(), seenSeq: this.meta("seen_seq"), runs, items, pending,
       background: bg ? (JSON.parse(bg.work) as BackgroundWork[]) : [],
       native: n ? { harness: n.harness, nativeThreadId: n.native_thread_id, account: n.account, model: n.model } : null,
       effort: this.effort(),
+      ...(commands !== null ? { commands } : {}),
     };
+  }
+
+  /** The current harness's slash commands, parsed again on the way out; null when that harness sent none. */
+  commands(): AgentCommand[] | null {
+    const row = this.db.query("SELECT c.list FROM commands c JOIN native n ON n.id=1 AND n.harness=c.harness").get() as { list: string } | null;
+    if (row === null) return null;
+    let raw: unknown;
+    try { raw = JSON.parse(row.list); } catch { raw = null; }
+    return this.parseCommands(raw, "the stored list");
+  }
+
+  private parseCommands(raw: unknown, where: string): AgentCommand[] {
+    const { commands, dropped } = parseCommands(raw);
+    for (const what of dropped) {
+      if (this.commandsLogged.has(what)) continue;
+      this.commandsLogged.add(what);
+      console.error(`thread store: ${what} at ${where} dropped (later ones of this kind are not logged)`);
+    }
+    return commands;
   }
 
   /** The agent's reasoning effort from the latest effort.state, parsed again on the way out: a store written before

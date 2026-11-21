@@ -6,6 +6,7 @@ import { sh } from "./helpers/sh";
 import { createApp } from "../src/api";
 import { insertSession, openDb, type SessionRow } from "../src/db";
 import { collectChanges, parseDiff } from "../src/sessionChanges";
+import { listRepoFiles, matchFiles } from "../src/sessionFiles";
 import { countUntracked, type CounterDeps } from "../src/untrackedCounter";
 import { run as procRun, type RunOpts } from "../src/proc";
 import { createShare } from "../src/shares";
@@ -387,4 +388,97 @@ test("diff output pairs status and counts by position, so names that are not UTF
     { path: "�.txt", status: "added", added: 2, removed: 0, nameNotUtf8: true },
     { path: "new.txt", status: "renamed", added: 3, removed: 1, oldPath: "old.txt" },
   ]);
+});
+
+// --- GET /api/sessions/:id/files: the composer's @ file picker -------------------------------------------------------
+
+const files = (a: ReturnType<typeof app>, query = "", id = ROW.id) => a.request(`/api/sessions/${id}/files${query}`);
+
+test("GET /api/sessions/:id/files lists tracked and untracked files, not ignored ones, repo-relative", async () => {
+  const { root, ws } = layout();
+  mkdirSync(join(ws, "src", "deep"), { recursive: true });
+  writeFileSync(join(ws, "src", "deep", "harbor.ts"), "x\n");
+  writeFileSync(join(ws, ".gitignore"), "*.log\n");
+  writeFileSync(join(ws, "debug.log"), "x\n");
+  const res = await files(app(root, { worktree: ws }));
+  expect(res.status).toBe(200);
+  expect(await res.json()).toEqual({ files: [".gitignore", "a.txt", "src/deep/harbor.ts"] });
+});
+
+test("GET /api/sessions/:id/files?q=: name matches first, then path matches; at most `limit` (50 at most), `more` when cut", async () => {
+  const { root, ws } = layout();
+  for (const f of ["harbor/x.ts", "src/harbor.ts", "src/myharbor.ts", "docs/harbor-notes.md"]) {
+    mkdirSync(join(ws, f, ".."), { recursive: true });
+    writeFileSync(join(ws, f), "x\n");
+  }
+  const a = app(root, { worktree: ws });
+  expect(await (await files(a, "?q=HARBOR")).json()).toEqual({ files: ["src/harbor.ts", "docs/harbor-notes.md", "src/myharbor.ts", "harbor/x.ts"] });
+  expect(await (await files(a, "?q=harbor&limit=2")).json()).toEqual({ files: ["src/harbor.ts", "docs/harbor-notes.md"], more: true });
+  for (let i = 0; i < 60; i++) writeFileSync(join(ws, `f${i}.txt`), "x\n");
+  const big = (await (await files(app(root, { worktree: ws }), "?limit=500")).json()) as { files: string[]; more?: true };
+  expect(big.files).toHaveLength(50);
+  expect(big.more).toBe(true);
+  expect((await files(a, "?limit=abc")).status).toBe(400);
+  expect((await files(a, "?limit=0")).status).toBe(400);
+});
+
+test("GET /api/sessions/:id/files: a symlink to a directory outside the repo is listed as itself, nothing behind it", async () => {
+  const { root, ws } = layout();
+  const outside = tmp("files-outside-");
+  writeFileSync(join(outside, "secret.txt"), "s\n");
+  symlinkSync(outside, join(ws, "elsewhere"));
+  const a = app(root, { worktree: ws });
+  expect(await (await files(a)).json()).toEqual({ files: ["a.txt", "elsewhere"] });
+  expect(await (await files(a, "?q=secret")).json()).toEqual({ files: [] });
+});
+
+test("GET /api/sessions/:id/files has the changes routes' guards: another repo's git dir, unknown, shared and InstaBox sessions", async () => {
+  const { root, ws } = layout();
+  const foreign = await files(app(root, { worktree: ws, repo: "web" }));
+  expect(foreign.status).toBe(409);
+  expect(await foreign.json()).toEqual({ error: "session worktree points to a different git repository", code: "foreign_git_dir" });
+  expect((await files(app(root, { worktree: ws }), "", "dev-nope")).status).toBe(404);
+  expect((await files(app(root, { worktree: ws }, (db) => { createShare(db, ROW.id, 60); }))).status).toBe(403);
+  const ibx = await files(app(root, { worktree: ws, host: "instabox" }));
+  expect(ibx.status).toBe(409);
+  expect(await ibx.json()).toEqual({ error: "File search is VPS-only (InstaBox session)", code: "instabox" });
+});
+
+test("GET /api/sessions/:id/files works in a repository without commits", async () => {
+  const { root, ws } = layout(true);
+  rmSync(ws, { recursive: true, force: true });
+  git(root, "init", "-q", ws);
+  writeFileSync(join(ws, "new.txt"), "x\n");
+  const res = await files(app(root, { worktree: null }));
+  expect(res.status).toBe(200);
+  expect(await res.json()).toEqual({ files: ["new.txt"] });
+});
+
+test("GET /api/sessions/:id/files: the listing is reused for 10 s, then read again", async () => {
+  const { root, ws } = layout();
+  let now = 1_000_000;
+  const realNow = Date.now;
+  Date.now = () => now;
+  try {
+    const a = app(root, { worktree: ws });
+    expect(await (await files(a)).json()).toEqual({ files: ["a.txt"] });
+    writeFileSync(join(ws, "b.txt"), "x\n");
+    now += 9_000;
+    expect(await (await files(a)).json()).toEqual({ files: ["a.txt"] });
+    now += 2_000;
+    expect(await (await files(a)).json()).toEqual({ files: ["a.txt", "b.txt"] });
+  } finally { Date.now = realNow; }
+});
+
+test("listRepoFiles: a listing over the byte cap is cut at the last whole name and says so", async () => {
+  const { ws } = layout(true);
+  for (const f of ["b-one.txt", "c-two.txt", "d-three.txt"]) writeFileSync(join(ws, f), "x\n");
+  // git prints the untracked names first: "b-one.txt\0c-two.txt\0d-three.txt\0a.txt\0".
+  expect(await listRepoFiles(ws, plainGit(ws))).toEqual({ paths: ["b-one.txt", "c-two.txt", "d-three.txt", "a.txt"], capped: false });
+  // 22 characters: "b-one.txt\0c-two.txt\0d-", two whole names and a cut one.
+  expect(await listRepoFiles(ws, plainGit(ws), { maxBytes: 22 })).toEqual({ paths: ["b-one.txt", "c-two.txt"], capped: true });
+});
+
+test("matchFiles: an empty query lists in path order; names git could not decode are left out", () => {
+  expect(matchFiles(["b", "a/\uFFFD.txt", "a"], "", 50)).toEqual({ files: ["a", "b"] });
 });
