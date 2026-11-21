@@ -876,6 +876,22 @@ describe("Claude commands (1.9.0)", () => {
     expect(commands).toEqual([{ type: "commands.changed", commands: [{ name: "code-review", description: REVIEW.description }] }]);
   });
 
+  test("a list that arrives after the session closed is not sent: a switch's next harness would get it", async () => {
+    const sdk = fakeSdk();
+    sdk.commandList = [COMPACT];
+    let release = () => {};
+    sdk.commandGate = new Promise((r) => (release = r));
+    const { session, commands } = open(sdk);
+    await session.startTurn("run-1", "hi", "user");
+    sdk.push(initWith());
+    await flush();
+    await session.close();
+    release();
+    await flush();
+    await flush();
+    expect(commands).toEqual([]);
+  });
+
   test("rows sharing a name are one command: the CLI's own row, which is the one /name runs", async () => {
     const sdk = fakeSdk();
     sdk.commandList = [{ name: "review", description: "a user's skill", argumentHint: "" }, { name: "review", description: "Claude Code's review", argumentHint: "", builtin: true }];

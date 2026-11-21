@@ -250,7 +250,8 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
   let terminalCommands: Set<string> | null = null;
   let sentCommands: string | null = null;
   function sendCommands(): void {
-    if (allCommands === null || terminalCommands === null) return;
+    // After close, a switch's next harness may already be current in devd, which files a list under the current one.
+    if (ended || allCommands === null || terminalCommands === null) return;
     const commands = remoteCommands(allCommands, terminalCommands);
     const key = JSON.stringify(commands);
     if (key === sentCommands) return;
