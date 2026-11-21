@@ -1,5 +1,5 @@
-// The Chat view of a tmux session: its `main` pane's Claude Code transcript, mapped onto the chat thread's item model,
-// and a composer that types into the pane.
+// The Chat view of a tmux session: its `main` pane's Claude Code transcript or Codex rollout (codexMirror.ts), mapped
+// onto the chat thread's item model, and a composer that types into the pane (Claude only: Codex is read-only for now).
 //
 // Where the transcript is: a VPS session container mounts devd's `<root>/_claude-projects/<session id>` as
 // `/home/dev/.claude/projects/-workspace` (sessions.ts), and every account profile's `projects` resolves into it, so
@@ -17,6 +17,8 @@ import { join } from "node:path";
 import type { MirrorInfo, MirrorSendError } from "../../shared/mirror";
 import type { BridgeEvent, LoggedEvent } from "../../shared/thread";
 import { AGENT_RUNTIMES, AGENTS } from "./agents";
+import { CODEX_PROFILE_ROOT } from "./codexAccountProfiles";
+import { CODEX_CHUNK_BYTES, CODEX_LINE_CAP, mapCodexLines, MIRROR_CODEX_READ, newCodexMapState, parseCodexRead, type CodexMapState } from "./codexMirror";
 import type { AgentLiveSnapshot } from "./agentEvents";
 import { agentProcsUnder, type ExecResult, type Proc } from "./ccUpkeep";
 import { getSession, type SessionRow } from "./db";
@@ -41,13 +43,32 @@ const HEAD_BYTES = 256;
 export const MAX_MESSAGE_CHARS = 100_000;
 
 // ── In-container probes ──────────────────────────────────────────────────────────────
-// Only metadata leaves the container: the pane's pid, the process table (pid, ppid, comm) and, for each claude
-// process whose session file verifies, its session id and status.
+// Only metadata leaves the container: the pane's pid, the process table (pid, ppid, comm), for each claude process
+// whose session file verifies its session id and status, and each codex process's CODEX_HOME and the thread ids of the
+// rollouts it has open.
 const PY_LOCATE_FN = String.raw`
-import json, os, subprocess, sys
+import json, os, re, subprocess, sys
+
+ROLLOUT = re.compile(r"/rollout-[^/]*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$")
+
+def main_rollout(path):
+    """A rollout whose session_meta says it is not a subagent's (a spawned agent's thread has a rollout of its own,
+    possibly written by the same process); one whose first line cannot be read is not trusted to be a main one."""
+    # Non-blocking: the fd could be a FIFO the agent named like a rollout.
+    with open(path, "rb", opener=lambda p, flags: os.open(p, flags | os.O_NONBLOCK)) as h:
+        first = h.readline(4 << 20)
+    try:
+        meta = json.loads(first)
+    except (ValueError, RecursionError):
+        return False
+    payload = meta.get("payload") if isinstance(meta, dict) else None
+    if not isinstance(meta, dict) or meta.get("type") != "session_meta" or not isinstance(payload, dict):
+        return False
+    source = payload.get("source")
+    return not (isinstance(source, dict) and "subagent" in source)
 
 def locate(session):
-    out = {"pane": None, "procs": [], "claude": {}}
+    out = {"pane": None, "procs": [], "claude": {}, "codex": {}}
     r = subprocess.run(["tmux", "display-message", "-p", "-t", "=" + session + ":", "#{pane_pid}\t#{pane_in_mode}"],
                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     f = r.stdout.strip().split("\t")
@@ -64,7 +85,24 @@ def locate(session):
         i = st.rindex(")")
         rest = st[i + 2:].split()
         comm = st[st.index("(") + 1:i]
-        out["procs"].append([int(d), int(rest[1]), comm])
+        out["procs"].append([int(d), int(rest[1]), comm, rest[19]])
+        if comm == "codex":
+            try:
+                with open("/proc/" + d + "/environ", "rb") as h:
+                    env = dict(e.split(b"=", 1) for e in h.read().split(b"\0") if b"=" in e)
+                home = env.get(b"CODEX_HOME", b"").decode() or env[b"HOME"].decode() + "/.codex"
+                opened = []
+                for fd in os.listdir("/proc/" + d + "/fd"):
+                    try:
+                        m = ROLLOUT.search(os.readlink("/proc/" + d + "/fd/" + fd))
+                        if m and m.group(1) not in opened and main_rollout("/proc/" + d + "/fd/" + fd):
+                            opened.append(m.group(1))
+                    except OSError:
+                        continue
+                out["codex"][d] = {"home": home, "open": sorted(opened)}
+            except (OSError, KeyError, ValueError, UnicodeDecodeError):
+                pass
+            continue
         if comm != "claude":
             continue
         try:
@@ -137,15 +175,17 @@ def fail(code):
     sys.exit(0)
 
 def check(session, expected, agents):
-    """None when the pane still runs the expected claude, not waiting and not scrolled back; else the refusal."""
+    """None when the pane still runs the expected agent process (pid and start), not waiting and not scrolled back;
+    else the refusal."""
     now = locate(session)
     pane = now["pane"]
     if pane is None:
         return "pane-changed"
-    children, comm = {}, {}
-    for pid, ppid, c in now["procs"]:
+    children, comm, starts = {}, {}, {}
+    for pid, ppid, c, start in now["procs"]:
         children.setdefault(ppid, []).append(pid)
         comm[pid] = c
+        starts[pid] = start
     nearest, queue, seen = None, [pane["pid"]], set()
     while queue:
         p = queue.pop(0)
@@ -156,7 +196,7 @@ def check(session, expected, agents):
             nearest = p
             break
         queue.extend(sorted(children.get(p, [])))
-    if nearest != expected:
+    if nearest != expected or starts.get(nearest) != expected_start:
         return "pane-changed"
     if (now["claude"].get(str(expected)) or {}).get("status") == "waiting":
         return "agent-waiting-in-terminal"
@@ -166,7 +206,7 @@ def check(session, expected, agents):
 
 # Below the docker exec timeout (15 s), so a hung tmux never leaves this running to type later.
 signal.alarm(12)
-session, expected, agents = sys.argv[1], int(sys.argv[2]), set(sys.argv[3].split(","))
+session, expected, agents, expected_start = sys.argv[1], int(sys.argv[2]), set(sys.argv[3].split(",")), sys.argv[4]
 text = sys.stdin.buffer.read()
 target = "=" + session + ":"
 refused = check(session, expected, agents)
@@ -183,10 +223,11 @@ if refused:
     subprocess.run(["tmux", "delete-buffer", "-b", buf], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     fail(refused)
 subprocess.run(["tmux", "paste-buffer", "-p", "-d", "-b", buf, "-t", target], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-# Claude takes the paste asynchronously; an Enter right behind it can land before the pasted text.
+# The agent takes the paste asynchronously; an Enter right behind it can land before the pasted text.
 time.sleep(0.3)
-# Enter only into the same claude whose prompt now holds the paste. Otherwise nothing more is typed: the pasted text
-# is not cleared either, since a key sent to whatever now has the pane (a shell, a dialog) is exactly what this avoids.
+# Enter only into the same agent whose prompt now holds the paste. Otherwise
+# nothing more is typed: the pasted text is not cleared either, since a key sent to whatever now has the pane (a shell,
+# a dialog) is exactly what this avoids.
 if check(session, expected, agents) or screen(target) != "draft":
     fail("not-submitted")
 subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -198,29 +239,47 @@ export type PaneAgent =
   | { kind: "no-pane" }
   | { kind: "no-agent"; inMode: boolean }
   | { kind: "other"; runtime: string; inMode: boolean }
-  | { kind: "claude"; pid: number; inMode: boolean; sid: string | null; status: "idle" | "busy" | "waiting" | null };
+  | { kind: "claude"; pid: number; start: string; inMode: boolean; sid: string | null; status: "idle" | "busy" | "waiting" | null }
+  /** `open`: thread ids of the rollouts the process has open. */
+  | { kind: "codex"; pid: number; start: string; inMode: boolean; home: string | null; open: string[] };
 
 /** null when the output is not what MIRROR_LOCATE prints. */
 export function parseLocate(stdout: string): PaneAgent | null {
   let raw: unknown;
   try { raw = JSON.parse(stdout); } catch { return null; }
   if (typeof raw !== "object" || raw === null) return null;
-  const o = raw as { pane?: unknown; procs?: unknown; claude?: unknown };
+  const o = raw as { pane?: unknown; procs?: unknown; claude?: unknown; codex?: unknown };
   if (o.pane === null) return { kind: "no-pane" };
   const pane = o.pane as { pid?: unknown; inMode?: unknown } | undefined;
-  if (typeof pane?.pid !== "number" || typeof pane.inMode !== "boolean" || !Array.isArray(o.procs) || typeof o.claude !== "object" || o.claude === null) return null;
+  if (typeof pane?.pid !== "number" || typeof pane.inMode !== "boolean" || !Array.isArray(o.procs) || typeof o.claude !== "object" || o.claude === null
+    || typeof o.codex !== "object" || o.codex === null) return null;
   const procs: Proc[] = [];
+  const starts = new Map<number, string>();
   for (const p of o.procs) {
-    if (!Array.isArray(p) || typeof p[0] !== "number" || typeof p[1] !== "number" || typeof p[2] !== "string") return null;
+    if (!Array.isArray(p) || typeof p[0] !== "number" || typeof p[1] !== "number" || typeof p[2] !== "string" || typeof p[3] !== "string") return null;
     procs.push({ pid: p[0], ppid: p[1], etimes: 0, comm: p[2] });
+    starts.set(p[0], p[3]);
   }
   const nearest = agentProcsUnder(pane.pid, procs, AGENT_RUNTIMES)[0];
   if (!nearest) return { kind: "no-agent", inMode: pane.inMode };
+  if (nearest.comm === "codex") {
+    const info = (o.codex as Record<string, { home?: unknown; open?: unknown }>)[String(nearest.pid)];
+    const home = typeof info?.home === "string" && codexHomeAllowed(info.home) ? info.home : null;
+    const open = Array.isArray(info?.open) ? info.open.filter((t): t is string => typeof t === "string" && UUID.test(t)) : [];
+    return { kind: "codex", pid: nearest.pid, start: starts.get(nearest.pid)!, inMode: pane.inMode, home, open };
+  }
   if (nearest.comm !== "claude") return { kind: "other", runtime: nearest.comm, inMode: pane.inMode };
   const info = (o.claude as Record<string, { sid?: unknown; status?: unknown }>)[String(nearest.pid)];
   const sid = typeof info?.sid === "string" && UUID.test(info.sid) ? info.sid : null;
   const status = info?.status === "idle" || info?.status === "busy" || info?.status === "waiting" ? info.status : null;
-  return { kind: "claude", pid: nearest.pid, inMode: pane.inMode, sid, status };
+  return { kind: "claude", pid: nearest.pid, start: starts.get(nearest.pid)!, inMode: pane.inMode, sid, status };
+}
+
+/** The homes a session's codex may read from: the default one or an account profile's (the rule
+ *  codexSessionAccounts' accountFromEnvironment applies). Any other CODEX_HOME is the agent's own choice and not read. */
+export function codexHomeAllowed(home: string): boolean {
+  if (home === "/home/dev/.codex") return true;
+  return home.startsWith(`${CODEX_PROFILE_ROOT}/`) && UUID.test(home.slice(CODEX_PROFILE_ROOT.length + 1));
 }
 
 const runtimeLabel = (runtime: string): string => Object.values(AGENTS).find((a) => a.runtime === runtime)?.label ?? runtime;
@@ -285,14 +344,14 @@ const INTERRUPTED = /^\[Request interrupted by user/;
 
 type Block = { type?: unknown; text?: unknown; id?: unknown; name?: unknown; input?: unknown; tool_use_id?: unknown; content?: unknown; is_error?: unknown };
 
-function clipInput(v: unknown, depth = 0): unknown {
+export function clipInput(v: unknown, depth = 0): unknown {
   if (typeof v === "string") return v.length > INPUT_STRING_CHARS ? `${v.slice(0, INPUT_STRING_CHARS)}…` : v;
   if (depth > 6 || v === null || typeof v !== "object") return v;
   if (Array.isArray(v)) return v.map((x) => clipInput(x, depth + 1));
   return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, clipInput(x, depth + 1)]));
 }
 
-function clipOutput(text: string): string {
+export function clipOutput(text: string): string {
   return text.length > OUTPUT_CHARS ? `${text.slice(0, OUTPUT_CHARS)}\n… (output clipped)` : text;
 }
 
@@ -388,12 +447,20 @@ export function mapClaudeLines(lines: string[], st: MapState, now: number): Mapp
 // ── The mirror ───────────────────────────────────────────────────────────────────────
 
 export interface Cursor {
+  /** Claude's session id, or the Codex thread id. */
   sid: string | null;
   ino: number;
   offset: number;
   headLen: number;
   headHash: string;
-  map: MapState;
+  map: MapState | CodexMapState;
+  /** Codex: the process that read last (`pid:start`). A turn its predecessor left open (killed mid-turn) never ends
+   *  otherwise. */
+  proc?: string;
+  /** Codex: the home read from (another home is another file of the same thread, so a new inode is no rewrite there). */
+  home?: string;
+  /** Codex: codexThread's watch, kept so a devd restart does not take a process it saw before for a first look. */
+  watch?: CodexWatch;
 }
 
 /** `status`: the HTTP status the route answers with (409 for a MirrorSendError). */
@@ -409,6 +476,7 @@ export const SEND_MESSAGES: Record<MirrorSendError, string> = {
   "terminal-not-ready": "The terminal is not showing the agent's prompt. Check the terminal.",
   "terminal-scrolled": "The terminal is scrolled back. Return it to the bottom first.",
   "conversation-unknown": "devd could not tell which conversation the agent is on. Use the terminal.",
+  "codex-send-unsupported": "Sending from chat isn't available for Codex yet; reply in the terminal.",
   "unsupported-agent": "Chat view isn't supported for this agent yet.",
   "unsupported-host": "Chat view isn't supported on InstaBox sessions yet.",
   "pane-changed": "The terminal changed while the message was being sent; nothing was typed. Check the terminal.",
@@ -431,6 +499,17 @@ export interface MirrorDeps {
 
 interface Pending { text: string; at: number }
 
+/** The Codex conversation the pane is on (null: none known yet), and whether a turn of it runs (as far as the read has
+ *  got: a backlog takes several refreshes). */
+interface CodexState { thread: string | null; busy: boolean }
+
+/** codexThread's view of the pane's codex process (`pid:start`): the rollouts seen open, and the newest hook row at the
+ *  time one opened that was not the choice (null: no wait). */
+interface CodexWatch { proc: string; known: string[]; waitAfter: number | null }
+
+/** Chunks of a Codex backlog read per refresh. */
+export const CODEX_TICK_CHUNKS = 4;
+
 export class TranscriptMirror {
   private stores = new Map<string, ThreadStore>();
   private watchers = new Map<string, { count: number; timer: ReturnType<typeof setInterval> }>();
@@ -441,6 +520,11 @@ export class TranscriptMirror {
   /** Bumped by release: a refresh that started before it stops at its next step instead of reopening the store. */
   private generation = new Map<string, number>();
   private timers = new Map<string, Set<ReturnType<typeof setTimeout>>>();
+  /** What the last refresh found in the pane: what a send checks before typing (only into Claude). */
+  private panes = new Map<string, PaneAgent | null>();
+  /** Per session, for the pane's codex process (`pid:start`): the rollouts it was seen with open, and the newest hook
+   *  row at the time an unchosen one newly opened (see codexThread). */
+  private codexWatch = new Map<string, CodexWatch>();
 
   constructor(private d: MirrorDeps) {}
 
@@ -519,6 +603,8 @@ export class TranscriptMirror {
     this.stores.get(id)?.close();
     this.stores.delete(id);
     this.infos.delete(id);
+    this.panes.delete(id);
+    this.codexWatch.delete(id);
     this.pending.delete(id);
     if (ended) for (const x of ["", "-wal", "-shm"]) rmSync(join(this.d.root, "_mirrors", `${id}.sqlite${x}`), { force: true });
   }
@@ -535,7 +621,8 @@ export class TranscriptMirror {
     this.d.bus.publish(`mirror:${id}`, { mirror: info });
   }
 
-  private infoFor(id: string, s: SessionRow, pane: PaneAgent | null): MirrorInfo {
+  /** `codex`: what reading the rollout found (null: it could not be read). */
+  private infoFor(id: string, s: SessionRow, pane: PaneAgent | null, codex: CodexState | null = null): MirrorInfo {
     const base = { conversationId: null, activity: null, terminalPrompt: null } as const;
     const block = (code: MirrorSendError, message = SEND_MESSAGES[code]) => ({ code, message });
     if ((s.host ?? "vps") === "instabox") return { ...base, state: "unsupported", agent: null, sendBlock: block("unsupported-host") };
@@ -544,6 +631,21 @@ export class TranscriptMirror {
     if (pane.kind === "other") {
       const label = runtimeLabel(pane.runtime);
       return { ...base, state: "unsupported", agent: label, sendBlock: block("unsupported-agent", `Chat view isn't supported for ${label} yet.`) };
+    }
+    if (pane.kind === "codex") {
+      const agent = AGENTS.codex.label;
+      // v1 only reads Codex: which conversation its TUI shows can change (/new, /resume) with nothing devd can see
+      // until the next prompt, so a message typed in from here could land in another conversation than the one shown.
+      const sendBlock = block("codex-send-unsupported");
+      if (codex?.thread == null) return { ...base, state: "unresolved", agent, sendBlock };
+      // Codex reports no status of its own: waiting comes from its hook events, a running turn from the rollout.
+      const live = this.d.live(id);
+      const waiting = live?.status === "waiting";
+      return {
+        state: "live", agent, conversationId: codex.thread, activity: waiting ? "waiting" : codex.busy ? "busy" : "idle",
+        terminalPrompt: waiting ? { text: live.reason || "The agent is waiting for an answer in the terminal." } : null,
+        sendBlock,
+      };
     }
     const agent = AGENTS.claude.label;
     if (pane.sid === null) return { ...base, state: "unresolved", agent, sendBlock: block("conversation-unknown") };
@@ -564,10 +666,122 @@ export class TranscriptMirror {
     const current = () => gen === this.gen(id) && !this.d.isEnding(id);
     const pane = (s.host ?? "vps") === "instabox" || s.status !== "running" ? null : await this.locate(s);
     if (!current()) return;
-    this.setInfo(id, this.infoFor(id, s, pane));
-    if (pane?.kind === "claude" && pane.sid !== null && (s.host ?? "vps") !== "instabox") await this.read(id, pane.sid, pane.status === "idle", current);
+    // The pane is known to a send only together with the info from the same refresh: one that fails partway (a read
+    // that throws) leaves neither, so a send never pairs a fresh pane with an older info.
+    this.panes.delete(id);
+    if (pane?.kind === "codex") {
+      const codex = await this.readCodex(id, s, pane, current);
+      if (!current()) return;
+      this.setInfo(id, this.infoFor(id, s, pane, codex));
+      this.panes.set(id, pane);
+    } else {
+      this.setInfo(id, this.infoFor(id, s, pane));
+      if (pane?.kind === "claude" && pane.sid !== null) await this.read(id, pane.sid, pane.status === "idle", current);
+      if (!current()) return;
+      this.panes.set(id, pane);
+    }
     if (!current()) return;
     this.checkPending(id);
+  }
+
+  /** The Codex threads this session's hook events named, newest first, with the id of each one's newest hook row and
+   *  newest prompt row (codexHarvester attributes usage the same way); `last`: the newest hook row of any thread. The
+   *  pane's thread falls out of the limit only after 100 other threads (Claude's included) had hooks in this session
+   *  since its last one; hooks carry no pid to key by. notify_log keeps 14 days, so a thread with no hook for that long
+   *  is unknown until its next prompt. */
+  private codexHooks(id: string): { threads: { thread: string; hook: number; prompt: number }[]; last: number } {
+    const rows = this.d.db.query(`SELECT agent_session_id AS thread, MAX(id) AS hook,
+      COALESCE(MAX(CASE WHEN event = 'user_prompt_submit' THEN id END), 0) AS prompt
+      FROM notify_log WHERE session_id = ? AND agent_session_id IS NOT NULL
+      GROUP BY agent_session_id ORDER BY hook DESC LIMIT 100`).all(id) as { thread: string; hook: number; prompt: number }[];
+    return { threads: rows.filter((r) => UUID.test(r.thread)), last: rows[0]?.hook ?? 0 };
+  }
+
+  /** The conversation the pane's codex is on: the newest hook-named thread whose rollout the process has open
+   *  (codexMirror.ts), with two guards against showing another conversation as this one. A thread whose newest hook is
+   *  older than the cursor's thread's is never fallen back to (the cursor's rollout missing from a flaky fd listing, a
+   *  `codex resume` of an older thread before its first prompt). And while the process has a rollout open besides the
+   *  choice that devd did not see open before (`/resume X`, `/new` at its first prompt), or on the first look at a
+   *  process with several open (devd did not see which came last), the conversation is unknown until a prompt is
+   *  submitted in the chosen thread after that: only a prompt starts a turn there, a late hook of an older turn (Stop
+   *  runs up to 300 s) does not.
+   *
+   *  Not detectable: `/new` before its first prompt. No rollout exists yet, so the old conversation shows until then. */
+  private codexThread(id: string, pane: Extract<PaneAgent, { kind: "codex" }>, cursor: Cursor): string | null {
+    const { threads, last } = this.codexHooks(id);
+    const proc = `${pane.pid}:${pane.start}`;
+    let watch = this.codexWatch.get(id) ?? cursor.watch;
+    const chosen = threads.find((t) => pane.open.includes(t.thread));
+    if (watch?.proc !== proc) watch = { proc, known: [], waitAfter: null };
+    else watch = { ...watch, known: [...watch.known] };
+    this.codexWatch.set(id, watch);
+    if (pane.open.some((t) => !watch.known.includes(t) && t !== chosen?.thread)) watch.waitAfter = Math.max(watch.waitAfter ?? 0, last);
+    for (const t of pane.open) if (!watch.known.includes(t)) watch.known.push(t);
+    if (!chosen) return null;
+    const cursorHook = threads.find((t) => t.thread === cursor.sid)?.hook ?? 0;
+    if (chosen.hook < cursorHook) return null;
+    if (watch.waitAfter !== null) {
+      if (chosen.prompt <= watch.waitAfter) return null;
+      watch.waitAfter = null;
+    }
+    return chosen.thread;
+  }
+
+  /** Reads the pane's Codex rollout from where the cursor stopped, inside the container (the account volume is not
+   *  devd's to read), at most CODEX_TICK_CHUNKS chunks per refresh. null when it could not be read. */
+  private async readCodex(id: string, s: SessionRow, pane: Extract<PaneAgent, { kind: "codex" }>, current: () => boolean): Promise<CodexState | null> {
+    const store = this.store(id);
+    const saved = store.mirrorCursor();
+    let cur: Cursor = saved ? JSON.parse(saved) as Cursor : { sid: null, ino: 0, offset: 0, headLen: 0, headHash: "", map: newCodexMapState() };
+    const thread = pane.home === null ? null : this.codexThread(id, pane, cur);
+    const watch = this.codexWatch.get(id);
+    if (watch && JSON.stringify(watch) !== JSON.stringify(cur.watch)) {
+      cur = { ...cur, watch };
+      store.applyBatch([], JSON.stringify(cur));
+    }
+    if (pane.home === null || thread === null) return { thread: null, busy: false };
+    const proc = `${pane.pid}:${pane.start}`;
+    for (let chunk = 1; ; chunk++) {
+      const r = await this.d.exec(s.container, ["python3", "-I", "-c", MIRROR_CODEX_READ, pane.home, thread,
+        JSON.stringify({ sid: cur.sid, offset: cur.offset, ino: cur.ino, headLen: cur.headLen, headHash: cur.headHash, home: cur.home }),
+        String(CODEX_CHUNK_BYTES), String(CODEX_LINE_CAP)], 10_000);
+      if (!current()) return null;
+      const out = r.code === 0 && !r.timedOut ? parseCodexRead(r.stdout) : null;
+      if (out === null) { this.log(`mirror ${id}: the Codex rollout could not be read`); return null; }
+      if (out.id === null) return { thread: null, busy: false };
+      const pre: BridgeEvent[] = [];
+      const closeOpenRun = () => {
+        if (cur.map.openRun !== null) pre.push({ type: "run.completed", runId: cur.map.openRun, nativeThreadId: cur.sid ?? "", usage: null, costUsd: null });
+      };
+      const from = cur.sid === out.id && !out.rewritten ? cur.offset : 0;
+      if (cur.sid !== out.id) {
+        if (cur.sid !== null) { closeOpenRun(); pre.push({ type: "bridge.notice", text: "New conversation" }); }
+        pre.push({ type: "thread.native", harness: "codex", nativeThreadId: out.id, account: null, model: null });
+        cur = { ...cur, sid: out.id, map: newCodexMapState() };
+      } else if (out.rewritten) {
+        closeOpenRun();
+        pre.push({ type: "bridge.notice", text: "The transcript was rewritten; it is read again from the start" });
+        cur = { ...cur, map: newCodexMapState() };
+      }
+      const map = cur.map as CodexMapState;
+      // Another codex process now writes the thread (resumed after its predecessor died): that one's turn is over.
+      if (cur.proc !== undefined && cur.proc !== proc && map.turn !== null) {
+        if (map.openRun !== null) pre.push({ type: "run.interrupted", runId: map.openRun });
+        map.openRun = null;
+        map.turn = null;
+      }
+      if (out.skipped > 0) this.log(`mirror ${id}: skipped ${out.skipped} rollout line(s) over ${CODEX_LINE_CAP} bytes`);
+      const mapped = mapCodexLines(out.lines, map, out.id, this.now());
+      const advanced = out.next !== from;
+      const moved = cur.proc !== proc || cur.home !== pane.home;
+      cur = { ...cur, ino: out.ino, offset: out.next, headLen: out.headLen, headHash: out.headHash, home: pane.home, proc };
+      if (advanced || pre.length || moved) this.commit(id, store, pre, mapped.events, cur);
+      this.markSeen(id, mapped.seen);
+      const done = !advanced || out.next >= out.size;
+      // A long backlog continues on the next refresh, so one refresh stays a bounded read.
+      if (done || chunk >= CODEX_TICK_CHUNKS) return { thread: out.id, busy: map.turn !== null };
+      if (!current()) return null;
+    }
   }
 
   /** Reads `<sid>.jsonl` from where the cursor stopped, never following a symlink the agent may have planted. */
@@ -670,10 +884,11 @@ export class TranscriptMirror {
     late.forEach(() => store.addNotice("A sent message has not shown up in the conversation yet. Check the terminal.", now, "warn"));
   }
 
-  /** Types `text` into the pane's Claude prompt and submits it, or refuses with the reason. Never types into anything
+  /** Types `text` into the pane's agent prompt and submits it, or refuses with the reason. Never types into anything
    *  but a verified, ready Claude prompt. */
   async send(id: string, text: string): Promise<void> {
-    text = text.replace(/\r\n/g, "\n");
+    // Leading blank lines would leave an agent's prompt looking empty after the paste, so Enter would not be pressed.
+    text = text.replace(/\r\n/g, "\n").replace(/^(?:[ \t]*\n)+/, "");
     if (text.trim() === "") throw new MirrorSendRefused("bad-request", "text must be a non-empty string");
     if (text.length > MAX_MESSAGE_CHARS) throw new MirrorSendRefused("bad-request", `text is longer than ${MAX_MESSAGE_CHARS} characters`);
     // An escape could end the bracketed paste early and turn the rest into keystrokes (`\e[201~` then `!cmd`).
@@ -691,14 +906,16 @@ export class TranscriptMirror {
     if (this.sending.has(id)) throw new MirrorSendRefused("pane-changed", "Another message is being sent to this terminal.");
     this.sending.add(id);
     try {
-      const pane = await this.locate(s);
-      const info = this.infoFor(id, s, pane);
-      this.setInfo(id, info);
+      // A fresh look at the pane and the conversation.
+      await this.refresh(id);
+      const pane = this.panes.get(id);
+      if (pane === undefined) throw new MirrorSendRefused("terminal-not-ready", "devd could not check the terminal just now. Try again, or use the terminal.");
+      const info = this.info(id);
       if (pane?.kind !== "claude" || info.sendBlock) {
         const b = info.sendBlock ?? { code: "agent-not-running" as const, message: SEND_MESSAGES["agent-not-running"] };
         throw new MirrorSendRefused(b.code, b.message);
       }
-      const sent = await this.d.exec(s.container, ["python3", "-I", "-c", MIRROR_SEND, MIRROR_PANE, String(pane.pid), AGENT_RUNTIMES.join(",")], 15_000, text);
+      const sent = await this.d.exec(s.container, ["python3", "-I", "-c", MIRROR_SEND, MIRROR_PANE, String(pane.pid), AGENT_RUNTIMES.join(","), pane.start], 15_000, text);
       let out: { ok?: unknown; error?: unknown } | null = null;
       try { out = JSON.parse(sent.stdout); } catch { out = null; }
       if (sent.code !== 0 || sent.timedOut || out === null) {

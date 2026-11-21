@@ -31,6 +31,13 @@ test("only devd's standing reason turns the field off; a refused send keeps the 
   expect(mirrorFieldOff({ ...live, sendBlock: { code: "agent-not-running", message: "No agent runs." } })).toBe("No agent runs.");
 });
 
+test("a Codex conversation is read-only: the composer shows devd's lock with Open terminal and stays off", () => {
+  const codex: MirrorInfo = { ...live, agent: "Codex", sendBlock: { code: "codex-send-unsupported", message: "Sending from chat isn't available for Codex yet; reply in the terminal." } };
+  expect(mirrorNotice(codex, null)).toEqual({ kind: "lock", text: "Sending from chat isn't available for Codex yet; reply in the terminal.", dismissible: false });
+  expect(mirrorFieldOff(codex)).toBe("Sending from chat isn't available for Codex yet; reply in the terminal.");
+  expect(mirrorUnsupported(codex)).toBeNull();
+});
+
 test("an agent the mirror cannot read says so by name", () => {
   expect(mirrorUnsupported(live)).toBeNull();
   const codex: MirrorInfo = { ...live, state: "unsupported", agent: "Codex", sendBlock: { code: "unsupported-agent", message: "Chat view isn't supported for Codex yet." } };
