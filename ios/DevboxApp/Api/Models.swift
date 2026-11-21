@@ -297,6 +297,8 @@ struct OpenProgress: Decodable, Equatable {
     var git: Git? = nil
     /// What the container step is doing (file ownership, the docker sidecar, the start).
     var detail: String? = nil
+    /// The `requestId` its open was sent with; nil when it had none, or from a devd before the field.
+    var requestId: String? = nil
 }
 
 /// `POST /api/sessions` (open/openSolo) response — mirrors `OpenResult` from `dashboard/src/api.ts`.

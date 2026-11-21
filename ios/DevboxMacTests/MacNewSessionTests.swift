@@ -43,17 +43,18 @@ final class MacNewSessionTests: XCTestCase {
         XCTAssertEqual(N.status(OpenProgress(step: "something-new")), "something-new")
     }
 
-    /// The bar and the stages never move back: a clone (the first open) reports after fetch, and its band overlaps.
+    /// The bar and the stages never move back when a later step starts lower in its band than the last one ended.
     func testTrackerIsMonotonic() {
+        // A repo's first open: the clone ends at 45 %, the checkout after it starts at 5 %.
         var t = N.Tracker()
         XCTAssertNil(t.stage)
-        t.apply(OpenProgress(step: "worktree", git: .init(phase: "Updating files", percent: 50)))
+        t.apply(OpenProgress(step: "clone", clone: .init(phase: "Checking out files", percent: 100)))
+        XCTAssertEqual(t.stage, .repo)
+        XCTAssertEqual(t.percent, 45)
+        t.apply(OpenProgress(step: "worktree", git: .init(phase: "Updating files", percent: 0)))
         XCTAssertEqual(t.stage, .checkout)
-        XCTAssertEqual(t.percent, 40)
-        t.apply(OpenProgress(step: "clone", clone: .init(phase: "Receiving objects", percent: 10)))
-        XCTAssertEqual(t.stage, .checkout)
-        XCTAssertEqual(t.percent, 40)
-        XCTAssertEqual(t.status, "Cloning · Receiving objects", "the text is always devd's latest")
+        XCTAssertEqual(t.percent, 45, "the bar does not move back")
+        XCTAssertEqual(t.status, "Checking out", "the text is always devd's latest")
         t.apply(OpenProgress(step: "container", detail: "starting the container"))
         XCTAssertEqual(t.stage, .container)
         t.finish()
@@ -66,9 +67,26 @@ final class MacNewSessionTests: XCTestCase {
         XCTAssertTrue(N.outcomeUnknown(URLError(.timedOut)))
         XCTAssertTrue(N.outcomeUnknown(URLError(.networkConnectionLost)))
         XCTAssertTrue(N.outcomeUnknown(DevdHTTPError(statusCode: 524)))
+        XCTAssertTrue(N.outcomeUnknown(DevdHTTPError(statusCode: 520)))
+        // The tunnel fallback timed out after the direct path refused: the fallback's answer decides.
+        XCTAssertTrue(N.outcomeUnknown(DevdClientError(description: "both paths failed", underlying: [URLError(.cannotConnectToHost), DevdHTTPError(statusCode: 524)])))
+        XCTAssertFalse(N.outcomeUnknown(DevdClientError(description: "both paths failed", underlying: [URLError(.timedOut), DevdHTTPError(statusCode: 400, serverMessage: "invalid agent")])))
         XCTAssertTrue(N.outcomeUnknown(DevdClientError(description: "both paths failed", underlying: [URLError(.cannotConnectToHost), URLError(.timedOut)])))
         XCTAssertFalse(N.outcomeUnknown(DevdHTTPError(statusCode: 400, serverMessage: "invalid agent")))
         XCTAssertFalse(N.outcomeUnknown(URLError(.cannotConnectToHost)))
+    }
+
+    /// Another open of the same repo (the CLI, another window) is not shown as ours; a devd without requestId still is.
+    func testTrackerShowsOnlyItsOwnOpen() {
+        var t = N.Tracker()
+        t.observe(OpenProgress(step: "worktree", git: .init(phase: "Updating files", percent: 80), requestId: "other"), requestId: "mine")
+        XCTAssertNil(t.stage)
+        XCTAssertEqual(t.percent, 0)
+        XCTAssertEqual(t.status, "Waiting for devd (another open of this repo is running)…")
+        t.observe(OpenProgress(step: "fetch", requestId: "mine"), requestId: "mine")
+        XCTAssertEqual(t.stage, .repo)
+        t.observe(OpenProgress(step: "worktree", git: .init(phase: "Updating files", percent: 50)), requestId: "mine")
+        XCTAssertEqual(t.stage, .checkout, "an old devd sends no requestId: its progress counts as before")
     }
 
     /// The request polls the repo's own progress key.

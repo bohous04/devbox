@@ -74,8 +74,8 @@ enum MacNewSession {
         return parts.filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
-    /// What the sheet shows while devd works. The bar and the stage never move back (a first clone reports after its
-    /// fetch, in an overlapping band); the text is always devd's latest.
+    /// What the sheet shows while devd works. The bar and the stage never move back: a repo's first open clones (up to
+    /// 45 %) and then checks out, whose band starts at 5 %. The text is always devd's latest.
     struct Tracker: Equatable {
         private(set) var percent = 0
         /// nil until devd reports a step (an open that has none to do, or an older devd).
@@ -83,6 +83,16 @@ enum MacNewSession {
         private(set) var status: String?
         /// The repo is being cloned (its first open), not fetched.
         private(set) var cloning = false
+
+        /// Takes a progress report of the repo. One with another open's `requestId` (the CLI or another window opening the
+        /// same repo) moves nothing. A devd before `requestId` sends none: then every report of the repo counts, as before.
+        mutating func observe(_ p: OpenProgress, requestId: String) {
+            if let other = p.requestId, other != requestId {
+                status = "Waiting for devd (another open of this repo is running)…"
+                return
+            }
+            apply(p)
+        }
 
         mutating func apply(_ p: OpenProgress) {
             percent = max(percent, MacNewSession.percent(p))
@@ -120,9 +130,10 @@ enum MacNewSession {
 
     /// The request may have reached devd: a timeout, a dropped connection, or a gateway giving up on a slow answer
     /// (Cloudflare cuts at ~100 s while a first clone runs for minutes).
+    /// When both paths failed, the last one (the fallback) decides: it is the attempt that may have reached devd.
     static func outcomeUnknown(_ error: Error) -> Bool {
-        if let h = error as? DevdHTTPError { return [502, 504, 524].contains(h.statusCode) }
         let last = (error as? DevdClientError)?.underlying.last ?? error
+        if let h = last as? DevdHTTPError { return [502, 504, 520, 524].contains(h.statusCode) }
         guard let code = (last as? URLError)?.code else { return false }
         return code == .timedOut || code == .networkConnectionLost
     }
@@ -244,6 +255,7 @@ struct MacNewSessionSheet: View {
                     .onChange(of: folder) { _, newFolder in
                         project = tree.flatMap { NewSessionLogic.soleProject($0, folder: newFolder) } ?? ""
                         repo = ""
+                        phase = .form
                     }
                 }
                 row("Project") {
@@ -252,7 +264,10 @@ struct MacNewSessionSheet: View {
                         ForEach(tree.map { NewSessionLogic.projectChoices($0, folder: folder) } ?? [], id: \.self) { Text($0).tag($0) }
                     }
                     .disabled(folder.isEmpty)
-                    .onChange(of: project) { _, _ in repo = "" }
+                    .onChange(of: project) { _, _ in
+                        repo = ""
+                        phase = .form
+                    }
                 }
                 row("Repo") {
                     Picker("Repo", selection: $repo) {
@@ -265,6 +280,8 @@ struct MacNewSessionSheet: View {
                     .onChange(of: repo) { _, newRepo in
                         agent = NewSessionLogic.defaultAgentFor(tree ?? [], folder: folder, project: project, repo: newRepo)
                         mode = .openExisting
+                        // An error or a "may still be creating" belongs to the repo it was about.
+                        phase = .form
                     }
                 }
                 row("Agent") {
@@ -294,10 +311,9 @@ struct MacNewSessionSheet: View {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.C.dangerText)
                     Text(message).foregroundStyle(Theme.C.dangerText).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
+                    // A failed open is retried with the primary button; the tree has no other.
                     if treeError != nil {
                         Button("Retry") { treeError = nil; Task { await loadTree() } }
-                    } else if case .failed(_, true) = phase {
-                        Button("Retry") { start() }.disabled(repo.isEmpty)
                     }
                 }
                 .font(.callout)
@@ -307,8 +323,19 @@ struct MacNewSessionSheet: View {
 
     private func row(_ label: String, @ViewBuilder _ control: () -> some View) -> some View {
         GridRow {
-            Text("\(label):").gridColumnAlignment(.trailing).foregroundStyle(Theme.C.foreground)
-            control().labelsHidden().frame(maxWidth: 300, alignment: .leading)
+            Text("\(label):").foregroundStyle(Theme.C.foreground).frame(width: 64, alignment: .trailing)
+            control().labelsHidden().modifier(FlexibleControl()).frame(width: 320, alignment: .leading)
+        }
+    }
+
+    /// One width for every picker: macOS 26 sizes a pop-up to its title unless told to fill.
+    private struct FlexibleControl: ViewModifier {
+        func body(content: Content) -> some View {
+            if #available(macOS 26, *) {
+                content.buttonSizing(.flexible).frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                content.frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 
@@ -352,9 +379,10 @@ struct MacNewSessionSheet: View {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(MacNewSession.Stage.allCases, id: \.self) { s in
                     let state: Int = t.stage.map { s < $0 ? 0 : s == $0 ? 1 : 2 } ?? 2
+                    let done = state == 0 || (state == 1 && s == .ready)
                     HStack(spacing: 8) {
                         Group {
-                            if state == 0 || (state == 1 && s == .ready) {
+                            if done {
                                 Image(systemName: "checkmark.circle.fill").foregroundStyle(InboxTone.doneIcon)
                             } else if state == 1 {
                                 ProgressView().controlSize(.small)
@@ -365,6 +393,8 @@ struct MacNewSessionSheet: View {
                         .frame(width: 18)
                         Text(t.title(s)).foregroundStyle(state == 2 ? Theme.C.mutedForeground : Theme.C.foreground)
                     }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("\(t.title(s)), \(done ? "Done" : state == 1 ? "In progress" : "Pending")")
                 }
             }
             Text(creates ? "devd skips the steps a session does not need." : "A session that is already running skips straight to Ready.")
@@ -420,6 +450,8 @@ struct MacNewSessionSheet: View {
     private func start() {
         guard !folder.isEmpty, !project.isEmpty, !repo.isEmpty, !working else { return }
         let f = folder, p = project, r = repo, a = agent, act = action
+        // Marks this open's progress, so another open of the same repo (the CLI, another window) is not shown as ours.
+        let requestId = UUID().uuidString
         let choice = repos.first { $0.value == r }
         phase = .working(MacNewSession.Tracker(), creates: act.creates)
         work = Task {
@@ -431,7 +463,7 @@ struct MacNewSessionSheet: View {
                     // A failed poll leaves the last stage showing; the request's own answer still decides.
                     guard let report = try? await actions.openProgress(folder: f, project: p, repo: r) else { continue }
                     guard !Task.isCancelled, case .working = phase else { return }
-                    t.apply(report)
+                    t.observe(report, requestId: requestId)
                     phase = .working(t, creates: creates)
                 }
             }
@@ -441,7 +473,7 @@ struct MacNewSessionSheet: View {
                     ? try await actions.openSolo(folder: f, project: p, agent: a)
                     // The first clone of a large repo runs for minutes before devd answers.
                     : try await actions.openSession(folder: f, project: p, repo: r, cloneUrl: choice?.cloneUrl, agent: a,
-                                                    fresh: act.fresh, timeout: 900)
+                                                    fresh: act.fresh, requestId: requestId, timeout: 900)
                 poll?.cancel()
                 if case .working(var t, let creates) = phase {
                     t.finish()

@@ -128,16 +128,18 @@ struct SessionActions {
         let cloneUrl: String?
         let agent: String?
         let fresh: Bool?
+        let requestId: String?
     }
 
-    /// `timeout`: the first clone of a large repo runs for minutes before devd answers (nil = the client's default).
+    /// `requestId`: the caller's id for this open, echoed in its `openProgress` reports (a devd before the field ignores
+    /// it). `timeout`: the first clone of a large repo runs for minutes before devd answers (nil = the client's default).
     func openSession(
         folder: String, project: String, repo: String,
-        cloneUrl: String?, agent: AgentName?, fresh: Bool?, timeout: TimeInterval? = nil
+        cloneUrl: String?, agent: AgentName?, fresh: Bool?, requestId: String? = nil, timeout: TimeInterval? = nil
     ) async throws -> OpenResult {
         try await client.post("/api/sessions", body: OpenSessionBody(
             folder: folder, project: project, repo: repo,
-            cloneUrl: cloneUrl, agent: agent?.rawValue, fresh: fresh
+            cloneUrl: cloneUrl, agent: agent?.rawValue, fresh: fresh, requestId: requestId
         ), timeout: timeout)
     }
 

@@ -1023,8 +1023,12 @@ export function createApp(d: ApiDeps): Hono {
   };
   app.post("/api/sessions", async (c) => {
     noIdleTimeout(c);
-    const body = (await c.req.json().catch(() => null)) as { folder: string; project: string; repo?: string; cloneUrl?: string; solo?: boolean; agent?: string; fresh?: boolean; host?: string; sessionId?: string; runtime?: unknown; prompt?: unknown; effort?: unknown } | null;
+    const body = (await c.req.json().catch(() => null)) as { folder: string; project: string; repo?: string; cloneUrl?: string; solo?: boolean; agent?: string; fresh?: boolean; host?: string; sessionId?: string; runtime?: unknown; prompt?: unknown; effort?: unknown; requestId?: unknown } | null;
     if (!body) return c.json({ error: "invalid JSON body" }, 400);
+    // The caller's id for this open, echoed in its /api/open-progress entries (the Mac sheet shows only its own).
+    if (body.requestId !== undefined && (typeof body.requestId !== "string" || !/^[A-Za-z0-9-]{1,64}$/.test(body.requestId)))
+      return c.json({ error: "requestId must be 1-64 letters, digits or dashes" }, 400);
+    const requestId = body.requestId as string | undefined;
     // The optional first prompt (the dashboard's New session page). Text only, refused explicitly rather than cut or
     // dropped; a chat session gets it as its first turn (linkOpenedChat), a tmux one through the prompt file.
     // `null` is absent, as before the field existed. Control characters are refused, not stripped: what reaches the
@@ -1131,7 +1135,7 @@ export function createApp(d: ApiDeps): Hono {
       if (runtime === "chat" && prompt !== undefined && !d.links) return c.json({ error: "chat sessions cannot take a first prompt here (no bridge link)" }, 503);
       if (runtime !== undefined || body.sessionId !== undefined) {
         const firstPrompt = runtime === "tmux" ? prompt : undefined;
-        const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, runtime, fresh: body.fresh, sessionId: body.sessionId, ...(firstPrompt !== undefined ? { firstPrompt } : {}) });
+        const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, runtime, fresh: body.fresh, sessionId: body.sessionId, requestId, ...(firstPrompt !== undefined ? { firstPrompt } : {}) });
         // A joined chat session that is busy, or already has a first message waiting, keeps it: never overwritten.
         if (runtime === "chat" && prompt !== undefined && !r.created) {
           const busyRun = d.threads?.(r.session.id).snapshot({ limit: 0 }).runs.some((run) => run.status === "running" || run.status === "queued") ?? false;
@@ -1151,7 +1155,7 @@ export function createApp(d: ApiDeps): Hono {
       const other: SessionRuntime = picked.runtime === "chat" ? "tmux" : "chat";
       const otherBlocked = other === "chat" ? chatRuntimeBlock(effective, "vps") : tmuxRuntimeBlock(effective);
       const joinRuntimes = otherBlocked ? [picked.runtime] : [picked.runtime, other];
-      const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, runtime: picked.runtime, joinRuntimes, fresh: body.fresh });
+      const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, runtime: picked.runtime, joinRuntimes, fresh: body.fresh, requestId });
       linkOpenedChat(r);
       return c.json(r.created && picked.notice ? { ...r, runtimeNotice: picked.notice } : r, r.created ? 201 : 200);
     } catch (e) {

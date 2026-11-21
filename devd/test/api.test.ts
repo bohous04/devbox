@@ -478,6 +478,22 @@ test("HTTP Gitea clone URL reaches Codex session creation", async () => {
   expect(calls).toEqual([{ ...input, fresh: undefined, runtime: "tmux", joinRuntimes: ["tmux", "chat"] }]);
 });
 
+// The Mac sheet tells its own open from another open of the same repo by this id in /api/open-progress.
+test("POST /api/sessions passes the caller's requestId to open(); a malformed one → 400", async () => {
+  const calls: { requestId?: string }[] = [];
+  const mgr = { open: async (input: { requestId?: string }) => { calls.push(input); return { created: true, session: { id: "dev-games-game_web", status: "running", runtime: "tmux" } }; } } as unknown as SessionManager;
+  const { a } = app(undefined, undefined, undefined, { mgr });
+  const post = (body: unknown) => a.request("/api/sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  expect((await post({ folder: "games", project: "games", repo: "game_web", requestId: "6F1C-42ab" })).status).toBe(201);
+  expect(calls.map((c) => c.requestId)).toEqual(["6F1C-42ab"]);
+  expect((await post({ folder: "games", project: "games", repo: "game_web", runtime: "tmux", requestId: "r-2" })).status).toBe(201);
+  expect(calls.map((c) => c.requestId)).toEqual(["6F1C-42ab", "r-2"]);
+  for (const bad of ["", "a b", 7, "x".repeat(65)]) {
+    expect((await post({ folder: "games", project: "games", repo: "game_web", requestId: bad })).status).toBe(400);
+  }
+  expect(calls.length).toBe(2);
+});
+
 test("HTTP Gitea clone URL can be scheduled", async () => {
   const { a } = app();
   const response = await a.request("/api/schedules", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Gitea", cron: "0 3 * * *", folder: "games", project: "games", repo: "game_web", cloneUrl: "http://gitea.example:3000/Alice/game_web.git", prompt: "Review" }) });
