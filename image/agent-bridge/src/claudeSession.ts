@@ -175,9 +175,12 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
 
   const emit = o.emit;
   const logError = o.logError ?? ((msg: string) => console.error(msg));
-  const effort = new EffortState(emit, o.effort ?? null, CLAUDE_EFFORT_LEVELS);
-  // Said at once: until the CLI's model list names the levels, the user can already pick (unchecked) ones.
+  // Said at once. On the CLI's default model (none given) the model is unknown until the first turn's init, so the
+  // user can already pick unchecked levels; an explicit model's levels come from the CLI's list.
+  const effort = new EffortState(emit, o.effort ?? null, model === null ? CLAUDE_EFFORT_LEVELS : []);
   effort.update({ model });
+  // The level a message went out with before the model's levels were known (the CLI ran it at its nearest level).
+  let sentUnchecked: string | null = null;
 
   // Emitted once, by whichever comes first: interrupt() returning or the run's own result.
   function reportInterrupt(run: ActiveRun): void {
@@ -192,6 +195,7 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
 
   function writeTurn(t: Turn): void {
     active = { runId: t.runId, interrupted: false, interruptReported: false };
+    if (effort.levels === null && effort.chosen !== null) sentUnchecked = effort.chosen;
     input.push({ type: "user", message: { role: "user", content: t.content }, parent_tool_use_id: null });
     emit({ type: "run.started", runId: t.runId, origin: t.origin, nativeThreadId, model });
   }
@@ -363,6 +367,7 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
       models = await modelList;
     } catch (e) {
       logError(`claude: reading the model list for effort levels failed: ${e instanceof Error ? e.message : String(e)}`);
+      if (forModel === model) effort.update({ model: forModel });
       uncheckedNotice(forModel, "Claude's model list could not be read");
       return;
     }
@@ -375,13 +380,19 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
       uncheckedNotice(forModel, `${forModel} is not in Claude's model list`);
       return;
     }
-    const dropped = effort.update({ model: forModel, supported: info.supportsEffort ? info.supportedEffortLevels ?? [] : [] });
-    if (dropped) await stream.applyFlagSettings({ effortLevel: null }).catch((e) => logError(`claude: resetting the effort failed: ${e instanceof Error ? e.message : String(e)}`));
+    if (effort.update({ model: forModel, supported: info.supportsEffort ? info.supportedEffortLevels ?? [] : [], sentUnchecked })) await dropped();
+  }
+  // A dropped level: the CLI goes back to the model's default, whose level only a later run's Stop reports (a run going
+  // now ran at the dropped one, downgraded).
+  async function dropped(): Promise<void> {
+    ranBeforeChoice = active;
+    effort.update({ effective: null });
+    await stream.applyFlagSettings({ effortLevel: null }).catch((e) => logError(`claude: resetting the effort failed: ${e instanceof Error ? e.message : String(e)}`));
   }
   // A level picked before the levels were known stays unchecked: the user hears it, it is not dropped.
   function uncheckedNotice(forModel: string, why: string): void {
     if (forModel !== model || effort.chosen === null) return;
-    emit({ type: "bridge.notice", text: `${why}, so effort ${effort.chosen} is sent without checking that ${forModel} takes it.` });
+    emit({ type: "bridge.notice", text: `Effort ${effort.chosen} could not be checked: ${why}, so it is sent as is.` });
   }
   if (model !== null) void reportLevels(model);
 
@@ -442,7 +453,7 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
       await stream.setModel(next);
       model = next;
       // The previous model's levels and level say nothing about this one until the CLI's list does.
-      effort.update({ model: next, supported: null, effective: null });
+      effort.update({ model: next, supported: null, effective: null, unchecked: [] });
       void reportLevels(next);
     },
     async setEffort(level) {
@@ -451,7 +462,7 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
       await stream.applyFlagSettings({ effortLevel: level as EffortLevel | null });
       ranBeforeChoice = active;
       // What a turn runs at is known only from its Stop hook.
-      effort.choose(level, null);
+      if (effort.choose(level, null)) await dropped();
     },
     async injectItems() {
       throw new Error("injectItems is not supported by Claude sessions");
