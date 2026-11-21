@@ -475,6 +475,25 @@ test("effort: a stored state of another shape (written before the parser, or by 
   }
 });
 
+test("effort: unchecked levels (bridge 1.8.0) are kept, known ones only, while the model's own are not known", () => {
+  const errors = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const s = store();
+    s.apply(ev({ type: "effort.state", model: null, supported: null, effective: null, chosen: "max", unchecked: ["low", "turbo", "max", "low"] }));
+    expect(s.snapshot().effort).toEqual({ model: null, supported: null, effective: null, chosen: "max", unchecked: ["low", "max"] });
+    // The model's levels arrived: unchecked ones mean nothing then, even if a bridge still sends them.
+    s.apply(ev({ type: "effort.state", model: "m", supported: ["low"], effective: null, chosen: null, unchecked: ["low", "max"] }));
+    expect(s.snapshot().effort).toEqual({ model: "m", supported: ["low"], effective: null, chosen: null });
+    // Not a list: dropped and logged.
+    s.apply(ev({ type: "effort.state", model: null, supported: null, effective: null, chosen: null, unchecked: "low" } as unknown as BridgeEvent));
+    expect(s.snapshot().effort).toEqual({ model: null, supported: null, effective: null, chosen: null });
+    expect(errors.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("thread store: effort")).map((l) => l.split(" ")[3])).toEqual(["unchecked"]);
+    s.close();
+  } finally {
+    errors.mockRestore();
+  }
+});
+
 test("effort: dropped values are logged once per field per session, however many distinct ones a bridge sends", () => {
   const errors = spyOn(console, "error").mockImplementation(() => {});
   try {

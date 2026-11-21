@@ -496,7 +496,7 @@ const bridgeLinks = new BridgeLinks({
   onBehind: (id) => inbox.changed(id),
   onHandshake: (id, h) => chatSwitch.onHandshake(id, h),
   pendingTurns: {
-    save: (id, text, seq, tag) => savePendingFirstTurn(db, id, text, seq, tag),
+    save: (id, text, seq, tag, effort) => savePendingFirstTurn(db, id, text, seq, tag, effort),
     load: (id) => getPendingFirstTurn(db, id),
     remove: (id) => deletePendingFirstTurn(db, id),
   },

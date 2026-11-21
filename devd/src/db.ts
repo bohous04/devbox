@@ -238,6 +238,8 @@ export function openDb(path: string): Database {
   const pendingCols = (db.query("PRAGMA table_info(pending_first_turns)").all() as { name: string }[]).map((c) => c.name);
   if (!pendingCols.includes("after_seq")) db.run(`ALTER TABLE pending_first_turns ADD COLUMN after_seq INTEGER NOT NULL DEFAULT 0`);
   if (!pendingCols.includes("tag")) db.run(`ALTER TABLE pending_first_turns ADD COLUMN tag TEXT`);
+  // effort: the level /new asked for, set right before the message (null = the agent's default).
+  if (!pendingCols.includes("effort")) db.run(`ALTER TABLE pending_first_turns ADD COLUMN effort TEXT`);
   // The inbox shelves of a session (sessionAttention.ts): settled (by hand or after 7 days idle) and snoozed. One row
   // per session, deleted with it (deleteSession).
   db.run(`CREATE TABLE IF NOT EXISTS session_attention (
@@ -1209,13 +1211,13 @@ export function deleteSessionPr(db: Database, sessionId: string): void {
   db.query(`DELETE FROM session_prs WHERE session_id=?`).run(sessionId);
 }
 
-export interface PendingFirstTurn { text: string; seq: number; tag: string | null }
-export function savePendingFirstTurn(db: Database, sessionId: string, text: string, seq: number, tag: string | null): void {
-  db.query(`INSERT OR REPLACE INTO pending_first_turns (session_id,text,created_at,after_seq,tag) VALUES (?,?,?,?,?)`).run(sessionId, text, Date.now(), seq, tag);
+export interface PendingFirstTurn { text: string; seq: number; tag: string | null; effort: string | null }
+export function savePendingFirstTurn(db: Database, sessionId: string, text: string, seq: number, tag: string | null, effort: string | null): void {
+  db.query(`INSERT OR REPLACE INTO pending_first_turns (session_id,text,created_at,after_seq,tag,effort) VALUES (?,?,?,?,?,?)`).run(sessionId, text, Date.now(), seq, tag, effort);
 }
 export function getPendingFirstTurn(db: Database, sessionId: string): PendingFirstTurn | null {
-  const r = db.query(`SELECT text, after_seq, tag FROM pending_first_turns WHERE session_id=?`).get(sessionId) as { text: string; after_seq: number; tag: string | null } | null;
-  return r ? { text: r.text, seq: r.after_seq, tag: r.tag } : null;
+  const r = db.query(`SELECT text, after_seq, tag, effort FROM pending_first_turns WHERE session_id=?`).get(sessionId) as { text: string; after_seq: number; tag: string | null; effort: string | null } | null;
+  return r ? { text: r.text, seq: r.after_seq, tag: r.tag, effort: r.effort } : null;
 }
 /** On devd start: a pending first message of a session that is gone or not running will never be delivered. Returns
  *  the deleted rows, so the caller can report the ones whose sender is still waiting (a user's first prompt). */

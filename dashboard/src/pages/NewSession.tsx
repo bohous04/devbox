@@ -19,6 +19,7 @@ import { openedNotice } from "../sessionsView";
 import { useStore } from "../store";
 import { Composer } from "../components/chat/Composer";
 import { AgentGlyph } from "../components/chat/Switchers";
+import { effortLabel, newSessionEffort, newSessionEffortBlock, type SwitchOption } from "../switchView";
 import { hostDisabledReason, jobErrorText, JOB_STEP_LABEL, type IbxStatusDto, type PlacementDto } from "../instaboxView";
 
 /** Route /new — start a session: pick the repo, type the first message in the chat composer, go. The interface
@@ -47,6 +48,8 @@ export function NewSession() {
   const [showAll, setShowAll] = useState(false);
   // The composer's text: what may start with it is decided here (InstaBox and a running terminal take none).
   const [draft, setDraft] = useState("");
+  // The effort the first message is sent at (null = the agent's default); offered for Claude chat sessions only.
+  const [effort, setEffort] = useState<string | null>(null);
   // Flipped to false on unmount — polling the InstaBox job must not keep calling the API or touch the state of a
   // disposed page after the user navigated away (see startInstabox below).
   const aliveRef = useRef(true);
@@ -132,7 +135,7 @@ export function NewSession() {
     try {
       const r = repo === SOLO
         ? await api.openSolo({ folder, project, agent })
-        : await api.openSession({ folder, project, repo, cloneUrl: selected?.cloneUrl, agent, fresh, runtime: choice.runtime, ...(prompt ? { prompt } : {}), ...(sessionId ? { sessionId } : {}) });
+        : await api.openSession({ folder, project, repo, cloneUrl: selected?.cloneUrl, agent, fresh, runtime: choice.runtime, ...(prompt ? { prompt } : {}), ...(prompt && effort !== null ? { effort } : {}), ...(sessionId ? { sessionId } : {}) });
       if (!aliveRef.current) return;
       await opened(r.session.id, choice.runtime, openedNotice(r.pull, choice.runtime));
     } finally { if (aliveRef.current) setBusy(false); }
@@ -194,8 +197,12 @@ export function NewSession() {
     if (picked === null) return false; // cancelled: the text stays in the box
     return picked === "continue" ? startVps(false, takesPrompt ? prompt : "", target.id) : startVps(true, prompt);
   };
+  // A choice the page no longer offers (another agent or interface) goes back to Default, visibly: the chip loses it.
+  const effortChoices = onIbx || repo === SOLO ? null : newSessionEffort(agent, choice?.runtime ?? null, effort);
+  useEffect(() => { if (effortChoices === null && effort !== null) setEffort(null); }, [effortChoices, effort]);
+  const effortBlock = newSessionEffortBlock(prompt, effort);
   const startLabel = ibxFailed && onIbx ? "Try again" : onIbx ? "Start on InstaBox" : reusable && prompt === "" ? "Open existing" : "Start session";
-  const canStart = !!repo && !busy && !!choice && textBlock === null;
+  const canStart = !!repo && !busy && !!choice && textBlock === null && effortBlock === null;
   // Continuing takes the message only where devd can deliver it: a running terminal's agent has already started.
   const continueTakes = reusable !== null && !!choice && continueTakesPrompt(reusable, choice.runtime);
 
@@ -214,6 +221,7 @@ export function NewSession() {
   const line = busy && step ? { text: `${JOB_STEP_LABEL[step] ?? step}…`, tone: "status" as const }
     : err ? { text: err, tone: "error" as const }
     : textBlock ? { text: textBlock, tone: "warn" as const }
+    : effortBlock ? { text: effortBlock, tone: "warn" as const }
     : repo && choice?.notice ? { text: choice.notice, tone: "warn" as const }
     : !tree ? { text: "Loading workspaces…", tone: "status" as const }
     : summary ? { text: summary, tone: "status" as const } : null;
@@ -243,7 +251,7 @@ export function NewSession() {
             busyVps={placement?.reason ?? null}
             onRuntime={setRuntime} onHost={setHost}
           />
-          <AgentMenu agent={agent} disabled={!repo || busy} onPick={setAgent} />
+          <AgentMenu agent={agent} disabled={!repo || busy} onPick={setAgent} effort={effort} effortChoices={effortChoices} onEffort={setEffort} />
         </>}
       />
 
@@ -256,9 +264,6 @@ export function NewSession() {
           )}
           {reusable && !busy && prompt === "" && <InlineAction onClick={() => report(startVps(true))}>Create another</InlineAction>}
           {ibxFailed && !busy && <InlineAction onClick={() => { setHost("vps"); report(startVps()); }}>Open on VPS</InlineAction>}
-          {/* No effort control here yet: a new session starts on the agent's default, set in the thread's composer. Under
-              the box, beside the agent chip: inside the toolbar it squeezed the interface chip to its chevron. */}
-          {choice?.runtime === "chat" && <p className="ml-auto text-xs text-muted-foreground">Effort: agent default · change it in the thread</p>}
         </div>
 
         {repoSessions.length > 0 && (
@@ -444,20 +449,29 @@ function RepoPicker({ tree, value, disabled, onPick }: { tree: TreeProject[] | n
   );
 }
 
-/** The agent, as the composer's chip (the same place the chat page has its agent/model chip). */
-function AgentMenu({ agent, disabled, onPick }: { agent: AgentName; disabled: boolean; onPick: (a: AgentName) => void }) {
+/** The agent, as the composer's chip (the same place the chat page has its agent/model chip), with the effort the first
+ *  message is sent at when one is offered: "Claude · High", its levels in the menu's Effort section. One chip, so the
+ *  toolbar keeps room on a phone. */
+function AgentMenu({ agent, disabled, onPick, effort, effortChoices, onEffort }: {
+  agent: AgentName; disabled: boolean; onPick: (a: AgentName) => void;
+  effort: string | null; effortChoices: SwitchOption[] | null; onEffort: (e: string | null) => void;
+}) {
   const profile = AGENT_PROFILES[agent];
+  const level = effortChoices !== null && effort !== null ? effortLabel(effort) : null;
+  const named = `Agent: ${profile.label}${level ? `, effort ${level}` : ""}`;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild disabled={disabled}>
         <Button
-          type="button" variant="ghost" size="sm" aria-label={`Agent: ${profile.label}`} title={`Agent: ${profile.label}`}
+          type="button" variant="ghost" size="sm" aria-label={named} title={named}
           className="h-8 max-w-56 shrink-0 gap-1.5 rounded-full px-2.5 font-medium text-foreground/90 hover:bg-accent hover:text-foreground has-[>svg]:px-2.5 data-[state=open]:bg-accent data-[state=open]:text-foreground"
         >
           <AgentGlyph agent={agent} />
-          {/* A phone shows the short name, so the options chip beside it keeps its whole label. */}
-          <span className="truncate sm:hidden">{profile.short}</span>
+          {/* A phone shows the short name, or the chosen level instead (the glyph names the agent), so the options chip
+              beside it keeps its whole label. */}
+          <span className="truncate sm:hidden">{level ?? profile.short}</span>
           <span className="truncate max-sm:hidden">{profile.label}</span>
+          {level && <span className="shrink-0 max-sm:hidden"><span className="text-muted-foreground">· </span><span className="font-semibold">{level}</span></span>}
           <ChevronDown aria-hidden="true" className="size-3.5 opacity-50" />
         </Button>
       </DropdownMenuTrigger>
@@ -471,6 +485,17 @@ function AgentMenu({ agent, disabled, onPick }: { agent: AgentName; disabled: bo
             {AGENT_PROFILES[id].yolo && <span className="text-xs text-muted-foreground">yolo</span>}
           </DropdownMenuItem>
         ))}
+        {effortChoices !== null && <>
+          <DropdownMenuSeparator />
+          <DropdownMenuLabel className="text-xs font-medium text-muted-foreground">Effort</DropdownMenuLabel>
+          {effortChoices.map((o) => (
+            <DropdownMenuItem key={o.value} onSelect={() => onEffort(o.value === "" ? null : o.value)} className="max-sm:min-h-11">
+              <Check className={o.current ? "" : "invisible"} aria-hidden="true" />
+              <span className="flex-1 truncate">{o.label}</span>
+            </DropdownMenuItem>
+          ))}
+          <p className="px-2 pb-1.5 text-xs text-muted-foreground">Set with your first message, which checks it against the model.</p>
+        </>}
       </DropdownMenuContent>
     </DropdownMenu>
   );

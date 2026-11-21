@@ -25,16 +25,16 @@ interface Harness {
   queueFails?: boolean;
 }
 function appWith(open: (t: Record<string, unknown>) => Promise<Opened>, h: Harness = {}) {
-  const turns: { id: string; text: string; onDone?: (err: Error | null) => void; tag: string | null }[] = [];
+  const turns: { id: string; text: string; onDone?: (err: Error | null) => void; tag: string | null; effort: string | null }[] = [];
   const notices: string[] = [];
   const notified: string[] = [];
   const db = openDb(":memory:");
   const ensured: string[] = [];
   const links = h.noLinks ? undefined : {
     ensure: (id: string) => { ensured.push(id); }, send: async () => {}, hasFirstTurn: () => h.queued ?? false,
-    startTurnWhenConnected: (id: string, text: string, onDone?: (err: Error | null) => void, tag: string | null = null) => {
+    startTurnWhenConnected: (id: string, text: string, onDone?: (err: Error | null) => void, tag: string | null = null, effort: string | null = null) => {
       if (h.queueFails) throw new Error("disk full");
-      turns.push({ id, text, onDone, tag });
+      turns.push({ id, text, onDone, tag, effort });
     },
   };
   const threads = () => ({ snapshot: () => ({ runs: h.runs ?? [] }), addNotice: (text: string) => { notices.push(text); } });
@@ -313,9 +313,9 @@ test("boot: a user's first prompt pruned with its not-running session is reporte
   const db = openDb(":memory:");
   const mk = (id: string, port: number) => insertSession(db, { id, folder: "f", project: "p", repo: id, container: id, port_base: port, status: "stopped", solo: 0, created_at: 0, last_active_at: 0, important: 0, runtime: "chat" } as never);
   mk("dev-p-user", 1); mk("dev-p-sched", 2);
-  savePendingFirstTurn(db, "dev-p-user", "fix the login bug", 0, USER_FIRST_PROMPT_TAG);
-  savePendingFirstTurn(db, "dev-p-sched", "scheduled prompt", 0, "Nightly bump");
-  savePendingFirstTurn(db, "dev-p-gone", "fix it", 0, USER_FIRST_PROMPT_TAG);
+  savePendingFirstTurn(db, "dev-p-user", "fix the login bug", 0, USER_FIRST_PROMPT_TAG, null);
+  savePendingFirstTurn(db, "dev-p-sched", "scheduled prompt", 0, "Nightly bump", null);
+  savePendingFirstTurn(db, "dev-p-gone", "fix it", 0, USER_FIRST_PROMPT_TAG, null);
   const notices: [string, string][] = []; const notified: string[] = [];
   reportPrunedFirstPrompts({ db, threads: (id: string) => ({ addNotice: (t: string) => { notices.push([id, t]); } }), notify: (_t: string, b: string) => { notified.push(b); } },
     prunePendingFirstTurns(db));
@@ -341,4 +341,36 @@ test("continue: a named chat session with a prompt gets it as an ordinary turn (
     status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0, runtime: "chat" } as never);
   expect((await post(busy, { ...BASE, runtime: "chat", sessionId: "dev-p-r", prompt: "also cover the empty case" })).status).toBe(409);
   expect(busy.turns).toEqual([]);
+});
+
+test("effort (/new): a Claude chat session's first message carries it; null or absent is none", async () => {
+  const a = appWith(async () => chatOpened());
+  expect((await post(a, { ...BASE, runtime: "chat", agent: "claude", fresh: true, prompt: "fix it", effort: "xhigh" })).status).toBe(201);
+  expect(a.turns.map((t) => [t.text, t.effort])).toEqual([["fix it", "xhigh"]]);
+  const none = appWith(async () => chatOpened());
+  expect((await post(none, { ...BASE, runtime: "chat", prompt: "fix it", effort: null })).status).toBe(201);
+  expect(none.turns.map((t) => t.effort)).toEqual([null]);
+});
+
+test("effort (/new) is refused before anything opens: not a Claude level, no message, a terminal, another agent, an existing session", async () => {
+  const cases: [Record<string, unknown>, string][] = [
+    // Joining or continuing a session would change an existing thread's effort from /new.
+    [{ runtime: "chat", prompt: "fix it", effort: "high" }, "effort is set on a new session only: an existing session's effort is set in its thread"],
+    [{ runtime: "chat", sessionId: "dev-p-r", prompt: "fix it", effort: "high" }, "effort is set on a new session only: an existing session's effort is set in its thread"],
+    [{ fresh: true, runtime: "chat", prompt: "fix it", effort: 3 }, "effort must be null or one of low, medium, high, xhigh, max"],
+    [{ fresh: true, runtime: "chat", prompt: "fix it", effort: "minimal" }, "effort must be null or one of low, medium, high, xhigh, max"],
+    [{ fresh: true, runtime: "chat", effort: "high" }, "effort is set with the first message: send one with it"],
+    [{ fresh: true, runtime: "tmux", prompt: "fix the test", effort: "high" }, "effort is set only for a chat session"],
+    [{ fresh: true, runtime: "chat", agent: "codex", prompt: "fix it", effort: "high" }, "effort on a new session is offered for Claude only: set it in the thread"],
+  ];
+  // The agent remembered for the repo counts when the body names none.
+  cases.push([{ fresh: true, runtime: "chat", prompt: "fix it", effort: "high" }, "effort on a new session is offered for Claude only: set it in the thread"]);
+  for (const [i, [body, error]] of cases.entries()) {
+    let opened = false;
+    const a = appWith(async () => { opened = true; return chatOpened(); });
+    if (i === cases.length - 1) setRepoAgent(a.db, "f", "p", "r", "codex", 0);
+    const r = await post(a, { ...BASE, ...body });
+    expect([r.status, ((await r.json()) as { error: string }).error]).toEqual([400, error]);
+    expect(opened).toBe(false);
+  }
 });

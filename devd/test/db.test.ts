@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -31,7 +31,7 @@ test("session CRUD", () => {
   expect(getSession(db, "dev-shop-cms")).toMatchObject({ status: "stopped", last_active_at: 9 });
   expect(listSessions(db)).toHaveLength(1);
   logEvent(db, "dev-shop-cms", "stop");
-  savePendingFirstTurn(db, "dev-shop-cms", "the user's prompt", 0, null);
+  savePendingFirstTurn(db, "dev-shop-cms", "the user's prompt", 0, null, null);
   deleteSession(db, "dev-shop-cms");
   expect(getSession(db, "dev-shop-cms")).toBeNull();
   // A later session with the same id must not inherit an undelivered first message.
@@ -491,13 +491,25 @@ test("agent_live_state: upsert overwrites the row of one session_id, delete remo
   expect(getAgentLiveState(db, "dev-shop-cms")).toBeNull();
 });
 
+test("a pending first turn keeps its effort; a table from before the column gains it", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "db-")), "devd.db");
+  const old = new Database(path);
+  old.run(`CREATE TABLE pending_first_turns (session_id TEXT PRIMARY KEY, text TEXT NOT NULL, created_at INTEGER NOT NULL, after_seq INTEGER NOT NULL DEFAULT 0, tag TEXT)`);
+  old.run(`INSERT INTO pending_first_turns (session_id, text, created_at, after_seq, tag) VALUES ('old', 'queued before the upgrade', 1, 3, NULL)`);
+  old.close();
+  const db = openDb(path);
+  expect(getPendingFirstTurn(db, "old")).toEqual({ text: "queued before the upgrade", seq: 3, tag: null, effort: null });
+  savePendingFirstTurn(db, "new", "fix it", 0, null, "xhigh");
+  expect(getPendingFirstTurn(db, "new")).toEqual({ text: "fix it", seq: 0, tag: null, effort: "xhigh" });
+});
+
 test("prunePendingFirstTurns keeps rows of running sessions only", () => {
   const db = openDb(":memory:");
   const mk = (id: string, status: string, port: number) => insertSession(db, { id, folder: "f", project: id, repo: "r", container: id, port_base: port, status, solo: 0, created_at: 0, last_active_at: 0, important: 0 } as SessionRow);
   mk("run", "running", 1); mk("stop", "stopped", 2);
-  for (const id of ["run", "stop", "ghost"]) savePendingFirstTurn(db, id, "t", 7, "tag");
+  for (const id of ["run", "stop", "ghost"]) savePendingFirstTurn(db, id, "t", 7, "tag", null);
   expect(prunePendingFirstTurns(db)).toEqual([{ sessionId: "stop", tag: "tag" }, { sessionId: "ghost", tag: "tag" }]);
-  expect(getPendingFirstTurn(db, "run")).toEqual({ text: "t", seq: 7, tag: "tag" });
+  expect(getPendingFirstTurn(db, "run")).toEqual({ text: "t", seq: 7, tag: "tag", effort: null });
   expect(getPendingFirstTurn(db, "stop")).toBeNull();
 });
 

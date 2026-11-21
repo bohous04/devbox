@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { RunRow, ThreadEffort } from "../../shared/thread";
 import type { AccountView, ChatTarget, CodexAccountView } from "./api";
 import {
-  effortChipLabel, effortMenuBlocked, effortOptions,
+  effortChipLabel, effortFooter, effortMenuBlocked, effortOptions, newSessionEffort, newSessionEffortBlock,
   accountMenuBlocked, claudeAccountOptions, codexAccountOptions, harnessOptions, modelMenuBlocked, modelOptions,
   awaitingTargetText, modelLabel, switchBlocked, switchErrorText, switchResultText,
 } from "./switchView";
@@ -203,4 +203,24 @@ describe("effort (bridge 1.7.0)", () => {
     expect(effortMenuBlocked(eff({ supported: [] }), NEW)).toBe("claude-opus-5-5 has no effort levels");
     expect(effortMenuBlocked(eff(), NEW)).toBeNull();
   });
+
+  test("before the model's levels are known (bridge 1.8.0): the unchecked levels are offered, checked on the next message", () => {
+    const early = eff({ model: null, supported: null, unchecked: ["low", "medium", "high", "xhigh", "max"], chosen: "xhigh" });
+    expect(effortMenuBlocked(early, NEW)).toBeNull();
+    expect(effortOptions(early).map((x) => [x.value, x.current])).toEqual([["", false], ["low", false], ["medium", false], ["high", false], ["xhigh", true], ["max", false]]);
+    expect(effortChipLabel(early, NEW)).toBe("Extra high");
+    expect(effortFooter(early)).toBe("Applies from your next message, which checks it against the model.");
+    expect(effortFooter(eff())).toBe("Applies from your next message.");
+  });
+});
+
+test("effort on /new: offered for Claude in a chat session only, and set with the first message", () => {
+  expect(newSessionEffort("claude", "chat")).not.toBeNull();
+  expect(newSessionEffort("claude", "chat")!.map((o) => o.value)).toEqual(["", "low", "medium", "high", "xhigh", "max"]);
+  expect(newSessionEffort("claude", "tmux")).toBeNull();
+  expect(newSessionEffort("claude", null)).toBeNull();
+  expect(newSessionEffort("codex", "chat")).toBeNull();
+  expect(newSessionEffortBlock("", "high")).toBe("Effort is set with your first message: type one, or set it back to Default.");
+  expect(newSessionEffortBlock("fix it", "high")).toBeNull();
+  expect(newSessionEffortBlock("", null)).toBeNull();
 });

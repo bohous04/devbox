@@ -643,6 +643,16 @@ test("POST thread/effort refuses a malformed body and a level the model does not
   expect(t.sent).toEqual([]);
 });
 
+test("POST thread/effort before the model's levels are known: an unchecked level goes to the bridge, another is refused", async () => {
+  const t = setup({ bridgeVersion: "1.8.0" });
+  t.feed(CHAT.id, [{ type: "effort.state", model: null, supported: null, effective: null, chosen: null, unchecked: ["low", "high", "max"] }]);
+  const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/effort`, { effort: "minimal" }));
+  expect(r.status).toBe(400);
+  expect(await r.json()).toEqual({ error: "unsupported-effort", message: "before its first reply the agent takes low, high, max (checked on that message)" });
+  expect((await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/effort`, { effort: "max" }))).status).toBe(202);
+  expect(t.sent).toEqual([[CHAT.id, { kind: "setEffort", effort: "max" }]]);
+});
+
 test("POST thread/effort to a bridge older than 1.7.0 is 409 bridge-too-old with what to do", async () => {
   for (const version of ["1.6.0", null]) {
     const t = setup({ bridgeVersion: version });

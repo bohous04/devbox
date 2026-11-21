@@ -2,9 +2,10 @@
 // harnesses can be picked and why not. devd decides (devd/src/chatSwitch.ts); these mirror its rules so the
 // menus do not offer what it would refuse, and say why.
 import type { RunRow, ThreadEffort } from "../../shared/thread";
+import { CLAUDE_EFFORT_LEVELS } from "../../shared/effort";
 import { ACP_MIN_BRIDGE_VERSION, EFFORT_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
 import { CHAT_MODELS, SAME_MODEL_ALIASES } from "../../shared/chatModels";
-import type { AccountView, ChatSwitchResult, ChatTarget, CodexAccountView } from "./api";
+import type { AccountView, AgentName, ChatSwitchResult, ChatTarget, CodexAccountView, SessionRuntime } from "./api";
 import { AGENT_IDS, AGENT_PROFILES, chatRuntimeBlock, profileFor } from "./newSession";
 import { codexWindowLabel } from "./subscriptionsView";
 
@@ -177,14 +178,35 @@ export function effortChipLabel(e: ThreadEffort | null, t: Pick<ChatTarget, "bri
 export function effortMenuBlocked(e: ThreadEffort | null, t: Pick<ChatTarget, "bridgeVersion">): string | null {
   if (!effortBridge(t)) return `This session's agent bridge (${t.bridgeVersion ?? "unknown version"}) cannot change the effort: recreate the session's container`;
   if (e === null) return "The agent has not reported its effort levels yet";
+  // Before the model names its levels the bridge (1.8.0) may take unchecked ones (effortFooter says when they are checked).
+  if (e.supported === null && e.unchecked) return null;
   if (e.supported === null) return `The agent has not reported the effort levels of ${e.model ?? "this model"}`;
   if (e.supported.length === 0) return `${e.model ?? "This model"} has no effort levels`;
   return null;
 }
 
-/** "Default" (value "": the model's own level, sent as null) and the levels the model lists. */
+/** "Default" (value "": the model's own level, sent as null) and the levels the model lists, or before it does, the
+ *  unchecked ones the agent takes. */
 export function effortOptions(e: ThreadEffort): SwitchOption[] {
   const detail = e.chosen === null && e.effective !== null ? `${effortLabel(e.effective)} for ${e.model ?? "this model"}`
     : e.chosen === null ? "The level shows after the agent's first reply" : null;
-  return [option("", "Default", e.chosen === null, { detail }), ...(e.supported ?? []).map((l) => option(l, effortLabel(l), e.chosen === l))];
+  const levels = e.supported !== null ? e.supported : e.unchecked ?? [];
+  return [option("", "Default", e.chosen === null, { detail }), ...levels.map((l) => option(l, effortLabel(l), e.chosen === l))];
 }
+
+/** The line under the Effort section: when a pick applies, and for unchecked levels, that the next message checks it
+ *  (a level the model lacks goes back to its default, said in the thread). */
+export const effortFooter = (e: ThreadEffort): string =>
+  e.supported === null && e.unchecked ? "Applies from your next message, which checks it against the model." : "Applies from your next message.";
+
+/** The Effort section /new offers (the agent chip's menu): Claude's levels in a chat session, unchecked like a thread's
+ *  before its first reply, so the first message checks them against the model. null = not offered: another agent has
+ *  no levels before its session reports them (Codex's come from its model list, inside the container). */
+export function newSessionEffort(agent: AgentName, runtime: SessionRuntime | null, chosen: string | null = null): SwitchOption[] | null {
+  if (agent !== "claude" || runtime !== "chat") return null;
+  return effortOptions({ model: null, supported: null, effective: null, chosen, unchecked: [...CLAUDE_EFFORT_LEVELS] });
+}
+
+/** devd sets the effort with the first message (POST /api/sessions refuses it without one): said before the press. */
+export const newSessionEffortBlock = (prompt: string, effort: string | null): string | null =>
+  effort !== null && prompt === "" ? "Effort is set with your first message: type one, or set it back to Default." : null;
