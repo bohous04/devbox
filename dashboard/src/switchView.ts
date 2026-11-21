@@ -33,7 +33,6 @@ export function switchBlocked(t: { runs: RunRow[] }, target: Pick<ChatTarget, "a
   return null;
 }
 
-/** Shown while the bridge awaits its target: picking any model, account or agent (also the current one) sends it. */
 /** What refetches the target besides the native thread and runs (ThreadView.switchKey on Apple): devd's notices of a
  *  switch. Hidden housekeeping notices (a bridge restart) are none. */
 export const switchNoticeCount = (items: ThreadItem[]): number => items.filter((i) => i.kind === "notice" && !isHousekeepingNotice(i)).length;
@@ -44,6 +43,7 @@ export function bridgeOutdatedText(t: Pick<ChatTarget, "bridgeVersion"> & { brid
   return t.bridgeOutdated === true ? `This session's agent bridge (${t.bridgeVersion ?? "older than 1.1.0"}) is outdated: recreate the session's container for the newer fixes.` : null;
 }
 
+/** Shown while the bridge awaits its target: picking any model, account or agent (also the current one) sends it. */
 export function awaitingTargetText(t: Pick<ChatTarget, "awaitingTarget">): string | null {
   return t.awaitingTarget ? "Agent is waiting for a target: pick a model, account or agent to continue" : null;
 }
