@@ -17,7 +17,7 @@ import { join } from "node:path";
 import type { MirrorInfo, MirrorSendError } from "../../shared/mirror";
 import type { BridgeEvent, LoggedEvent } from "../../shared/thread";
 import { AGENT_RUNTIMES, AGENTS } from "./agents";
-import { CODEX_CHUNK_BYTES, mapCodexLines, MIRROR_CODEX_READ, newCodexMapState, parseCodexRead, type CodexMapState } from "./codexMirror";
+import { CODEX_CHUNK_BYTES, CODEX_LINE_CAP, mapCodexLines, MIRROR_CODEX_READ, newCodexMapState, parseCodexRead, type CodexMapState } from "./codexMirror";
 import type { AgentLiveSnapshot } from "./agentEvents";
 import { agentProcsUnder, type ExecResult, type Proc } from "./ccUpkeep";
 import { getSession, type SessionRow } from "./db";
@@ -43,9 +43,12 @@ export const MAX_MESSAGE_CHARS = 100_000;
 
 // ── In-container probes ──────────────────────────────────────────────────────────────
 // Only metadata leaves the container: the pane's pid, the process table (pid, ppid, comm), for each claude process
-// whose session file verifies its session id and status, and each codex process's CODEX_HOME.
+// whose session file verifies its session id and status, and each codex process's CODEX_HOME and the thread ids of the
+// rollouts it has open.
 const PY_LOCATE_FN = String.raw`
-import json, os, subprocess, sys
+import json, os, re, subprocess, sys
+
+ROLLOUT = re.compile(r"/rollout-[^/]*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$")
 
 def locate(session):
     out = {"pane": None, "procs": [], "claude": {}, "codex": {}}
@@ -70,7 +73,16 @@ def locate(session):
             try:
                 with open("/proc/" + d + "/environ", "rb") as h:
                     env = dict(e.split(b"=", 1) for e in h.read().split(b"\0") if b"=" in e)
-                out["codex"][d] = env.get(b"CODEX_HOME", b"").decode() or env[b"HOME"].decode() + "/.codex"
+                home = env.get(b"CODEX_HOME", b"").decode() or env[b"HOME"].decode() + "/.codex"
+                opened = []
+                for fd in os.listdir("/proc/" + d + "/fd"):
+                    try:
+                        m = ROLLOUT.search(os.readlink("/proc/" + d + "/fd/" + fd))
+                    except OSError:
+                        continue
+                    if m:
+                        opened.append(m.group(1))
+                out["codex"][d] = {"home": home, "open": sorted(set(opened))}
             except (OSError, KeyError, ValueError, UnicodeDecodeError):
                 pass
             continue
@@ -125,7 +137,7 @@ RULE = re.compile(r"^\s*─{8,}\s*$")
 PROMPT = re.compile(r"^\s*❯")
 DIALOG = re.compile(r"Enter to (confirm|select)|Esc to cancel")
 CODEX_PROMPT = re.compile(r"^›(?: |$)")
-CODEX_DIALOG = re.compile(r"\benter (?:confirm|select|continue|submit)\b.*\besc\b", re.I)
+CODEX_DIALOG = re.compile(r"\benter (?:to )?(?:confirm|select|continue|submit)\b.*\besc\b", re.I)
 CODEX_EMPTY = re.compile(r"^\s*\? for shortcuts\b")
 
 def screen(target):
@@ -238,7 +250,8 @@ export type PaneAgent =
   | { kind: "no-agent"; inMode: boolean }
   | { kind: "other"; runtime: string; inMode: boolean }
   | { kind: "claude"; pid: number; inMode: boolean; sid: string | null; status: "idle" | "busy" | "waiting" | null }
-  | { kind: "codex"; pid: number; inMode: boolean; home: string | null };
+  /** `open`: thread ids of the rollouts the process has open. */
+  | { kind: "codex"; pid: number; inMode: boolean; home: string | null; open: string[] };
 
 /** null when the output is not what MIRROR_LOCATE prints. */
 export function parseLocate(stdout: string): PaneAgent | null {
@@ -258,8 +271,10 @@ export function parseLocate(stdout: string): PaneAgent | null {
   const nearest = agentProcsUnder(pane.pid, procs, AGENT_RUNTIMES)[0];
   if (!nearest) return { kind: "no-agent", inMode: pane.inMode };
   if (nearest.comm === "codex") {
-    const home = (o.codex as Record<string, unknown>)[String(nearest.pid)];
-    return { kind: "codex", pid: nearest.pid, inMode: pane.inMode, home: typeof home === "string" && home.startsWith("/") && !home.includes("\0") ? home : null };
+    const info = (o.codex as Record<string, { home?: unknown; open?: unknown }>)[String(nearest.pid)];
+    const home = typeof info?.home === "string" && info.home.startsWith("/") && !info.home.includes("\0") ? info.home : null;
+    const open = Array.isArray(info?.open) ? info.open.filter((t): t is string => typeof t === "string" && UUID.test(t)) : [];
+    return { kind: "codex", pid: nearest.pid, inMode: pane.inMode, home, open };
   }
   if (nearest.comm !== "claude") return { kind: "other", runtime: nearest.comm, inMode: pane.inMode };
   const info = (o.claude as Record<string, { sid?: unknown; status?: unknown }>)[String(nearest.pid)];
@@ -440,6 +455,8 @@ export interface Cursor {
   headLen: number;
   headHash: string;
   map: MapState | CodexMapState;
+  /** Codex: the process that read last. A turn its predecessor left open (killed mid-turn) never ends otherwise. */
+  pid?: number;
 }
 
 /** `status`: the HTTP status the route answers with (409 for a MirrorSendError). */
@@ -630,14 +647,19 @@ export class TranscriptMirror {
     const current = () => gen === this.gen(id) && !this.d.isEnding(id);
     const pane = (s.host ?? "vps") === "instabox" || s.status !== "running" ? null : await this.locate(s);
     if (!current()) return;
-    this.panes.set(id, pane);
+    // The pane is known to a send only together with the info from the same refresh: one that fails partway (a read
+    // that throws) leaves neither, so a send never pairs a fresh pane with an older info.
+    this.panes.delete(id);
     if (pane?.kind === "codex") {
       const codex = await this.readCodex(id, s, pane, current);
       if (!current()) return;
       this.setInfo(id, this.infoFor(id, s, pane, codex));
+      this.panes.set(id, pane);
     } else {
       this.setInfo(id, this.infoFor(id, s, pane));
       if (pane?.kind === "claude" && pane.sid !== null) await this.read(id, pane.sid, pane.status === "idle", current);
+      if (!current()) return;
+      this.panes.set(id, pane);
     }
     if (!current()) return;
     this.checkPending(id);
@@ -651,17 +673,18 @@ export class TranscriptMirror {
   }
 
   /** Reads the pane's Codex rollout from where the cursor stopped, inside the container (the account volume is not
-   *  devd's to read). null when it could not be read. */
+   *  devd's to read). The thread: the newest one the hook events named whose rollout the pane's process has open
+   *  (codexMirror.ts); none such is no conversation known, never an older one. null when it could not be read. */
   private async readCodex(id: string, s: SessionRow, pane: Extract<PaneAgent, { kind: "codex" }>, current: () => boolean): Promise<CodexState | null> {
-    const candidates = this.codexThreads(id);
-    if (pane.home === null || candidates.length === 0) return { thread: null, busy: false };
+    const thread = this.codexThreads(id).find((t) => pane.open.includes(t));
+    if (pane.home === null || thread === undefined) return { thread: null, busy: false };
     const store = this.store(id);
     const saved = store.mirrorCursor();
     let cur: Cursor = saved ? JSON.parse(saved) as Cursor : { sid: null, ino: 0, offset: 0, headLen: 0, headHash: "", map: newCodexMapState() };
     for (;;) {
-      const r = await this.d.exec(s.container, ["python3", "-I", "-c", MIRROR_CODEX_READ, pane.home, JSON.stringify(candidates),
+      const r = await this.d.exec(s.container, ["python3", "-I", "-c", MIRROR_CODEX_READ, pane.home, thread,
         JSON.stringify({ sid: cur.sid, offset: cur.offset, ino: cur.ino, headLen: cur.headLen, headHash: cur.headHash }),
-        String(CODEX_CHUNK_BYTES), String(LINE_CAP)], 10_000);
+        String(CODEX_CHUNK_BYTES), String(CODEX_LINE_CAP)], 10_000);
       if (!current()) return null;
       const out = r.code === 0 && !r.timedOut ? parseCodexRead(r.stdout) : null;
       if (out === null) { this.log(`mirror ${id}: the Codex rollout could not be read`); return null; }
@@ -680,8 +703,15 @@ export class TranscriptMirror {
         pre.push({ type: "bridge.notice", text: "The transcript was rewritten; it is read again from the start" });
         cur = { ...cur, map: newCodexMapState() };
       }
-      if (out.skipped > 0) this.log(`mirror ${id}: skipped ${out.skipped} rollout line(s) over ${LINE_CAP} bytes`);
       const map = cur.map as CodexMapState;
+      // Another codex process now writes the thread (resumed after its predecessor died): that one's turn is over.
+      if (cur.pid !== undefined && cur.pid !== pane.pid && map.turn !== null) {
+        if (map.openRun !== null) pre.push({ type: "run.interrupted", runId: map.openRun });
+        map.openRun = null;
+        map.turn = null;
+      }
+      cur.pid = pane.pid;
+      if (out.skipped > 0) this.log(`mirror ${id}: skipped ${out.skipped} rollout line(s) over ${CODEX_LINE_CAP} bytes`);
       const mapped = mapCodexLines(out.lines, map, out.id, this.now());
       const advanced = out.next !== from;
       cur = { ...cur, ino: out.ino, offset: out.next, headLen: out.headLen, headHash: out.headHash };
@@ -794,7 +824,8 @@ export class TranscriptMirror {
   /** Types `text` into the pane's agent prompt and submits it, or refuses with the reason. Never types into anything
    *  but a verified, ready Claude or Codex prompt. */
   async send(id: string, text: string): Promise<void> {
-    text = text.replace(/\r\n/g, "\n");
+    // Leading blank lines would leave an agent's prompt looking empty after the paste, so Enter would not be pressed.
+    text = text.replace(/\r\n/g, "\n").replace(/^(?:[ \t]*\n)+/, "");
     if (text.trim() === "") throw new MirrorSendRefused("bad-request", "text must be a non-empty string");
     if (text.length > MAX_MESSAGE_CHARS) throw new MirrorSendRefused("bad-request", `text is longer than ${MAX_MESSAGE_CHARS} characters`);
     // An escape could end the bracketed paste early and turn the rest into keystrokes (`\e[201~` then `!cmd`).
@@ -814,7 +845,8 @@ export class TranscriptMirror {
     try {
       // A fresh look at the pane and the conversation (for Codex, whether a turn runs comes from the rollout).
       await this.refresh(id);
-      const pane = this.panes.get(id) ?? null;
+      const pane = this.panes.get(id);
+      if (pane === undefined) throw new MirrorSendRefused("terminal-not-ready", "devd could not check the terminal just now. Try again, or use the terminal.");
       const info = this.info(id);
       if ((pane?.kind !== "claude" && pane?.kind !== "codex") || info.sendBlock) {
         const b = info.sendBlock ?? { code: "agent-not-running" as const, message: SEND_MESSAGES["agent-not-running"] };

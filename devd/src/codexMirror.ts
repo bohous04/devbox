@@ -2,9 +2,11 @@
 //
 // Where the rollout is: `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl` on the account's codex
 // volume, which only the container mounts, so the read runs inside it (MIRROR_CODEX_READ). Which thread: Codex's hook
-// events carry it (`notify_log.agent_session_id`, as codexHarvester attributes usage); the newest one with a rollout in
-// the pane's CODEX_HOME is the conversation the pane is on. A `/new` conversation shows up with its first prompt's
-// hook event. The running rollout stays plain `.jsonl` (verified on 0.166.0; closed ones may be compressed to `.zst`).
+// events carry it (`notify_log.agent_session_id`, as codexHarvester attributes usage), and the pane's codex process
+// keeps the rollouts of its conversations open (verified on 0.166.0, also the one left by `/new`): the newest hook-named
+// thread whose rollout the pane's process has open is the conversation the pane is on. That rules out another codex in
+// the session (another window, `codex exec`) and a fresh codex before its first prompt, whose rollout does not exist
+// yet. A `/new` conversation shows up with its first prompt's hook event. The running rollout stays plain `.jsonl`.
 //
 // The rollout's shape (verified on codex-cli 0.166.0): `{timestamp, type, payload}` lines. A turn runs from
 // `event_msg task_started` to `task_complete` (or `turn_aborted`); what the user typed is `event_msg item_completed`
@@ -14,36 +16,37 @@
 import type { BridgeEvent } from "../../shared/thread";
 import { clipInput, clipOutput, type MapState, type Mapped } from "./transcriptMirror";
 
-/** Lines read per exec: one exec returns at most about this many bytes of rollout. */
-export const CODEX_CHUNK_BYTES = 4 * 1024 * 1024;
+/** Lines read per exec: one exec returns at most about this many bytes of rollout (plus one line up to the cap). */
+export const CODEX_CHUNK_BYTES = 1024 * 1024;
+/** A rollout line longer than this is skipped unread (it all goes through docker exec within the script's alarm). */
+export const CODEX_LINE_CAP = 4 * 1024 * 1024;
 
-// Finds the rollout of the first candidate thread that has one and reads complete lines from the cursor (from 0 for
-// another thread, or when the file is not the one the cursor read: another inode, shorter, or a changed head). Prints
-// one JSON object; `lines` are the rollout's own lines, so this is the only output that carries conversation content.
+// Finds the thread's rollout and reads complete lines from the cursor (from 0 for another thread, or when the file is
+// not the one the cursor read: another inode, shorter, or a changed head). Prints one JSON object (`{"id": null}`: no
+// single rollout of it); `lines` are the rollout's own lines, so this is the only output that carries conversation
+// content.
 export const MIRROR_CODEX_READ = String.raw`# MIRROR_CODEX_READ
 import glob, hashlib, json, os, signal, stat, sys
 # Below the docker exec timeout (10 s).
 signal.alarm(8)
-home, ids, cur, budget, cap = sys.argv[1], json.loads(sys.argv[2]), json.loads(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
+home, thread, cur, budget, cap = sys.argv[1], sys.argv[2], json.loads(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
 HEAD = 256
 
-def find(thread):
-    hits = glob.glob(os.path.join(glob.escape(home), "sessions", "*", "*", "*", "rollout-*-" + thread + ".jsonl"))
-    return hits[0] if len(hits) == 1 else None
+def emit(o):
+    # Not ASCII-escaped: escaping would multiply the size of non-Latin text going through docker exec.
+    sys.stdout.buffer.write(json.dumps(o, ensure_ascii=False).encode("utf-8"))
 
-path = thread = None
-for candidate in ids:
-    path = find(candidate)
-    if path:
-        thread = candidate
-        break
-if path is None:
-    print(json.dumps({"id": None}))
+hits = glob.glob(os.path.join(glob.escape(home), "sessions", "*", "*", "*", "rollout-*-" + thread + ".jsonl"))
+try:
+    if len(hits) != 1:
+        raise FileNotFoundError()
+    fd = os.open(hits[0], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except FileNotFoundError:
+    emit({"id": None})
     sys.exit(0)
-fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
 st = os.fstat(fd)
 if not stat.S_ISREG(st.st_mode):
-    print(json.dumps({"error": "not-a-file"}))
+    emit({"error": "not-a-file"})
     sys.exit(0)
 head = lambda n: hashlib.sha256(os.pread(fd, n, 0)).hexdigest()
 offset, rewritten = 0, False
@@ -75,8 +78,8 @@ while pos - offset < budget:
     if line.strip():
         lines.append(line[:-1].decode("utf-8", "replace"))
 n = min(HEAD, st.st_size)
-print(json.dumps({"id": thread, "ino": st.st_ino, "size": st.st_size, "headLen": n, "headHash": head(n), "next": pos,
-                  "skipped": skipped, "rewritten": rewritten, "lines": lines}))
+emit({"id": thread, "ino": st.st_ino, "size": st.st_size, "headLen": n, "headHash": head(n), "next": pos,
+      "skipped": skipped, "rewritten": rewritten, "lines": lines})
 `;
 
 export type CodexRead =

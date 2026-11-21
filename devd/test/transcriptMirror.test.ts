@@ -137,9 +137,9 @@ test("parseLocate finds the pane's nearest agent and trusts only a well-formed s
     .toEqual({ kind: "claude", pid: 20, inMode: false, sid: SID, status: "busy" });
   expect(parseLocate(locateOut({ procs, claude: { "20": { sid: "../../etc/passwd", status: "weird" } } })))
     .toEqual({ kind: "claude", pid: 20, inMode: false, sid: null, status: null });
-  expect(parseLocate(locateOut({ procs: [[10, 1, "bash"], [11, 10, "codex"]], codex: { "11": "/home/dev/.codex" } })))
-    .toEqual({ kind: "codex", pid: 11, inMode: false, home: "/home/dev/.codex" });
-  expect(parseLocate(locateOut({ procs: [[10, 1, "bash"], [11, 10, "codex"]], codex: { "11": "relative/home" } }))).toMatchObject({ kind: "codex", home: null });
+  expect(parseLocate(locateOut({ procs: [[10, 1, "bash"], [11, 10, "codex"]], codex: { "11": { home: "/home/dev/.codex", open: [SID, "../x"] } } })))
+    .toEqual({ kind: "codex", pid: 11, inMode: false, home: "/home/dev/.codex", open: [SID] });
+  expect(parseLocate(locateOut({ procs: [[10, 1, "bash"], [11, 10, "codex"]], codex: { "11": { home: "relative/home" } } }))).toMatchObject({ kind: "codex", home: null, open: [] });
   expect(parseLocate(locateOut({ procs: [[10, 1, "bash"], [11, 10, "grok"]] }))).toEqual({ kind: "other", runtime: "grok", inMode: false });
   expect(parseLocate(locateOut({ procs: [[10, 1, "bash"]] }))).toEqual({ kind: "no-agent", inMode: false });
   expect(parseLocate(locateOut({ pane: null }))).toEqual({ kind: "no-pane" });
@@ -152,8 +152,9 @@ const TMUX: SessionRow = {
 };
 const CHAT: SessionRow = { ...TMUX, id: "dev-a-chat", container: "dev-a-chat", repo: "chat", port_base: 40300, runtime: "chat" };
 
-/** `codexHome`: the pane's codex CODEX_HOME (a local directory: the Codex read script runs for real against it). */
-interface Pane { sid: string | null; status?: string; agent?: string; inMode?: boolean; sendResult?: string; noPane?: boolean; codexHome?: string }
+/** `codexHome`: the pane's codex CODEX_HOME (a local directory: the Codex read script runs for real against it);
+ *  `codexOpen`: the threads whose rollouts the codex process has open; `pid`: the agent's pid (20). */
+interface Pane { sid: string | null; status?: string; agent?: string; inMode?: boolean; sendResult?: string; noPane?: boolean; codexHome?: string; codexOpen?: string[]; pid?: number }
 
 function setup(pane: Pane, isEnding: (id: string) => boolean = () => false) {
   const root = tmp("mirror-root-");
@@ -171,9 +172,10 @@ function setup(pane: Pane, isEnding: (id: string) => boolean = () => false) {
     if (cmd[3] === MIRROR_LOCATE) {
       if (pane.noPane) return ok(locateOut({ pane: null }));
       const agent = pane.agent ?? "claude";
-      return ok(locateOut({ pane: { pid: 10, inMode: pane.inMode ?? false }, procs: agent === "none" ? [[10, 1, "bash"]] : [[10, 1, "bash"], [20, 10, agent]],
-        claude: agent === "claude" ? { "20": { sid: pane.sid, status: pane.status ?? "idle" } } : {},
-        codex: agent === "codex" && pane.codexHome ? { "20": pane.codexHome } : {} }));
+      const pid = pane.pid ?? 20;
+      return ok(locateOut({ pane: { pid: 10, inMode: pane.inMode ?? false }, procs: agent === "none" ? [[10, 1, "bash"]] : [[10, 1, "bash"], [pid, 10, agent]],
+        claude: agent === "claude" ? { [pid]: { sid: pane.sid, status: pane.status ?? "idle" } } : {},
+        codex: agent === "codex" && pane.codexHome ? { [pid]: { home: pane.codexHome, open: pane.codexOpen ?? [] } } : {} }));
     }
     if (cmd[3] === MIRROR_CODEX_READ) {
       const r = Bun.spawnSync(["python3", ...cmd.slice(1)]);
@@ -330,6 +332,8 @@ test("send types the text through the send script's stdin and maps its refusals"
   expect(typed(t)[0]!.cmd.slice(0, 3)).toEqual(["python3", "-I", "-c"]);
   expect(typed(t)[0]!.cmd.slice(4, 6)).toEqual(["main", "20"]);
   expect(typed(t)[0]!.cmd.at(-1)).toBe("claude");
+  expect(await refusal(t.mirror.send(TMUX.id, "\n  \nafter blank lines"))).toBe("sent");
+  expect(typed(t)[1]!.stdin).toBe("after blank lines");
   pane.sendResult = '{"error": "pane-changed"}';
   expect(await refusal(t.mirror.send(TMUX.id, "again"))).toBe("pane-changed");
   pane.sendResult = '{"error": "terminal-has-draft"}';
@@ -429,6 +433,8 @@ real_open, real_listdir = builtins.open, os.listdir
 fix = lambda p: fake + p[5:] if isinstance(p, str) and p.startswith("/proc") else p
 builtins.open = lambda p, *a, **k: real_open(fix(p), *a, **k)
 os.listdir = lambda p=".": real_listdir(fix(p))
+real_readlink = os.readlink
+os.readlink = lambda p: real_readlink(fix(p))
 script = sys.argv[1]
 sys.argv = ["-c"] + sys.argv[2:]
 exec(compile(script, "<mirror>", "exec"), {"__name__": "__main__"})
@@ -513,7 +519,7 @@ test.skipIf(!Bun.which("python3"))("MIRROR_SEND reads the screen: a draft, a dia
   const late = fakeContainer({ status: "idle", screenAfterPaste: "Enter to confirm · Esc to cancel\n" });
   expect(late.run(MIRROR_SEND, ["main", "20", "claude", "claude"], "x").out.trim()).toBe('{"error": "not-submitted"}');
   expect(late.tmuxLog()).not.toContain("send-keys");
-});
+}, 15_000); // seven sends, each sleeping 0.3 s before Enter
 
 test.skipIf(!Bun.which("python3"))("MIRROR_SEND: an agent that exits during the send gets no paste or no Enter, so nothing reaches the shell", () => {
   // Exits while the buffer loads: the check before the paste stops it, and the buffer is dropped.
@@ -548,15 +554,18 @@ const userMsg = (id: string, text: string) => ev({ type: "item_completed", item:
 
 test.skipIf(!Bun.which("python3"))("a Codex pane: the hook-named thread's rollout is mirrored, appended lines follow, and a running turn blocks sending", async () => {
   const c = codexHome();
-  const t = setup({ sid: null, agent: "codex", codexHome: c.home });
-  await t.mirror.refresh(TMUX.id);
-  // No hook event has named a thread yet (a fresh Codex, before its first prompt).
-  expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "unresolved", agent: "Codex", sendBlock: { code: "conversation-unknown" } });
+  const pane: Pane = { sid: null, agent: "codex", codexHome: c.home };
+  const t = setup(pane);
   const lines = codexLines();
   c.write(TID, lines.slice(0, 12));
-  t.hook(SID); // a Claude id in the same session's log has no rollout here and is passed over
+  c.write(TID2, [userMsg("o1", "Another codex's conversation")]);
   t.hook(TID);
-  t.hook(SID2);
+  t.hook(SID2); // a Claude id in the same session's log
+  t.hook(TID2); // another codex of the session (another window): newest, but not this pane's
+  await t.mirror.refresh(TMUX.id);
+  // The pane's codex has no rollout open yet (a fresh Codex, before its first prompt): no older thread stands in.
+  expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "unresolved", agent: "Codex", sendBlock: { code: "conversation-unknown" } });
+  pane.codexOpen = [TID];
   await t.mirror.refresh(TMUX.id);
   expect(items(t.mirror)).toEqual(["user: List the files", "assistant: I'll list them.", "tool exec done: README.md\nsrc"]);
   expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "live", agent: "Codex", conversationId: TID, activity: "busy", sendBlock: { code: "agent-busy" } });
@@ -574,11 +583,14 @@ test.skipIf(!Bun.which("python3"))("a Codex pane: the hook-named thread's rollou
 
 test.skipIf(!Bun.which("python3"))("a Codex /new: the next hook event names a new rollout, which continues the mirror after a notice", async () => {
   const c = codexHome();
-  const t = setup({ sid: null, agent: "codex", codexHome: c.home });
+  const pane: Pane = { sid: null, agent: "codex", codexHome: c.home, codexOpen: [TID] };
+  const t = setup(pane);
   c.write(TID, [ev({ type: "task_started", turn_id: "a1" }), userMsg("u1", "First conversation")]);
   t.hook(TID);
   await t.mirror.refresh(TMUX.id);
+  // Codex keeps the old rollout open after /new and opens the new one with its first prompt.
   c.write(TID2, [ev({ type: "task_started", turn_id: "b1" }), userMsg("u2", "Second conversation"), ev({ type: "task_complete", turn_id: "b1" })]);
+  pane.codexOpen = [TID, TID2];
   t.hook(TID2);
   await t.mirror.refresh(TMUX.id);
   expect(items(t.mirror)).toEqual(["user: First conversation", "notice: New conversation", "user: Second conversation"]);
@@ -589,7 +601,7 @@ test.skipIf(!Bun.which("python3"))("a Codex /new: the next hook event names a ne
 
 test.skipIf(!Bun.which("python3"))("a rewritten Codex rollout is read again from the start; an unreadable one keeps the cursor", async () => {
   const c = codexHome();
-  const t = setup({ sid: null, agent: "codex", codexHome: c.home });
+  const t = setup({ sid: null, agent: "codex", codexHome: c.home, codexOpen: [TID] });
   c.write(TID, [ev({ type: "task_started", turn_id: "a1" }), userMsg("u1", "Before"), ev({ type: "task_complete", turn_id: "a1" })]);
   t.hook(TID);
   await t.mirror.refresh(TMUX.id);
@@ -603,6 +615,22 @@ test.skipIf(!Bun.which("python3"))("a rewritten Codex rollout is read again from
   expect(t.logs.some((l) => l.includes("could not be read"))).toBe(true);
   expect(t.mirror.store(TMUX.id).mirrorCursor()).toBe(cursor);
   expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "unresolved" });
+  expect(await refusal(t.mirror.send(TMUX.id, "hi"))).toBe("conversation-unknown");
+  expect(typed(t)).toEqual([]);
+});
+
+test.skipIf(!Bun.which("python3"))("a Codex turn left open by a process that died ends when another process takes the thread", async () => {
+  const c = codexHome();
+  const pane: Pane = { sid: null, agent: "codex", codexHome: c.home, codexOpen: [TID] };
+  const t = setup(pane);
+  c.write(TID, [ev({ type: "task_started", turn_id: "a1" }), userMsg("u1", "Killed mid-turn")]);
+  t.hook(TID);
+  await t.mirror.refresh(TMUX.id);
+  expect(t.mirror.info(TMUX.id)).toMatchObject({ activity: "busy" });
+  pane.pid = 21; // `codex resume` of the same thread
+  await t.mirror.refresh(TMUX.id);
+  expect(t.mirror.info(TMUX.id)).toMatchObject({ activity: "idle", sendBlock: null });
+  expect(t.mirror.store(TMUX.id).snapshot().runs.map((r) => r.status)).toEqual(["interrupted"]);
 });
 
 test.skipIf(!Bun.which("python3"))("MIRROR_SEND on a Codex pane: types into an empty composer only, never during a turn or into a picker", () => {
@@ -620,6 +648,7 @@ test.skipIf(!Bun.which("python3"))("MIRROR_SEND on a Codex pane: types into an e
     [`› \n  second line\n  model · /workspace\n`, '{"error": "terminal-not-ready"}'],
     [`• Working (9s • esc to interrupt)\n› \x1b[2mAsk Codex to do anything\x1b[0m\n  ? for shortcuts\n`, '{"error": "agent-busy"}'],
     [`  Where should the new conversation run?\n› 1. Use current Git worktree\n  enter select · esc back\n`, '{"error": "agent-waiting-in-terminal"}'],
+    [`  Allow this command?\n› 1. Yes\n  Press enter to confirm or esc to cancel\n`, '{"error": "agent-waiting-in-terminal"}'],
     ["dev@box:/workspace$ ", '{"error": "terminal-not-ready"}'],
   ] as [string, string][]) {
     const r = send(screen);
@@ -630,11 +659,15 @@ test.skipIf(!Bun.which("python3"))("MIRROR_SEND on a Codex pane: types into an e
   const late = send(READY_CODEX, `• Working (0s • esc to interrupt)\n› pasted\n`);
   expect(late.out).toBe('{"error": "not-submitted"}');
   expect(late.log).not.toContain("send-keys");
-});
+}, 15_000);
 
-test.skipIf(!Bun.which("python3"))("MIRROR_LOCATE reports a codex process's CODEX_HOME", () => {
+test.skipIf(!Bun.which("python3"))("MIRROR_LOCATE reports a codex process's CODEX_HOME and the rollouts it has open", () => {
   const c = fakeContainer({ status: "idle", agent: "codex" });
-  expect(parseLocate(c.run(MIRROR_LOCATE, ["main"]).out)).toMatchObject({ kind: "codex", pid: 20, home: expect.stringMatching(/\/home\/\.codex$/) });
+  const fds = join(c.dir, "proc", "20", "fd");
+  mkdirSync(fds);
+  symlinkSync(`/home/dev/.codex/sessions/2026/01/01/rollout-2026-01-01T00-00-00-${TID}.jsonl`, join(fds, "7"));
+  symlinkSync("/home/dev/.codex/log/codex-tui.log", join(fds, "8"));
+  expect(parseLocate(c.run(MIRROR_LOCATE, ["main"]).out)).toMatchObject({ kind: "codex", pid: 20, home: expect.stringMatching(/\/home\/\.codex$/), open: [TID] });
 });
 
 test("the Codex fixture maps onto user, assistant, tool and notice items, a steer into a run of its own; reasoning and model input are dropped", () => {
@@ -680,25 +713,25 @@ test("older Codex rollouts: a user_message event is the prompt, and a failed tur
   expect(snap.seen).toEqual(["Old style"]);
 });
 
-test.skipIf(!Bun.which("python3"))("MIRROR_CODEX_READ picks the first candidate with a rollout and reads complete lines within its budget", () => {
+test.skipIf(!Bun.which("python3"))("MIRROR_CODEX_READ reads the thread's rollout in complete lines within its budget", () => {
   const c = codexHome();
-  const read = (ids: string[], cur: object, budget = 1000, cap = 100) => {
-    const r = Bun.spawnSync(["python3", "-I", "-c", MIRROR_CODEX_READ, c.home, JSON.stringify(ids), JSON.stringify(cur), String(budget), String(cap)]);
+  const read = (thread: string, cur: object, budget = 1000, cap = 100) => {
+    const r = Bun.spawnSync(["python3", "-I", "-c", MIRROR_CODEX_READ, c.home, thread, JSON.stringify(cur), String(budget), String(cap)]);
     return JSON.parse(r.stdout.toString()) as { id: string | null; next: number; size: number; skipped: number; rewritten: boolean; lines: string[]; headLen: number; headHash: string; ino: number };
   };
-  expect(read([TID], {}).id).toBeNull();
+  expect(read(TID, {}).id).toBeNull();
   writeFileSync(c.file(TID2), `{"a":1}\n${"y".repeat(150)}\n{"b":2}\n{"partial"`);
-  const first = read([TID, TID2], {}, 5);
+  const first = read(TID2, {}, 5);
   // A budget smaller than one line still returns that line; the one over the cap is skipped unread.
   expect([first.id, first.lines, first.skipped]).toEqual([TID2, ['{"a":1}'], 0]);
   const cur = { sid: TID2, offset: first.next, ino: first.ino, headLen: first.headLen, headHash: first.headHash };
-  const rest = read([TID2], cur);
+  const rest = read(TID2, cur);
   expect([rest.lines, rest.skipped, rest.rewritten]).toEqual([['{"b":2}'], 1, false]);
   // The unfinished last line stays for the next read.
   expect(rest.next).toBe(rest.size - '{"partial"'.length);
   // Another thread starts from 0; a changed head is a rewrite.
-  expect(read([TID2], { ...cur, sid: TID }).lines[0]).toBe('{"a":1}');
+  expect(read(TID2, { ...cur, sid: TID }).lines[0]).toBe('{"a":1}');
   writeFileSync(c.file(TID2), `{"c":3}\n${"z".repeat(40)}\n`);
-  const again = read([TID2], { ...cur, offset: 8 });
+  const again = read(TID2, { ...cur, offset: 8 });
   expect([again.rewritten, again.lines[0]]).toEqual([true, '{"c":3}']);
 });
