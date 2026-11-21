@@ -54,10 +54,39 @@ struct SessionActions {
         try await client.postVoid("/api/sessions/\(id)/name", body: NameBody(name: name))
     }
 
-    private struct EmptyBody: Encodable {}
+    private struct EndResult: Decodable { let pending: Bool? }
 
-    func switchAccount(_ id: String) async throws -> SwitchAccountResponse {
-        try await client.post("/api/sessions/\(id)/switch-account", body: EmptyBody())
+    /// `end` that says whether devd finished: false = ended (204); true = devd is still backing up and finishes in the
+    /// background (202 `{pending: true}`), with a notification when done. Mirrors `api.end` in cli/src/api.ts.
+    func endReportingPending(_ id: String) async throws -> Bool {
+        let data = try await client.postData("/api/sessions/\(id)/end", body: EndBody(soloAction: nil))
+        guard !data.isEmpty else { return false }
+        return try JSONDecoder().decode(EndResult.self, from: data).pending == true
+    }
+
+    private struct AccountBody: Encodable { let accountId: String? }
+
+    /// `accountId` = a picked Anthropic account (the F9 menu's named account); nil sends `{}` and devd chooses a
+    /// fresher one itself.
+    func switchAccount(_ id: String, accountId: String? = nil) async throws -> SwitchAccountResponse {
+        try await client.post("/api/sessions/\(id)/switch-account", body: AccountBody(accountId: accountId))
+    }
+
+    private struct CodexAccountBody: Encodable { let accountId: String }
+
+    /// A Codex session's account switch. devd answers 202 `{running: true}` when the handoff outlasts its wait; the
+    /// result then comes from `codexAccounts` (dashboard SessionCodexAccount.tsx).
+    func switchCodexAccount(_ id: String, accountId: String) async throws -> CodexSessionSwitchResult {
+        try await client.post("/api/sessions/\(id)/codex-account", body: CodexAccountBody(accountId: accountId))
+    }
+
+    /// The Anthropic account pool (the accounts `switchAccount` can name).
+    func accounts() async throws -> AccountsResponse {
+        try await client.get("/api/accounts")
+    }
+
+    func codexAccounts(_ id: String) async throws -> CodexSessionAccounts {
+        try await client.get("/api/sessions/\(id)/codex-account")
     }
 
     private struct AgentBody: Encodable { let agent: String }

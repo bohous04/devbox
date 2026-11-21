@@ -1278,6 +1278,8 @@ export function createApp(d: ApiDeps): Hono {
     const name = sanitizeSessionName(body.name);
     setSessionName(d.db, s.id, name);
     logEvent(d.db, s.id, "rename", { name });
+    // The inbox title is the nickname: its subscribers (the Mac sidebar) see the rename without a reload.
+    d.inbox?.changedSafe(s.id);
     return c.body(null, 204);
   });
 
@@ -2801,6 +2803,8 @@ export function createApp(d: ApiDeps): Hono {
       if (blocked) return c.json({ error: blocked }, 400);
     }
     const r = await d.switchAgent(c.req.param("id"), body.agent);
+    // The inbox item carries the agent: a swap that reached the DB is published to its subscribers.
+    if (r.status === "switched") d.inbox?.changedSafe(c.req.param("id"));
     switch (r.status) {
       case "unknown-session": return c.json({ error: "unknown session" }, 404);
       case "not-running": return c.json({ error: "session is not running" }, 409);
