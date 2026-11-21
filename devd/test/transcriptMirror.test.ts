@@ -332,7 +332,7 @@ test("send refuses commands, control characters, an exited, waiting or unknown a
     [{ sid: null }, "hi", "conversation-unknown"],
     [{ sid: SID }, "hi\x1b[201~\r!rm -rf x\r", "bad-request"],
     [{ sid: SID, agent: "grok" }, "hi", "unsupported-agent"],
-    [{ sid: null, agent: "codex" }, "hi", "conversation-unknown"],
+    [{ sid: null, agent: "codex" }, "hi", "codex-send-unsupported"],
   ] as [Pane, string, string][]) {
     const t = setup(pane);
     expect(await refusal(t.mirror.send(TMUX.id, text))).toBe(want);
@@ -348,7 +348,7 @@ test("send types the text through the send script's stdin and maps its refusals"
   expect(typed(t)[0]!.stdin).toBe("line one\nline 'two' / not a command");
   expect(typed(t)[0]!.cmd.slice(0, 3)).toEqual(["python3", "-I", "-c"]);
   expect(typed(t)[0]!.cmd.slice(4, 6)).toEqual(["main", "20"]);
-  expect(typed(t)[0]!.cmd.slice(-2)).toEqual(["claude", "777"]);
+  expect(typed(t)[0]!.cmd.at(-1)).toBe("777");
   expect(await refusal(t.mirror.send(TMUX.id, "\n  \nafter blank lines"))).toBe("sent");
   expect(typed(t)[1]!.stdin).toBe("after blank lines");
   pane.sendResult = '{"error": "pane-changed"}';
@@ -502,25 +502,25 @@ test.skipIf(!Bun.which("python3"))("MIRROR_LOCATE reports the pane, the process 
 
 test.skipIf(!Bun.which("python3"))("MIRROR_SEND pastes stdin bracketed and presses Enter, or refuses after re-checking", () => {
   const c = fakeContainer({ status: "idle" });
-  const r = c.run(MIRROR_SEND, ["main", "20", "claude,codex", "claude", "777"], "two\nlines $(nope) 'q'");
+  const r = c.run(MIRROR_SEND, ["main", "20", "claude,codex", "777"], "two\nlines $(nope) 'q'");
   expect([r.code, r.out.trim()]).toEqual([0, '{"ok": true}']);
   expect(c.pasted()).toBe("two\nlines $(nope) 'q'");
   const log = c.tmuxLog();
   expect(log).toMatch(/paste-buffer -p -d -b devd-mirror-[0-9a-f]+ -t =main:/);
   expect(log.trim().split("\n").at(-1)).toBe("send-keys -t =main: Enter");
-  expect(c.run(MIRROR_SEND, ["main", "21", "claude", "claude", "777"], "x").out.trim()).toBe('{"error": "pane-changed"}');
+  expect(c.run(MIRROR_SEND, ["main", "21", "claude", "777"], "x").out.trim()).toBe('{"error": "pane-changed"}');
   // The same pid, but another process (it started at another time): refused too.
-  expect(c.run(MIRROR_SEND, ["main", "20", "claude", "claude", "778"], "x").out.trim()).toBe('{"error": "pane-changed"}');
-  expect(fakeContainer({ status: "waiting" }).run(MIRROR_SEND, ["main", "20", "claude", "claude", "777"], "x").out.trim()).toBe('{"error": "agent-waiting-in-terminal"}');
+  expect(c.run(MIRROR_SEND, ["main", "20", "claude", "778"], "x").out.trim()).toBe('{"error": "pane-changed"}');
+  expect(fakeContainer({ status: "waiting" }).run(MIRROR_SEND, ["main", "20", "claude", "777"], "x").out.trim()).toBe('{"error": "agent-waiting-in-terminal"}');
   const scrolled = fakeContainer({ status: "idle", inMode: true });
-  expect(scrolled.run(MIRROR_SEND, ["main", "20", "claude", "claude", "777"], "x").out.trim()).toBe('{"error": "terminal-scrolled"}');
+  expect(scrolled.run(MIRROR_SEND, ["main", "20", "claude", "777"], "x").out.trim()).toBe('{"error": "terminal-scrolled"}');
   expect(scrolled.tmuxLog()).not.toContain("paste-buffer");
 });
 
 test.skipIf(!Bun.which("python3"))("MIRROR_SEND reads the screen: a draft, a dialog or an unknown screen is never typed into", () => {
   const send = (screen: string) => {
     const c = fakeContainer({ status: "idle", screen });
-    return { out: c.run(MIRROR_SEND, ["main", "20", "claude", "claude", "777"], "x").out.trim(), log: c.tmuxLog() };
+    return { out: c.run(MIRROR_SEND, ["main", "20", "claude", "777"], "x").out.trim(), log: c.tmuxLog() };
   };
   for (const [screen, want] of [
     [`${RULE}\n\x1b[39m❯ \n${RULE}\n`, '{"ok": true}'],
@@ -536,19 +536,19 @@ test.skipIf(!Bun.which("python3"))("MIRROR_SEND reads the screen: a draft, a dia
   }
   // A dialog that opens while the paste lands: Enter is not pressed.
   const late = fakeContainer({ status: "idle", screenAfterPaste: "Enter to confirm · Esc to cancel\n" });
-  expect(late.run(MIRROR_SEND, ["main", "20", "claude", "claude", "777"], "x").out.trim()).toBe('{"error": "not-submitted"}');
+  expect(late.run(MIRROR_SEND, ["main", "20", "claude", "777"], "x").out.trim()).toBe('{"error": "not-submitted"}');
   expect(late.tmuxLog()).not.toContain("send-keys");
 }, 15_000); // seven sends, each sleeping 0.3 s before Enter
 
 test.skipIf(!Bun.which("python3"))("MIRROR_SEND: an agent that exits during the send gets no paste or no Enter, so nothing reaches the shell", () => {
   // Exits while the buffer loads: the check before the paste stops it, and the buffer is dropped.
   const atLoad = fakeContainer({ status: "idle", onLoad: 'rm -rf "$PROC/20" "$PROC/30"' });
-  expect(atLoad.run(MIRROR_SEND, ["main", "20", "claude", "claude", "777"], "x").out.trim()).toBe('{"error": "pane-changed"}');
+  expect(atLoad.run(MIRROR_SEND, ["main", "20", "claude", "777"], "x").out.trim()).toBe('{"error": "pane-changed"}');
   expect(atLoad.tmuxLog()).not.toContain("paste-buffer");
   expect(atLoad.tmuxLog()).toContain("delete-buffer");
   // Exits while the paste lands (the shell got the bracketed paste, which it does not run): no Enter, no other key.
   const atPaste = fakeContainer({ status: "idle", onPaste: 'rm -rf "$PROC/20" "$PROC/30"', screenAfterPaste: "dev@box:/workspace$ x" });
-  expect(atPaste.run(MIRROR_SEND, ["main", "20", "claude", "claude", "777"], "x").out.trim()).toBe('{"error": "not-submitted"}');
+  expect(atPaste.run(MIRROR_SEND, ["main", "20", "claude", "777"], "x").out.trim()).toBe('{"error": "not-submitted"}');
   expect(atPaste.tmuxLog()).not.toContain("send-keys");
 });
 
@@ -575,7 +575,7 @@ const userMsg = (id: string, text: string) => ev({ type: "item_completed", item:
 const TID3 = "01aaaaaa-0000-7000-8000-000000000003";
 const ACCOUNT_HOME = `/home/dev/.codex-accounts/${SID2}`;
 
-test.skipIf(!Bun.which("python3"))("a Codex pane: the hook-named thread's rollout is mirrored, appended lines follow, and a running turn blocks sending", async () => {
+test.skipIf(!Bun.which("python3"))("a Codex pane: the hook-named thread's rollout is mirrored, appended lines follow, and the chat never types into it", async () => {
   const c = codexHome();
   const pane: Pane = { sid: null, agent: "codex", codexHome: c.home };
   const t = setup(pane);
@@ -587,24 +587,24 @@ test.skipIf(!Bun.which("python3"))("a Codex pane: the hook-named thread's rollou
   t.hook(TID2); // another codex of the session (another window): newest, but not this pane's
   await t.mirror.refresh(TMUX.id);
   // The pane's codex has no rollout open yet (a fresh Codex, before its first prompt): no older thread stands in.
-  expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "unresolved", agent: "Codex", sendBlock: { code: "conversation-unknown" } });
-  expect(await refusal(t.mirror.send(TMUX.id, "hi"))).toBe("conversation-unknown");
+  expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "unresolved", agent: "Codex", sendBlock: { code: "codex-send-unsupported" } });
+  expect(await refusal(t.mirror.send(TMUX.id, "hi"))).toBe("codex-send-unsupported");
   // Its first prompt opens the rollout; that prompt's hook (TID's) is older than TID2's, which is not this pane's.
   pane.codexOpen = [TID];
   t.hook(TID);
   await t.mirror.refresh(TMUX.id);
   expect(items(t.mirror)).toEqual(["user: List the files", "assistant: I'll list them.", "tool exec done: README.md\nsrc"]);
-  expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "live", agent: "Codex", conversationId: TID, activity: "busy", sendBlock: { code: "agent-busy" } });
-  expect(await refusal(t.mirror.send(TMUX.id, "hi"))).toBe("agent-busy");
-  expect(typed(t)).toEqual([]);
+  expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "live", agent: "Codex", conversationId: TID, activity: "busy", sendBlock: { code: "codex-send-unsupported" } });
   c.write(TID, lines.slice(12));
   await t.mirror.refresh(TMUX.id);
   expect(items(t.mirror)).toEqual(renderCodex(lines).items.map(brief));
-  expect(t.mirror.info(TMUX.id)).toMatchObject({ activity: "idle", sendBlock: null });
+  // Idle and resolved: still locked, with the reason the composer shows next to Open terminal.
+  const lock = { code: "codex-send-unsupported", message: "Sending from chat isn't available for Codex yet; reply in the terminal." };
+  expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "live", activity: "idle", sendBlock: lock });
   expect(t.mirror.store(TMUX.id).snapshot().native).toMatchObject({ harness: "codex", nativeThreadId: TID });
-  // Sending types into the Codex pane with the Codex screen rules.
-  expect(await refusal(t.mirror.send(TMUX.id, "next"))).toBe("sent");
-  expect(typed(t)[0]!.cmd.slice(4)).toEqual(["main", "20", expect.stringContaining("codex"), "codex", "777"]);
+  const res = await app(t).request(`/api/sessions/${TMUX.id}/mirror/messages`, { method: "POST", body: JSON.stringify({ text: "next" }), headers: { "content-type": "application/json" } });
+  expect([res.status, await res.json()]).toEqual([409, { error: lock.code, message: lock.message }]);
+  expect(typed(t)).toEqual([]);
 });
 
 test.skipIf(!Bun.which("python3"))("a Codex foreign CODEX_HOME or a symlinked sessions directory is never read", async () => {
@@ -641,9 +641,7 @@ test.skipIf(!Bun.which("python3"))("Codex /new: before its first prompt the old 
   c.write(TID2, [ev({ type: "task_started", turn_id: "b1" }), userMsg("u2", "Second conversation"), ev({ type: "task_complete", turn_id: "b1" })]);
   pane.codexOpen = [TID, TID2];
   await t.mirror.refresh(TMUX.id);
-  expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "unresolved", sendBlock: { code: "conversation-unknown" } });
-  expect(await refusal(t.mirror.send(TMUX.id, "hi"))).toBe("conversation-unknown");
-  expect(typed(t)).toEqual([]);
+  expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "unresolved", sendBlock: { code: "codex-send-unsupported" } });
   t.hook(TID2);
   await t.mirror.refresh(TMUX.id);
   expect(items(t.mirror)).toEqual(["user: First conversation", "notice: New conversation", "user: Second conversation"]);
@@ -687,7 +685,6 @@ test.skipIf(!Bun.which("python3"))("a Codex fd listing that misses the current r
     pane.codexOpen = open;
     await t.mirror.refresh(TMUX.id);
     expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "unresolved" });
-    expect(await refusal(t.mirror.send(TMUX.id, "hi"))).toBe("conversation-unknown");
   }
   // Back in the listing: known before, so it resolves at once.
   pane.codexOpen = [TID, TID2];
@@ -746,7 +743,6 @@ test.skipIf(!Bun.which("python3"))("a rewritten Codex rollout is read again from
   await t.mirror.refresh(TMUX.id);
   expect(t.logs.some((l) => l.includes("could not be read"))).toBe(true);
   expect(t.mirror.store(TMUX.id).mirrorCursor()).toBe(cursor);
-  expect(await refusal(t.mirror.send(TMUX.id, "hi"))).toBe("conversation-unknown");
 });
 
 test.skipIf(!Bun.which("python3"))("a Codex turn left open by a process that died ends when another process (pid and start) takes the thread", async () => {
@@ -760,11 +756,11 @@ test.skipIf(!Bun.which("python3"))("a Codex turn left open by a process that die
   pane.start = "888"; // `codex resume` of the same thread in a new process that got the same pid
   t.hook(TID);
   await t.mirror.refresh(TMUX.id);
-  expect(t.mirror.info(TMUX.id)).toMatchObject({ activity: "idle", sendBlock: null });
+  expect(t.mirror.info(TMUX.id)).toMatchObject({ activity: "idle" });
   expect(t.mirror.store(TMUX.id).snapshot().runs.map((r) => r.status)).toEqual(["interrupted"]);
 });
 
-test.skipIf(!Bun.which("python3"))("a long Codex backlog is read a few chunks per refresh, and sending waits until it is caught up", async () => {
+test.skipIf(!Bun.which("python3"))("a long Codex backlog is read a few chunks per refresh", async () => {
   const c = codexHome();
   const t = setup({ sid: null, agent: "codex", codexHome: c.home, codexOpen: [TID] });
   const filler = JSON.stringify({ type: "response_item", payload: { type: "reasoning", summary: [], encrypted_content: "r".repeat(100_000) } });
@@ -772,40 +768,11 @@ test.skipIf(!Bun.which("python3"))("a long Codex backlog is read a few chunks pe
   t.hook(TID);
   await t.mirror.refresh(TMUX.id);
   expect(t.calls.filter((x) => x.cmd[3] === MIRROR_CODEX_READ)).toHaveLength(CODEX_TICK_CHUNKS);
-  expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "live", sendBlock: { code: "conversation-unknown", message: expect.stringContaining("still reading") } });
+  expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "live", conversationId: TID });
+  expect(items(t.mirror).at(-1)).toBe("user: Start");
   await t.mirror.refresh(TMUX.id);
   expect(items(t.mirror).at(-1)).toBe("user: End");
-  expect(t.mirror.info(TMUX.id)).toMatchObject({ sendBlock: null });
 }, 20_000);
-
-test.skipIf(!Bun.which("python3"))("MIRROR_SEND on a Codex pane: types into an empty composer only, never during a turn or into a picker", () => {
-  const READY_CODEX = `• done\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n  model · /workspace\n  \x1b[1m?\x1b[0m for shortcuts\n`;
-  const send = (screen: string, screenAfterPaste?: string) => {
-    const c = fakeContainer({ status: "idle", agent: "codex", screen, screenAfterPaste });
-    return { out: c.run(MIRROR_SEND, ["main", "20", "codex", "codex", "777"], "x").out.trim(), log: c.tmuxLog() };
-  };
-  const ok = send(READY_CODEX, `\x1b[1m›\x1b[0m pasted\n  model · /workspace\n`);
-  expect(ok.out).toBe('{"ok": true}');
-  expect(ok.log.trim().split("\n").at(-1)).toBe("send-keys -t =main: Enter");
-  for (const [screen, want] of [
-    [`› hello draft\n  model · /workspace\n`, '{"error": "terminal-has-draft"}'],
-    // An empty first line with text below it: the shortcuts hint is gone, so the screen is not trusted.
-    [`› \n  second line\n  model · /workspace\n`, '{"error": "terminal-not-ready"}'],
-    [`• Working (9s • esc to interrupt)\n› \x1b[2mAsk Codex to do anything\x1b[0m\n  ? for shortcuts\n`, '{"error": "agent-busy"}'],
-    [`  Where should the new conversation run?\n› 1. Use current Git worktree\n  enter select · esc back\n`, '{"error": "agent-waiting-in-terminal"}'],
-    [` Resume a previous session\n  › 4s ago      Reply with B\n enter resume   ⌃a archive   esc exit\n`, '{"error": "agent-waiting-in-terminal"}'],
-    [`  Allow this command?\n› 1. Yes\n  Press enter to confirm or esc to cancel\n`, '{"error": "agent-waiting-in-terminal"}'],
-    ["dev@box:/workspace$ ", '{"error": "terminal-not-ready"}'],
-  ] as [string, string][]) {
-    const r = send(screen);
-    expect(r.out).toBe(want);
-    expect(r.log).not.toContain("paste-buffer");
-  }
-  // A turn that starts while the paste lands: Enter would steer it, so it is not pressed.
-  const late = send(READY_CODEX, `• Working (0s • esc to interrupt)\n› pasted\n`);
-  expect(late.out).toBe('{"error": "not-submitted"}');
-  expect(late.log).not.toContain("send-keys");
-}, 15_000);
 
 test.skipIf(!Bun.which("python3"))("MIRROR_LOCATE reports a codex process's CODEX_HOME, start and the main rollouts it has open", () => {
   const c = fakeContainer({ status: "idle", agent: "codex" });

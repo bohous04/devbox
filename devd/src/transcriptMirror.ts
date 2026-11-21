@@ -1,5 +1,5 @@
 // The Chat view of a tmux session: its `main` pane's Claude Code transcript or Codex rollout (codexMirror.ts), mapped
-// onto the chat thread's item model, and a composer that types into the pane.
+// onto the chat thread's item model, and a composer that types into the pane (Claude only: Codex is read-only for now).
 //
 // Where the transcript is: a VPS session container mounts devd's `<root>/_claude-projects/<session id>` as
 // `/home/dev/.claude/projects/-workspace` (sessions.ts), and every account profile's `projects` resolves into it, so
@@ -140,11 +140,6 @@ print(json.dumps(locate(sys.argv[1])))
 // The screen: Claude's selection dialogs (trust, question, permission) end with a "Enter to confirm/select … Esc to
 // cancel" footer; its prompt box is a `❯` line right below a rule, running to the next rule, and the placeholder in an
 // empty prompt is dim (`\e[2m` up to a reset). Verified on Claude Code 2.1.325.
-//
-// Codex (verified on 0.166.0): its composer is the last `›` line, with a dim placeholder when empty, and the "? for
-// shortcuts" hint below it only while nothing is typed; its pickers end with "enter select/confirm/continue/resume … esc";
-// a running turn shows "esc to interrupt". Codex takes a message sent during a turn into that turn (a steer, not a
-// queue), so a running turn refuses (agent-busy) instead.
 export const MIRROR_SEND = String.raw`# MIRROR_SEND${PY_LOCATE_FN}
 import re, signal, time, uuid
 
@@ -153,9 +148,6 @@ DIM = re.compile(r"\x1b\[2m.*?(?:\x1b\[0?m|\x1b\[22m|$)")
 RULE = re.compile(r"^\s*─{8,}\s*$")
 PROMPT = re.compile(r"^\s*❯")
 DIALOG = re.compile(r"Enter to (confirm|select)|Esc to cancel")
-CODEX_PROMPT = re.compile(r"^›(?: |$)")
-CODEX_DIALOG = re.compile(r"\benter (?:to )?(?:confirm|select|continue|submit|resume)\b.*\besc\b", re.I)
-CODEX_EMPTY = re.compile(r"^\s*\? for shortcuts\b")
 
 def screen(target):
     r = subprocess.run(["tmux", "capture-pane", "-e", "-p", "-t", target], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -176,26 +168,6 @@ def screen(target):
         typed = [ANSI.sub("", DIM.sub("", l)).replace("\u00a0", " ") for l in raw[i:end]]
         typed[0] = PROMPT.sub("", typed[0])
         return "draft" if any(t.strip() for t in typed) else "ready"
-    return "unknown"
-
-def screen_codex(target):
-    r = subprocess.run(["tmux", "capture-pane", "-e", "-p", "-t", target], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    if r.returncode != 0:
-        return "unknown"
-    raw = r.stdout.decode("utf-8", "replace").split("\n")
-    plain = [ANSI.sub("", l) for l in raw]
-    if any(CODEX_DIALOG.search(l) for l in plain[-25:]):
-        return "dialog"
-    if any("esc to interrupt" in l for l in plain[-25:]):
-        return "busy"
-    for i in range(len(plain) - 1, -1, -1):
-        if not CODEX_PROMPT.match(plain[i]):
-            continue
-        typed = CODEX_PROMPT.sub("", ANSI.sub("", DIM.sub("", raw[i])).replace("\u00a0", " "), count=1)
-        if typed.strip():
-            return "draft"
-        # An empty first line can still hold a draft below it; the hint shows only while nothing is typed.
-        return "ready" if any(CODEX_EMPTY.match(l) for l in plain[i + 1:]) else "unknown"
     return "unknown"
 
 def fail(code):
@@ -234,16 +206,15 @@ def check(session, expected, agents):
 
 # Below the docker exec timeout (15 s), so a hung tmux never leaves this running to type later.
 signal.alarm(12)
-session, expected, agents, kind, expected_start = sys.argv[1], int(sys.argv[2]), set(sys.argv[3].split(",")), sys.argv[4], sys.argv[5]
-read_screen = screen_codex if kind == "codex" else screen
+session, expected, agents, expected_start = sys.argv[1], int(sys.argv[2]), set(sys.argv[3].split(",")), sys.argv[4]
 text = sys.stdin.buffer.read()
 target = "=" + session + ":"
 refused = check(session, expected, agents)
 if refused:
     fail(refused)
-state = read_screen(target)
+state = screen(target)
 if state != "ready":
-    fail({"dialog": "agent-waiting-in-terminal", "draft": "terminal-has-draft", "busy": "agent-busy"}.get(state, "terminal-not-ready"))
+    fail({"dialog": "agent-waiting-in-terminal", "draft": "terminal-has-draft"}.get(state, "terminal-not-ready"))
 buf = "devd-mirror-" + uuid.uuid4().hex
 subprocess.run(["tmux", "load-buffer", "-b", buf, "-"], input=text, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 # The last check before the paste: the agent may have exited while the buffer loaded.
@@ -254,10 +225,10 @@ if refused:
 subprocess.run(["tmux", "paste-buffer", "-p", "-d", "-b", buf, "-t", target], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 # The agent takes the paste asynchronously; an Enter right behind it can land before the pasted text.
 time.sleep(0.3)
-# Enter only into the same agent whose prompt now holds the paste (for Codex: with no turn started meanwhile). Otherwise
+# Enter only into the same agent whose prompt now holds the paste. Otherwise
 # nothing more is typed: the pasted text is not cleared either, since a key sent to whatever now has the pane (a shell,
 # a dialog) is exactly what this avoids.
-if check(session, expected, agents) or read_screen(target) != "draft":
+if check(session, expected, agents) or screen(target) != "draft":
     fail("not-submitted")
 subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 print(json.dumps({"ok": True}))
@@ -505,7 +476,7 @@ export const SEND_MESSAGES: Record<MirrorSendError, string> = {
   "terminal-not-ready": "The terminal is not showing the agent's prompt. Check the terminal.",
   "terminal-scrolled": "The terminal is scrolled back. Return it to the bottom first.",
   "conversation-unknown": "devd could not tell which conversation the agent is on. Use the terminal.",
-  "agent-busy": "The agent is working on a turn. Send when it finishes, or use the terminal.",
+  "codex-send-unsupported": "Sending from chat isn't available for Codex yet; reply in the terminal.",
   "unsupported-agent": "Chat view isn't supported for this agent yet.",
   "unsupported-host": "Chat view isn't supported on InstaBox sessions yet.",
   "pane-changed": "The terminal changed while the message was being sent; nothing was typed. Check the terminal.",
@@ -528,9 +499,9 @@ export interface MirrorDeps {
 
 interface Pending { text: string; at: number }
 
-/** The Codex conversation the pane is on (null: none known yet), whether a turn of it runs, and whether the read has
- *  reached the rollout's end (until it has, `busy` is not known). */
-interface CodexState { thread: string | null; busy: boolean; caughtUp: boolean }
+/** The Codex conversation the pane is on (null: none known yet), and whether a turn of it runs (as far as the read has
+ *  got: a backlog takes several refreshes). */
+interface CodexState { thread: string | null; busy: boolean }
 
 /** codexThread's view of the pane's codex process (`pid:start`): the rollouts seen open, and the newest hook row at the
  *  time one opened that was not the choice (null: no wait). */
@@ -549,7 +520,7 @@ export class TranscriptMirror {
   /** Bumped by release: a refresh that started before it stops at its next step instead of reopening the store. */
   private generation = new Map<string, number>();
   private timers = new Map<string, Set<ReturnType<typeof setTimeout>>>();
-  /** What the last refresh found in the pane: the agent a send types into. */
+  /** What the last refresh found in the pane: what a send checks before typing (only into Claude). */
   private panes = new Map<string, PaneAgent | null>();
   /** Per session, for the pane's codex process (`pid:start`): the rollouts it was seen with open, and the newest hook
    *  row at the time an unchosen one newly opened (see codexThread). */
@@ -663,18 +634,17 @@ export class TranscriptMirror {
     }
     if (pane.kind === "codex") {
       const agent = AGENTS.codex.label;
-      if (codex?.thread == null) return { ...base, state: "unresolved", agent, sendBlock: block("conversation-unknown") };
-      if (!codex.caughtUp) {
-        return { ...base, state: "live", agent, conversationId: codex.thread,
-          sendBlock: block("conversation-unknown", "devd is still reading this conversation. Send again in a moment.") };
-      }
+      // v1 only reads Codex: which conversation its TUI shows can change (/new, /resume) with nothing devd can see
+      // until the next prompt, so a message typed in from here could land in another conversation than the one shown.
+      const sendBlock = block("codex-send-unsupported");
+      if (codex?.thread == null) return { ...base, state: "unresolved", agent, sendBlock };
       // Codex reports no status of its own: waiting comes from its hook events, a running turn from the rollout.
       const live = this.d.live(id);
       const waiting = live?.status === "waiting";
       return {
         state: "live", agent, conversationId: codex.thread, activity: waiting ? "waiting" : codex.busy ? "busy" : "idle",
         terminalPrompt: waiting ? { text: live.reason || "The agent is waiting for an answer in the terminal." } : null,
-        sendBlock: waiting ? block("agent-waiting-in-terminal") : codex.busy ? block("agent-busy") : pane.inMode ? block("terminal-scrolled") : null,
+        sendBlock,
       };
     }
     const agent = AGENTS.claude.label;
@@ -769,7 +739,7 @@ export class TranscriptMirror {
       cur = { ...cur, watch };
       store.applyBatch([], JSON.stringify(cur));
     }
-    if (pane.home === null || thread === null) return { thread: null, busy: false, caughtUp: true };
+    if (pane.home === null || thread === null) return { thread: null, busy: false };
     const proc = `${pane.pid}:${pane.start}`;
     for (let chunk = 1; ; chunk++) {
       const r = await this.d.exec(s.container, ["python3", "-I", "-c", MIRROR_CODEX_READ, pane.home, thread,
@@ -778,7 +748,7 @@ export class TranscriptMirror {
       if (!current()) return null;
       const out = r.code === 0 && !r.timedOut ? parseCodexRead(r.stdout) : null;
       if (out === null) { this.log(`mirror ${id}: the Codex rollout could not be read`); return null; }
-      if (out.id === null) return { thread: null, busy: false, caughtUp: true };
+      if (out.id === null) return { thread: null, busy: false };
       const pre: BridgeEvent[] = [];
       const closeOpenRun = () => {
         if (cur.map.openRun !== null) pre.push({ type: "run.completed", runId: cur.map.openRun, nativeThreadId: cur.sid ?? "", usage: null, costUsd: null });
@@ -808,8 +778,8 @@ export class TranscriptMirror {
       if (advanced || pre.length || moved) this.commit(id, store, pre, mapped.events, cur);
       this.markSeen(id, mapped.seen);
       const done = !advanced || out.next >= out.size;
-      // A long backlog continues on the next refresh, so a send waits for one bounded read, not for all of it.
-      if (done || chunk >= CODEX_TICK_CHUNKS) return { thread: out.id, busy: map.turn !== null, caughtUp: done };
+      // A long backlog continues on the next refresh, so one refresh stays a bounded read.
+      if (done || chunk >= CODEX_TICK_CHUNKS) return { thread: out.id, busy: map.turn !== null };
       if (!current()) return null;
     }
   }
@@ -915,7 +885,7 @@ export class TranscriptMirror {
   }
 
   /** Types `text` into the pane's agent prompt and submits it, or refuses with the reason. Never types into anything
-   *  but a verified, ready Claude or Codex prompt. */
+   *  but a verified, ready Claude prompt. */
   async send(id: string, text: string): Promise<void> {
     // Leading blank lines would leave an agent's prompt looking empty after the paste, so Enter would not be pressed.
     text = text.replace(/\r\n/g, "\n").replace(/^(?:[ \t]*\n)+/, "");
@@ -936,16 +906,16 @@ export class TranscriptMirror {
     if (this.sending.has(id)) throw new MirrorSendRefused("pane-changed", "Another message is being sent to this terminal.");
     this.sending.add(id);
     try {
-      // A fresh look at the pane and the conversation (for Codex, whether a turn runs comes from the rollout).
+      // A fresh look at the pane and the conversation.
       await this.refresh(id);
       const pane = this.panes.get(id);
       if (pane === undefined) throw new MirrorSendRefused("terminal-not-ready", "devd could not check the terminal just now. Try again, or use the terminal.");
       const info = this.info(id);
-      if ((pane?.kind !== "claude" && pane?.kind !== "codex") || info.sendBlock) {
+      if (pane?.kind !== "claude" || info.sendBlock) {
         const b = info.sendBlock ?? { code: "agent-not-running" as const, message: SEND_MESSAGES["agent-not-running"] };
         throw new MirrorSendRefused(b.code, b.message);
       }
-      const sent = await this.d.exec(s.container, ["python3", "-I", "-c", MIRROR_SEND, MIRROR_PANE, String(pane.pid), AGENT_RUNTIMES.join(","), pane.kind, pane.start], 15_000, text);
+      const sent = await this.d.exec(s.container, ["python3", "-I", "-c", MIRROR_SEND, MIRROR_PANE, String(pane.pid), AGENT_RUNTIMES.join(","), pane.start], 15_000, text);
       let out: { ok?: unknown; error?: unknown } | null = null;
       try { out = JSON.parse(sent.stdout); } catch { out = null; }
       if (sent.code !== 0 || sent.timedOut || out === null) {
