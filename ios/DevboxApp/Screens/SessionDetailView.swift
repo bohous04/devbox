@@ -106,10 +106,18 @@ struct SessionDetailView: View {
                 SectionHeader("Actions")
                 LazyVGrid(columns: actionColumns, spacing: 8) {
                     if running {
-                        actionButton("Terminal", systemImage: "terminal", variant: .default) { showTerminal = true }
+                        actionButton("Terminal", systemImage: "terminal", variant: .default) {
+                            // The view a tmux session's inbox row opens next time (InboxRoute.row): this detail again.
+                            TmuxTabMemory.shared.remember(.terminal, for: session.id)
+                            showTerminal = true
+                        }
                             .disabled(appModel.client == nil)
                         // A chat session's thread, or a tmux session's terminal conversation (devd's mirror).
-                        actionButton("Chat", systemImage: "bubble.left", variant: .outline) { showChat = true }
+                        actionButton("Chat", systemImage: "bubble.left", variant: .outline) {
+                            // A tmux session's inbox row opens straight into its chat from now on (InboxRoute.row).
+                            TmuxTabMemory.shared.remember(.chat, for: session.id)
+                            showChat = true
+                        }
                             .disabled(appModel.client == nil)
                     }
 

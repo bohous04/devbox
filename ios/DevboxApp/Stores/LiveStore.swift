@@ -111,7 +111,10 @@ final class LiveStore: ObservableObject {
         // offline", just the end of polling, and the offline banner must not appear because of our own stop().
         var errorMessage: String?
         switch l {
-        case .success(let value): live = value
+        case .success(let value):
+            live = value
+            // The list holds every session devd has: a remembered tab of any other is for a session that ended.
+            TmuxTabMemory.shared.prune(keeping: Set(value.sessions.map(\.id)))
         case .failure(let error) where !isCancellation(error): errorMessage = errorText(error)
         case .failure: break
         }

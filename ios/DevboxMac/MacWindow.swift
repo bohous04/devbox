@@ -691,9 +691,10 @@ private struct WindowConfigurator: NSViewRepresentable {
     }
 }
 
-/// The thread as chat or terminal. A tmux session has no chat, so it starts on its terminal.
+/// The thread as chat or terminal. A tmux session starts on the one last chosen for it (TmuxTabMemory), else its
+/// terminal.
 struct MacThreadDetail: View {
-    private enum Tab { case chat, terminal }
+    private typealias Tab = TmuxTabMemory.Tab
 
     let threadId: String
     let client: DevdClient
@@ -706,16 +707,20 @@ struct MacThreadDetail: View {
     private var item: InboxItem? { inbox.items?.first { $0.sessionId == threadId } }
 
     var body: some View {
-        let shown = tab ?? (item?.runtime == .tmux ? .terminal : .chat)
+        let shown = tab ?? opening
         Group {
             switch shown {
             case .chat:
                 let store = state.windows.store(for: threadId, client: client)
-                ChatScreen(store: store, client: client, openTerminal: { tab = .terminal },
+                ChatScreen(store: store, client: client, openTerminal: { choose(.terminal) },
                            closeWindow: { dismissWindow(id: MacWindow.sceneId, value: threadId) },
                            revealChanges: revealChanges)
                     .id(ObjectIdentifier(store))
                     .onReceive(store.$ended) { if $0 { state.windows.ended(threadId) } }
+                    // A remembered Chat the mirror cannot show (another agent, no longer tmux) opens Terminal, the
+                    // reason still on the Chat tab; the choice is kept for when it can.
+                    .onReceive(store.$mirror) { m in if tab == nil, m.flatMap(MirrorView.unsupported) != nil { tab = .terminal } }
+                    .onReceive(store.$noLongerTmux) { if $0, tab == nil { tab = .terminal } }
             case .terminal:
                 TerminalScreen(sessionId: threadId, title: item?.title ?? threadId, client: client, closable: false)
             }
@@ -733,12 +738,12 @@ struct MacThreadDetail: View {
             if #available(macOS 26, *) { ToolbarSpacer(.flexible, placement: .primaryAction) }
             ToolbarItem(placement: .primaryAction) {
                 ChangesChip(store: state.windows.store(for: threadId, client: client), client: client) {
-                    tab = .chat
+                    choose(.chat)
                     revealChanges += 1
                 }
             }
             ToolbarItem(placement: .primaryAction) {
-                Picker("View", selection: Binding(get: { shown }, set: { tab = $0 })) {
+                Picker("View", selection: Binding(get: { shown }, set: { choose($0) })) {
                     Text("Chat").tag(Tab.chat)
                     Text("Terminal").tag(Tab.terminal)
                 }
@@ -746,6 +751,20 @@ struct MacThreadDetail: View {
                 .labelsHidden()
             }
         }
+    }
+
+    private var isTmux: Bool { item?.runtime == .tmux }
+
+    /// Before the user picks one in this window. A chat session has no Terminal default to remember against.
+    private var opening: Tab {
+        guard isTmux else { return .chat }
+        return TmuxTabMemory.shared.tab(for: threadId) ?? .terminal
+    }
+
+    /// The user's own switch; a tmux session remembers it for next time.
+    private func choose(_ next: Tab) {
+        tab = next
+        if isTmux { TmuxTabMemory.shared.remember(next, for: threadId) }
     }
 }
 

@@ -5,6 +5,13 @@ import SwiftUI
 enum InboxRoute: Hashable {
     case thread(String)
     case session(String)
+
+    /// A chat session opens its thread; a tmux one its detail, or its chat (the mirror) when that is the view last
+    /// opened for it on this device (TmuxTabMemory).
+    @MainActor
+    static func row(sessionId: String, runtime: InboxItem.Runtime, memory: TmuxTabMemory = .shared) -> InboxRoute {
+        runtime == .chat || memory.tab(for: sessionId) == .chat ? .thread(sessionId) : .session(sessionId)
+    }
 }
 
 /// Every session by what it needs (dashboard/src/pages/Inbox.tsx): needs you, working, idle, then the snoozed and
@@ -171,7 +178,7 @@ struct InboxScreen: View {
         VStack(spacing: 2) {
             ForEach(items) { item in
                 HStack(alignment: .top, spacing: 0) {
-                    NavigationLink(value: item.runtime == .chat ? InboxRoute.thread(item.sessionId) : InboxRoute.session(item.sessionId)) {
+                    NavigationLink(value: InboxRoute.row(sessionId: item.sessionId, runtime: item.runtime)) {
                         InboxRow(item: item, now: now, preview: preview)
                     }
                     .buttonStyle(InboxPressStyle())
