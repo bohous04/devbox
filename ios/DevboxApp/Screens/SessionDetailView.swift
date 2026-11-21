@@ -25,6 +25,7 @@ struct SessionDetailView: View {
     @State private var showSwitchAccountConfirm = false
     @State private var showSwitchAgentConfirm = false
     @State private var showTerminal = false
+    @State private var showChat = false
 
     @State private var reviews: [CriticReview] = []
     @State private var showFindings = false
@@ -106,6 +107,9 @@ struct SessionDetailView: View {
                 LazyVGrid(columns: actionColumns, spacing: 8) {
                     if running {
                         actionButton("Terminal", systemImage: "terminal", variant: .default) { showTerminal = true }
+                            .disabled(appModel.client == nil)
+                        // A chat session's thread, or a tmux session's terminal conversation (devd's mirror).
+                        actionButton("Chat", systemImage: "bubble.left", variant: .outline) { showChat = true }
                             .disabled(appModel.client == nil)
                     }
 
@@ -413,6 +417,9 @@ struct SessionDetailView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Theme.C.background)
             }
+        }
+        .navigationDestination(isPresented: $showChat) {
+            if let client = appModel.client { ChatScreen(sessionId: session.id, client: client) }
         }
         .fullScreenOrSheet(isPresented: $showTerminal) {
             if let client = appModel.client {

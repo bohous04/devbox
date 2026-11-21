@@ -407,13 +407,105 @@ final class ThreadStoreLiveTests: XCTestCase {
         store.stop()
     }
 
-    func testTmuxSessionIsReportedNotStreamed() async throws {
-        MockURLProtocol.handler = { _ in .init(statusCode: 409, data: Data(#"{"error":"not-a-chat-session"}"#.utf8)) }
+    private func mirrorBody(lastSeq: Int, sendBlock: String = "null", activity: String = "idle") -> Data {
+        let info = #"{"state":"live","agent":"Claude Code","conversationId":"c1","activity":"\#(activity)","terminalPrompt":null,"sendBlock":\#(sendBlock)}"#
+        return Data(#"{"mirror":\#(info),"snapshot":\#(String(decoding: snapshot(lastSeq: lastSeq), as: UTF8.self))}"#.utf8)
+    }
+
+    /// A tmux session: /thread refuses it, so the store reads devd's mirror of the pane, streams the mirror's own
+    /// stream, applies its `mirror` frames, and never marks it seen.
+    func testTmuxSessionLoadsAndStreamsTheMirror() async throws {
+        MockURLProtocol.handler = { req in
+            switch req.url?.path {
+            case "/api/sessions/s1/thread": return .init(statusCode: 409, data: Data(#"{"error":"not-a-chat-session"}"#.utf8))
+            case "/api/sessions/s1/mirror": return .init(statusCode: 200, data: self.mirrorBody(lastSeq: 4))
+            default: return .init(statusCode: 204)
+            }
+        }
+        var paths: [String] = []
+        var feed: AsyncThrowingStream<String, Error>.Continuation?
+        let store = ThreadStore(sessionId: "s1", client: client(), connect: { path, _ in
+            paths.append(path)
+            return AsyncThrowingStream { feed = $0 }
+        })
+        await store.start()
+        try await waitUntil { feed != nil }
+        XCTAssertTrue(store.isTmux)
+        XCTAssertEqual(store.thread?.lastSeq, 4)
+        XCTAssertEqual(store.mirror?.agent, "Claude Code")
+        XCTAssertEqual(paths, ["/api/sessions/s1/mirror/stream?afterSeq=4"])
+        let codex = #"{"state":"live","agent":"Codex","conversationId":"t1","activity":"idle","terminalPrompt":null,"sendBlock":{"code":"codex-send-unsupported","message":"Sending from chat isn't available for Codex yet; reply in the terminal."}}"#
+        for l in ["event: mirror", "data: \(codex)", ""] { feed?.yield(l) }
+        try await waitUntil { store.mirror?.agent == "Codex" }
+        XCTAssertEqual(store.mirror?.sendBlock?.code, "codex-send-unsupported")
+        store.markSeenIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertFalse(requests.contains { $0.contains("/seen") }, "a mirror has no seen marker")
+        store.stop()
+
+        // Back from the background: the mirror's own catch-up route.
+        await store.resume()
+        XCTAssertTrue(requests.contains("GET /api/sessions/s1/mirror?afterSeq=4"))
+        store.stop()
+    }
+
+    /// A refused send becomes the lock and keeps the text (false); devd repeating the same info keeps it; a sent
+    /// message or a real change of the pane takes it away; a failure devd does not explain throws.
+    func testSendToPaneLocksOnARefusal() async throws {
+        var post = (status: 409, body: #"{"error":"terminal-has-draft","message":"Text is already typed."}"#)
+        MockURLProtocol.handler = { req in
+            switch req.url?.path {
+            case "/api/sessions/s1/thread": return .init(statusCode: 409, data: Data(#"{"error":"not-a-chat-session"}"#.utf8))
+            case "/api/sessions/s1/mirror": return .init(statusCode: 200, data: self.mirrorBody(lastSeq: 1))
+            case "/api/sessions/s1/mirror/messages": return .init(statusCode: post.status, data: Data(post.body.utf8))
+            default: return .init(statusCode: 204)
+            }
+        }
+        var feed: AsyncThrowingStream<String, Error>.Continuation?
+        let store = ThreadStore(sessionId: "s1", client: client(), connect: { _, _ in AsyncThrowingStream { feed = $0 } })
+        await store.start()
+        try await waitUntil { feed != nil }
+        let refused = try await store.sendToPane(text: "hi")
+        XCTAssertFalse(refused)
+        XCTAssertEqual(store.sendLock, MirrorLock(code: "terminal-has-draft", message: "Text is already typed."))
+        let body = MockURLProtocol.capturedRequests.last { $0.url?.path == "/api/sessions/s1/mirror/messages" }.map(bodyJSON)
+        XCTAssertEqual(body as NSDictionary?, ["text": "hi"] as NSDictionary)
+        let same = #"{"state":"live","agent":"Claude Code","conversationId":"c1","activity":"idle","terminalPrompt":null,"sendBlock":null}"#
+        for l in ["event: mirror", "data: \(same)", "", "event: ping", "data: {}", ""] { feed?.yield(l) }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertNotNil(store.sendLock, "the same info again keeps the lock")
+        for l in ["event: mirror", "data: \(same.replacingOccurrences(of: "idle", with: "busy"))", ""] { feed?.yield(l) }
+        try await waitUntil { store.sendLock == nil }
+
+        post = (409, #"{"error":"codex-send-unsupported","message":"Sending from chat isn't available for Codex yet; reply in the terminal."}"#)
+        _ = try await store.sendToPane(text: "hi")
+        XCTAssertEqual(store.sendLock?.code, "codex-send-unsupported")
+        post = (202, #"{"sent":true}"#)
+        let sent = try await store.sendToPane(text: "hi")
+        XCTAssertTrue(sent)
+        XCTAssertNil(store.sendLock)
+        post = (400, #"{"error":"Commands (a line starting with /, ! or #) can't be sent from the chat; type them in the terminal."}"#)
+        do {
+            _ = try await store.sendToPane(text: "/clear")
+            XCTFail("a 400 is the composer's error, not a lock")
+        } catch {
+            XCTAssertNil(store.sendLock)
+        }
+        store.stop()
+    }
+
+    /// /mirror itself failing leaves the load error (the screen offers Open terminal), not a silent empty thread.
+    func testMirrorLoadFailureIsShown() async throws {
+        MockURLProtocol.handler = { req in
+            if req.url?.path == "/api/sessions/s1/thread" { return .init(statusCode: 409, data: Data(#"{"error":"not-a-chat-session"}"#.utf8)) }
+            return .init(statusCode: 500, data: Data(#"{"error":"boom"}"#.utf8))
+        }
         var connects = 0
         let store = ThreadStore(sessionId: "s1", client: client(), connect: { _, _ in connects += 1; return AsyncThrowingStream { _ in } })
         await store.start()
         XCTAssertTrue(store.isTmux)
         XCTAssertNil(store.thread)
+        XCTAssertEqual(store.loadError, "boom")
         XCTAssertEqual(connects, 0)
     }
 

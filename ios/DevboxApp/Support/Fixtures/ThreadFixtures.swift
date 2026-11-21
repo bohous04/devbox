@@ -18,7 +18,7 @@ enum ThreadFixtures {
         "POST \(base)/thread/seen": { _ in .json([String: Any]()) },
         // Taken; the level would come back over the stream, which is silent here.
         "POST \(base)/thread/effort": { _ in FixtureResponse(status: 202, body: Data()) },
-        // The chat header's place ("orchard / sync") comes from the live session list.
+        // The chat header's place ("orchard / sync") comes from the live session list (with MirrorFixtures' sessions).
         "GET /api/stats/live": { _ in raw(live) },
         "GET /api/stats/sessions": { _ in .json([Any]()) },
         "GET \(base)/changes": { _ in raw(changes) },
@@ -99,7 +99,7 @@ enum ThreadFixtures {
     {"sessions":[{"id":"dev-orchard-sync","folder":"orchard","project":"orchard","repo":"sync","container":"dev-orchard-sync",
     "port_base":40100,"status":"running","solo":0,"created_at":1790000000000,"last_active_at":1790000600000,"important":0,
     "name":null,"critic":0,"agent":"claude","ports":[],"claudeState":"idle","cpuPct":0,"memBytes":0,
-    "workspace":"/workspace","accountId":null}],"disk":{"usedBytes":1,"totalBytes":2}}
+    "workspace":"/workspace","accountId":null},\#(MirrorFixtures.liveSessions)],"disk":{"usedBytes":1,"totalBytes":2}}
     """#
 
     private static let thread = #"""

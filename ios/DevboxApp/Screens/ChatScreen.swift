@@ -1,8 +1,10 @@
 import SwiftUI
 
 /// A chat session's conversation (dashboard/src/pages/SessionPage.tsx): the thread live over devd's stream, the
-/// composer with the model, account and agent switchers, and the session's terminal from the toolbar. iOS drops
-/// the stream in the background; coming back catches up from the thread's seq (`ThreadStore.resume`).
+/// composer with the model, account and agent switchers, and the session's terminal from the toolbar. A tmux session
+/// shows its pane's transcript instead (devd's mirror), with a plain composer that types into the pane and the
+/// reason when it cannot. iOS drops the stream in the background; coming back catches up from the thread's seq
+/// (`ThreadStore.resume`).
 struct ChatScreen: View {
     @StateObject private var store: ThreadStore
     @EnvironmentObject private var live: LiveStore
@@ -75,18 +77,26 @@ struct ChatScreen: View {
                 } actions: {
                     if let closeWindow { Button("Close window", action: closeWindow) }
                 }
-            } else if store.isTmux {
+            } else if let reason = store.mirror.flatMap(MirrorView.unsupported) {
                 ContentUnavailableView {
-                    Label("This is a tmux session", systemImage: "terminal")
+                    Label(reason, systemImage: "terminal")
                 } description: {
-                    Text("It has no chat thread; its agent runs in the terminal.")
+                    Text("Its agent runs in the terminal.")
                 } actions: {
-                    Button("Open the terminal") { if let openTerminal { openTerminal() } else { showTerminal = true } }
+                    Button("Open terminal", action: toTerminal)
                 }
             } else if let thread = store.thread {
                 conversation(thread)
             } else if let error = store.loadError {
-                ContentUnavailableView("Could not load the thread", systemImage: "bubble.left.and.exclamationmark.bubble.right", description: Text(error))
+                ContentUnavailableView {
+                    Label(store.isTmux ? "Could not load the terminal's conversation" : "Could not load the thread",
+                          systemImage: "bubble.left.and.exclamationmark.bubble.right")
+                } description: {
+                    Text(error)
+                } actions: {
+                    // The way out a tmux session always had.
+                    if store.isTmux { Button("Open terminal", action: toTerminal) }
+                }
             } else {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -148,13 +158,20 @@ struct ChatScreen: View {
         }
     }
 
+    /// Open terminal: the Mac's tab, else the full-screen terminal. A refused send's lock goes with it, as on the web.
+    private func toTerminal() {
+        store.sendLock = nil
+        if let openTerminal { openTerminal() } else { showTerminal = true }
+    }
+
     private func conversation(_ t: ThreadSnapshot) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     banners
                     if t.items.isEmpty {
-                        EmptyState("No messages yet — write the first message below.", systemImage: "bubble.left")
+                        EmptyState(store.isTmux ? "No messages yet — the agent's conversation in the terminal shows up here."
+                                   : "No messages yet — write the first message below.", systemImage: "bubble.left")
                     }
                     let turnStarts = WorkGroups.turnStarts(store.display)
                     ForEach(store.display) { row in
@@ -219,15 +236,21 @@ struct ChatScreen: View {
                 proxy.scrollTo("end", anchor: .bottom)
             }
             .safeAreaInset(edge: .bottom) {
-                ChatSwitchers(sessionId: sessionId, thread: t, targetKey: store.switchKey, client: client) { chip, status in
-                    VStack(alignment: .leading, spacing: 6) {
-                        status
-                        ComposerView(running: ThreadView.activeRun(t) != nil, chip: chip,
-                                     onSend: { try await store.send(text: $0, images: $1) },
-                                     onStop: { try await store.interrupt() },
-                                     // A chat session always runs on the VPS (devd's chatRuntimeBlock), where devd lists files.
-                                     commands: t.commands,
-                                     searchFiles: { [client, sessionId] in try await searchSessionFiles(client, sessionId: sessionId, query: $0) })
+                Group {
+                    if let mirror = store.mirror {
+                        mirrorComposer(mirror)
+                    } else {
+                        ChatSwitchers(sessionId: sessionId, thread: t, targetKey: store.switchKey, client: client) { chip, status in
+                            VStack(alignment: .leading, spacing: 6) {
+                                status
+                                ComposerView(running: ThreadView.activeRun(t) != nil, chip: chip,
+                                             onSend: { try await store.send(text: $0, images: $1); return true },
+                                             onStop: { try await store.interrupt() },
+                                             // A chat session always runs on the VPS (devd's chatRuntimeBlock), where devd lists files.
+                                             commands: t.commands,
+                                             searchFiles: { [client, sessionId] in try await searchSessionFiles(client, sessionId: sessionId, query: $0) })
+                            }
+                        }
                     }
                 }
                 .padding(.horizontal, Theme.S.screenPadding)
@@ -268,6 +291,25 @@ struct ChatScreen: View {
     }
 
     private static let changesId = "changes"
+
+    /// The terminal's agent: what is typed here goes into its pane. No model or effort chip, no `/` commands (devd
+    /// refuses them: they belong in the terminal), no `@` files and no images.
+    private func mirrorComposer(_ mirror: MirrorInfo) -> some View {
+        let notice = MirrorView.notice(mirror, lock: store.sendLock)
+        return VStack(alignment: .leading, spacing: 6) {
+            if let notice {
+                MirrorNoticeBar(notice: notice, openTerminal: toTerminal, dismiss: { store.sendLock = nil })
+            }
+            ComposerView(running: false, chip: nil,
+                         onSend: { text, _ in try await store.sendToPane(text: text) },
+                         onStop: {},
+                         placeholder: MirrorView.placeholder, fieldOff: MirrorView.fieldOff(mirror), imagesOff: MirrorView.imagesOff)
+        }
+        // VoiceOver hears each new line once, as the web's live region says it.
+        .onChange(of: notice?.announcement) { _, text in
+            if let text { AccessibilityNotification.Announcement(text).post() }
+        }
+    }
 
     @ViewBuilder
     private var banners: some View {

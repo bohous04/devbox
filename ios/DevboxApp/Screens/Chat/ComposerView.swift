@@ -13,13 +13,20 @@ struct ComposerView: View {
     let running: Bool
     /// The model chip (ChatSwitchers), compact on the one-row box; nil while the session's target is unknown.
     let chip: ((_ compact: Bool) -> AnyView)?
-    let onSend: (String, [Data]) async throws -> Void
+    /// false: refused with a reason shown above the composer (a tmux session's lock); the text stays, no error.
+    let onSend: (String, [Data]) async throws -> Bool
     let onStop: () async throws -> Void
     /// The agent's slash commands: `/` at the start of a message opens them. nil (or none): the agent runs none (Codex)
     /// or has not said which (an older bridge), and `/` opens nothing.
     var commands: [AgentCommand]? = nil
     /// The session repo's files for `@`; nil: `@` opens nothing.
     var searchFiles: ((String) async throws -> SessionFiles)? = nil
+    /// Replaces the default placeholder (a tmux session's).
+    var placeholder: String? = nil
+    /// Why nothing can be sent now: the empty field is off and says it (text already typed stays editable).
+    var fieldOff: String? = nil
+    /// Why images cannot go with a message: the attach button is off and says it.
+    var imagesOff: String? = nil
 
     private struct Attached: Identifiable {
         let id = UUID()
@@ -60,6 +67,7 @@ struct ComposerView: View {
     private func clamped(_ m: TriggerMenuModel) -> Int { m.options.isEmpty ? 0 : min(activeOption, m.options.count - 1) }
 
     private var canSend: Bool { !busy && preparing == 0 && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var fieldDisabled: Bool { fieldOff != nil && text.isEmpty }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -158,16 +166,19 @@ struct ComposerView: View {
                 .frame(width: 36, height: 36).contentShape(Rectangle())
         }
         .labelOnlyMenu()
-        .disabled(images.count >= ImagePrep.maxImagesPerMessage)
+        .disabled(images.count >= ImagePrep.maxImagesPerMessage || imagesOff != nil)
+        .help(imagesOff ?? "Attach images")
         .accessibilityLabel("Attach images")
+        .accessibilityHint(imagesOff ?? "")
     }
 
     private var field: some View {
         // The placeholder in the muted grey: in the foreground's colour an empty field looks filled in.
         CaretField(text: $text, caret: $caret, setCaret: $setCaret,
-                   prompt: Text(ComposerTriggers.placeholder(running: running, commands: hasCommands, files: searchFiles != nil))
+                   prompt: Text(fieldOff ?? placeholder ?? ComposerTriggers.placeholder(running: running, commands: hasCommands, files: searchFiles != nil))
                        .foregroundStyle(Theme.C.mutedForeground))
             .focused($focused)
+            .disabled(fieldDisabled)
             .onKeyPress(phases: .down) { press in onKey(press) }
             .lineLimit(1...6)
             .font(.system(size: ChatType.s(16)))
@@ -302,10 +313,11 @@ struct ComposerView: View {
         let sentImages = images
         Task {
             do {
-                try await onSend(sent, sentImages.map(\.data))
-                // Text typed and images added while the send was in flight stay.
-                if text == sent { text = "" }
-                images.removeAll { a in sentImages.contains { $0.id == a.id } }
+                if try await onSend(sent, sentImages.map(\.data)) {
+                    // Text typed and images added while the send was in flight stay.
+                    if text == sent { text = "" }
+                    images.removeAll { a in sentImages.contains { $0.id == a.id } }
+                }
             } catch {
                 self.error = chatErrorText(error)
             }

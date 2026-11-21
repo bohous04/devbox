@@ -313,8 +313,14 @@ final class ThreadStore: ObservableObject {
     let sessionId: String
     @Published private(set) var thread: ThreadSnapshot?
     @Published private(set) var loadError: String?
-    /// devd answered 409 not-a-chat-session: a tmux session has no thread.
+    /// devd answered 409 not-a-chat-session: a tmux session, whose thread is its pane's transcript mirrored
+    /// (devd/src/mirrorApi.ts), read only through the mirror's routes and never marked seen.
     @Published private(set) var isTmux = false
+    /// A tmux session: what devd knows about its pane (who runs there, why a message cannot go in now).
+    @Published private(set) var mirror: MirrorInfo?
+    /// A tmux session: the last refused send's reason. It goes with a sent message, the dismiss button, Open terminal,
+    /// or a real change of the pane (MirrorView.keepsLock).
+    @Published var sendLock: MirrorLock?
     /// The stream is down and reconnecting.
     @Published private(set) var paused = false
     /// The last frame that could not be read (also logged); the thread may miss that update until a reload.
@@ -383,8 +389,14 @@ final class ThreadStore: ObservableObject {
         guard let t = thread else { return await start() }
         wantsStream = true
         do {
-            let s: ThreadSnapshot = try await client.get("\(base)/thread?afterSeq=\(t.lastSeq)")
-            update(ThreadView.mergeSnapshot(t, ThreadSnapshotFrame(afterSeq: t.lastSeq, snapshot: s)))
+            if isTmux {
+                let m: MirrorResponse = try await client.get("\(base)/mirror?afterSeq=\(t.lastSeq)")
+                applyMirror(m.mirror)
+                update(ThreadView.mergeSnapshot(t, ThreadSnapshotFrame(afterSeq: t.lastSeq, snapshot: m.snapshot)))
+            } else {
+                let s: ThreadSnapshot = try await client.get("\(base)/thread?afterSeq=\(t.lastSeq)")
+                update(ThreadView.mergeSnapshot(t, ThreadSnapshotFrame(afterSeq: t.lastSeq, snapshot: s)))
+            }
         } catch {
             // The stream's own replay (afterSeq) still catches up; the failure is shown, not hidden.
             Self.logger.error("thread resume fetch failed: \(String(describing: error), privacy: .public)")
@@ -402,9 +414,26 @@ final class ThreadStore: ObservableObject {
             isTmux = false
         } catch let e as DevdHTTPError where e.statusCode == 409 && e.serverMessage == "not-a-chat-session" {
             isTmux = true
+            await loadMirror()
         } catch {
             loadError = errorText(error)
         }
+    }
+
+    private func loadMirror() async {
+        do {
+            let m: MirrorResponse = try await client.get("\(base)/mirror")
+            applyMirror(m.mirror)
+            setThread(m.snapshot)
+            loadError = nil
+        } catch {
+            loadError = errorText(error)
+        }
+    }
+
+    private func applyMirror(_ info: MirrorInfo) {
+        if !MirrorView.keepsLock(from: mirror, to: info) { sendLock = nil }
+        mirror = info
     }
 
     private func openStream() {
@@ -432,19 +461,22 @@ final class ThreadStore: ObservableObject {
     }
 
     /// One stream connect. nil: the session is ending (409 session-ending), try again later. Throws
-    /// CancellationError when the session is gone (404, 409 not-a-chat-session), which ends EventStream's loop.
+    /// CancellationError when the session is gone (404), or is no longer what the store reads (409 not-a-chat-session,
+    /// or not-a-tmux-session for a mirror), which ends EventStream's loop.
     private func connectOnce(session: String, lastEventId: String?) async throws -> AsyncThrowingStream<String, Error>? {
         // Each (re)connect asks from the seq the store holds now; devd prefers Last-Event-ID when sent.
         let after = thread?.lastSeq ?? 0
+        let path = isTmux ? "/api/sessions/\(session)/mirror/stream?afterSeq=\(after)" : "/api/stream?session=\(session)&afterSeq=\(after)"
         do {
-            let lines = try await connect("/api/stream?session=\(session)&afterSeq=\(after)", lastEventId)
+            let lines = try await connect(path, lastEventId)
             ending = false
             return lines
         } catch let e as DevdHTTPError where e.statusCode == 409 && e.serverMessage == "session-ending" {
             Self.logger.info("thread stream: session is ending, retrying")
             ending = true
             return nil
-        } catch let e as DevdHTTPError where e.statusCode == 404 || (e.statusCode == 409 && e.serverMessage == "not-a-chat-session") {
+        } catch let e as DevdHTTPError where e.statusCode == 404
+                    || (e.statusCode == 409 && (e.serverMessage == "not-a-chat-session" || e.serverMessage == "not-a-tmux-session")) {
             Self.logger.notice("thread stream refused (HTTP \(e.statusCode) \(e.serverMessage ?? "", privacy: .public)): session ended")
             ending = false
             ended = true
@@ -462,6 +494,7 @@ final class ThreadStore: ObservableObject {
             case "thread-notice": update(ThreadView.applyNotice(t, try JSONDecoder().decode(ThreadItem.self, from: data)))
             case "thread-effort": update(ThreadView.applyEffort(t, try JSONDecoder().decode(ThreadEffort?.self, from: data)))
             case "thread-commands": update(ThreadView.applyCommands(t, ThreadView.commands(from: data)))
+            case "mirror": applyMirror(try JSONDecoder().decode(MirrorInfo.self, from: data))
             case "inbox", "ping": break
             default: Self.logger.notice("thread stream: ignoring event \(e.name, privacy: .public)")
             }
@@ -502,7 +535,8 @@ final class ThreadStore: ObservableObject {
 
     /// Opening the thread, a run ending while it is open and coming back to it mark it seen.
     func markSeenIfNeeded() {
-        guard let t = thread, t.lastSeq > t.seenSeq, t.lastSeq > postedSeen else { return }
+        // A mirror has no seen marker (the inbox shows tmux sessions by their hooks).
+        guard !isTmux, let t = thread, t.lastSeq > t.seenSeq, t.lastSeq > postedSeen else { return }
         let seq = t.lastSeq
         postedSeen = seq
         Task {
@@ -537,6 +571,23 @@ final class ThreadStore: ObservableObject {
         }
         let _: Queued = try await client.post("\(base)/thread/messages",
                                               body: Message(text: text, attachments: paths.isEmpty ? nil : paths.map(Attachment.init)))
+    }
+
+    private struct MirrorMessage: Encodable { let text: String }
+    private struct Sent: Decodable { let sent: Bool }
+
+    /// A tmux session: types the text into its pane's agent. A refusal devd explains (409, 404) becomes `sendLock` and
+    /// returns false, so the composer keeps the text; other failures throw.
+    func sendToPane(text: String) async throws -> Bool {
+        do {
+            let _: Sent = try await client.post("\(base)/mirror/messages", body: MirrorMessage(text: text))
+            sendLock = nil
+            return true
+        } catch {
+            guard let lock = MirrorView.sendLock(error) else { throw error }
+            sendLock = lock
+            return false
+        }
     }
 
     func interrupt() async throws {
