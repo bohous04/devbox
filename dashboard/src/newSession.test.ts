@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import {
-  AGENT_IDS, AGENT_PROFILES, SOLO, chatRuntimeBlock, continueTakesPrompt, defaultAgentFor, folderChoices, instaboxAgentBlock, isProxyAgent, profileFor, projectChoices, repoChoices, runningInOtherRuntime, runtimeAfterDefault, runtimeChoice, sendPlan, sessionsFor, soleProject, tmuxRuntimeBlock,
+  AGENT_IDS, AGENT_PROFILES, SOLO, chatRuntimeBlock, continueTakesPrompt, defaultAgentFor, folderChoices, instaboxAgentBlock, isProxyAgent, profileFor, projectChoices, repoChoices, runningInOtherRuntime, continueDetail, runtimeAfterDefault, runtimeChoice, sendPlan, sessionsFor, soleProject, tmuxRuntimeBlock,
 } from "./newSession";
 import type { TreeProject } from "./api";
 // Only this test may import devd — it ensures the manual mirror in newSession.ts
@@ -182,4 +182,13 @@ test("continueTakesPrompt: not on InstaBox, not into a running terminal (its age
   expect(continueTakesPrompt({ status: "stopped" }, "tmux")).toBe(true);
   expect(continueTakesPrompt({ status: "running" }, "tmux")).toBe(false);
   expect(continueTakesPrompt({ status: "stopped", host: "instabox" }, "tmux")).toBe(false);
+});
+
+test("continuing an existing session says what happens to the message, and to an effort chosen for a new one", () => {
+  const vps = { host: "vps" as const }, ibx = { host: "instabox" as const };
+  expect(continueDetail(vps, true, false)).toBe("Your message goes to that session.");
+  expect(continueDetail(vps, false, false)).toBe("Opens it without your message: its agent is already running, so the message would not reach it.");
+  expect(continueDetail(ibx, false, false)).toBe("Opens it without your message: an InstaBox session takes no message.");
+  expect(continueDetail(vps, true, true)).toBe("Your message goes to that session. Effort applies to a new session only — set it in the thread.");
+  expect(continueDetail(vps, false, true)).toBe("Opens it without your message: its agent is already running, so the message would not reach it. Effort applies to a new session only — set it in the thread.");
 });

@@ -11,7 +11,7 @@ import {
 import { cn } from "@/lib/utils";
 import {
   AGENT_IDS, AGENT_PROFILES, SOLO, chatRuntimeBlock, defaultAgentFor, instaboxAgentBlock, repoChoices, runningInOtherRuntime,
-  continueTakesPrompt, runtimeAfterDefault, runtimeChoice, sendPlan, sessionsFor, tmuxRuntimeBlock,
+  continueDetail, continueTakesPrompt, runtimeAfterDefault, runtimeChoice, sendPlan, sessionsFor, tmuxRuntimeBlock,
 } from "../newSession";
 import { getDefaultRuntime, validateConfig } from "../configEdit";
 import { highlight, openIndex, pickKey, repoSearch, searchTerms } from "../repoSearch";
@@ -44,7 +44,7 @@ export function NewSession() {
   const [err, setErr] = useState<string | null>(null);
   // The open "where does your message go" question, answered through its resolver.
   // It holds the session it names, so a store update while it is open cannot change where the answer goes.
-  const [asking, setAsking] = useState<{ resolve: (w: Where) => void; session: SessionLive; takesPrompt: boolean } | null>(null);
+  const [asking, setAsking] = useState<{ resolve: (w: Where) => void; session: SessionLive; detail: string } | null>(null);
   const [showAll, setShowAll] = useState(false);
   // The composer's text: what may start with it is decided here (InstaBox and a running terminal take none).
   const [draft, setDraft] = useState("");
@@ -135,7 +135,7 @@ export function NewSession() {
     try {
       const r = repo === SOLO
         ? await api.openSolo({ folder, project, agent })
-        : await api.openSession({ folder, project, repo, cloneUrl: selected?.cloneUrl, agent, fresh, runtime: choice.runtime, ...(prompt ? { prompt } : {}), ...(prompt && effort !== null ? { effort } : {}), ...(sessionId ? { sessionId } : {}) });
+        : await api.openSession({ folder, project, repo, cloneUrl: selected?.cloneUrl, agent, fresh, runtime: choice.runtime, ...(prompt ? { prompt } : {}), ...(fresh && prompt && effort !== null ? { effort } : {}), ...(sessionId ? { sessionId } : {}) });
       if (!aliveRef.current) return;
       await opened(r.session.id, choice.runtime, openedNotice(r.pull, choice.runtime));
     } finally { if (aliveRef.current) setBusy(false); }
@@ -192,7 +192,8 @@ export function NewSession() {
     if (plan === "open") return startVps(false, "", reusable!.id);
     if (plan === "new") return prompt === "" ? startVps() : startVps(true, prompt);
     const target = reusable!, takesPrompt = continueTakes;
-    const picked = await new Promise<Where>((resolve) => setAsking({ resolve, session: target, takesPrompt }));
+    // Continuing goes without the effort (devd sets it on a new session only), which the choice itself says.
+    const picked = await new Promise<Where>((resolve) => setAsking({ resolve, session: target, detail: continueDetail(target, takesPrompt, effort !== null) }));
     setAsking(null);
     if (picked === null) return false; // cancelled: the text stays in the box
     return picked === "continue" ? startVps(false, takesPrompt ? prompt : "", target.id) : startVps(true, prompt);
@@ -295,7 +296,7 @@ export function NewSession() {
           </section>
         )}
       </div>
-      {asking && <AskWhere session={asking.session} what={what} takesPrompt={asking.takesPrompt} onPick={asking.resolve} />}
+      {asking && <AskWhere session={asking.session} what={what} detail={asking.detail} onPick={asking.resolve} />}
     </div>
   );
 }
@@ -304,8 +305,8 @@ type Where = "continue" | "new" | null;
 
 /** Typed text with an existing session of the repo: where it goes is asked, never guessed. Two equal choices, nothing
  *  focused at first (Enter does not pick one), Escape cancels and the text stays in the box. */
-function AskWhere({ session, what, takesPrompt, onPick }: {
-  session: SessionLive; what: string; takesPrompt: boolean; onPick: (w: Where) => void;
+function AskWhere({ session, what, detail, onPick }: {
+  session: SessionLive; what: string; detail: string; onPick: (w: Where) => void;
 }) {
   const content = useRef<HTMLDivElement>(null);
   // It unmounts when answered, so it hands focus back itself, always to the message box where the text stays: the
@@ -328,9 +329,7 @@ function AskWhere({ session, what, takesPrompt, onPick }: {
           <div className="mt-5 flex flex-col gap-2">
             <button type="button" className={choice} onClick={() => onPick("continue")}>
               <span className="font-medium">Continue <span className="font-mono text-[13px]">{session.id}</span></span>
-              <span className="text-xs text-muted-foreground">{takesPrompt
-                ? "Your message goes to that session."
-                : `Opens it without your message: ${session.host === "instabox" ? "an InstaBox session takes no message" : "its agent is already running, so the message would not reach it"}.`}</span>
+              <span className="text-xs text-muted-foreground">{detail}</span>
             </button>
             <button type="button" className={choice} onClick={() => onPick("new")}>
               <span className="font-medium">New session</span>
@@ -497,7 +496,7 @@ function AgentMenu({ agent, disabled, onPick, effort, effortChoices, onEffort }:
               <span className="flex-1 truncate">{o.label}</span>
             </DropdownMenuItem>
           ))}
-          <p className="px-2 pb-1.5 text-xs text-muted-foreground">Set with your first message, which checks it against the model.</p>
+          <p className="px-2 pb-1.5 text-xs text-muted-foreground">Checked against the model on your next message.</p>
         </>}
       </DropdownMenuContent>
     </DropdownMenu>

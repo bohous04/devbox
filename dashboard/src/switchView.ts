@@ -195,9 +195,13 @@ export function effortOptions(e: ThreadEffort): SwitchOption[] {
 }
 
 /** The line under the Effort section: when a pick applies, and for unchecked levels, that the next message checks it
- *  (a level the model lacks goes back to its default, said in the thread). */
-export const effortFooter = (e: ThreadEffort): string =>
-  e.supported === null && e.unchecked ? "Applies from your next message, which checks it against the model." : "Applies from your next message.";
+ *  (a level the model lacks goes back to its default, said in the thread), or, once a model is named and its levels
+ *  are still unknown, that its list could not check it. */
+export function effortFooter(e: ThreadEffort): string {
+  if (e.supported !== null || !e.unchecked) return "Applies from your next message.";
+  return e.model === null ? "Checked against the model on your next message."
+    : `Applies from your next message; ${e.model}'s levels could not be read, so it is not checked.`;
+}
 
 /** The Effort section /new offers (the agent chip's menu): Claude's levels in a chat session, unchecked like a thread's
  *  before its first reply, so the first message checks them against the model. null = not offered: another agent has

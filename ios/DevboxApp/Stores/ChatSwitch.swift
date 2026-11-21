@@ -237,9 +237,12 @@ enum ChatSwitch {
     }
 
     /// The line under the Effort menu (switchView.ts effortFooter): when a pick applies, and for unchecked levels, that
-    /// the next message checks it (a level the model lacks goes back to its default, said in the thread).
+    /// the next message checks it (a level the model lacks goes back to its default, said in the thread), or, once a
+    /// model is named and its levels are still unknown, that its list could not check it.
     static func effortFooter(_ e: ThreadEffort?) -> String {
-        e?.supported == nil && e?.unchecked != nil ? "Applies from your next message, which checks it against the model." : "Applies from your next message."
+        guard let e, e.supported == nil, e.unchecked != nil else { return "Applies from your next message." }
+        guard let model = e.model else { return "Checked against the model on your next message." }
+        return "Applies from your next message; \(model)'s levels could not be read, so it is not checked."
     }
 
     /// What the switchers show when devd refused or the bridge did not confirm; the code stays visible.

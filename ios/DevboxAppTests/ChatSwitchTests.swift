@@ -160,7 +160,11 @@ final class ChatSwitchTests: XCTestCase {
         XCTAssertEqual(ChatSwitch.effortOptions(early).map(\.value), ["", "low", "medium", "high", "xhigh", "max"])
         XCTAssertEqual(ChatSwitch.effortOptions(early).filter(\.current).map(\.value), ["xhigh"])
         XCTAssertEqual(ChatSwitch.effortChipLabel(early, new), "Extra high")
-        XCTAssertEqual(ChatSwitch.effortFooter(early), "Applies from your next message, which checks it against the model.")
+        XCTAssertEqual(ChatSwitch.effortFooter(early), "Checked against the model on your next message.")
         XCTAssertEqual(ChatSwitch.effortFooter(effort()), "Applies from your next message.")
+        // A model named while its levels are still unknown: its list could not check them.
+        var named = early
+        named.model = "claude-haiku-9"
+        XCTAssertEqual(ChatSwitch.effortFooter(named), "Applies from your next message; claude-haiku-9's levels could not be read, so it is not checked.")
     }
 }

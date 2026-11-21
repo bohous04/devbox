@@ -209,8 +209,10 @@ describe("effort (bridge 1.7.0)", () => {
     expect(effortMenuBlocked(early, NEW)).toBeNull();
     expect(effortOptions(early).map((x) => [x.value, x.current])).toEqual([["", false], ["low", false], ["medium", false], ["high", false], ["xhigh", true], ["max", false]]);
     expect(effortChipLabel(early, NEW)).toBe("Extra high");
-    expect(effortFooter(early)).toBe("Applies from your next message, which checks it against the model.");
+    expect(effortFooter(early)).toBe("Checked against the model on your next message.");
     expect(effortFooter(eff())).toBe("Applies from your next message.");
+    // A model named while its levels are still unknown: its list could not check them, and the footer says so.
+    expect(effortFooter({ ...early, model: "claude-haiku-9" })).toBe("Applies from your next message; claude-haiku-9's levels could not be read, so it is not checked.");
   });
 });
 
