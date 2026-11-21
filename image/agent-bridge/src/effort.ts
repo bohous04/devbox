@@ -4,14 +4,16 @@ export type EffortEvent = Extract<BridgeEvent, { type: "effort.state" }>;
 
 /** What a harness reports about reasoning effort (bridge 1.7.0): `supported` null = the harness has not said yet,
  *  [] = the model has no levels; `effective` null = not known (Claude reports it only after a turn); `chosen` null =
- *  the harness's own default. Emits `effort.state` whenever any of it changes. */
+ *  the harness's own default. Emits `effort.state` whenever any of it changes.
+ *  `unchecked` (1.8.0): levels taken while `supported` is null, before the harness names its model; the model's own
+ *  list checks a choice once it arrives (`update`), dropping it with a notice. effort.state carries them then. */
 export class EffortState {
   private model: string | null = null;
   private supported: string[] | null = null;
   private effective: string | null = null;
   private last = "";
 
-  constructor(private emit: (e: BridgeEvent) => void, private chosenLevel: string | null) {}
+  constructor(private emit: (e: BridgeEvent) => void, private chosenLevel: string | null, private unchecked: readonly string[] = []) {}
 
   get chosen(): string | null {
     return this.chosenLevel;
@@ -41,7 +43,11 @@ export class EffortState {
   /** Throws when the level is not one the current model offers (or none are known yet). */
   check(level: string | null): void {
     if (level !== null) {
-      if (this.supported === null) throw new Error("the agent has not reported its effort levels yet; try again after its first reply");
+      if (this.supported === null) {
+        if (this.unchecked.length === 0) throw new Error("the agent has not reported its effort levels yet; try again after its first reply");
+        if (!this.unchecked.includes(level)) throw new Error(`effort ${level} is not one of ${this.unchecked.join(", ")}`);
+        return;
+      }
       if (!this.supported.includes(level)) {
         throw new Error(this.supported.length === 0 ? `${this.model ?? "this model"} has no effort levels` : `effort ${level} is not one of ${this.supported.join(", ")}`);
       }
@@ -56,7 +62,10 @@ export class EffortState {
   }
 
   private publish(): void {
-    const e: EffortEvent = { type: "effort.state", model: this.model, supported: this.supported, effective: this.effective, chosen: this.chosenLevel };
+    const e: EffortEvent = {
+      type: "effort.state", model: this.model, supported: this.supported, effective: this.effective, chosen: this.chosenLevel,
+      ...(this.supported === null && this.unchecked.length > 0 ? { unchecked: [...this.unchecked] } : {}),
+    };
     const key = JSON.stringify(e);
     if (key === this.last) return;
     this.last = key;

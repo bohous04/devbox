@@ -63,8 +63,9 @@ export interface ThreadSnapshot {
 
 /** `supported`: the levels the current model takes ([] = none, null = not known yet); `effective`: the level the agent
  *  runs at, null when it is not known (Claude's model default, before its first reply); `chosen`: the user's pick, null =
- *  the model default. */
-export interface ThreadEffort { model: string | null; supported: string[] | null; effective: string | null; chosen: string | null }
+ *  the model default. `unchecked` (bridge 1.8.0, only while `supported` is null): levels the agent takes before it
+ *  names its model, checked against that model's list on the next message; absent = none. */
+export interface ThreadEffort { model: string | null; supported: string[] | null; effective: string | null; chosen: string | null; unchecked?: string[] }
 
 /** devd's connection to a chat session's agent bridge socket. */
 export type LinkStatus = "connecting" | "connected" | "disconnected";

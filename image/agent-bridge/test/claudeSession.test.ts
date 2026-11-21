@@ -5,7 +5,8 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { CLAUDE_CAPABILITIES, openClaudeSession, PLAN_UNAVAILABLE, ResumeFailedError, type ClaudeSessionOptions } from "../src/claudeSession.ts";
+import { CLAUDE_EFFORT_LEVELS as SHARED_CLAUDE_EFFORT_LEVELS } from "../../../shared/effort";
+import { CLAUDE_CAPABILITIES, CLAUDE_EFFORT_LEVELS, openClaudeSession, PLAN_UNAVAILABLE, ResumeFailedError, type ClaudeSessionOptions } from "../src/claudeSession.ts";
 import type { BridgeEvent, UsageBaseline } from "../src/events.ts";
 
 // Scripted SDK: the test pushes output messages and reads what the session wrote to the input stream.
@@ -598,13 +599,18 @@ describe("Claude switching", () => {
 });
 
 describe("Claude effort (1.7.0)", () => {
+  const levelsKnown = (efforts: BridgeEvent[]) => until(() => efforts.some((e) => e.type === "effort.state" && e.supported !== null));
   const stopHook = (sdk: ReturnType<typeof fakeSdk>) => (sdk.options!.hooks as { Stop: { hooks: ((i: unknown, id: undefined, o: { signal: AbortSignal }) => Promise<unknown>)[] }[] }).Stop[0]!.hooks[0]!;
 
   test("levels come from the CLI's model list; the effective level only from a turn's Stop hook", async () => {
     const sdk = fakeSdk();
     const { efforts } = open(sdk);
-    await until(() => efforts.length === 1);
-    expect(efforts[0]).toEqual({ type: "effort.state", model: "claude-sonnet-4-5", supported: ["low", "medium", "high"], effective: null, chosen: null });
+    await levelsKnown(efforts);
+    expect(efforts).toEqual([
+      // At open: the model is named, its levels are not known yet, so the unchecked ones can be picked.
+      { type: "effort.state", model: "claude-sonnet-4-5", supported: null, effective: null, chosen: null, unchecked: ["low", "medium", "high", "xhigh", "max"] },
+      { type: "effort.state", model: "claude-sonnet-4-5", supported: ["low", "medium", "high"], effective: null, chosen: null },
+    ]);
     expect(await stopHook(sdk)({ hook_event_name: "Stop", effort: { level: "medium" } }, undefined, { signal: new AbortController().signal })).toEqual({ continue: true });
     expect(efforts.at(-1)).toMatchObject({ effective: "medium", chosen: null });
   });
@@ -621,7 +627,7 @@ describe("Claude effort (1.7.0)", () => {
     const sdk = fakeSdk();
     const { session, efforts } = open(sdk, () => 0, { effort: "high" });
     expect(sdk.options!.effort).toBe("high");
-    await until(() => efforts.length === 1);
+    await levelsKnown(efforts);
     await session.setEffort("low");
     expect(sdk.flagSettings).toEqual([{ effortLevel: "low" }]);
     expect(efforts.at(-1)).toMatchObject({ chosen: "low", effective: null });
@@ -633,7 +639,7 @@ describe("Claude effort (1.7.0)", () => {
   test("setEffort refuses a level the model lacks and sends nothing", async () => {
     const sdk = fakeSdk();
     const { session, efforts } = open(sdk);
-    await until(() => efforts.length === 1);
+    await levelsKnown(efforts);
     await expect(session.setEffort("max")).rejects.toThrow("effort max is not one of low, medium, high");
     expect(sdk.flagSettings).toEqual([]);
   });
@@ -641,8 +647,8 @@ describe("Claude effort (1.7.0)", () => {
   test("switching to a model without the chosen level drops it with a notice and resets the CLI's level", async () => {
     const sdk = fakeSdk();
     const { session, events, efforts } = open(sdk, () => 0, { model: "claude-opus-4-5", effort: "max" });
-    await until(() => efforts.length === 1);
-    expect(efforts[0]).toMatchObject({ chosen: "max", supported: ["low", "medium", "high", "xhigh", "max"] });
+    await levelsKnown(efforts);
+    expect(efforts.at(-1)).toMatchObject({ chosen: "max", supported: ["low", "medium", "high", "xhigh", "max"] });
     await session.setModel("claude-sonnet-4-5");
     await until(() => sdk.flagSettings.length === 1);
     expect(sdk.flagSettings).toEqual([{ effortLevel: null }]);
@@ -653,7 +659,7 @@ describe("Claude effort (1.7.0)", () => {
   test("a run going when the effort changed reports its old level: the chip keeps the choice until a later run reports", async () => {
     const sdk = fakeSdk();
     const { session, efforts } = open(sdk, () => 0, { model: "claude-opus-4-5" });
-    await until(() => efforts.length === 1);
+    await levelsKnown(efforts);
     const signal = new AbortController().signal;
     await session.startTurn("run-1", "go", "user");
     await session.setEffort("max");
@@ -669,11 +675,12 @@ describe("Claude effort (1.7.0)", () => {
   test("a switch to a model the CLI does not list forgets the previous model's levels and level", async () => {
     const sdk = fakeSdk();
     const { session, efforts, logs } = open(sdk, () => 0, { model: "claude-opus-4-5" });
-    await until(() => efforts.length === 1);
+    await levelsKnown(efforts);
     await stopHook(sdk)({ hook_event_name: "Stop", effort: { level: "high" } }, undefined, { signal: new AbortController().signal });
     await session.setModel("claude-haiku-9");
     await until(() => logs.some((l) => l.includes("claude-haiku-9 is not in the CLI's model list")));
-    expect(efforts.at(-1)).toEqual({ type: "effort.state", model: "claude-haiku-9", supported: null, effective: null, chosen: null });
+    // Its levels stay unknown, so the unchecked ones stay on offer.
+    expect(efforts.at(-1)).toEqual({ type: "effort.state", model: "claude-haiku-9", supported: null, effective: null, chosen: null, unchecked: ["low", "medium", "high", "xhigh", "max"] });
   });
 
   test("launched on the CLI's default model, the levels follow the model its init names", async () => {
@@ -681,7 +688,51 @@ describe("Claude effort (1.7.0)", () => {
     const { session, efforts } = open(sdk, () => 0, { model: null });
     await session.startTurn("run-1", "hi", "user");
     sdk.push(init());
-    await until(() => efforts.length === 1);
-    expect(efforts[0]).toMatchObject({ model: "claude-sonnet-4-5", supported: ["low", "medium", "high"] });
+    await levelsKnown(efforts);
+    expect(efforts.at(-1)).toMatchObject({ model: "claude-sonnet-4-5", supported: ["low", "medium", "high"] });
   });
+
+  test("on the CLI's default model, a level is taken before the first reply and checked once init names the model", async () => {
+    const sdk = fakeSdk();
+    const { session, events, efforts } = open(sdk, () => 0, { model: null });
+    expect(efforts).toEqual([{ type: "effort.state", model: null, supported: null, effective: null, chosen: null, unchecked: ["low", "medium", "high", "xhigh", "max"] }]);
+    await expect(session.setEffort("minimal")).rejects.toThrow("effort minimal is not one of low, medium, high, xhigh, max");
+    await session.setEffort("xhigh");
+    expect(sdk.flagSettings).toEqual([{ effortLevel: "xhigh" }]);
+    expect(efforts.at(-1)).toMatchObject({ chosen: "xhigh", supported: null });
+    await session.startTurn("run-1", "hi", "user");
+    // claude-sonnet-4-5 takes low, medium, high: the choice goes, said as a model switch says it.
+    sdk.push(init());
+    await levelsKnown(efforts);
+    expect(events).toContainEqual({ type: "bridge.notice", text: "Effort xhigh is not available on claude-sonnet-4-5; back to its default." });
+    await until(() => sdk.flagSettings.length === 2);
+    expect(sdk.flagSettings.at(-1)).toEqual({ effortLevel: null });
+    expect(efforts.at(-1)).toMatchObject({ model: "claude-sonnet-4-5", chosen: null });
+  });
+
+  test("an unchecked level is kept when the CLI's model list cannot be read, and the thread says so", async () => {
+    const sdk = fakeSdk();
+    Object.defineProperty(sdk, "modelInfo", { get: () => { throw new Error("control request failed"); } });
+    const { session, events, logs } = open(sdk, () => 0, { model: null });
+    await session.setEffort("max");
+    await session.startTurn("run-1", "hi", "user");
+    sdk.push(init());
+    await until(() => logs.some((l) => l.includes("reading the model list for effort levels failed")));
+    expect(events).toContainEqual({ type: "bridge.notice", text: "Claude's model list could not be read, so effort max is sent without checking that claude-sonnet-4-5 takes it." });
+  });
+
+  test("an unchecked level the model's list cannot check is kept, and the thread says so", async () => {
+    const sdk = fakeSdk();
+    sdk.modelInfo = [];
+    const { session, events, logs } = open(sdk, () => 0, { model: null });
+    await session.setEffort("high");
+    await session.startTurn("run-1", "hi", "user");
+    sdk.push(init());
+    await until(() => logs.some((l) => l.includes("not in the CLI's model list")));
+    expect(events).toContainEqual({ type: "bridge.notice", text: "claude-sonnet-4-5 is not in Claude's model list, so effort high is sent without checking that claude-sonnet-4-5 takes it." });
+  });
+});
+
+test("the bridge's unchecked Claude levels are shared/effort.ts's, all of them known levels", () => {
+  expect([...CLAUDE_EFFORT_LEVELS] as string[]).toEqual([...SHARED_CLAUDE_EFFORT_LEVELS]);
 });

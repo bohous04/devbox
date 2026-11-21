@@ -28,3 +28,7 @@ export const ACK_MIN_BRIDGE_VERSION = "1.5.0";
 /** The first agent bridge that reports and takes a reasoning effort (`effort.state`, `setEffort`). An older bridge
  *  refuses the unknown command: devd answers 409 bridge-too-old and the dashboard disables the choice. */
 export const EFFORT_MIN_BRIDGE_VERSION = "1.7.0";
+
+/** Why a bridge older than EFFORT_MIN_BRIDGE_VERSION gets no effort, and what to do (devd's 409 and thread notice). */
+export const effortBridgeTooOld = (version: string | null): string =>
+  `this session's agent bridge (${version ?? "unknown version"}) cannot change the effort; it needs ${EFFORT_MIN_BRIDGE_VERSION} — recreate the session's container`;

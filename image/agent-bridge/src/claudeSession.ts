@@ -8,6 +8,10 @@ import { claudeQueryOptions, mapSdkMessage, resultError, sumModelUsage, type Cla
 import type { BridgeEvent, Capabilities, RunOrigin, TokenUsage, UsageBaseline } from "./events.ts";
 import { readImageBase64 } from "./images.ts";
 
+/** Claude Code's effort levels (the SDK's EffortLevel), taken before the CLI names the model it runs: its model list
+ *  checks the choice then (shared/effort.ts CLAUDE_EFFORT_LEVELS is the same list, for devd and the apps). */
+export const CLAUDE_EFFORT_LEVELS: readonly EffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
+
 export interface HarnessSession {
   /** Resolves when the turn is accepted. `images`: files under /inbox, only when `capabilities().images`. */
   startTurn(runId: string, text: string, origin: RunOrigin, images?: string[]): Promise<void>;
@@ -171,7 +175,9 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
 
   const emit = o.emit;
   const logError = o.logError ?? ((msg: string) => console.error(msg));
-  const effort = new EffortState(emit, o.effort ?? null);
+  const effort = new EffortState(emit, o.effort ?? null, CLAUDE_EFFORT_LEVELS);
+  // Said at once: until the CLI's model list names the levels, the user can already pick (unchecked) ones.
+  effort.update({ model });
 
   // Emitted once, by whichever comes first: interrupt() returning or the run's own result.
   function reportInterrupt(run: ActiveRun): void {
@@ -357,6 +363,7 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
       models = await modelList;
     } catch (e) {
       logError(`claude: reading the model list for effort levels failed: ${e instanceof Error ? e.message : String(e)}`);
+      uncheckedNotice(forModel, "Claude's model list could not be read");
       return;
     }
     if (forModel !== model) return; // a later setModel reports its own
@@ -365,10 +372,16 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
     if (!info) {
       logError(`claude: ${forModel} is not in the CLI's model list; its effort levels are unknown`);
       effort.update({ model: forModel });
+      uncheckedNotice(forModel, `${forModel} is not in Claude's model list`);
       return;
     }
     const dropped = effort.update({ model: forModel, supported: info.supportsEffort ? info.supportedEffortLevels ?? [] : [] });
     if (dropped) await stream.applyFlagSettings({ effortLevel: null }).catch((e) => logError(`claude: resetting the effort failed: ${e instanceof Error ? e.message : String(e)}`));
+  }
+  // A level picked before the levels were known stays unchecked: the user hears it, it is not dropped.
+  function uncheckedNotice(forModel: string, why: string): void {
+    if (forModel !== model || effort.chosen === null) return;
+    emit({ type: "bridge.notice", text: `${why}, so effort ${effort.chosen} is sent without checking that ${forModel} takes it.` });
   }
   if (model !== null) void reportLevels(model);
 
