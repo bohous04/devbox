@@ -136,7 +136,7 @@ struct ChatScreen: View {
                     ChangesChip(store: store, client: client) { ownReveal += 1 }
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    Button { showTerminal = true } label: { Label("Terminal", systemImage: "terminal") }
+                    Button { phoneTerminal() } label: { Label("Terminal", systemImage: "terminal") }
                 }
             }
         }
@@ -173,7 +173,14 @@ struct ChatScreen: View {
     /// Open terminal: the Mac's tab, else the full-screen terminal. A refused send's lock goes with it, as on the web.
     private func toTerminal() {
         store.sendLock = nil
-        if let openTerminal { openTerminal() } else { showTerminal = true }
+        if let openTerminal { openTerminal() } else { phoneTerminal() }
+    }
+
+    /// The full-screen terminal. A tmux session's inbox row then opens its detail again, not this chat
+    /// (InboxRoute.row): the terminal is the view last opened for it.
+    private func phoneTerminal() {
+        if store.isTmux { TmuxTabMemory.shared.remember(.terminal, for: sessionId) }
+        showTerminal = true
     }
 
     private func conversation(_ t: ThreadSnapshot) -> some View {

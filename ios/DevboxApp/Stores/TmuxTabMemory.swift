@@ -15,14 +15,18 @@ final class TmuxTabMemory {
 
     static let maxEntries = 500
     static let key = "tmuxTabs"
-    /// The app's list. A test host or a fixture run gets a scratch one, as MacAppState's windows do: the test host is
-    /// the app itself, and its fixture session lists would prune (or fill) the user's real list.
+    /// The app's list. A test host or a fixture run gets a scratch one, emptied at start, as MacAppState's windows
+    /// do: the test host is the app itself, and its fixture session lists would prune (or fill) the user's real list.
     static let shared: TmuxTabMemory = {
         var scratch = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
         #if DEBUG
         scratch = scratch || FixtureMode.isActive
         #endif
-        return TmuxTabMemory(defaults: scratch ? UserDefaults(suiteName: "DevboxTmuxTabs-scratch")! : .standard)
+        guard scratch else { return TmuxTabMemory(defaults: .standard) }
+        let suite = "DevboxTmuxTabs-scratch"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        return TmuxTabMemory(defaults: defaults)
     }()
     private static let logger = Logger(subsystem: "com.example.devbox", category: "TmuxTabs")
 

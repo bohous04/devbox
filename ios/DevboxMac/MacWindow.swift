@@ -717,10 +717,10 @@ struct MacThreadDetail: View {
                            revealChanges: revealChanges)
                     .id(ObjectIdentifier(store))
                     .onReceive(store.$ended) { if $0 { state.windows.ended(threadId) } }
-                    // A remembered Chat the mirror cannot show (another agent, no longer tmux) opens Terminal, the
-                    // reason still on the Chat tab; the choice is kept for when it can.
+                    // A remembered Chat for an agent the mirror cannot read opens Terminal, the reason still on the
+                    // Chat tab; the choice is kept for when it can. A session no longer on tmux stays on Chat: its
+                    // "reopen it" is the one useful thing to show.
                     .onReceive(store.$mirror) { m in if tab == nil, m.flatMap(MirrorView.unsupported) != nil { tab = .terminal } }
-                    .onReceive(store.$noLongerTmux) { if $0, tab == nil { tab = .terminal } }
             case .terminal:
                 TerminalScreen(sessionId: threadId, title: item?.title ?? threadId, client: client, closable: false)
             }
