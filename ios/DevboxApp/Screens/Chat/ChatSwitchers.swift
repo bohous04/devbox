@@ -60,12 +60,13 @@ struct ChatSwitchers<Content: View>: View {
             HStack(spacing: 4) {
                 if busy != nil { ProgressView().controlSize(.mini) }
                 // The model's name gives way first: the level and the chevron always show whole. Compact, the family
-                // alone ("Opus"), so the field keeps the row; the menu names the full model.
+                // alone ("Opus"), so the field keeps the row; the menu names the full model. The level is secondary
+                // to the model: regular weight, muted.
                 Text(compact ? target.model.map(ChatSwitch.shortModelLabel) ?? "Default" : model)
                     .lineLimit(1).truncationMode(compact ? .tail : .middle)
                 if let effort {
                     Text("·").foregroundStyle(Theme.C.mutedForeground)
-                    Text(effort).fontWeight(.semibold).lineLimit(1).fixedSize()
+                    Text(effort).fontWeight(.regular).foregroundStyle(Theme.C.mutedForeground).lineLimit(1).fixedSize()
                 }
                 Image(systemName: "chevron.down").font(.system(size: ChatType.s(10), weight: .semibold)).foregroundStyle(Theme.C.mutedForeground)
             }

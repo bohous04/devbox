@@ -45,6 +45,13 @@ final class ChatLayoutTests: XCTestCase {
         XCTAssertEqual(shape(rows), ["1", "2*", "3", "4", "5"])
     }
 
+    /// A prompt opens a turn (more room above it) unless it is the first row or follows a notice.
+    func testTurnStarts() {
+        let items = [item(1, "a", .user), item(2, "a", .assistant), item(3, "b", .user), item(4, nil, .notice), item(5, "c", .user)]
+        let rows = WorkGroups.rows(chatRows(items), runs: [run("a", .completed), run("b", .completed), run("c", .completed)])
+        XCTAssertEqual(WorkGroups.turnStarts(rows), [ThreadDisplayRow.itemId(2)])
+    }
+
     func testLabelsAndSummary() {
         XCTAssertEqual(WorkGroups.shortDuration(45_000), "45s")
         XCTAssertEqual(WorkGroups.shortDuration(3_900_000), "1h 5m")

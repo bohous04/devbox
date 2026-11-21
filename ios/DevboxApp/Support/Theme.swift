@@ -96,6 +96,8 @@ enum ChatLayout {
     static let bubbleLines = 3
     /// The user's bubble text, a step below the answer's.
     static let bubbleText: CGFloat = 13
+    /// Extra room above a prompt, where a turn starts (the web's).
+    static let turnGap: CGFloat = 12
     /// The composer keeps the field over its controls (the web's layout); the iPhone starts on one row.
     static let composerTwoRows = true
     /// Resting at the thread's end, no row shows cut at the header (ThreadEdge).
@@ -108,6 +110,7 @@ enum ChatLayout {
     static let bubbleLines = 6
     static let bubbleText: CGFloat = 16
     static let composerTwoRows = false
+    static let turnGap: CGFloat = 0
     static let trimTopEdge = false
     #endif
 }
