@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { ApiError } from "../../api";
 import { MAX_IMAGES_PER_MESSAGE, prepareImage, takeImages } from "../../imageView";
 import { composerErrorText } from "../../threadView";
-import { activeTrigger, applyPick, composerPlaceholder, filterCommands, type Trigger } from "../../composerTrigger";
+import { activeTrigger, applyPick, composerPlaceholder, filterCommands, keyAction, type Trigger } from "../../composerTrigger";
 import type { AgentCommand } from "../../../../shared/thread";
 import type { SessionFiles } from "../../../../shared/changes";
 import { TriggerMenu, type TriggerOption } from "./TriggerMenu";
@@ -111,6 +111,8 @@ export function Composer({ running, onSend, onStop, controls, notices, placehold
   let options: TriggerOption[] = [];
   let menuStatus: { text: string; error?: boolean } | undefined;
   let staleFiles = false;
+  // The file results are on their way: none yet, or an older query's.
+  let searching = false;
   if (menuOpen && trigger.kind === "/") {
     options = filterCommands(commands!, trigger.query).map((c) => ({ value: c.name, label: `/${c.name}`, detail: c.description ?? c.hint }));
     if (options.length === 0) menuStatus = { text: "No matching command" };
@@ -120,6 +122,7 @@ export function Composer({ running, onSend, onStop, controls, notices, placehold
     const r = fileResult;
     staleFiles = r !== null && r.query !== trigger.query;
     if (r?.files) options = r.files.files.map((f) => ({ value: f, label: f }));
+    searching = r === null || staleFiles;
     if (r === null || staleFiles) menuStatus = { text: "Searching…" };
     else if (r.error !== undefined) menuStatus = { text: `File search failed: ${r.error}`, error: true };
     else if (options.length === 0) menuStatus = { text: "No matching file" };
@@ -127,7 +130,10 @@ export function Composer({ running, onSend, onStop, controls, notices, placehold
     else if (r.files?.listingCapped) menuStatus = { text: "Only part of this large repository was searched" };
   }
   const optionCount = options.length;
-  const pickable = optionCount > 0 && !staleFiles;
+  const pickable = optionCount > 0 && !searching;
+  // Clamped here, not only reset in an effect: a shorter list arrives a render before the effect runs.
+  const active = optionCount === 0 ? 0 : Math.min(activeOption, optionCount - 1);
+  const exact = trigger !== null && options[active]?.value === trigger.query;
   // A new word (or none) is a fresh start: Escape closed the menu only for the word it was pressed on.
   useEffect(() => { if (triggerKey === null) setDismissed(null); }, [triggerKey]);
   useEffect(() => setActiveOption(0), [triggerKey, trigger?.query, optionCount]);
@@ -291,7 +297,7 @@ export function Composer({ running, onSend, onStop, controls, notices, placehold
       >
         {menuOpen && (
           <TriggerMenu
-            id={menuId} title={trigger.kind === "/" ? "Commands" : "Files"} options={options} active={activeOption}
+            id={menuId} title={trigger.kind === "/" ? "Commands" : "Files"} options={options} active={active}
             status={menuStatus} stale={staleFiles} onPick={pick} onHover={setActiveOption}
           />
         )}
@@ -323,7 +329,7 @@ export function Composer({ running, onSend, onStop, controls, notices, placehold
               {...(hasCommands || searchFiles ? {
                 "aria-autocomplete": "list" as const,
                 "aria-controls": menuOpen && optionCount > 0 ? menuId : undefined,
-                "aria-activedescendant": menuOpen && pickable ? `${menuId}-${activeOption}` : undefined,
+                "aria-activedescendant": menuOpen && pickable ? `${menuId}-${active}` : undefined,
               } : {})}
               onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
               onFocus={() => setFocused(true)}
@@ -352,22 +358,15 @@ export function Composer({ running, onSend, onStop, controls, notices, placehold
                 e.preventDefault(); void attach(files);
               }}
               onKeyDown={(e) => {
-                if (menuOpen && !e.nativeEvent.isComposing) {
-                  if (e.key === "Escape") { e.preventDefault(); setDismissed(triggerKey); return; }
-                  if (pickable) {
-                    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                      e.preventDefault();
-                      setActiveOption((i) => (i + (e.key === "ArrowDown" ? 1 : optionCount - 1)) % optionCount);
-                      return;
-                    }
-                    if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
-                      e.preventDefault(); pick(options[activeOption]!.value); return;
-                    }
-                  }
-                }
-                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && window.matchMedia("(pointer: fine)").matches) {
-                  e.preventDefault(); void send();
-                }
+                const action = keyAction(menuOpen ? { options: optionCount, searching, exact } : null,
+                  { key: e.key, shiftKey: e.shiftKey, altKey: e.altKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey, isComposing: e.nativeEvent.isComposing, keyCode: e.keyCode },
+                  window.matchMedia("(pointer: fine)").matches);
+                if (action === "default") return;
+                e.preventDefault();
+                if (action === "send") void send();
+                else if (action === "dismiss") setDismissed(triggerKey);
+                else if (action === "next" || action === "prev") setActiveOption((active + (action === "next" ? 1 : optionCount - 1)) % optionCount);
+                else if (action === "pick") pick(options[active]!.value);
               }}
             />
           </div>
@@ -417,6 +416,10 @@ export function Composer({ running, onSend, onStop, controls, notices, placehold
         </div>
       </div>
       {err && <p role="alert" className="px-1 text-sm text-destructive">{err}</p>}
+      {/* Mounted always, so screen readers announce each change: the menu's status, else how many options it shows. */}
+      <p role="status" aria-live="polite" className="sr-only">
+        {!menuOpen ? "" : menuStatus?.text ?? `${optionCount} ${trigger.kind === "/" ? "commands" : "files"}`}
+      </p>
     </form>
   );
 }

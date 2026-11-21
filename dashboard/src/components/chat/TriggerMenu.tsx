@@ -5,7 +5,7 @@ export interface TriggerOption { value: string; label: string; detail?: string }
 
 /** The list the composer opens above the field for `/` (the agent's commands) or `@` (the repo's files). Picked with
  *  the arrow keys and Enter or Tab in the field (Composer), or a click; the field keeps focus throughout. `status` is
- *  the line under the options: searching, nothing found, a failure, or that more match. */
+ *  the line under the options (shown only; screen readers hear it from the composer's live region): searching, nothing found, a failure, or that more match. */
 export function TriggerMenu({ id, title, options, active, status, stale = false, onPick, onHover }: {
   id: string;
   /** The options answer an earlier query (the next is on its way): shown dimmed, not pickable. */
@@ -41,7 +41,8 @@ export function TriggerMenu({ id, title, options, active, status, stale = false,
           ))}
         </ul>
       )}
-      {status && <p role={status.error ? "alert" : "status"} className={cn("px-3 pb-2 pt-1 text-xs", status.error ? "text-destructive" : "text-muted-foreground")}>{status.text}</p>}
+      {/* Read out by the composer's own live region, which stays mounted (Composer). */}
+      {status && <p aria-hidden="true" className={cn("px-3 pb-2 pt-1 text-xs", status.error ? "text-destructive" : "text-muted-foreground")}>{status.text}</p>}
     </div>
   );
 }

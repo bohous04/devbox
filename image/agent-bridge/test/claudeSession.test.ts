@@ -915,6 +915,16 @@ describe("Claude commands (1.9.0)", () => {
     expect(commands).toEqual([]);
   });
 
+  test("/model, /effort and /clear are left out: devd's own controls and thread own what they change", async () => {
+    const sdk = fakeSdk();
+    sdk.commandList = ["model", "effort", "clear"].map((name) => ({ name, description: name, argumentHint: "", builtin: true })).concat([COMPACT]);
+    const { session, commands } = open(sdk);
+    await session.startTurn("run-1", "hi", "user");
+    sdk.push(initWith());
+    await until(() => commands.length > 0);
+    expect(commands).toEqual([{ type: "commands.changed", commands: [{ name: "compact", description: COMPACT.description, hint: COMPACT.argumentHint }] }]);
+  });
+
   test("rows sharing a name are one command: the CLI's own row, which is the one /name runs", async () => {
     const sdk = fakeSdk();
     sdk.commandList = [{ name: "review", description: "a user's skill", argumentHint: "" }, { name: "review", description: "Claude Code's review", argumentHint: "", builtin: true }];

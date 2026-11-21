@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { activeTrigger, applyPick, composerPlaceholder, filterCommands } from "./composerTrigger";
+import { activeTrigger, applyPick, composerPlaceholder, filterCommands, keyAction, type KeyInput, type MenuState } from "./composerTrigger";
 
 test("/ opens only at the start of the message and until the command name ends", () => {
   expect(activeTrigger("/", 1)).toEqual({ kind: "/", query: "", start: 0, end: 1 });
@@ -48,4 +48,55 @@ test("the placeholder names only the triggers this session has", () => {
   expect(composerPlaceholder({ running: false, commands: false, files: true })).toBe("Ask anything · @ for files");
   expect(composerPlaceholder({ running: false, commands: false, files: false })).toBe("Ask anything");
   expect(composerPlaceholder({ running: true, commands: true, files: true })).toBe("Queue a message for after this run");
+});
+
+const key = (k: string, o: Partial<KeyInput> = {}): KeyInput => ({ key: k, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, isComposing: false, keyCode: 0, ...o });
+const menu = (o: Partial<MenuState> = {}): MenuState => ({ options: 3, searching: false, exact: false, ...o });
+
+test("keyAction: no menu: Enter sends where Enter sends (mouse or trackpad), Shift+Enter and IME keys keep their default", () => {
+  expect(keyAction(null, key("Enter"), true)).toBe("send");
+  expect(keyAction(null, key("Enter"), false)).toBe("default");
+  expect(keyAction(null, key("Enter", { shiftKey: true }), true)).toBe("default");
+  expect(keyAction(null, key("Enter", { isComposing: true }), true)).toBe("default");
+  // Safari ends a composition with a keydown whose keyCode is 229 and isComposing false.
+  expect(keyAction(null, key("Enter", { keyCode: 229 }), true)).toBe("default");
+});
+
+test("keyAction: an open menu with options: arrows move, Enter and Tab pick, Escape closes; modified arrows and IME keys are the field's", () => {
+  expect(keyAction(menu(), key("ArrowDown"), true)).toBe("next");
+  expect(keyAction(menu(), key("ArrowUp"), true)).toBe("prev");
+  for (const mod of ["shiftKey", "altKey", "ctrlKey", "metaKey"] as const) expect(keyAction(menu(), key("ArrowDown", { [mod]: true }), true)).toBe("default");
+  expect(keyAction(menu(), key("Enter"), true)).toBe("pick");
+  expect(keyAction(menu(), key("Enter"), false)).toBe("pick");
+  expect(keyAction(menu(), key("Tab"), true)).toBe("pick");
+  expect(keyAction(menu(), key("Tab", { shiftKey: true }), true)).toBe("default");
+  expect(keyAction(menu(), key("Enter", { shiftKey: true }), true)).toBe("default");
+  expect(keyAction(menu(), key("Escape"), true)).toBe("dismiss");
+  expect(keyAction(menu(), key("Enter", { isComposing: true }), true)).toBe("default");
+  expect(keyAction(menu(), key("Enter", { keyCode: 229 }), true)).toBe("default");
+});
+
+test("keyAction: what is typed already is the option: Enter does what it does without a menu (\"/compact\" + Enter sends); Tab still picks", () => {
+  expect(keyAction(menu({ exact: true }), key("Enter"), true)).toBe("send");
+  expect(keyAction(menu({ exact: true }), key("Enter"), false)).toBe("default");
+  expect(keyAction(menu({ exact: true }), key("Tab"), true)).toBe("pick");
+});
+
+test("keyAction: results on their way (stale or none yet): Enter and Tab do nothing, so neither an old result nor the half-typed text goes out", () => {
+  for (const m of [menu({ searching: true }), menu({ searching: true, options: 0 })]) {
+    expect(keyAction(m, key("Enter"), true)).toBe("hold");
+    expect(keyAction(m, key("Tab"), true)).toBe("hold");
+    expect(keyAction(m, key("ArrowDown"), true)).toBe("default");
+    expect(keyAction(m, key("Escape"), true)).toBe("dismiss");
+  }
+});
+
+test("keyAction: a menu with nothing to pick (no match, or a failed search): Enter sends as without one", () => {
+  expect(keyAction(menu({ options: 0 }), key("Enter"), true)).toBe("send");
+  expect(keyAction(menu({ options: 0 }), key("Tab"), true)).toBe("default");
+  expect(keyAction(menu({ options: 0 }), key("ArrowDown"), true)).toBe("default");
+});
+
+test("a file path with spaces is quoted", () => {
+  expect(applyPick("@my", { kind: "@", query: "my", start: 0, end: 3 }, "docs/my notes.md")).toEqual({ text: '@"docs/my notes.md" ', caret: 20 });
 });
