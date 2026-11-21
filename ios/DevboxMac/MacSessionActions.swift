@@ -9,6 +9,8 @@ enum MacSessionMenu {
         let id: String
         let label: String
         let current: Bool
+        /// Codex: picking it finishes an unfinished switch to this account.
+        var finishing = false
     }
 
     enum Pool: Equatable {
@@ -19,6 +21,8 @@ enum MacSessionMenu {
     enum Accounts: Equatable {
         case loading
         case failed(String)
+        /// Nothing can be picked, and why (said as it is).
+        case unavailable(String)
         case loaded([Choice])
     }
 
@@ -85,10 +89,11 @@ enum MacSessionMenu {
         switch pool == .claude ? claude : codex {
         case .loading: note = "Loading accounts…"
         case .failed(let why): note = "Couldn't load accounts: \(why)"
+        case .unavailable(let why): note = why
         case .loaded(let list):
-            // devd reports the Anthropic account a session runs on (its lease); a Codex session's account it reports
-            // only per session, so no Codex account is marked.
-            accounts = list.map { Choice(id: $0.id, label: $0.label, current: pool == .claude && $0.id == accountId) }
+            // The Anthropic account a session runs on is its lease in the live list; the Codex list is the session's
+            // own and comes marked (codexChoices).
+            accounts = pool == .claude ? list.map { Choice(id: $0.id, label: $0.label, current: $0.id == accountId) } : list
             if list.isEmpty { note = "No usable account" }
         }
         return AccountMenu(pool: pool, title: pool == .claude ? "Change Account (Claude Code)" : "Change Account (Codex)",
@@ -111,9 +116,21 @@ enum MacSessionMenu {
         accounts.filter { !$0.disabled && !$0.quarantined }.map { Choice(id: $0.id, label: $0.label, current: false) }
     }
 
-    /// Codex accounts that are not disabled; whether one can run in this session devd checks when switching.
-    static func codexChoices(_ accounts: [CodexAccountView]) -> [Choice] {
-        accounts.filter { !$0.disabled }.map { Choice(id: $0.id, label: $0.label, current: false) }
+    /// The Codex accounts this session can switch to, by cli/src/main.ts `pickAndSwitchAccount`: only those available
+    /// in the session, the current one marked; while a switch is unfinished, only finishing it on its account.
+    static func codexChoices(_ view: CodexSessionAccounts) -> Accounts {
+        let pendingTargets = view.panes.compactMap(\.pending?.accountId).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+        if pendingTargets.count > 1 {
+            return .unavailable("This session has unfinished switches to different Codex accounts. Resolve the pending conversations before selecting another account.")
+        }
+        if view.panes.isEmpty { return .unavailable("No running Codex pane found — start Codex in Terminal first.") }
+        let finishing = pendingTargets.first
+        let available = view.accounts.filter { !$0.disabled && $0.available && (finishing == nil || $0.id == finishing) }
+        if available.isEmpty { return .unavailable("No selectable Codex account is available in this session.") }
+        return .loaded(available.map {
+            finishing != nil ? Choice(id: $0.id, label: "\($0.label) (finish switching)", current: false, finishing: true)
+                : Choice(id: $0.id, label: $0.label, current: $0.id == view.currentAccountId)
+        })
     }
 }
 
@@ -150,7 +167,6 @@ final class MacSessionActions: ObservableObject {
 
     struct Rename: Identifiable {
         let sessionId: String
-        let title: String
         let name: String
         var id: String { sessionId }
     }
@@ -168,51 +184,48 @@ final class MacSessionActions: ObservableObject {
 
     @Published var sheet: Sheet?
     @Published private(set) var claude: MacSessionMenu.Accounts = .loading
-    @Published private(set) var codex: MacSessionMenu.Accounts = .loading
+    /// Each Codex session's own account list (`GET /api/sessions/:id/codex-account`); a session not loaded yet is
+    /// loading.
+    @Published private(set) var codex: [String: MacSessionMenu.Accounts] = [:]
     private(set) var actions: SessionActions?
     private weak var live: LiveStore?
-    private var client: DevdClient?
-    /// How often a Codex switch that went on in the background is asked about (the dashboard asks every 3 s).
+    /// The confirmed job's work, cancelled when its sheet goes away (devd carries on with it).
+    private var running: Task<Void, Never>?
+    /// How often a Codex switch that went on in the background is asked about (the dashboard asks every 3 s), and how
+    /// long it is followed before the sheet says its outcome is unknown.
     var codexPollInterval: Duration = .seconds(3)
+    var codexMaxWait: Duration = .seconds(20 * 60)
 
     func attach(client: DevdClient?, live: LiveStore?) {
-        self.client = client
         self.live = live
         actions = client.map { SessionActions(client: $0) }
     }
 
-    /// Both account lists, each on its own: one pool failing leaves the other usable.
-    func loadAccounts() async {
-        guard let client else { return }
-        async let anthropic: Result<AccountsResponse, Error> = Self.result { try await client.get("/api/accounts") }
-        async let codexList: Result<CodexAccountsResponse, Error> = Self.result { try await client.get("/api/codex-accounts") }
-        let (a, c) = await (anthropic, codexList)
-        claude = Self.accounts(a.map { MacSessionMenu.claudeChoices($0.accounts) })
-        codex = Self.accounts(c.map { MacSessionMenu.codexChoices($0.accounts) })
+    /// The Anthropic pool, shared by every Claude Code session.
+    func loadClaudeAccounts() async {
+        guard let actions else { return }
+        do { claude = .loaded(MacSessionMenu.claudeChoices(try await actions.accounts().accounts)) }
+        catch { claude = .failed(errorText(error)) }
     }
 
-    private static func result<T>(_ op: () async throws -> T) async -> Result<T, Error> {
-        do { return .success(try await op()) } catch { return .failure(error) }
-    }
-
-    private static func accounts(_ r: Result<[MacSessionMenu.Choice], Error>) -> MacSessionMenu.Accounts {
-        switch r {
-        case .success(let list): return .loaded(list)
-        case .failure(let error): return .failed(errorText(error))
-        }
+    func loadCodexAccounts(_ sessionId: String) async {
+        guard let actions else { return }
+        do { codex[sessionId] = MacSessionMenu.codexChoices(try await actions.codexAccounts(sessionId)) }
+        catch { codex[sessionId] = .failed(errorText(error)) }
     }
 
     // MARK: - Requests from the menu
 
     func requestRename(_ item: InboxItem, name: String?) {
-        sheet = .rename(Rename(sessionId: item.sessionId, title: item.title, name: name ?? ""))
+        sheet = .rename(Rename(sessionId: item.sessionId, name: name ?? ""))
     }
 
-    /// The server sanitizes the name; an empty one clears it. Throws for the sheet to show.
+    /// The server sanitizes the name; an empty one clears it. Throws for the sheet to show. The live list refreshes
+    /// after the sheet has closed (the row itself updates over the inbox stream).
     func rename(_ sessionId: String, to name: String) async throws {
         guard let actions else { throw DevdClientError(description: "Not connected to devd") }
         try await actions.setName(sessionId, name.trimmingCharacters(in: .whitespacesAndNewlines))
-        await live?.refreshNow()
+        Task { [live] in await live?.refreshNow() }
     }
 
     func requestAgent(_ item: InboxItem, to target: AgentName) {
@@ -241,12 +254,15 @@ final class MacSessionActions: ObservableObject {
     }
 
     func requestCodexAccount(_ item: InboxItem, account: MacSessionMenu.Choice) {
-        open(Job(title: "Switch Codex to \(account.label)?",
+        let verb = account.finishing ? "Finish switching" : "Switch"
+        open(Job(title: "\(verb) Codex to \(account.label)?",
                   message: "Each Codex pane resumes its exact current conversation on this account. Unfinished turns may be interrupted; if the conversation cannot be resumed, switching stops without starting a new one.",
-                  confirmLabel: "Switch Account", destructive: false, progress: "Switching Codex to \(account.label)…") { [weak self] progress in
+                  confirmLabel: account.finishing ? "Finish Switching" : "Switch Account", destructive: false,
+                  progress: "Switching Codex to \(account.label)…") { [weak self] progress in
             guard let self, let actions = self.actions else { throw DevdClientError(description: "Not connected to devd") }
+            defer { Task { await self.loadCodexAccounts(item.sessionId) } }
             return try await Self.codexSwitch(actions: actions, sessionId: item.sessionId, account: account,
-                                              pollEvery: self.codexPollInterval, progress: progress)
+                                              pollEvery: self.codexPollInterval, maxWait: self.codexMaxWait, progress: progress)
         })
     }
 
@@ -266,24 +282,45 @@ final class MacSessionActions: ObservableObject {
         sheet = .job(task)
     }
 
-    /// Runs the open task after its confirmation; its outcome replaces the question in the sheet.
-    func confirm() async {
-        guard case .job(var task) = sheet, case .confirm = task.phase else { return }
-        task.phase = .running(task.progress)
-        sheet = .job(task)
-        let id = task.id
+    /// Starts the open job after its confirmation; its outcome replaces the question in the sheet. Awaiting the result
+    /// is for tests; the sheet does not wait.
+    @discardableResult
+    func confirm() -> Task<Void, Never>? {
+        guard case .job(var job) = sheet, case .confirm = job.phase else { return nil }
+        job.phase = .running(job.progress)
+        sheet = .job(job)
+        let id = job.id
         let progress: @MainActor (String) -> Void = { [weak self] text in
             guard let self, case .job(var t) = self.sheet, t.id == id else { return }
             t.phase = .running(text)
             self.sheet = .job(t)
         }
-        let outcome: Outcome
-        do { outcome = try await task.work(progress) } catch { outcome = Outcome(text: errorText(error), tone: .failure) }
-        if outcome.tone != .failure { await live?.refreshNow() }
-        guard case .job(var t) = sheet, t.id == id else { return }
-        t.phase = .done(outcome)
-        sheet = .job(t)
+        let task = Task { [weak self] in
+            let outcome: Outcome
+            do { outcome = try await job.work(progress) } catch {
+                // Closing the sheet cancels only the waiting here: the request already reached devd.
+                outcome = Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled
+                    ? Self.unknownOutcome : Outcome(text: errorText(error), tone: .failure)
+            }
+            guard let self else { return }
+            if case .job(var t) = self.sheet, t.id == id {
+                t.phase = .done(outcome)
+                self.sheet = .job(t)
+            }
+            if outcome.tone != .failure { await self.live?.refreshNow() }
+        }
+        running = task
+        return task
     }
+
+    /// The sheet went away (Close while running, or the window): stop waiting for the job. devd carries on with it.
+    func cancelRunning() {
+        running?.cancel()
+        running = nil
+    }
+
+    static let unknownOutcome = Outcome(text: "Closed before devd answered: the action goes on in devd. Check the session for its result.",
+                                        tone: .warning)
 
     // MARK: - Outcomes (the CLI's sentences)
 
@@ -314,23 +351,25 @@ final class MacSessionActions: ObservableObject {
     }
 
     /// A Codex switch, followed while devd runs it in the background (202), then said as the CLI says it. The switch
-    /// goes on in devd whatever happens here, so a lost poll or a switch that outlasts `maxPolls` is reported as
+    /// goes on in devd whatever happens here, so lost polls or a switch that outlasts `maxWait` are reported as
     /// unknown, never as failed.
     static func codexSwitch(actions: SessionActions, sessionId: String, account: MacSessionMenu.Choice, pollEvery: Duration,
-                            maxPolls: Int = 400, progress: @escaping @MainActor (String) -> Void) async throws -> Outcome {
+                            maxWait: Duration, progress: @escaping @MainActor (String) -> Void) async throws -> Outcome {
         let unknown = "The switch is still running on devd, or its result was lost: check the session's Codex account in the dashboard."
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: maxWait)
         var r = try await actions.switchCodexAccount(sessionId, accountId: account.id)
-        var polls = 0, failures = 0
+        var failures = 0
         while r.running == true {
-            guard polls < maxPolls else { return Outcome(text: unknown, tone: .warning) }
-            polls += 1
+            guard clock.now < deadline else { return Outcome(text: unknown, tone: .warning) }
             progress("Switching… Large conversations with many agents can take several minutes.")
             try await Task.sleep(for: pollEvery)
-            let poll: CodexSessionAccountPoll
+            let poll: CodexSessionAccounts
             do {
-                poll = try await actions.codexAccountPoll(sessionId)
+                poll = try await actions.codexAccounts(sessionId)
                 failures = 0
             } catch {
+                try Task.checkCancellation()
                 failures += 1
                 if failures >= 3 { return Outcome(text: "\(unknown) (\(errorText(error)))", tone: .warning) }
                 continue
@@ -364,7 +403,7 @@ struct MacSessionMenuItems: View {
         let session = live.live?.sessions.first { $0.id == item.sessionId }
         let menu = MacSessionMenu.menu(sessionId: item.sessionId, runtime: item.runtime, agent: item.agent,
                                        facts: session.map { .init(worktree: $0.worktree != nil, accountId: $0.accountId) },
-                                       claude: actions.claude, codex: actions.codex)
+                                       claude: actions.claude, codex: actions.codex[item.sessionId] ?? .loading)
         Divider()
         Button("Rename Session…") { actions.requestRename(item, name: session?.name) }
             .disabled(!menu.canRename)
@@ -393,7 +432,11 @@ struct MacSessionMenuItems: View {
                 }
                 if let note = account.note { Text(note) }
                 Divider()
-                Button("Refresh Accounts") { Task { await actions.loadAccounts() } }
+                Button("Refresh Accounts") {
+                    Task {
+                        if account.pool == .claude { await actions.loadClaudeAccounts() } else { await actions.loadCodexAccounts(item.sessionId) }
+                    }
+                }
             }
         }
         Divider()
@@ -406,28 +449,37 @@ struct MacSessionMenuItems: View {
 
 extension View {
     /// The sheets of the rows' F9 actions, and the account lists the menus offer.
-    func macSessionActions(_ actions: MacSessionActions) -> some View {
-        modifier(MacSessionActionsHost(actions: actions))
+    func macSessionActions(_ actions: MacSessionActions, inbox: InboxStore) -> some View {
+        modifier(MacSessionActionsHost(actions: actions, inbox: inbox))
     }
 }
 
 private struct MacSessionActionsHost: ViewModifier {
     @ObservedObject var actions: MacSessionActions
+    @ObservedObject var inbox: InboxStore
     @EnvironmentObject private var state: MacAppState
     @EnvironmentObject private var appModel: AppModel
 
+    /// The terminal Codex sessions: each has its own account list (which accounts it can use, which it runs on).
+    private var codexSessions: [String] {
+        (inbox.items ?? []).filter { $0.runtime == .tmux && $0.agent == AgentName.codex.rawValue }.map(\.sessionId)
+    }
+
     func body(content: Content) -> some View {
         content
-            .task(id: appModel.clientIdentity) {
+            // Again when a Codex session appears: its list loads once, then after each switch and on Refresh Accounts.
+            .task(id: "\(appModel.clientIdentity)|\(codexSessions)") {
                 actions.attach(client: appModel.client, live: state.live)
-                await actions.loadAccounts()
+                await actions.loadClaudeAccounts()
+                for id in codexSessions where actions.codex[id] == nil { await actions.loadCodexAccounts(id) }
             }
-            .sheet(item: $actions.sheet) { sheet in
+            .sheet(item: $actions.sheet, onDismiss: actions.cancelRunning) { sheet in
                 switch sheet {
                 case .rename(let r): MacRenameSheet(rename: r, actions: actions)
                 case .job: MacSessionTaskSheet(actions: actions)
                 }
             }
+            .onDisappear(perform: actions.cancelRunning)
     }
 }
 
@@ -454,6 +506,7 @@ struct MacRenameSheet: View {
             TextField("Name", text: $name, prompt: Text("No name (shows project/repo)"))
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(save)
+                .disabled(busy)
             if let error {
                 Text(error).font(Theme.F.meta).foregroundStyle(Theme.C.dangerText)
             }
@@ -461,10 +514,9 @@ struct MacRenameSheet: View {
                 if busy { ProgressView().controlSize(.small) }
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Rename", action: save).keyboardShortcut(.defaultAction)
+                Button("Rename", action: save).keyboardShortcut(.defaultAction).disabled(busy)
             }
         }
-        .disabled(busy)
         .padding(20)
         .frame(width: 360)
     }
@@ -484,8 +536,8 @@ struct MacRenameSheet: View {
     }
 }
 
-/// An agent or account switch, or End: the question with Cancel as the default, then progress (it cannot be closed
-/// while devd works), then the outcome.
+/// An agent or account switch, or End: the question with Cancel as the default, then progress, then the outcome.
+/// Closing while it runs stops only the waiting (the host cancels it); devd carries on.
 struct MacSessionTaskSheet: View {
     @ObservedObject var actions: MacSessionActions
     @Environment(\.dismiss) private var dismiss
@@ -500,14 +552,16 @@ struct MacSessionTaskSheet: View {
                     HStack {
                         Spacer()
                         Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
-                        Button(task.confirmLabel, role: task.destructive ? .destructive : nil) {
-                            Task { await actions.confirm() }
-                        }
+                        Button(task.confirmLabel, role: task.destructive ? .destructive : nil) { actions.confirm() }
                     }
                 case .running(let text):
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
                         Text(text).fixedSize(horizontal: false, vertical: true)
+                    }
+                    HStack {
+                        Spacer()
+                        Button("Close (continues on devd)") { dismiss() }.keyboardShortcut(.cancelAction)
                     }
                 case .done(let outcome):
                     Label {
@@ -523,13 +577,7 @@ struct MacSessionTaskSheet: View {
             }
             .padding(20)
             .frame(width: 400)
-            .interactiveDismissDisabled(Self.running(task.phase))
         }
-    }
-
-    private static func running(_ phase: MacSessionActions.Phase) -> Bool {
-        if case .running = phase { return true }
-        return false
     }
 
     private static func icon(_ tone: MacSessionActions.Tone) -> String {

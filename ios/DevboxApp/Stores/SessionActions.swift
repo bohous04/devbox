@@ -75,12 +75,17 @@ struct SessionActions {
     private struct CodexAccountBody: Encodable { let accountId: String }
 
     /// A Codex session's account switch. devd answers 202 `{running: true}` when the handoff outlasts its wait; the
-    /// result then comes from `codexAccountPoll` (dashboard SessionCodexAccount.tsx).
+    /// result then comes from `codexAccounts` (dashboard SessionCodexAccount.tsx).
     func switchCodexAccount(_ id: String, accountId: String) async throws -> CodexSessionSwitchResult {
         try await client.post("/api/sessions/\(id)/codex-account", body: CodexAccountBody(accountId: accountId))
     }
 
-    func codexAccountPoll(_ id: String) async throws -> CodexSessionAccountPoll {
+    /// The Anthropic account pool (the accounts `switchAccount` can name).
+    func accounts() async throws -> AccountsResponse {
+        try await client.get("/api/accounts")
+    }
+
+    func codexAccounts(_ id: String) async throws -> CodexSessionAccounts {
         try await client.get("/api/sessions/\(id)/codex-account")
     }
 

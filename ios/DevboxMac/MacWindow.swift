@@ -234,7 +234,7 @@ struct MacInboxSidebar: View {
         .sheet(item: $actionsFor) { item in
             InboxRowActions(item: item, store: store).frame(minWidth: 360, minHeight: 320)
         }
-        .macSessionActions(sessionActions)
+        .macSessionActions(sessionActions, inbox: store)
     }
 
     /// Search and New session, above the groups.

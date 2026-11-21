@@ -1384,9 +1384,28 @@ struct CodexSessionSwitchResult: Decodable, Equatable {
     var error: String? = nil
 }
 
-/// The part of `GET /api/sessions/:id/codex-account` that follows a background switch: `switching` while it runs,
-/// then `lastSwitch` once (devd/src/api.ts).
-struct CodexSessionAccountPoll: Decodable {
+/// `GET /api/sessions/:id/codex-account` (devd/src/codexSessionAccounts.ts CodexSessionAccountView): the accounts as
+/// this session can use them, each Codex pane's account and an unfinished switch. A background switch adds `switching`
+/// while it runs, then `lastSwitch` once (devd/src/api.ts).
+struct CodexSessionAccounts: Decodable {
+    struct Account: Decodable {
+        let id: String
+        let label: String
+        let disabled: Bool
+        let available: Bool
+        let unavailableReason: String?
+    }
+    struct Pending: Decodable {
+        let accountId: String
+    }
+    struct Pane: Decodable {
+        let target: String
+        let accountId: String?
+        let pending: Pending?
+    }
+    let accounts: [Account]
+    let panes: [Pane]
+    let currentAccountId: String?
     let switching: Bool?
     let lastSwitch: CodexSessionSwitchResult?
 }
