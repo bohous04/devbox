@@ -419,7 +419,7 @@ struct SessionDetailView: View {
             }
         }
         .navigationDestination(isPresented: $showChat) {
-            if let client = appModel.client { ChatScreen(sessionId: session.id, client: client) }
+            if let client = appModel.client { ChatScreen(sessionId: session.id, client: client).id(appModel.clientIdentity) }
         }
         .fullScreenOrSheet(isPresented: $showTerminal) {
             if let client = appModel.client {

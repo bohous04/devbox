@@ -7,7 +7,8 @@ struct MirrorLock: Equatable {
 }
 
 /// The Chat view of a tmux session (devd/src/transcriptMirror.ts): a port of `dashboard/src/mirrorView.ts`, so the
-/// apps and the web lock the composer for the same reasons, in the same words.
+/// apps and the web lock the composer for the same reasons (devd's words; the apps say "reopen" where the web says
+/// "reload the page").
 enum MirrorView {
     /// A tmux session takes no images through its Chat view: they would have to reach the pane as files.
     static let imagesOff = "Images can't be sent to a terminal session; paste them in the terminal."

@@ -114,7 +114,7 @@ struct ChatScreen: View {
                     Text(heading.title).font(.system(size: 16, weight: .semibold)).lineLimit(1)
                     // Where it runs and what it is doing ("Working…", "Finished 3m ago"), as the inbox row says.
                     TimelineView(.periodic(from: .now, by: 30)) { context in
-                        let state = store.thread.flatMap { ThreadView.runState($0, now: InboxView.ms(context.date)) }
+                        let state = runState(now: context.date)
                         let line = [heading.place, state].compactMap { $0 }.joined(separator: " · ")
                         if !line.isEmpty {
                             Text(line).font(.caption).foregroundStyle(Theme.C.mutedForeground).lineLimit(1)
@@ -124,7 +124,7 @@ struct ChatScreen: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 // One element read as "title, place, state", whatever the layout.
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel([heading.title, heading.place, store.thread.flatMap { ThreadView.runState($0, now: InboxView.ms(Date())) }]
+                .accessibilityLabel([heading.title, heading.place, runState(now: Date())]
                     .compactMap { $0 }.joined(separator: ", "))
             }
             #endif
@@ -155,6 +155,16 @@ struct ChatScreen: View {
                 wentAway = false
                 Task { await store.resume() }
             }
+        }
+    }
+
+    /// The header's state. A tmux session's comes from devd's look at the pane, as the web's: its transcript has no
+    /// turn yet while the agent waits for an answer only the terminal can give.
+    private func runState(now: Date) -> String? {
+        switch store.mirror?.activity {
+        case "busy": return "Working…"
+        case "waiting": return "Needs you"
+        default: return store.thread.flatMap { ThreadView.runState($0, now: InboxView.ms(now)) }
         }
     }
 
