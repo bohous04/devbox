@@ -85,9 +85,11 @@ export function chatBusy(t: ThreadSnapshot, a: Attention): boolean {
   return a.section === "working" || t.pending.length > 0;
 }
 
-/** The hub's live state of a tmux session. `done` stays needs_you until the next prompt: tmux has no seen marker. */
-export function tmuxAttention(live: AgentLiveSnapshot | null, pr: PrHold | null = null): Attention {
-  if (!live) return prAttention(pr, 0) ?? { section: "idle", reason: null, since: 0 };
+/** The hub's live state of a tmux session. `done` stays needs_you until the next prompt: tmux has no seen marker.
+ *  Without live state (no hook event since devd started) the session is idle since `lastActive`, the session's
+ *  recorded activity, so its row still says how long ago. */
+export function tmuxAttention(live: AgentLiveSnapshot | null, pr: PrHold | null = null, lastActive = 0): Attention {
+  if (!live) return prAttention(pr, 0) ?? { section: "idle", reason: null, since: lastActive };
   const since = live.statusSince;
   switch (live.status) {
     case "waiting": return { section: "needs_you", reason: "request", since };

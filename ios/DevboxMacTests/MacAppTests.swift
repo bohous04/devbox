@@ -21,7 +21,7 @@ final class MacAppTests: XCTestCase {
     }
 
     private func item(_ section: String, reason: String?, since: Int = 0, branch: String? = nil) throws -> InboxItem {
-        var json: [String: Any] = ["sessionId": "s", "runtime": "chat", "title": "t", "project": "p", "repo": "r", "agent": "claude",
+        var json: [String: Any] = ["sessionId": "dev-p-r-7", "runtime": "chat", "title": "t", "project": "p", "repo": "r", "agent": "claude",
                                    "attention": ["section": section, "since": since, "reason": reason.map { $0 as Any } ?? NSNull()],
                                    "lastText": NSNull()]
         if let branch { json["branch"] = branch }
@@ -64,6 +64,8 @@ final class MacAppTests: XCTestCase {
         XCTAssertEqual(MacInboxRow.secondLine(try item("idle", reason: nil), detail: ""), "p/r")
         XCTAssertEqual(MacInboxRow.secondLine(try item("needs_you", reason: "request", branch: "b"), detail: "May I run it?"), "r  ·  May I run it?",
                        "a row that needs you names its repo and says what it asks")
+        // devd's own branch repeats the repo: only its number distinguishes the row.
+        XCTAssertEqual(MacInboxRow.secondLine(try item("idle", reason: nil, branch: "session/r-7"), detail: "msg"), "p/r  ·  #7")
     }
 
     func testCutLinksNameTheFullAddress() {

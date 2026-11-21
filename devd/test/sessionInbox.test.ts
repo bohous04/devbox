@@ -139,6 +139,12 @@ test("tmux item uses the hub's live state and carries runtime tmux", () => {
   expect(it.attention.section).toBe("working");
 });
 
+test("a tmux session with no live state since devd started is idle since its last activity, not since 0", () => {
+  const t = setup();
+  insertSession(t.db, { ...TMUX, created_at: 1000, last_active_at: 5000 });
+  expect(t.inbox.item(getSession(t.db, TMUX.id)!).attention).toEqual({ section: "idle", reason: null, since: 5000 });
+});
+
 test("list covers every session, sorted", () => {
   const t = setup();
   insertSession(t.db, TMUX); // no hub state: idle since 0

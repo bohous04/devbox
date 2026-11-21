@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Attention, InboxItem } from "../../shared/thread";
-import { groupInbox, inboxHref, plainPreview, projectBadge, reasonLabel, reasonStatus, rowStatus, rowTitle, statusParts, shelfBlock, shortAgo, snoozeTimes, splitNeedsYou, threadHeading, upsertInbox } from "./inboxView";
+import { groupInbox, inboxHref, mixedAgents, plainPreview, projectBadge, reasonLabel, reasonStatus, rowStatus, rowTitle, statusParts, shelfBlock, shortAgo, snoozeTimes, splitNeedsYou, threadHeading, upsertInbox } from "./inboxView";
 
 const item = (sessionId: string, attention: Attention, runtime: InboxItem["runtime"] = "chat"): InboxItem => ({
   sessionId, runtime, title: sessionId, project: "p", repo: "r", agent: "claude", attention, lastText: null,
@@ -161,4 +161,11 @@ test("threadHeading: the thread page names the thread like its inbox row, the to
   expect(threadHeading("dev-p-r-14", session, undefined)).toBeNull();
   // Not a known session: its id.
   expect(threadHeading("dev-p-r-14", undefined, undefined)).toBe("dev-p-r-14");
+});
+
+test("mixedAgents: a row names its agent only while the visible rows use more than one", () => {
+  const a = item("a", { section: "idle", reason: null, since: 1 });
+  expect(mixedAgents([a, { ...a, sessionId: "b" }])).toBe(false);
+  expect(mixedAgents([])).toBe(false);
+  expect(mixedAgents([a, { ...a, sessionId: "b", agent: "codex" }])).toBe(true);
 });

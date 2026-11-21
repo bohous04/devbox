@@ -162,3 +162,7 @@ export function sessionTitle(s: { sessionId: string; name: string | null; projec
   const n = new RegExp(`-${s.repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-(\\d+)$`).exec(s.sessionId)?.[1];
   return n ? `${s.repo} #${n}` : s.repo;
 }
+
+/** Whether the inbox mixes agents: only then does a row name its agent (the Apple apps' InboxView.mixedAgents).
+ *  With one agent everywhere the label says nothing. */
+export const mixedAgents = (items: InboxItem[]): boolean => new Set(items.map((i) => i.agent)).size > 1;
