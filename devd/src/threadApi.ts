@@ -306,7 +306,9 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
    *  seq > that id, each exactly once. The store keeps state, not raw events: `snapshot({afterSeq})` holds every item
    *  and run changed after that seq as whole rows, which replace the client's copies; pending, background and
    *  native replace wholesale. An effort.state never goes out as a `thread` event: `thread-effort` carries the
-   *  store's parsed ThreadEffort (no id), and the snapshot has it as `effort`.
+   *  store's parsed ThreadEffort (no id), and the snapshot has it as `effort`. Likewise a commands.changed goes out as
+   *  `thread-commands` (the current harness's AgentCommand[] or null, no id), also after each `thread.native`; the
+   *  snapshot has it as `commands`.
    *
    *  text/event-stream is not compressed (hono's compress skips it); the ping keeps the connection under Bun's
    *  idleTimeout. */
@@ -354,9 +356,15 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
             if (store) send(sseFrame("thread-effort", store.effort()));
             return;
           }
+          // The same for the command list (bridge 1.9.0); a new native thread may be another harness's, with its own.
+          if (e.event.type === "commands.changed") {
+            if (store) send(sseFrame("thread-commands", store.commands()));
+            return;
+          }
           if (e.seq <= sentSeq) return;
           sentSeq = e.seq;
           send(sseFrame("thread", e, e.seq));
+          if (e.event.type === "thread.native" && store) send(sseFrame("thread-commands", store.commands()));
         });
         const ping = setInterval(() => send(sseFrame("ping", {})), SSE_PING_MS);
         stop = () => {

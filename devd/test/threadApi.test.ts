@@ -685,6 +685,23 @@ test("SSE: an effort.state goes out parsed as thread-effort, never as a thread e
   ]);
 });
 
+test("SSE: commands.changed goes out as thread-commands (the current harness's list), never as a thread event; a harness switch sends the new harness's", async () => {
+  const t = setup({ bridgeVersion: "1.9.0" });
+  const res = await t.a.fetch(req("GET", `/api/stream?session=${CHAT.id}`));
+  const events = readEvents(res, 5);
+  await Bun.sleep(10);
+  const [claude] = t.feed(CHAT.id, [{ type: "thread.native", harness: "claude", nativeThreadId: "t-1", account: null, model: "m" }]);
+  t.feed(CHAT.id, [{ type: "commands.changed", commands: [{ name: "compact", hint: "<instructions>" }, { name: "two words" }] } as unknown as BridgeEvent]);
+  const [codex] = t.feed(CHAT.id, [{ type: "thread.native", harness: "codex", nativeThreadId: "t-2", account: null, model: "gpt" }]);
+  expect(await events).toEqual([
+    { event: "thread", id: "1", data: claude },
+    { event: "thread-commands", data: null },
+    { event: "thread-commands", data: [{ name: "compact", hint: "<instructions>" }] },
+    { event: "thread", id: "3", data: codex },
+    { event: "thread-commands", data: null },
+  ]);
+});
+
 test("a malformed effort.state is stored as nothing known: the snapshot stays readable and POST thread/effort answers", async () => {
   const t = setup({ bridgeVersion: "1.7.0" });
   const errors = spyOn(console, "error").mockImplementation(() => {});

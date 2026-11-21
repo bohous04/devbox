@@ -449,7 +449,6 @@ test("schema 3: a schema-2 store gains the notice tone; a warning notice keeps i
     expect(s.snapshot().items.map((i) => [i.text, i.tone])).toEqual([["Switched to Codex", undefined], ["Your first message was not delivered (gone). Send it again.", "warn"]]);
     s.close();
     expect(userVersion(dir)).toBe(THREAD_STORE_SCHEMA);
-    expect(THREAD_STORE_SCHEMA).toBe(3);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -536,4 +535,83 @@ test("effort: dropped values are logged once per field per session, however many
   } finally {
     errors.mockRestore();
   }
+});
+
+const claude: BridgeEvent = { type: "thread.native", harness: "claude", nativeThreadId: "t-1", account: null, model: "m" };
+const codex: BridgeEvent = { type: "thread.native", harness: "codex", nativeThreadId: "t-2", account: null, model: "gpt" };
+const LIST = [{ name: "compact", description: "Compact the conversation", hint: "<instructions>" }, { name: "review" }];
+
+test("commands.changed (bridge 1.9.0): the current harness's list in the snapshot, kept across a reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "threads-"));
+  try {
+    const s = ThreadStore.open(dir, "dev-a-b-1");
+    n = 0;
+    expect("commands" in s.snapshot()).toBe(false);
+    s.apply(ev(claude));
+    expect("commands" in s.snapshot()).toBe(false);
+    s.apply(ev({ type: "commands.changed", commands: LIST }));
+    expect(s.snapshot().commands).toEqual(LIST);
+    expect(s.commands()).toEqual(LIST);
+    s.apply(ev({ type: "commands.changed", commands: [{ name: "review" }] }));
+    expect(s.snapshot().commands).toEqual([{ name: "review" }]);
+    s.close();
+    expect(ThreadStore.open(dir, "dev-a-b-1").snapshot().commands).toEqual([{ name: "review" }]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("commands: a harness that sent no list (Codex) has none, and switching back brings its own list back", () => {
+  const s = store();
+  s.apply(ev(claude));
+  s.apply(ev({ type: "commands.changed", commands: LIST }));
+  s.apply(ev(codex));
+  expect("commands" in s.snapshot()).toBe(false);
+  expect(s.commands()).toBeNull();
+  s.apply(ev(claude));
+  expect(s.snapshot().commands).toEqual(LIST);
+});
+
+test("commands: a list before any thread.native belongs to no harness and is dropped, logged", () => {
+  const errors = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const s = store();
+    s.apply(ev({ type: "commands.changed", commands: LIST }));
+    s.apply(ev(claude));
+    expect("commands" in s.snapshot()).toBe(false);
+    expect(errors.mock.calls.map((c) => String(c[0]))).toEqual(["thread store: commands.changed at seq 1 before any thread.native dropped"]);
+  } finally { errors.mockRestore(); }
+});
+
+test("commands: entries of another shape are dropped (logged once per kind); an empty name or one with spaces is no command", () => {
+  const errors = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const s = store();
+    s.apply(ev(claude));
+    const odd = [{ name: "ok", description: 5, hint: "<x>" }, { name: "two words" }, { name: "" }, "plain", { name: "/slash" }, { name: "fine", description: "d" }, { name: "bad" , hint: ["h"] }];
+    s.apply(ev({ type: "commands.changed", commands: odd } as unknown as BridgeEvent));
+    s.apply(ev({ type: "commands.changed", commands: [...odd, { name: "x y" }] } as unknown as BridgeEvent));
+    expect(s.snapshot().commands).toEqual([{ name: "ok", hint: "<x>" }, { name: "fine", description: "d" }, { name: "bad" }]);
+    expect(errors.mock.calls.map((c) => String(c[0]))).toEqual([
+      "thread store: command description that is not a string at seq 2 dropped (later ones of this kind are not logged)",
+      "thread store: command without a valid name at seq 2 dropped (later ones of this kind are not logged)",
+      "thread store: command hint that is not a string at seq 2 dropped (later ones of this kind are not logged)",
+    ]);
+  } finally { errors.mockRestore(); }
+});
+
+test("schema 4: a schema-3 store gains the commands table", () => {
+  const dir = mkdtempSync(join(tmpdir(), "threads-"));
+  try {
+    ThreadStore.open(dir, "dev-a-b-1").close();
+    const db = new Database(ThreadStore.path(dir, "dev-a-b-1"));
+    db.run("DROP TABLE commands");
+    db.run("PRAGMA user_version = 3");
+    db.close();
+    const s = ThreadStore.open(dir, "dev-a-b-1");
+    n = 0;
+    s.apply(ev(claude));
+    s.apply(ev({ type: "commands.changed", commands: LIST }));
+    expect(s.snapshot().commands).toEqual(LIST);
+    s.close();
+    expect(userVersion(dir)).toBe(4);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
