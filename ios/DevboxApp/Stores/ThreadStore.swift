@@ -63,10 +63,21 @@ enum ThreadView {
 
     /// What makes the chat switchers re-read their target (the dashboard's effect dependencies): the native
     /// thread, a run queued or ended, a notice.
+    /// shared/thread.ts isHousekeepingNotice: a bridge restart and devd's "older bridge" line, left out of what the
+    /// thread shows (stored rows stay). shared/fixtures/housekeeping-notices.json pins both copies.
+    static func isHousekeeping(_ i: ThreadItem) -> Bool {
+        guard i.kind == .notice else { return false }
+        return i.text.wholeMatch(of: #/Agent bridge restarted \(v[^)]*\)/#) != nil
+            || i.text.prefixMatch(of: #/this session's agent bridge is .+, older than the current \S+: /#) != nil
+    }
+
+    /// The items the thread shows: all but bridge housekeeping.
+    static func shownItems(_ t: ThreadSnapshot) -> [ThreadItem] { t.items.filter { !isHousekeeping($0) } }
+
     static func switchKey(_ t: ThreadSnapshot) -> String {
         let n = t.native
         return [n?.harness, n?.nativeThreadId, n?.model, n?.account].map { $0 ?? "-" }.joined(separator: "|")
-            + "|\(t.runs.filter { $0.endedSeq != nil }.count)|\(t.runs.count)|\(t.items.filter { $0.kind == .notice }.count)"
+            + "|\(t.runs.filter { $0.endedSeq != nil }.count)|\(t.runs.count)|\(t.items.filter { $0.kind == .notice && !isHousekeeping($0) }.count)"
     }
 
     /// The newest seq at which a run ended: reaching it while the thread is open counts as seen.
@@ -433,7 +444,7 @@ final class ThreadStore: ObservableObject {
         let critic = Set(ThreadView.criticRunIds(t))
         let open = Dictionary(t.pending.map { ($0.requestId, $0) }, uniquingKeysWith: { a, _ in a })
         let failed = Set(t.runs.filter { $0.status == .failed }.map(\.runId))
-        rows = t.items.enumerated().map { i, it in
+        rows = ThreadView.shownItems(t).enumerated().map { i, it in
             ChatRow(id: i, item: it, pending: it.itemId.flatMap { open[$0] },
                     queued: it.runId.map(queued.contains) ?? false, critic: it.runId.map(critic.contains) ?? false,
                     failedRun: it.kind == .notice && it.runId.map(failed.contains) == true)

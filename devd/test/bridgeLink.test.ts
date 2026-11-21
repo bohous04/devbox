@@ -321,7 +321,7 @@ test("a bridge log behind the store is logged, shown as a notice and reported, u
   expect(behind).toEqual([ID]);
   expect(logs.some((l) => l.includes("behind") && l.includes("bridge 2") && l.includes("devd 5"))).toBe(true);
   const notice = store.snapshot().items.filter((i) => i.kind === "notice");
-  expect(notice.map((i) => i.text)).toEqual(["bridge log is behind devd's store (bridge 2, devd 5); new events may be missing"]);
+  expect(notice.map((i) => [i.text, i.tone])).toEqual([["bridge log is behind devd's store (bridge 2, devd 5); new events may be missing", undefined]]);
   a.close();
   await waitFor(() => links.status(ID) === "disconnected", "disconnect");
   serve({ events: [ev(1), ev(2), ev(3), ev(4), ev(5), ev(6)] });
@@ -575,12 +575,12 @@ test("T9: a frame without a seq that keeps failing is said once in the thread; t
   const raw = setInterval(() => s.raw("{not json\n"), 5);
   cleanups.push(() => clearInterval(raw));
   await waitFor(() => s.hellos.length >= POISON_LIMIT + 3, "repeated failures");
-  const notices = store.snapshot().items.filter((i) => i.kind === "notice").map((i) => i.text);
-  expect(notices).toEqual([`the agent bridge keeps sending a frame devd cannot read (malformed frame: not valid JSON); the link reconnects every ${RETRY} ms`]);
+  const notices = store.snapshot().items.filter((i) => i.kind === "notice").map((i) => [i.text, i.tone]);
+  expect(notices).toEqual([[`the agent bridge keeps sending a frame devd cannot read (malformed frame: not valid JSON); the link reconnects every ${RETRY} ms`, undefined]]);
   expect(logs.filter((l) => l.includes("not valid JSON"))).toHaveLength(2);
 });
 
-test("M12: a bridge older than this devd's is said once per version in the thread, also across reconnects", async () => {
+test("M12: a bridge older than this devd's is logged, never put in the thread (the target says it while true)", async () => {
   const { links, serve, logs, store } = setup();
   const a = serve({ ready: { version: "1.4.0" } });
   links.ensure(ID);
@@ -591,14 +591,15 @@ test("M12: a bridge older than this devd's is said once per version in the threa
   await waitFor(() => b.hellos.length === 1 && links.status(ID) === "connected", "reconnect");
   await Bun.sleep(RETRY);
   const text = `this session's agent bridge is 1.4.0, older than the current ${BRIDGE_VERSION}: it lacks the newer fixes until the session's container is recreated`;
-  expect(store.snapshot().items.filter((i) => i.kind === "notice").map((i) => i.text)).toEqual([text]);
+  expect(store.snapshot().items.filter((i) => i.kind === "notice")).toEqual([]);
+  // Once per session and version, however often it reconnects.
   expect(logs.filter((l) => l.includes("older than the current"))).toEqual([`bridge link ${ID}: ${text}`]);
   b.close();
   await waitFor(() => links.status(ID) === "disconnected", "disconnect");
   serve({ ready: { version: BRIDGE_VERSION } });
   await waitFor(() => links.status(ID) === "connected", "current bridge");
   await Bun.sleep(RETRY);
-  expect(store.snapshot().items.filter((i) => i.kind === "notice")).toHaveLength(1);
+  expect(store.snapshot().items.filter((i) => i.kind === "notice")).toHaveLength(0);
 });
 
 test("S6-R21: a bridge from 1.5.0 gets a periodic ack with the store's durable seq; older bridges never get one", async () => {
@@ -731,6 +732,7 @@ for (const [what, binding, says] of [
     expect(notices(store)).toHaveLength(1);
     expect(notices(store)[0]).toContain(says);
     expect(refusals).toEqual(notices(store));
+    expect(store.snapshot().items.map((i) => i.tone)).toEqual(["warn"]);
     expect(logs.filter((l) => l.includes("refused"))).toHaveLength(1);
   });
 }
@@ -897,6 +899,8 @@ test("a first message's effort a bridge older than 1.7.0 cannot take: the messag
   await waitFor(() => b.cmds.length === 1, "turn sent");
   expect(b.cmds).toEqual([{ kind: "startTurn", text: "fix it" }]);
   expect(notices(store)).toContainEqual("Effort high was not set: this session's agent bridge (1.6.0) cannot change the effort; it needs 1.7.0 — recreate the session's container");
+  // Something the user has to act on: raised, not a faint line.
+  expect(store.snapshot().items.find((i) => i.text.startsWith("Effort high was not set"))?.tone).toBe("warn");
 });
 
 test("a first message's effort the bridge refuses: the message still goes, with the refusal in the thread", async () => {

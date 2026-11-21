@@ -1,0 +1,14 @@
+{
+  "hidden": [
+    "Agent bridge restarted (v1.7.0)",
+    "Agent bridge restarted (v1.8.0)",
+    "this session's agent bridge is 1.5.0, older than the current 1.6.0: it lacks the newer fixes until the session's container is recreated",
+    "this session's agent bridge is older than 1.1.0, older than the current 1.8.0: it lacks the newer fixes until the session's container is recreated"
+  ],
+  "shown": [
+    "Your first message was not delivered (bridge refused). Send it again.",
+    "Switched to Codex · resumed · context handed over (1 items)",
+    "Agent bridge restarted after a crash: the last run was recovered",
+    "Effort high was not set: this session's agent bridge (1.6.0) cannot change the effort; it needs 1.7.0 — recreate the session's container"
+  ]
+}

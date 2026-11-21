@@ -7,6 +7,7 @@ import type { BridgeCommand } from "../../image/agent-bridge/src/protocol";
 import { PROXY_PROFILE_ENV_KEYS, PROXY_PROFILES, proxyProfileEnv } from "../../image/agent-bridge/src/proxyProfile";
 import type { BridgeEvent, Capabilities } from "../../shared/thread";
 import { PROFILE_ENV } from "../src/agentSwitch";
+import { BRIDGE_VERSION } from "../../image/agent-bridge/src/version";
 import { AgentDisconnected, CommandFailed } from "../src/bridgeLink";
 import { CHAT_MODELS, ChatSwitch, MODEL_WINDOW_ALIASES, type ChatSwitchDeps } from "../src/chatSwitch";
 import { PRICED_MODELS } from "../src/pricing";
@@ -505,6 +506,8 @@ test("a resumed thread with a delta says how much of it was handed over", async 
   ]);
   expect(await t.post("harness", { agent: "codex" })).toEqual({ status: 202, body: { kind: "resume-with-delta" } });
   expect(notices(t).at(-1)).toBe("Switched to Codex · resumed · context handed over (1 items)");
+  // A record of the user's own action: a plain notice.
+  expect(t.store.snapshot().items.at(-1)?.tone).toBeUndefined();
 });
 
 test("GET thread/target is the target devd plans the next switch from", async () => {
@@ -513,12 +516,35 @@ test("GET thread/target is the target devd plans the next switch from", async ()
     const r = await t.app.fetch(new Request(`http://x/api/sessions/${CHAT.id}/thread/target`));
     return { status: r.status, body: await r.json() };
   };
-  expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "primary", model: null, awaitingTarget: false, bridgeVersion: null } });
+  expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "primary", model: null, awaitingTarget: false, bridgeVersion: null, bridgeOutdated: false } });
   claudeThread(t);
   await t.post("account", { accountId: "backup" });
-  expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "backup", model: "claude-opus-5-5", awaitingTarget: false, bridgeVersion: null } });
+  expect(await get()).toEqual({ status: 200, body: { agent: "claude", harness: "claude", account: "backup", model: "claude-opus-5-5", awaitingTarget: false, bridgeVersion: null, bridgeOutdated: false } });
   await t.post("harness", { agent: "codex" });
-  expect(await get()).toEqual({ status: 200, body: { agent: "codex", harness: "codex", account: "default", model: null, awaitingTarget: false, bridgeVersion: null } });
+  expect(await get()).toEqual({ status: 200, body: { agent: "codex", harness: "codex", account: "default", model: null, awaitingTarget: false, bridgeVersion: null, bridgeOutdated: false } });
+});
+
+test("GET thread/target says whether the session's bridge is older than this devd's, while it is", async () => {
+  const t = setup();
+  const outdated = async () => ((await (await t.app.fetch(new Request(`http://x/api/sessions/${CHAT.id}/thread/target`))).json()) as { bridgeOutdated: boolean }).bridgeOutdated;
+  t.handshake(false, "1.4.0");
+  expect(await outdated()).toBe(true);
+  t.handshake(false, BRIDGE_VERSION);
+  expect(await outdated()).toBe(false);
+  // A handshake without a version is a 1.0.0 bridge: outdated too.
+  t.handshake(false, null);
+  expect(await outdated()).toBe(true);
+});
+
+test("bridgeOutdated: not claimed before a handshake; a recreated container's current bridge clears it", async () => {
+  const t = setup();
+  expect(t.sw.target(CHAT.id).bridgeOutdated).toBe(false);
+  t.handshake(false, "1.4.0");
+  expect(t.sw.target(CHAT.id).bridgeOutdated).toBe(true);
+  t.sw.drop(CHAT.id);
+  expect(t.sw.target(CHAT.id).bridgeOutdated).toBe(false);
+  t.handshake(false, BRIDGE_VERSION);
+  expect(t.sw.target(CHAT.id).bridgeOutdated).toBe(false);
 });
 
 test("after a failed resume the switch notice says so", async () => {
@@ -575,6 +601,7 @@ test("a failed re-plan after a failed resume stays visible, but the DB follows t
   expect(await t.post("account", { accountId: "backup" })).toEqual({ status: 409, body: { error: "agent-disconnected" } });
   expect(activeLeases(t)).toEqual(["backup"]);
   expect(notices(t).at(-1)).toStartWith("The agent waits for its target");
+  expect(t.store.snapshot().items.at(-1)?.tone).toBeUndefined();
   // What devd sends on the next handshake is the target the bridge holds: backup, a fresh thread, the full handoff.
   t.setOnSend(() => {});
   t.handshake(true);
@@ -883,6 +910,7 @@ test("a harness switch the bridge could not open says so in the thread; the sess
   t.setOnSend((cmd) => { if (cmd.kind === "switchTarget") throw new CommandFailed("Authentication required"); });
   expect(await t.post("harness", { agent: "vibe" })).toEqual({ status: 409, body: { error: "command-failed", message: "Authentication required" } });
   expect(notices(t).at(-1)).toBe("Switching to Mistral Vibe failed: Authentication required. The session stays on Claude Code.");
+  expect(t.store.snapshot().items.at(-1)?.tone).toBe("warn");
   expect(getSession(t.db, CHAT.id)!.agent).toBe("claude");
   expect(activeLeases(t)).toEqual(["primary"]);
 });

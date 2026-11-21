@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import type { RunRow, ThreadItem } from "../../shared/thread";
+import cases from "../../shared/fixtures/housekeeping-notices.json";
 import { shortDuration, threadRows, toolLabel, workLabel, workSummary } from "./workGroups";
 
 let seq = 0;
@@ -67,4 +68,11 @@ test("workSummary counts tool kinds", () => {
     item("a", "tool", { tool: "Edit", input: { file_path: "x" } }), item("a", "assistant"), item("a", "tool", { tool: "TodoWrite", input: {} }),
   ];
   expect(workSummary(items)).toBe("2 commands · 1 edit · 1 other tool");
+});
+
+test("threadRows: bridge housekeeping (restarts, an older bridge) stays out of the thread; other notices stay", () => {
+  // shared/fixtures/housekeeping-notices.json: the Apple apps hide the same lines (ThreadStoreTests).
+  const notices = [...cases.hidden, ...cases.shown].map((text) => item(null, "notice", { text }));
+  const shown = threadRows(notices, []).map((r) => (r.type === "item" ? r.item.text : ""));
+  expect(shown).toEqual(cases.shown);
 });

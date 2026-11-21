@@ -8,7 +8,7 @@ import {
 import { api, ApiError, type ChatSwitchResult, type ChatTarget } from "../../api";
 import { profileFor } from "../../newSession";
 import {
-  accountMenuBlocked, awaitingTargetText, claudeAccountOptions, codexAccountOptions, effortChipLabel, effortFooter, effortMenuBlocked, effortOptions, harnessOptions,
+  accountMenuBlocked, awaitingTargetText, bridgeOutdatedText, switchNoticeCount, claudeAccountOptions, codexAccountOptions, effortChipLabel, effortFooter, effortMenuBlocked, effortOptions, harnessOptions,
   modelLabel, modelMenuBlocked, modelOptions, switchBlocked, switchErrorText, switchResultText, type SwitchOption,
 } from "../../switchView";
 
@@ -35,7 +35,7 @@ export function Switchers({ sessionId, thread, children }: {
   const n = thread.native;
   const ended = thread.runs.filter((r) => r.endedSeq !== null).length;
   // A queued message or a devd notice (a bridge restart, a failed resume) may mean the bridge now awaits its target.
-  const notices = thread.items.filter((i) => i.kind === "notice").length;
+  const notices = switchNoticeCount(thread.items);
   const runCount = thread.runs.length;
   const loadTarget = useCallback(() => api.chatTarget(sessionId).then(
     (t) => { setTarget(t); setTargetErr(null); },
@@ -89,6 +89,7 @@ export function Switchers({ sessionId, thread, children }: {
   }
   const blocked = switchBlocked(thread, target);
   const awaiting = awaitingTargetText(target);
+  const outdated = bridgeOutdatedText(target);
   const profile = profileFor(target.agent);
 
   // A readable name only for a model the menu ticks; any other id (a dated or effort variant) shows as reported.
@@ -154,6 +155,7 @@ export function Switchers({ sessionId, thread, children }: {
   );
   const lines = [
     awaiting && <p key="awaiting" role="status" className="text-xs text-muted-foreground">{awaiting}</p>,
+    outdated && <p key="outdated" role="status" className="text-xs text-muted-foreground">{outdated}</p>,
     note && <p key="note" role="status" className="text-xs text-amber-700 dark:text-amber-300">{note}</p>,
     err && <p key="err" role="alert" className="text-xs text-destructive">{err}</p>,
     targetErr && <p key="targetErr" role="alert" className="text-xs text-destructive">{targetErr}</p>,

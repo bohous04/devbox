@@ -434,6 +434,35 @@ test("T8: a schema-1 store from before the effort table (live since #91 shipped 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("schema 3: a schema-2 store gains the notice tone; a warning notice keeps it, others carry none", () => {
+  const dir = mkdtempSync(join(tmpdir(), "threads-"));
+  try {
+    const old = ThreadStore.open(dir, "dev-a-b-1");
+    old.addNotice("Switched to Codex", 1);
+    old.close();
+    const db = new Database(ThreadStore.path(dir, "dev-a-b-1"));
+    db.run("ALTER TABLE items DROP COLUMN tone");
+    db.run("PRAGMA user_version = 2");
+    db.close();
+    const s = ThreadStore.open(dir, "dev-a-b-1");
+    s.addNotice("Your first message was not delivered (gone). Send it again.", 2, "warn");
+    expect(s.snapshot().items.map((i) => [i.text, i.tone])).toEqual([["Switched to Codex", undefined], ["Your first message was not delivered (gone). Send it again.", "warn"]]);
+    s.close();
+    expect(userVersion(dir)).toBe(THREAD_STORE_SCHEMA);
+    expect(THREAD_STORE_SCHEMA).toBe(3);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a skipped event's notice is plain: nothing the user can act on", () => {
+  const dir = mkdtempSync(join(tmpdir(), "threads-"));
+  try {
+    const s = ThreadStore.open(dir, "dev-a-b-1");
+    s.skipEvent(5, "devd skipped event 5", 1);
+    expect(s.snapshot().items.map((i) => i.tone)).toEqual([undefined]);
+    s.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("effort.state: kept for the snapshot across a reopen; levels outside the known list are dropped, logged once", () => {
   const dir = mkdtempSync(join(tmpdir(), "threads-"));
   const errors = spyOn(console, "error").mockImplementation(() => {});

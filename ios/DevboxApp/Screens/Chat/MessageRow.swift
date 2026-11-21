@@ -37,13 +37,17 @@ struct MessageRow: View, Equatable {
         }
     }
 
-    /// A run's failure stays prominent; devd's and the bridge's own notices (and an unknown kind) are a faint centred
-    /// line between hairlines.
+    /// A run's failure stays prominent, and so does a notice the user has to act on (tone "warn"); devd's and the
+    /// bridge's other notices (and an unknown kind) are a faint centred line between hairlines.
     @ViewBuilder
     private var notice: some View {
         if item.kind == .notice, failedRun {
             Label { Text(item.text) } icon: { Image(systemName: "exclamationmark.circle") }
                 .font(Theme.F.meta).foregroundStyle(Theme.C.dangerText)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else if item.kind == .notice, item.warns {
+            Label { Text(item.text) } icon: { Image(systemName: "exclamationmark.triangle") }
+                .font(Theme.F.meta).foregroundStyle(Theme.C.warnText)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             HStack(spacing: 10) {

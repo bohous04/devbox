@@ -14,6 +14,7 @@
 import type { Database } from "bun:sqlite";
 import type { BridgeCommand, HandoffDelivery, SwitchTarget } from "../../image/agent-bridge/src/protocol";
 import { isProxyProfile, proxyProfileEnv, type ProxyProfile } from "../../image/agent-bridge/src/proxyProfile";
+import { BRIDGE_VERSION } from "../../image/agent-bridge/src/version";
 import { ACP_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
 import { MODEL_ALIASES, CHAT_MODELS as SHARED_CHAT_MODELS } from "../../shared/chatModels";
 import type { Capabilities, LoggedEvent } from "../../shared/thread";
@@ -78,7 +79,9 @@ const UNCHANGED: SwitchResult = { kind: "set-model", unchanged: true };
 /** GET .../thread/target: the profile and the target devd plans the next switch from. `awaitingTarget`: the bridge
  *  holds no harness until it gets a target (devd keeps sending it; a switch is allowed despite queued messages). */
 /** `bridgeVersion`: from the bridge's latest handshake; null before one, or for a 1.0.0 bridge (it sends none). */
-export interface CurrentTarget extends Target { agent: AgentName; awaitingTarget: boolean; bridgeVersion: string | null }
+/** `bridgeOutdated`: the bridge's latest handshake named a version older than this devd's, or none (1.0.0); it lacks
+ *  the newer fixes until the session's container is recreated. False before a handshake. */
+export interface CurrentTarget extends Target { agent: AgentName; awaitingTarget: boolean; bridgeVersion: string | null; bridgeOutdated: boolean }
 
 export interface ChatSwitchDeps {
   db: Database;
@@ -174,7 +177,13 @@ export class ChatSwitch {
     const s = getSession(this.d.db, sessionId);
     if (!s) throw new Error(`unknown session ${sessionId}`);
     const { harness, account, model } = this.current(s, this.d.threads(sessionId));
-    return { agent: agentNameFor(s.agent), harness, account, model, awaitingTarget: this.awaiting.has(sessionId), bridgeVersion: this.bridgeVersions.get(sessionId) ?? null };
+    const bridgeVersion = this.bridgeVersions.get(sessionId) ?? null;
+    // A handshake seen without a version is a 1.0.0 bridge; before any handshake nothing is claimed.
+    const handshaken = this.bridgeVersions.has(sessionId);
+    return {
+      agent: agentNameFor(s.agent), harness, account, model, awaitingTarget: this.awaiting.has(sessionId), bridgeVersion,
+      bridgeOutdated: handshaken && (bridgeVersion === null || !versionAtLeast(bridgeVersion, BRIDGE_VERSION)),
+    };
   }
 
   async switch(sessionId: string, req: SwitchRequest): Promise<SwitchResult> {
@@ -236,7 +245,7 @@ export class ChatSwitch {
       // The bridge answered: it could not open the new agent (e.g. its CLI is not signed in) and is back where it was.
       if (e instanceof CommandFailed && req.kind === "harness") {
         const after = awaiting ? "The agent still waits for its target." : `The session stays on ${specFor(from).label}.`;
-        store.addNotice(`Switching to ${specFor(profile).label} failed: ${e.message}. ${after}`, this.d.now());
+        store.addNotice(`Switching to ${specFor(profile).label} failed: ${e.message}. ${after}`, this.d.now(), "warn");
       }
       throw e;
     } finally {

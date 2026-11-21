@@ -91,6 +91,7 @@ struct ChatSwitchers<Content: View>: View {
             if let target {
                 if let blocked = ChatSwitch.blocked(runs: thread.runs, target: target) { line(blocked, Theme.C.mutedForeground) }
                 if let awaiting = ChatSwitch.awaitingTargetText(target) { line(awaiting, Theme.C.mutedForeground) }
+                if let outdated = ChatSwitch.bridgeOutdatedText(target) { line(outdated, Theme.C.mutedForeground) }
                 if let note { line(note, Theme.C.warnText) }
                 if let error { line(error, Theme.C.dangerText) }
             }

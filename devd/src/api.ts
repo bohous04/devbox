@@ -118,10 +118,10 @@ const endSyncWaitMs = () => Number(process.env.DEVD_END_SYNC_WAIT_MS ?? 20_000);
 
 /** A user's first prompt (POST /api/sessions) that never reached the agent: said in the thread, the event log and a
  *  notification. Also used after a devd restart (index.ts onRestoredTurnDone). */
-export function reportFirstPromptFailed(d: { db: Database; threads?: (id: string) => { addNotice: (text: string, at: number) => void }; notify: NotifyFn }, s: Pick<SessionRow, "id" | "project" | "repo">, err: Error): void {
+export function reportFirstPromptFailed(d: { db: Database; threads?: (id: string) => { addNotice: (text: string, at: number, tone?: "warn") => void }; notify: NotifyFn }, s: Pick<SessionRow, "id" | "project" | "repo">, err: Error): void {
   try {
     logEvent(d.db, s.id, "first_prompt_failed", { error: err.message });
-    d.threads?.(s.id).addNotice(`Your first message was not delivered (${err.message}). Send it again.`, Date.now());
+    d.threads?.(s.id).addNotice(`Your first message was not delivered (${err.message}). Send it again.`, Date.now(), "warn");
     d.notify(`${s.project}/${s.repo}`, `First message to ${s.id} was not delivered: ${err.message}`, { session: { id: s.id, project: s.project, repo: s.repo, runtime: "chat" } });
   } catch (e) { console.error(`reporting the failed first message of ${s.id} failed:`, e); }
 }

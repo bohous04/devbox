@@ -15,6 +15,9 @@ export interface ThreadItem {
   status?: "streaming" | "done" | "open" | "answered" | "expired";
   /** A user message's images: container paths under `/inbox/<sessionId>/` (devd/src/threadImages.ts). */
   attachments?: string[];
+  /** A notice the user has to act on, or data that may be missing (devd sets it): shown raised, not as a faint line.
+   *  Absent = a plain notice. */
+  tone?: "warn";
   ts: number;
 }
 
@@ -105,4 +108,12 @@ export interface InboxItem {
   branch?: string | null;
   attention: Attention;
   lastText: string | null;
+}
+
+/** Bridge housekeeping that once went into threads as notices: a restart (resumed, nothing to act on) and devd's
+ *  "older bridge" line, which went stale once the bridge was updated (the target's `bridgeOutdated` says it while it
+ *  is true). Stored rows stay; the apps leave them out of what they show (reversible). The Apple apps copy this
+ *  rule (ThreadView.isHousekeeping); shared/fixtures/housekeeping-notices.json pins both. */
+export function isHousekeepingNotice(i: Pick<ThreadItem, "kind" | "text">): boolean {
+  return i.kind === "notice" && (/^Agent bridge restarted \(v[^)]*\)$/.test(i.text) || /^this session's agent bridge is .+, older than the current \S+: /.test(i.text));
 }

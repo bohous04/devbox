@@ -24,7 +24,7 @@ export interface ProviderThread {
 
 /** The thread store's schema (`PRAGMA user_version`). A change to the schema raises it and adds a migration from the
  *  previous version in `open`; a store with a higher version (written by a newer devd) is refused, never guessed at. */
-export const THREAD_STORE_SCHEMA = 2;
+export const THREAD_STORE_SCHEMA = 3;
 
 /** Per-session conversation store: `<root>/_threads/<id>.sqlite`. Conversation data stays out of the
  *  main devd DB on purpose. Items are ordered by their own `id`; `seq` is the log seq of the event that created them (one event can create
@@ -55,6 +55,7 @@ export class ThreadStore {
     }
     if (version === 0) db.transaction(() => ThreadStore.createSchema1(db))();
     if (version <= 1) db.transaction(() => ThreadStore.migrateTo2(db))();
+    if (version <= 2) db.transaction(() => ThreadStore.migrateTo3(db))();
     return new ThreadStore(db, opts.onNotice ?? (() => {}));
   }
 
@@ -99,6 +100,14 @@ export class ThreadStore {
   private static migrateTo2(db: Database) {
     db.run(`CREATE TABLE IF NOT EXISTS effort (id INTEGER PRIMARY KEY CHECK (id = 1), state TEXT NOT NULL)`);
     db.run(`PRAGMA user_version = 2`);
+  }
+
+  /** Schema 3: a notice's tone (ThreadItem.tone). Idempotent like the others. */
+  private static migrateTo3(db: Database) {
+    if (!(db.query("PRAGMA table_info(items)").all() as { name: string }[]).some((c) => c.name === "tone")) {
+      db.run("ALTER TABLE items ADD COLUMN tone TEXT");
+    }
+    db.run(`PRAGMA user_version = 3`);
   }
 
   lastSeq(): number { return this.meta("last_seq"); }
@@ -304,19 +313,19 @@ export class ThreadStore {
   }
 
   private insertItem(seq: number, ts: number, i: Omit<ThreadItem, "seq" | "ts">) {
-    this.db.query(`INSERT INTO items (seq, run_id, item_id, kind, text, tool, input, output, is_error, status, ts, updated_seq, attachments)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    this.db.query(`INSERT INTO items (seq, run_id, item_id, kind, text, tool, input, output, is_error, status, ts, updated_seq, attachments, tone)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       seq, i.runId, i.itemId, i.kind, i.text, i.tool ?? null, i.input === undefined ? null : JSON.stringify(i.input),
       i.output ?? null, i.isError === undefined ? null : i.isError ? 1 : 0, i.status ?? null, ts, seq,
-      i.attachments === undefined ? null : JSON.stringify(i.attachments));
+      i.attachments === undefined ? null : JSON.stringify(i.attachments), i.tone ?? null);
   }
 
   /** A notice devd itself adds (not a bridge event). Seqs belong to the bridge's log (the link's hello asks for
    *  everything after `lastSeq`, `apply` drops what is at or below it), so a notice takes none: it sits at the current
    *  seq with its own item id `notice:<n>` and is announced through `onNotice` (the SSE stream). A replay from that
    *  seq still includes it (see snapshot), for a client whose stream was down when it was added. */
-  addNotice(text: string, ts: number): void {
-    this.notice(this.lastSeq(), text, ts, () => {});
+  addNotice(text: string, ts: number, tone?: "warn"): void {
+    this.notice(this.lastSeq(), text, ts, () => {}, tone);
   }
 
   /** `addNotice` once per `key` for the store's lifetime (persisted); false when it was said already. */
@@ -333,9 +342,9 @@ export class ThreadStore {
     this.notice(seq, text, ts, () => this.setMeta("last_seq", seq));
   }
 
-  private notice(seq: number, text: string, ts: number, also: () => void) {
+  private notice(seq: number, text: string, ts: number, also: () => void, tone?: "warn") {
     const n = this.meta("notice_count") + 1;
-    const item: ThreadItem = { seq, runId: null, itemId: `notice:${n}`, kind: "notice", text, status: "done", ts };
+    const item: ThreadItem = { seq, runId: null, itemId: `notice:${n}`, kind: "notice", text, status: "done", ts, ...(tone ? { tone } : {}) };
     this.db.transaction(() => {
       this.setMeta("notice_count", n);
       this.insertItem(seq, ts, item);
@@ -363,6 +372,7 @@ export class ThreadStore {
       if (r.is_error !== null) it.isError = r.is_error === 1;
       if (r.status !== null) it.status = r.status;
       if (r.attachments !== null) it.attachments = JSON.parse(r.attachments);
+      if (r.tone === "warn") it.tone = "warn";
       return it;
     });
     const runs = (this.db.query(`SELECT * FROM runs WHERE updated_seq > ? ORDER BY rowid`).all(after) as Record<string, any>[])

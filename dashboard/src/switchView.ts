@@ -1,7 +1,7 @@
 // Pure logic of the chat composer's switchers (components/chat/Switchers.tsx): which models, accounts and
 // harnesses can be picked and why not. devd decides (devd/src/chatSwitch.ts); these mirror its rules so the
 // menus do not offer what it would refuse, and say why.
-import type { RunRow, ThreadEffort } from "../../shared/thread";
+import { isHousekeepingNotice, type RunRow, type ThreadEffort, type ThreadItem } from "../../shared/thread";
 import { CLAUDE_EFFORT_LEVELS } from "../../shared/effort";
 import { ACP_MIN_BRIDGE_VERSION, EFFORT_MIN_BRIDGE_VERSION, versionAtLeast } from "../../shared/bridgeVersion";
 import { CHAT_MODELS, SAME_MODEL_ALIASES } from "../../shared/chatModels";
@@ -34,6 +34,16 @@ export function switchBlocked(t: { runs: RunRow[] }, target: Pick<ChatTarget, "a
 }
 
 /** Shown while the bridge awaits its target: picking any model, account or agent (also the current one) sends it. */
+/** What refetches the target besides the native thread and runs (ThreadView.switchKey on Apple): devd's notices of a
+ *  switch. Hidden housekeeping notices (a bridge restart) are none. */
+export const switchNoticeCount = (items: ThreadItem[]): number => items.filter((i) => i.kind === "notice" && !isHousekeepingNotice(i)).length;
+
+/** devd's `bridgeOutdated` (an older bridge than devd's), said beside the menus while true: it was a thread notice that
+ *  went stale once the bridge was updated. */
+export function bridgeOutdatedText(t: Pick<ChatTarget, "bridgeVersion"> & { bridgeOutdated?: boolean }): string | null {
+  return t.bridgeOutdated === true ? `This session's agent bridge (${t.bridgeVersion ?? "older than 1.1.0"}) is outdated: recreate the session's container for the newer fixes.` : null;
+}
+
 export function awaitingTargetText(t: Pick<ChatTarget, "awaitingTarget">): string | null {
   return t.awaitingTarget ? "Agent is waiting for a target: pick a model, account or agent to continue" : null;
 }
