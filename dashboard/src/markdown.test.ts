@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { isPathLike, parseInline, parseMarkdown } from "./markdown";
+import { codeOnly, isPathLike, parseInline, parseMarkdown } from "./markdown";
 
 test("parseMarkdown: fenced code, headings, lists and paragraphs", () => {
   const md = "# Title\n\nSome *text*\nmore\n\n```ts\nconst a = 1;\n\n```\n- one\n- two\n\n1. first\n2. second";
@@ -87,4 +87,12 @@ test("parseInline: ✅ ❌ ⚠️ (with or without U+FE0F) become status parts; 
 test("isPathLike: files and folders yes; flags, versions, commands and words no", () => {
   for (const p of ["src/sync/queue.ts", "queue.ts", "tsconfig.json", "notes/", ".env.local", "./run.sh", "README.md"]) expect(isPathLike(p)).toBe(true);
   for (const p of ["--strict", "2.0", "a -- b", "bun test", "kebab-case-word", "a-b-c", "https://x.y/z", "e.g", "1/2"]) expect(isPathLike(p)).toBe(false);
+});
+
+test("codeOnly: a table cell that is one code span (a command, a path) gives its text; anything else null", () => {
+  expect(codeOnly(" `bun test src/a.ts` ")).toBe("bun test src/a.ts");
+  expect(codeOnly("`a` and `b`")).toBeNull();
+  expect(codeOnly("run `a`")).toBeNull();
+  expect(codeOnly("``")).toBeNull();
+  expect(codeOnly("plain")).toBeNull();
 });
