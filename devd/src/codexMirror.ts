@@ -42,7 +42,8 @@ home, thread, cur, budget, cap = sys.argv[1], sys.argv[2], json.loads(sys.argv[3
 HEAD = 256
 DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 NAME = re.compile(r"rollout-[^/]*-" + re.escape(thread) + r"\.jsonl")
-KIND = re.compile(rb'"type":\s*"(function_call_output|custom_tool_call_output|function_call|custom_tool_call)"')
+# The line's own item: its payload type comes first (serde writes an enum's tag first), so nested items never match.
+KIND = re.compile(rb'^\{(?:"timestamp":"[^"]*",)?"type":"response_item","payload":\{"type":"(function_call_output|custom_tool_call_output|function_call|custom_tool_call)"')
 FIELD = lambda key: re.compile(rb'"' + key + rb'":\s*"([^"\\]{1,200})"')
 CALL_ID, TOOL = FIELD(b"call_id"), FIELD(b"name")
 
@@ -96,6 +97,8 @@ try:
 except FileNotFoundError:
     emit({"id": None})
     sys.exit(0)
+os.close(dfd)
+os.close(root)
 st = os.fstat(fd)
 if not stat.S_ISREG(st.st_mode):
     emit({"error": "not-a-file"})
@@ -116,12 +119,13 @@ while pos - offset < budget:
         if len(line) <= cap:
             break  # still being written
         # Over the cap: skip it unread, once its end is written.
-        end, ended = pos + len(line), False
+        end, ended, tail = pos + len(line), False, line[-65536:]
         while not ended:
             rest = f.readline(1 << 20)
             if not rest:
                 break
             end += len(rest)
+            tail = (tail + rest)[-65536:]
             ended = rest.endswith(b"\n")
         if not ended:
             break
@@ -129,7 +133,9 @@ while pos - offset < budget:
         # A tool call or output too large to read still starts or ends its tool: a stub in its place, from the line's
         # start. Anything else leaves a placeholder, which keeps the line count that entry ids are built from.
         prefix = line[:65536]
-        kind, call, tool = KIND.search(prefix), CALL_ID.search(prefix), TOOL.search(prefix)
+        kind, tool = KIND.search(prefix), TOOL.search(prefix)
+        # A function_call writes its call_id after the arguments, the others before their payload.
+        call = (list(CALL_ID.finditer(tail)) or [None])[-1] if kind and kind.group(1) == b"function_call" else CALL_ID.search(prefix)
         if kind and call and kind.group(1).endswith(b"_output"):
             lines.append(json.dumps({"type": "response_item", "payload": {"type": "function_call_output", "call_id": call.group(1).decode("utf-8", "replace"),
                                                                          "output": "(output too large to show)"}}))

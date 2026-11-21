@@ -142,7 +142,7 @@ print(json.dumps(locate(sys.argv[1])))
 // empty prompt is dim (`\e[2m` up to a reset). Verified on Claude Code 2.1.325.
 //
 // Codex (verified on 0.166.0): its composer is the last `›` line, with a dim placeholder when empty, and the "? for
-// shortcuts" hint below it only while nothing is typed; its pickers end with "enter select/confirm/continue · esc …";
+// shortcuts" hint below it only while nothing is typed; its pickers end with "enter select/confirm/continue/resume … esc";
 // a running turn shows "esc to interrupt". Codex takes a message sent during a turn into that turn (a steer, not a
 // queue), so a running turn refuses (agent-busy) instead.
 export const MIRROR_SEND = String.raw`# MIRROR_SEND${PY_LOCATE_FN}
@@ -154,7 +154,7 @@ RULE = re.compile(r"^\s*─{8,}\s*$")
 PROMPT = re.compile(r"^\s*❯")
 DIALOG = re.compile(r"Enter to (confirm|select)|Esc to cancel")
 CODEX_PROMPT = re.compile(r"^›(?: |$)")
-CODEX_DIALOG = re.compile(r"\benter (?:to )?(?:confirm|select|continue|submit)\b.*\besc\b", re.I)
+CODEX_DIALOG = re.compile(r"\benter (?:to )?(?:confirm|select|continue|submit|resume)\b.*\besc\b", re.I)
 CODEX_EMPTY = re.compile(r"^\s*\? for shortcuts\b")
 
 def screen(target):
@@ -488,6 +488,8 @@ export interface Cursor {
   proc?: string;
   /** Codex: the home read from (another home is another file of the same thread, so a new inode is no rewrite there). */
   home?: string;
+  /** Codex: codexThread's watch, kept so a devd restart does not take a process it saw before for a first look. */
+  watch?: CodexWatch;
 }
 
 /** `status`: the HTTP status the route answers with (409 for a MirrorSendError). */
@@ -530,6 +532,10 @@ interface Pending { text: string; at: number }
  *  reached the rollout's end (until it has, `busy` is not known). */
 interface CodexState { thread: string | null; busy: boolean; caughtUp: boolean }
 
+/** codexThread's view of the pane's codex process (`pid:start`): the rollouts seen open, and the newest hook row at the
+ *  time one opened that was not the choice (null: no wait). */
+interface CodexWatch { proc: string; known: string[]; waitAfter: number | null }
+
 /** Chunks of a Codex backlog read per refresh. */
 export const CODEX_TICK_CHUNKS = 4;
 
@@ -547,7 +553,7 @@ export class TranscriptMirror {
   private panes = new Map<string, PaneAgent | null>();
   /** Per session, for the pane's codex process (`pid:start`): the rollouts it was seen with open, and the newest hook
    *  row at the time an unchosen one newly opened (see codexThread). */
-  private codexWatch = new Map<string, { proc: string; known: Set<string>; waitAfter: number | null }>();
+  private codexWatch = new Map<string, CodexWatch>();
 
   constructor(private d: MirrorDeps) {}
 
@@ -728,19 +734,18 @@ export class TranscriptMirror {
    *  runs up to 300 s) does not.
    *
    *  Not detectable: `/new` before its first prompt. No rollout exists yet, so the old conversation shows until then. */
-  private codexThread(id: string, pane: Extract<PaneAgent, { kind: "codex" }>, cursorSid: string | null): string | null {
+  private codexThread(id: string, pane: Extract<PaneAgent, { kind: "codex" }>, cursor: Cursor): string | null {
     const { threads, last } = this.codexHooks(id);
     const proc = `${pane.pid}:${pane.start}`;
-    let watch = this.codexWatch.get(id);
+    let watch = this.codexWatch.get(id) ?? cursor.watch;
     const chosen = threads.find((t) => pane.open.includes(t.thread));
-    if (watch?.proc !== proc) {
-      watch = { proc, known: new Set(), waitAfter: null };
-      this.codexWatch.set(id, watch);
-    }
-    if (pane.open.some((t) => !watch.known.has(t) && t !== chosen?.thread)) watch.waitAfter = Math.max(watch.waitAfter ?? 0, last);
-    for (const t of pane.open) watch.known.add(t);
+    if (watch?.proc !== proc) watch = { proc, known: [], waitAfter: null };
+    else watch = { ...watch, known: [...watch.known] };
+    this.codexWatch.set(id, watch);
+    if (pane.open.some((t) => !watch.known.includes(t) && t !== chosen?.thread)) watch.waitAfter = Math.max(watch.waitAfter ?? 0, last);
+    for (const t of pane.open) if (!watch.known.includes(t)) watch.known.push(t);
     if (!chosen) return null;
-    const cursorHook = threads.find((t) => t.thread === cursorSid)?.hook ?? 0;
+    const cursorHook = threads.find((t) => t.thread === cursor.sid)?.hook ?? 0;
     if (chosen.hook < cursorHook) return null;
     if (watch.waitAfter !== null) {
       if (chosen.prompt <= watch.waitAfter) return null;
@@ -755,7 +760,12 @@ export class TranscriptMirror {
     const store = this.store(id);
     const saved = store.mirrorCursor();
     let cur: Cursor = saved ? JSON.parse(saved) as Cursor : { sid: null, ino: 0, offset: 0, headLen: 0, headHash: "", map: newCodexMapState() };
-    const thread = pane.home === null ? null : this.codexThread(id, pane, cur.sid);
+    const thread = pane.home === null ? null : this.codexThread(id, pane, cur);
+    const watch = this.codexWatch.get(id);
+    if (watch && JSON.stringify(watch) !== JSON.stringify(cur.watch)) {
+      cur = { ...cur, watch };
+      store.applyBatch([], JSON.stringify(cur));
+    }
     if (pane.home === null || thread === null) return { thread: null, busy: false, caughtUp: true };
     const proc = `${pane.pid}:${pane.start}`;
     for (let chunk = 1; ; chunk++) {

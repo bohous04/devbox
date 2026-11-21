@@ -199,7 +199,15 @@ function setup(pane: Pane, isEnding: (id: string) => boolean = () => false) {
   const write = (sid: string, lines: string[]) => appendFileSync(join(projects, `${sid}.jsonl`), lines.map((l) => `${l}\n`).join(""));
   /** A hook event of the session naming agent thread `thread` (what Codex's hooks record). */
   const hook = (thread: string, event = "user_prompt_submit") => insertNotifyLog(db, { ts: now, session_id: TMUX.id, event, decision: "sent", reason: null, inflight: 0, teammates: 0, agent_session_id: thread, detail: null });
-  return { mirror, calls, logs, bus, projects, write, root, hook, advance: (ms: number) => { now += ms; } };
+  const t = { mirror, calls, logs, bus, projects, write, root, hook, advance: (ms: number) => { now += ms; },
+    /** devd restarts: a new mirror over the same root and database. */
+    restart: () => {
+      t.mirror.release(TMUX.id);
+      t.mirror = new TranscriptMirror({ db, root, bus, exec, isEnding, live: () => null, now: () => now, log: (m) => logs.push(m) });
+      const next = t.mirror;
+      cleanups.push(() => next.release(TMUX.id));
+    } };
+  return t;
 }
 
 const items = (m: TranscriptMirror) => m.store(TMUX.id).snapshot().items.map(brief);
@@ -709,6 +717,10 @@ test.skipIf(!Bun.which("python3"))("Codex: a first look at a process with severa
   await t.mirror.refresh(TMUX.id);
   expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "live", conversationId: TID });
   expect(items(t.mirror)).toEqual(["user: Resumed thread"]);
+  // devd restarts: the same process is no first look, so it stays resolved.
+  t.restart();
+  await t.mirror.refresh(TMUX.id);
+  expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "live", conversationId: TID });
 });
 
 test.skipIf(!Bun.which("python3"))("a rewritten Codex rollout is read again from the start; one moved to another account's home reads on", async () => {
@@ -781,6 +793,7 @@ test.skipIf(!Bun.which("python3"))("MIRROR_SEND on a Codex pane: types into an e
     [`› \n  second line\n  model · /workspace\n`, '{"error": "terminal-not-ready"}'],
     [`• Working (9s • esc to interrupt)\n› \x1b[2mAsk Codex to do anything\x1b[0m\n  ? for shortcuts\n`, '{"error": "agent-busy"}'],
     [`  Where should the new conversation run?\n› 1. Use current Git worktree\n  enter select · esc back\n`, '{"error": "agent-waiting-in-terminal"}'],
+    [` Resume a previous session\n  › 4s ago      Reply with B\n enter resume   ⌃a archive   esc exit\n`, '{"error": "agent-waiting-in-terminal"}'],
     [`  Allow this command?\n› 1. Yes\n  Press enter to confirm or esc to cancel\n`, '{"error": "agent-waiting-in-terminal"}'],
     ["dev@box:/workspace$ ", '{"error": "terminal-not-ready"}'],
   ] as [string, string][]) {
@@ -902,4 +915,11 @@ test.skipIf(!Bun.which("python3"))("MIRROR_CODEX_READ stubs a tool call over the
   const lines = (JSON.parse(r.stdout.toString()) as { lines: string[] }).lines;
   const mapped = mapCodexLines(lines, newCodexMapState(), TID, 0).events.map((e) => e.event);
   expect(mapped).toContainEqual(expect.objectContaining({ type: "tool.started", itemId: "call-7", tool: "apply_patch", input: "(input too large to show)" }));
+  // A function_call writes its call_id after the arguments; a nested item inside another line is no tool.
+  const fn = JSON.stringify({ timestamp: "t", type: "response_item", payload: { type: "function_call", name: "shell", arguments: "a".repeat(300), call_id: "call-8" } });
+  const nested = JSON.stringify({ type: "compacted", payload: { replacement_history: [{ type: "response_item", payload: { type: "function_call", call_id: "call-x", name: "n" } }], pad: "q".repeat(300) } });
+  writeFileSync(c.file(TID), `${fn}\n${nested}\n`);
+  const r2 = Bun.spawnSync(["python3", "-I", "-c", MIRROR_CODEX_READ, c.home, TID, "{}", "1000", "100"]);
+  const events = mapCodexLines((JSON.parse(r2.stdout.toString()) as { lines: string[] }).lines, newCodexMapState(), TID, 0).events.map((e) => e.event);
+  expect(events.filter((e) => e.type === "tool.started")).toEqual([expect.objectContaining({ itemId: "call-8", tool: "shell" })]);
 });
