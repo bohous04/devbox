@@ -53,6 +53,24 @@ interface Repo {
  *  - untracked files are read by a child running as the worktree owner: see untrackedCounter.ts.
  */
 async function openRepo(ws: string, expected: Expected): Promise<Repo> {
+  const { git, gitCapped, gitDir, commonDir } = await verifiedGit(ws, expected);
+  const must = async (what: string, ...args: string[]): Promise<string> => {
+    const r = await git(...args);
+    if (r.code !== 0) {
+      console.error(`changes ${ws}: git ${args.join(" ")} failed: ${r.stderr.trim()}`);
+      throw new ChangesError(500, "git_failed", `${what} failed`);
+    }
+    return r.stdout;
+  };
+  const head = await git("rev-parse", "--verify", "--quiet", "HEAD^{commit}");
+  if (head.code !== 0) throw new ChangesError(409, "no_commits", "repository has no commits yet");
+  const base = await originDefault(git, gitDir, commonDir);
+  const rev = base ? (await must(`merge-base with ${base}`, "merge-base", base, head.stdout.trim())).trim() : head.stdout.trim();
+  return { ws, git, must, base, rev, gitCapped };
+}
+
+/** The checks of `openRepo` (above) up to pinning git to the verified dirs, for any read of the session repo. */
+export async function verifiedGit(ws: string, expected: Expected): Promise<{ git: Git; gitCapped: Repo["gitCapped"]; gitDir: string; commonDir: string }> {
   if (!isDir(ws)) throw new ChangesError(409, "worktree_missing", "session worktree is missing");
   // devd runs as root over a worktree owned by uid 1000 → safe.directory (same as collectGitStats).
   const discover: Git = (...args) => sh(ws, "git", "-c", `safe.directory=${ws}`, ...args);
@@ -69,19 +87,7 @@ async function openRepo(ws: string, expected: Expected): Promise<Repo> {
   const pinned = ["git", "-c", `safe.directory=${ws}`, "--git-dir", gitDir, "--work-tree", ws];
   const git: Git = (...args) => sh(ws, ...pinned, ...args);
   const gitCapped = (maxStdout: number, ...args: string[]) => run([...pinned, ...args], { cwd: ws, timeoutMs: timeoutFor("LOCAL"), maxStdout });
-  const must = async (what: string, ...args: string[]): Promise<string> => {
-    const r = await git(...args);
-    if (r.code !== 0) {
-      console.error(`changes ${ws}: git ${args.join(" ")} failed: ${r.stderr.trim()}`);
-      throw new ChangesError(500, "git_failed", `${what} failed`);
-    }
-    return r.stdout;
-  };
-  const head = await git("rev-parse", "--verify", "--quiet", "HEAD^{commit}");
-  if (head.code !== 0) throw new ChangesError(409, "no_commits", "repository has no commits yet");
-  const base = await originDefault(git, gitDir, commonDir);
-  const rev = base ? (await must(`merge-base with ${base}`, "merge-base", base, head.stdout.trim())).trim() : head.stdout.trim();
-  return { ws, git, must, base, rev, gitCapped };
+  return { git, gitCapped, gitDir, commonDir };
 }
 
 /** Tracked changes (status + counts in one git call, so both describe the same moment) and the

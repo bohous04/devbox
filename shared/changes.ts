@@ -30,12 +30,12 @@ export interface SessionChanges {
   countsUnavailable?: true;
 }
 
-/** Why a changes route refused (both routes). `error` is for people and may be reworded; `code` is stable. A refusal
+/** Why a changes route (or the files route) refused. `error` is for people and may be reworded; `code` is stable. A refusal
  *  from a guard in front of every route (the shared-session guard, 403) comes without a code. */
 export type ChangesErrorCode =
   | "unknown_session" | "instabox" | "restricted"
   | "worktree_missing" | "not_a_repo" | "foreign_git_dir" | "no_commits" | "root_owned"
-  | "invalid_path" | "not_changed" | "unreadable_file"
+  | "invalid_path" | "not_changed" | "unreadable_file" | "invalid_limit"
   | "git_failed" | "read_failed";
 
 export interface ChangesErrorBody {
@@ -53,4 +53,14 @@ export interface FileDiff {
   /** `diff` was cut at 256 KB on a line boundary. */
   truncated: boolean;
   diff: string;
+}
+
+/** GET /api/sessions/:id/files?q=&limit= — files of the session repo for the composer's @ picker (repo-relative
+ *  paths, tracked and untracked, not ignored). Refusals as for the changes routes (ChangesErrorBody). */
+export interface SessionFiles {
+  files: string[];
+  /** More files matched than `limit`. */
+  more?: true;
+  /** The repo lists more names than devd reads (about 4 MB of them): files past that point were not searched. */
+  listingCapped?: true;
 }

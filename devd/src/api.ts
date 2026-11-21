@@ -70,6 +70,7 @@ import { classifyClaudeState } from "./stats";
 import { isValidTmuxName, killSessionCmd, labelSetCmd, parseProbe, probeCmd, type TmuxSession } from "./tmux";
 import { barePath, sessionWorkdir, type TreeProject } from "./tree";
 import { ChangesError, collectChanges, collectFileDiff } from "./sessionChanges";
+import { FILE_LISTING_TTL_MS, listRepoFiles, matchFiles, MAX_FILE_RESULTS } from "./sessionFiles";
 import type { ChangesErrorBody, ChangesErrorCode } from "../../shared/changes";
 import { COMMIT, VERSION } from "./version";
 import type { SelfUpdateStatus } from "./selfUpdate";
@@ -1293,10 +1294,10 @@ export function createApp(d: ApiDeps): Hono {
 
   // Changed-files card in the chat thread: the worktree's changes against the upstream / default branch.
   // Same guards for the listing and the per-file diff; `read` gets the worktree and the git dirs it must resolve to.
-  const sessionChanges = async <T,>(c: Context, read: (ws: string, expected: { gitDir: string; commonDir: string }) => Promise<T>) => {
+  const sessionChanges = async <T,>(c: Context, read: (ws: string, expected: { gitDir: string; commonDir: string }, id: string) => Promise<T>, what = "Changed files") => {
     const s = getSession(d.db, c.req.param("id") ?? "");
     if (!s) return c.json({ error: "unknown session", code: "unknown_session" } satisfies ChangesErrorBody, 404);
-    { const g = ibxOnly(c, s, "Changed files", "instabox" satisfies ChangesErrorCode); if (g) return g; }
+    { const g = ibxOnly(c, s, what, "instabox" satisfies ChangesErrorCode); if (g) return g; }
     // safeGit would refuse anyway; this way the dashboard gets the same message as other routes.
     if (restricted(s.id)) return c.json({ error: SHARED_DENIED, code: "restricted" } satisfies ChangesErrorBody, 403);
     // The repo git must resolve to: the session's registration in the bare clone devd created
@@ -1304,14 +1305,38 @@ export function createApp(d: ApiDeps): Hono {
     const ws = sessionWorkdir(d.root, s);
     const bare = s.worktree ? barePath(d.root, s.folder, s.project, s.repo) : null;
     const expected = bare ? { gitDir: join(bare, "worktrees", basename(ws)), commonDir: bare } : { gitDir: join(ws, ".git"), commonDir: join(ws, ".git") };
-    try { return c.json(await read(ws, expected)); }
+    try { return c.json(await read(ws, expected, s.id)); }
     catch (e) { if (e instanceof ChangesError) return c.json({ error: e.message, code: e.code } satisfies ChangesErrorBody, e.status); throw e; }
   };
-  app.get("/api/sessions/:id/changes", (c) => sessionChanges(c, collectChanges));
+  app.get("/api/sessions/:id/changes", (c) => sessionChanges(c, (ws, expected) => collectChanges(ws, expected)));
   app.get("/api/sessions/:id/changes/diff", (c) => {
     const path = c.req.query("path");
     if (!path) return c.json({ error: "path required", code: "invalid_path" } satisfies ChangesErrorBody, 400);
     return sessionChanges(c, (ws, expected) => collectFileDiff(ws, expected, path));
+  });
+
+  // The composer's @ file picker: one listing per session and worktree serves the keystrokes of the next 10 s.
+  const fileListings = new Map<string, { at: number; listing: Promise<{ paths: string[]; capped: boolean }> }>();
+  app.get("/api/sessions/:id/files", (c) => {
+    const rawLimit = c.req.query("limit");
+    const limit = rawLimit === undefined ? MAX_FILE_RESULTS : /^\d+$/.test(rawLimit) ? Number(rawLimit) : 0;
+    if (limit < 1) return c.json({ error: "limit must be a positive integer", code: "invalid_limit" } satisfies ChangesErrorBody, 400);
+    const q = c.req.query("q") ?? "";
+    return sessionChanges(c, async (ws, expected, id) => {
+      const key = `${id}\0${ws}`;
+      const now = Date.now();
+      for (const [k, v] of fileListings) if (now - v.at >= FILE_LISTING_TTL_MS) fileListings.delete(k);
+      let entry = fileListings.get(key);
+      if (entry === undefined) {
+        entry = { at: now, listing: listRepoFiles(ws, expected) };
+        fileListings.set(key, entry);
+        // A refusal is not kept: the next keystroke asks git again.
+        const mine = entry;
+        mine.listing.catch(() => { if (fileListings.get(key) === mine) fileListings.delete(key); });
+      }
+      const { paths, capped } = await entry.listing;
+      return { ...matchFiles(paths, q, Math.min(limit, MAX_FILE_RESULTS)), ...(capped ? { listingCapped: true as const } : {}) };
+    }, "File search");
   });
 
   app.get("/api/sessions/:id/reviews", (c) => {
