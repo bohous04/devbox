@@ -24,6 +24,14 @@ export function mirrorSendLock(e: unknown): MirrorLock | null {
   return Object.hasOwn(SESSION_REFUSALS, b.error) ? { code: b.error as SessionRefusal, message: SESSION_REFUSALS[b.error as SessionRefusal] } : null;
 }
 
+/** The mirror composer's fixed props. What is typed goes into the pane: no `/` commands (devd refuses them, they
+ *  belong in the terminal), no `@` files, no images; devd's standing reason turns the empty field off and says it. */
+export function mirrorComposerProps(info: MirrorInfo) {
+  const fieldOff = mirrorFieldOff(info);
+  return { commands: undefined, searchFiles: undefined, fieldOff, imagesOff: MIRROR_IMAGES_OFF,
+    placeholder: fieldOff ?? "Message the agent in the terminal" } as const;
+}
+
 /** The mirror composer's onSend: a refusal becomes the lock and keeps the text (`false`); a sent message clears it. */
 export async function sendToMirror(send: () => Promise<unknown>, setLock: (lock: MirrorLock | null) => void): Promise<void | false> {
   try {

@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { ApiError } from "../../api";
 import { MAX_IMAGES_PER_MESSAGE, prepareImage, takeImages } from "../../imageView";
 import { composerErrorText } from "../../threadView";
-import { activeTrigger, applyPick, composerPlaceholder, filterCommands, keyAction, type Trigger } from "../../composerTrigger";
+import { activeTrigger, applyPick, offeredTrigger, composerPlaceholder, filterCommands, keyAction, type Trigger } from "../../composerTrigger";
 import type { AgentCommand } from "../../../../shared/thread";
 import type { SessionFiles } from "../../../../shared/changes";
 import { TriggerMenu, type TriggerOption } from "./TriggerMenu";
@@ -89,9 +89,7 @@ export function Composer({ running, onSend, onStop, controls, notices, placehold
   const found = activeTrigger(text, caret);
   // An empty list offers nothing, as no list does.
   const hasCommands = commands !== undefined && commands.length > 0;
-  const trigger: Trigger | null = !focused || found === null ? null
-    : found.kind === "/" ? (hasCommands ? found : null)
-    : searchFiles ? found : null;
+  const trigger: Trigger | null = focused ? offeredTrigger(found, { commands, searchFiles }) : null;
   const triggerKey = trigger ? `${trigger.kind}${trigger.start}` : null;
   const menuOpen = trigger !== null && triggerKey !== dismissed;
   const [fileResult, setFileResult] = useState<{ query: string; files?: SessionFiles; error?: string } | null>(null);

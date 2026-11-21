@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import type { MirrorInfo } from "../../shared/mirror";
 import { ApiError } from "./api";
-import { mirrorFieldOff, mirrorNotice, mirrorSendLock, mirrorUnsupported, sendToMirror, type MirrorLock } from "./mirrorView";
+import { activeTrigger, offeredTrigger } from "./composerTrigger";
+import { MIRROR_IMAGES_OFF, mirrorComposerProps, mirrorFieldOff, mirrorNotice, mirrorSendLock, mirrorUnsupported, sendToMirror, type MirrorLock } from "./mirrorView";
 import { streamUrl } from "./useEventStream";
 
 const live: MirrorInfo = { state: "live", agent: "Claude Code", conversationId: "c", activity: "idle", terminalPrompt: null, sendBlock: null };
@@ -62,4 +63,19 @@ test("a tmux session streams its mirror; a chat session the shared stream", () =
   expect(streamUrl("dev-a b", true, 7)).toBe("/api/sessions/dev-a%20b/mirror/stream?afterSeq=7");
   expect(streamUrl("dev-a", true, undefined)).toBe("/api/sessions/dev-a/mirror/stream");
   expect(streamUrl(undefined, true, undefined)).toBe("/api/stream");
+});
+
+test("the mirror composer opens no / or @ menu and takes no images; its placeholder is devd's reason when sending is off", () => {
+  const props = mirrorComposerProps(live);
+  for (const text of ["/", "/rev", "look at @src", "@"]) {
+    const found = activeTrigger(text, text.length);
+    expect(found).not.toBeNull();
+    expect(offeredTrigger(found, props)).toBeNull();
+    // The same word in a chat session's composer does open its menu.
+    expect(offeredTrigger(found, { commands: [{ name: "review" }], searchFiles: async () => ({ files: [] }) })).toEqual(found);
+  }
+  expect(props.imagesOff).toBe(MIRROR_IMAGES_OFF);
+  expect(props.placeholder).toBe("Message the agent in the terminal");
+  const codex = mirrorComposerProps({ ...live, agent: "Codex", sendBlock: { code: "codex-send-unsupported", message: "Read-only." } });
+  expect([codex.fieldOff, codex.placeholder]).toEqual(["Read-only.", "Read-only."]);
 });
