@@ -339,7 +339,7 @@ export function Composer({ running, onSend, onStop, controls, notices, placehold
               className={cn(
                 // Caps: six whole lines plus the bottom padding on phones (148px), twelve from sm (292px); then it
                 // scrolls. From sm the card rests two lines tall, so it reads as a message box.
-                "block max-h-[148px] w-full resize-none bg-transparent pb-1 text-base leading-6 outline-none placeholder:text-muted-foreground sm:max-h-[292px] sm:min-h-[52px]",
+                "block max-h-[148px] w-full resize-none bg-transparent pb-1 text-base leading-6 outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60 sm:max-h-[292px] sm:min-h-[52px]",
                 oneRow && "max-sm:pb-0",
                 // Scrolled: the top 12px of the field fade out, inside the field, so nothing is cut hard at its edge.
                 scrolled && "[mask-image:linear-gradient(to_bottom,transparent,black_0.75rem)]",

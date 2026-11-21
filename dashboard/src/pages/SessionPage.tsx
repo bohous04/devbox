@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, MessageSquare, SquareTerminal } from "lucide-react";
+import { ArrowLeft, MessageSquare, SquareTerminal, X } from "lucide-react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import type { MirrorInfo } from "../../../shared/mirror";
 import type { ThreadSnapshot } from "../../../shared/thread";
@@ -14,7 +14,7 @@ import { threadHeading } from "../inboxView";
 import { useStore } from "../store";
 import { activeRun, applyCommands, applyEffort, applyNotice, applyThreadEvent, criticRunIds, mergeSnapshot, queuedRunIds } from "../threadView";
 import { useEventStream } from "../useEventStream";
-import { MIRROR_IMAGES_OFF, mirrorFieldOff, mirrorNotice, mirrorSendLock, mirrorUnsupported, type MirrorLock } from "../mirrorView";
+import { MIRROR_IMAGES_OFF, mirrorFieldOff, mirrorNotice, mirrorUnsupported, sendToMirror, type MirrorLock } from "../mirrorView";
 
 // Same lazy import as TerminalPage: xterm stays in its own chunk.
 const Terminal = lazy(() => import("../components/Terminal").then((m) => ({ default: m.Terminal })));
@@ -121,7 +121,7 @@ function ChatPage({ id }: { id: string }) {
   const unsupported = mirror ? mirrorUnsupported(mirror) : null;
   const mirrorLine = mirror ? mirrorNotice(mirror, sendLock) : null;
   const openTerminal = (
-    <Button type="button" variant="outline" size="sm" className="flex-none" onClick={() => setTab("terminal")}>Open terminal</Button>
+    <Button type="button" variant="outline" size="sm" className="flex-none" onClick={() => { setSendLock(null); setTab("terminal"); }}>Open terminal</Button>
   );
   // devd searches the repo on the VPS only; an InstaBox session's repo is elsewhere.
   const vpsRepo = session !== undefined && session.host !== "instabox";
@@ -223,25 +223,26 @@ function ChatPage({ id }: { id: string }) {
                 // refuses them: they belong in the terminal), no images.
                 <Composer
                   running={false} onStop={async () => {}}
-                  onSend={async (text) => {
-                    try { await api.sendMirrorMessage(id, text); setSendLock(null); }
-                    catch (e) {
-                      const lock = mirrorSendLock(e);
-                      if (!lock) throw e;
-                      setSendLock(lock);
-                      return false;
-                    }
-                  }}
+                  onSend={(text) => sendToMirror(() => api.sendMirrorMessage(id, text), setSendLock)}
                   fieldOff={mirrorFieldOff(mirror)} imagesOff={MIRROR_IMAGES_OFF} searchFiles={searchFiles}
-                  placeholder="Message the agent in the terminal"
-                  notices={mirrorLine && (
-                    <div className={`flex items-center gap-3 rounded-md border px-3 py-2 text-sm ${mirrorLine.kind === "prompt"
-                      ? "border-amber-600/40 bg-amber-500/10 text-amber-700 dark:text-amber-300"
-                      : "border-border bg-muted/50 text-muted-foreground"}`}>
-                      <span role="status" className="min-w-0 flex-1">{mirrorLine.kind === "prompt" ? <><span className="font-medium">Waiting for you in the terminal:</span> {mirrorLine.text}</> : mirrorLine.text}</span>
-                      {openTerminal}
-                    </div>
-                  )}
+                  placeholder={mirrorFieldOff(mirror) ?? "Message the agent in the terminal"}
+                  notices={<>
+                    {/* Always mounted, only its text changes, so screen readers hear each new line once. */}
+                    <p role="status" className="sr-only">{mirrorLine ? `${mirrorLine.kind === "prompt" ? "Waiting for you in the terminal: " : ""}${mirrorLine.text}` : ""}</p>
+                    {mirrorLine && (
+                      <div className={`flex items-center gap-3 rounded-md border px-3 py-2 text-sm ${mirrorLine.kind === "prompt"
+                        ? "border-amber-600/40 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                        : "border-border bg-muted/50 text-muted-foreground"}`}>
+                        <span className="min-w-0 flex-1">{mirrorLine.kind === "prompt" ? <><span className="font-medium">Waiting for you in the terminal:</span> {mirrorLine.text}</> : mirrorLine.text}</span>
+                        {openTerminal}
+                        {mirrorLine.dismissible && (
+                          <Button type="button" variant="ghost" size="icon-sm" className="flex-none" aria-label="Dismiss" title="Dismiss" onClick={() => setSendLock(null)}>
+                            <X className="size-4" aria-hidden="true" />
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                  </>}
                 />
               ) : (
               <Switchers sessionId={id} thread={thread}>

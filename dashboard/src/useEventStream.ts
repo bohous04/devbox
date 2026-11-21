@@ -5,6 +5,19 @@ import { api } from "./api";
 
 export const STREAM_POLL_MS = 5000;
 
+/** The stream's URL: `/api/stream` (with `?session=` for a chat session's thread), or a tmux session's mirror stream. */
+export function streamUrl(sessionId: string | undefined, mirror: boolean, afterSeq: number | undefined): string {
+  const q = new URLSearchParams();
+  const mirrored = mirror && sessionId !== undefined;
+  if (sessionId !== undefined) {
+    if (!mirrored) q.set("session", sessionId);
+    if (afterSeq !== undefined) q.set("afterSeq", String(afterSeq));
+  }
+  const qs = q.toString();
+  const base = mirrored ? `/api/sessions/${encodeURIComponent(sessionId)}/mirror/stream` : "/api/stream";
+  return `${base}${qs ? `?${qs}` : ""}`;
+}
+
 export interface EventStreamOptions {
   /** With a session: also that chat session's thread events (`?session=`). */
   sessionId?: string;
@@ -65,16 +78,7 @@ export function useEventStream(opts: EventStreamOptions): { paused: boolean; pol
     const stopPoll = () => { clearInterval(poll); poll = undefined; };
 
     const connect = () => {
-      const q = new URLSearchParams();
-      const mirrored = mirror && sessionId !== undefined;
-      if (sessionId !== undefined) {
-        if (!mirrored) q.set("session", sessionId);
-        const after = h.current.afterSeq?.();
-        if (after !== undefined) q.set("afterSeq", String(after));
-      }
-      const qs = q.toString();
-      const base = mirrored ? `/api/sessions/${encodeURIComponent(sessionId)}/mirror/stream` : "/api/stream";
-      const src = new EventSource(`${base}${qs ? `?${qs}` : ""}`);
+      const src = new EventSource(streamUrl(sessionId, mirror === true, sessionId !== undefined ? h.current.afterSeq?.() : undefined));
       es = src;
       src.onopen = () => { setPaused(false); stopPoll(); loadInbox(); };
       const on = <T>(type: string, handle: (data: T) => void) => src.addEventListener(type, (m) => {
