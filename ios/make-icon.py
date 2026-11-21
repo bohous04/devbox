@@ -16,10 +16,14 @@
 # drawn here. The mark is centered at ~50 % of the canvas — the mask clips the corners, and a
 # smaller margin than on the mac (54 %) would look cropped.
 #
+# The Mac app (DevboxMac, same asset catalog) gets `mac-<px>.png` sizes: macOS does not mask an icon, so
+# the light variant is drawn as Apple's macOS grid has it, a rounded body 824 wide on the 1024 canvas with a
+# soft drop shadow, and the mark at 54 % of the body as on the mac notifier icon.
+#
 # Run: python3 ios/make-icon.py   (needs Pillow)
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 S = 1024
 SS = 2         # supersampling — edges are rendered at 2048 and scaled down with LANCZOS
@@ -92,11 +96,38 @@ def tinted() -> Image.Image:
     return mark((225, 225, 225, 255)).convert("LA").convert("RGBA")
 
 
+MAC_BODY = 824     # Apple's macOS icon grid: body 824 on a 1024 canvas, corner radius 185
+MAC_RADIUS = 185
+MAC_SIZES = (16, 32, 64, 128, 256, 512, 1024)  # pixel sizes; Contents.json maps them to 16-512 pt at 1x/2x
+
+
+def mac() -> Image.Image:
+    body = vertical_gradient(AMBER, AMBER_DEEP).convert("RGBA")
+    m = mark(DARK + (255,), scale=0.54)
+    body.paste(m, (0, 0), m)
+    body = body.resize((MAC_BODY, MAC_BODY), Image.LANCZOS)
+    mask = Image.new("L", (MAC_BODY * SS, MAC_BODY * SS), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, MAC_BODY * SS - 1, MAC_BODY * SS - 1), radius=MAC_RADIUS * SS, fill=255)
+    mask = mask.resize((MAC_BODY, MAC_BODY), Image.LANCZOS)
+    off = (S - MAC_BODY) // 2
+    shadow = Image.new("L", (S, S), 0)
+    shadow.paste(mask, (off, off + 12))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(14)).point(lambda v: int(v * 0.35))
+    out = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    out.paste(Image.new("RGBA", (S, S), (0, 0, 0, 255)), (0, 0), shadow)
+    out.paste(body, (off, off), mask)
+    return out
+
+
 def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     for name, img in (("AppIcon1024.png", light()), ("AppIcon1024-dark.png", dark()), ("AppIcon1024-tinted.png", tinted())):
         img.save(OUT_DIR / name, optimize=True)
         print("wrote", OUT_DIR / name, img.mode, img.size)
+    icon = mac()
+    for px in MAC_SIZES:
+        icon.resize((px, px), Image.LANCZOS).save(OUT_DIR / f"mac-{px}.png", optimize=True)
+    print("wrote", OUT_DIR / "mac-*.png", MAC_SIZES)
     # Safety check: the primary icon must be 1024×1024 without alpha, otherwise the App Store
     # Connect upload fails only at the very end (build 1 got through only thanks to a manual conversion).
     primary = Image.open(OUT_DIR / "AppIcon1024.png")
