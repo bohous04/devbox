@@ -101,7 +101,9 @@ struct ComposerView: View {
     }
 
     private var field: some View {
-        TextField(running ? "Queue a message" : "Ask anything", text: $text, axis: .vertical)
+        // The placeholder in the muted grey: in the foreground's colour an empty field looks filled in.
+        TextField("Message", text: $text,
+                  prompt: Text(running ? "Queue a message" : "Ask anything").foregroundStyle(Theme.C.mutedForeground), axis: .vertical)
             .lineLimit(1...6)
             .font(.system(size: ChatType.s(16)))
             .textFieldStyle(.plain)
@@ -132,12 +134,14 @@ struct ComposerView: View {
         }
         Button { send() } label: {
             Image(systemName: "arrow.up").font(.system(size: ChatType.s(15), weight: .semibold))
+                // Empty: a filled circle a step off the card and a muted arrow (the web's), so the button stays in view.
                 .foregroundStyle(canSend ? Theme.C.primaryForeground : Theme.C.mutedForeground)
                 .frame(width: 34, height: 34)
-                .background(canSend ? Theme.C.primary : Theme.C.muted, in: Circle())
+                .background(canSend ? Theme.C.primary : Theme.C.foreground.opacity(0.1), in: Circle())
                 .iPhoneTapTarget()
         }
-        .labelOnlyButton()
+        // Its own colours for the empty state: the system's disabled dimming would fade it into the card.
+        .buttonStyle(SendButtonStyle())
         .disabled(!canSend)
         .accessibilityLabel("Send")
     }
@@ -198,5 +202,12 @@ struct ComposerView: View {
             do { try await onStop() } catch { self.error = chatErrorText(error) }
             stopping = false
         }
+    }
+}
+
+/// The send button drawn as its label says, pressed a little dimmer; disabled, it keeps the label's own empty look.
+private struct SendButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.opacity(configuration.isPressed ? 0.7 : 1)
     }
 }

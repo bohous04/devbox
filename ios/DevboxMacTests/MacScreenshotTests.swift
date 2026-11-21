@@ -109,7 +109,11 @@ final class MacScreenshotTests: XCTestCase {
         XCTAssertNotNil(state.inbox?.items, "the fixture inbox did not load")
         if let draft {
             // Typed as a user would: the field's editor takes the text and SwiftUI's binding follows.
-            let field = try XCTUnwrap(Self.allViews(window.contentView!).first { ($0 as? NSTextField)?.placeholderString == "Ask anything" || ($0 is NSTextView && $0.frame.width > 300) },
+            let field = try XCTUnwrap(Self.allViews(window.contentView!).first {
+                // The placeholder is styled (muted), so AppKit holds it as an attributed string.
+                ($0 as? NSTextField).map { ($0.placeholderAttributedString?.string ?? $0.placeholderString) == "Ask anything" } == true
+                    || ($0 is NSTextView && $0.frame.width > 300)
+            },
                                       "no composer field")
             window.makeFirstResponder(field)
             let editor = try XCTUnwrap(window.firstResponder as? NSTextView, "the composer has no editor")
