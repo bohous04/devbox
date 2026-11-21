@@ -95,4 +95,6 @@ test("codeOnly: a table cell that is one code span (a command, a path) gives its
   expect(codeOnly("run `a`")).toBeNull();
   expect(codeOnly("``")).toBeNull();
   expect(codeOnly("plain")).toBeNull();
+  expect(codeOnly("`a`[x](u)")).toBeNull();
+  expect(codeOnly("[`a`](u)")).toBeNull();
 });

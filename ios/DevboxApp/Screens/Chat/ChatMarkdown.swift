@@ -103,7 +103,7 @@ struct ChatMarkdown: View {
     private func table(_ header: [String], _ rows: [[String]]) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             if !header.allSatisfy({ $0.trimmingCharacters(in: .whitespaces).isEmpty }) {
-                Text(header.prefix(2).joined(separator: " · "))
+                ChatInline.text(header.prefix(2).joined(separator: " · "))
                     .font(font.weight(.semibold)).foregroundStyle(Theme.C.foreground)
                     .padding(.horizontal, 12).padding(.vertical, 7)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -113,13 +113,7 @@ struct ChatMarkdown: View {
                 VStack(alignment: .leading, spacing: 4) {
                     if let first = row.first {
                         if ChatMarkdownParse.isCodeOnly(first) {
-                            // A command or path on one line, cut at its end where it does not fit; a long press shows
-                            // the whole and copies it.
-                            ChatInline.text(first).lineLimit(1).truncationMode(.tail)
-                                .contextMenu {
-                                    Text(Self.codeText(first))
-                                    Button { UIPasteboard.general.string = Self.codeText(first) } label: { Label("Copy", systemImage: "doc.on.doc") }
-                                }
+                            codeCell(first)
                         } else {
                             ChatInline.text(first).font(font.weight(.medium))
                         }
@@ -127,6 +121,8 @@ struct ChatMarkdown: View {
                     ForEach(Array(row.dropFirst().enumerated()), id: \.offset) { j, cell in
                         if header.count > 2, j + 1 < header.count {
                             (Text(header[j + 1] + ": ").foregroundColor(Theme.C.mutedForeground) + ChatInline.text(cell))
+                        } else if ChatMarkdownParse.isCodeOnly(cell) {
+                            codeCell(cell)
                         } else {
                             ChatInline.text(cell)
                         }
@@ -139,6 +135,16 @@ struct ChatMarkdown: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: Theme.R.lg))
         .overlay(RoundedRectangle(cornerRadius: Theme.R.lg).strokeBorder(Theme.C.border))
+    }
+
+    /// A command or path on one line, cut in the middle where it does not fit (never wrapped mid-path, never clipped
+    /// at the edge); a long press shows the whole and copies it.
+    private func codeCell(_ s: String) -> some View {
+        ChatInline.text(s).lineLimit(1).truncationMode(.middle)
+            .contextMenu {
+                Text(Self.codeText(s))
+                Button { UIPasteboard.general.string = Self.codeText(s) } label: { Label("Copy", systemImage: "doc.on.doc") }
+            }
     }
     #endif
 }
