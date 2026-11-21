@@ -756,6 +756,45 @@ class Safety(unittest.TestCase):
             self.assertEqual(host.main(),0)
         g.audit.assert_called()
 
+    def preserve_with_unit(self,states,ready_after):
+        """preserve() against a fake systemd: `states` are the unit's successive ActiveStates (the last repeats);
+        the proof lands after `ready_after` inspections. Returns the systemd-run calls."""
+        c={'Id':'0123456789abcdef','Name':'/dev-fixture','State':{'Running':False}}
+        g=Mock()
+        checks=[]
+        g.end_ready.side_effect=lambda c,fresh=None:(fresh is None and (checks.append(1) or len(checks)>=ready_after))
+        states=list(states);started=[]
+        def fake_run(cmd,**k):
+            if cmd[0]=='systemd-run':
+                started.append(cmd);return SimpleNamespace(returncode=0,stdout='',stderr='')
+            state=states.pop(0) if len(states)>1 else states[0]
+            if cmd[:2]==['systemctl','show']:
+                return SimpleNamespace(returncode=0,stdout=state+'\n',stderr='')
+            if cmd[:2]==['systemctl','is-active']:  # as systemd answers it: 0 for "active" only
+                return SimpleNamespace(returncode=0 if state=='active' else 3,stdout='',stderr='')
+            raise AssertionError(cmd)
+        with patch.object(host.subprocess,'run',side_effect=fake_run),patch.object(host,'inspect',return_value=c),patch.object(host.time,'sleep'):
+            host.preserve(g,c)
+        return started
+
+    def test_preservation_already_activating_is_waited_for_not_started_again(self):
+        # A oneshot prepare-end is "activating" for as long as it runs: a second systemd-run of its name would fail.
+        self.assertEqual(self.preserve_with_unit(['activating'],ready_after=3),[])
+
+    def test_preservation_is_started_once_and_waited_for_while_activating(self):
+        started=self.preserve_with_unit(['inactive','activating'],ready_after=3)
+        self.assertEqual(len(started),1)
+        self.assertIn('devbox-storage-end-0123456789ab',started[0])
+
+    def test_preservation_that_finished_between_checks_is_not_called_failed(self):
+        # --collect: a finished unit is gone (inactive) by the time it is asked; its proof decides.
+        # The first inspection sees no proof yet; the unit has finished by the time it is asked.
+        self.assertEqual(len(self.preserve_with_unit(['inactive','inactive'],ready_after=2)),1)
+
+    def test_failed_preservation_denies_removal(self):
+        with self.assertRaisesRegex(RuntimeError,'Offsite preservation failed'):
+            self.preserve_with_unit(['inactive','failed'],ready_after=99)
+
     def test_expired_or_other_repository_proof_denies_removal(self):
         proof=dict(container_id='abc',signatures={},repository='wrong-repository',verified_at=time.time())
         guard.atomic(self.g.state/'prepared'/'abc.json',proof)

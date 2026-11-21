@@ -37,13 +37,24 @@ def gate(g,name=None):
             raise RuntimeError('Session storage budget exceeded; clean or release temporary copies before adding data.')
 
 
+# A Type=oneshot unit is "activating" for as long as it runs (is-active answers "active" only), and "deactivating"
+# while it stops: both mean prepare-end is still going and owns the unit name.
+RUNNING_STATES=('activating','active','deactivating')
+
+
+def unit_running(unit):
+    p=subprocess.run(['systemctl','show','--property=ActiveState','--value',unit],capture_output=True,text=True)
+    if p.returncode:
+        raise RuntimeError('Cannot read the state of offsite preservation ('+unit+'); session removal denied')
+    return p.stdout.strip() in RUNNING_STATES
+
+
 def preserve(g,c):
     # prepare-end (run by devd just before rm) has just verified the sources.
     if g.end_ready(c, fresh=300):
         return
     unit='devbox-storage-end-'+c['Id'][:12]
-    active=subprocess.run(['systemctl','is-active','--quiet',unit],capture_output=True).returncode==0
-    if not active:
+    if not unit_running(unit):
         p=subprocess.run(['systemd-run','--quiet','--collect','--unit',unit,
                           '--property=Type=oneshot','--property=Nice=15',
                           '--property=TimeoutStartSec=4h','/usr/local/bin/devbox-storage',
@@ -56,7 +67,11 @@ def preserve(g,c):
         fresh=inspect(c['Id'])
         if fresh and g.end_ready(fresh):
             return
-        if subprocess.run(['systemctl','is-active','--quiet',unit],capture_output=True).returncode:
+        if not unit_running(unit):
+            # --collect: a unit that succeeded is gone by now; its proof, written before it ended, decides.
+            fresh=inspect(c['Id'])
+            if fresh and g.end_ready(fresh):
+                return
             raise RuntimeError('Offsite preservation failed; data retained. Inspect journalctl -u '+unit)
         time.sleep(1)
     raise RuntimeError('Session removal is waiting for verified offsite preservation ('+unit+'). No data has been removed; existing work is retained.')
