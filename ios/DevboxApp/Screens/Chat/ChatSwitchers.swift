@@ -5,15 +5,16 @@ import SwiftUI
 /// switch from (GET thread/target), re-read when the thread announces a new native thread, a run ends or a notice
 /// arrives. Disabled options show their reason under the name (touch has no hover).
 /// One chip (the model, with the agent's name for VoiceOver) opens a menu with the agent, model and account submenus;
-/// `content` places the chip (nil while the target is unknown) and the status lines (why switching is blocked, the
-/// last switch's result or error) — the composer puts the chip in its box.
+/// `content` places the chip (nil while the target is unknown; `compact` draws it as the agent's glyph and the effort
+/// level, for the iPhone's one-row composer) and the status lines (why switching is blocked, the last switch's result
+/// or error) — the composer puts the chip in its box.
 struct ChatSwitchers<Content: View>: View {
     let sessionId: String
     let thread: ThreadSnapshot
     /// `ThreadView.switchKey(thread)`, precomputed by the store.
     let targetKey: String
     let client: DevdClient
-    @ViewBuilder let content: (_ chip: AnyView?, _ status: AnyView) -> Content
+    @ViewBuilder let content: (_ chip: ((_ compact: Bool) -> AnyView)?, _ status: AnyView) -> Content
 
     private enum Which: String { case harness, model, effort, account }
 
@@ -28,7 +29,7 @@ struct ChatSwitchers<Content: View>: View {
     private var base: String { "/api/sessions/\(pathSegment(sessionId))/thread" }
 
     var body: some View {
-        content(chip, AnyView(status))
+        content(target == nil ? nil : { chip(compact: $0) }, AnyView(status))
             .task(id: targetKey) { await loadTarget() }
             .task(id: target.map { "\($0.harness):\($0.account ?? "-")" }) {
                 if let target, ChatSwitch.accountMenuBlocked(target) == nil { await loadAccounts(target) }
@@ -37,8 +38,8 @@ struct ChatSwitchers<Content: View>: View {
             .onChange(of: thread.runs.count) { _, _ in note = nil }
     }
 
-    private var chip: AnyView? {
-        guard let target else { return nil }
+    private func chip(compact: Bool) -> AnyView {
+        guard let target else { return AnyView(EmptyView()) }
         let blocked = ChatSwitch.blocked(runs: thread.runs, target: target)
         let agent = AgentProfiles.profile(for: AgentName(rawValue: target.agent)).short
         let model = target.model.map(ChatSwitch.modelLabel) ?? "Default model"
@@ -58,16 +59,24 @@ struct ChatSwitchers<Content: View>: View {
         } label: {
             HStack(spacing: 4) {
                 if busy != nil { ProgressView().controlSize(.mini) }
-                // The model's name gives way first: the level and the chevron always show whole.
-                Text(model).lineLimit(1).truncationMode(.middle)
-                if let effort {
-                    Text("·").foregroundStyle(Theme.C.mutedForeground)
-                    Text(effort).fontWeight(.semibold).lineLimit(1).fixedSize()
+                if compact {
+                    // The field keeps the row: the agent's glyph for the model, then the level; the menu names both.
+                    Image(systemName: AgentProfiles.glyph(target.agent)).font(.system(size: ChatType.s(12), weight: .semibold))
+                        .foregroundStyle(Theme.C.mutedForeground)
+                    if let effort { Text(effort).fontWeight(.semibold).lineLimit(1).fixedSize() }
+                } else {
+                    // The model's name gives way first: the level and the chevron always show whole.
+                    Text(model).lineLimit(1).truncationMode(.middle)
+                    if let effort {
+                        Text("·").foregroundStyle(Theme.C.mutedForeground)
+                        Text(effort).fontWeight(.semibold).lineLimit(1).fixedSize()
+                    }
                 }
                 Image(systemName: "chevron.down").font(.system(size: ChatType.s(10), weight: .semibold)).foregroundStyle(Theme.C.mutedForeground)
             }
-            // The web's max-w-56: a long raw model id never takes the composer's row.
-            .frame(maxWidth: 224)
+            // The web's max-w-56: a long raw model id never takes the composer's row. Compact, it is as wide as it reads.
+            .frame(maxWidth: compact ? nil : 224)
+            .fixedSize(horizontal: compact, vertical: false)
             .font(.system(size: ChatType.s(14), weight: .medium))
             .foregroundStyle(Theme.C.foreground)
             .padding(.horizontal, 8).frame(minHeight: 32)
