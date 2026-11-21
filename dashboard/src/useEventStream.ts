@@ -1,12 +1,30 @@
 import { useEffect, useRef, useState } from "react";
+import type { MirrorInfo } from "../../shared/mirror";
 import type { AgentCommand, InboxItem, InboxRemoved, LoggedEvent, ThreadEffort, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 import { api } from "./api";
 
 export const STREAM_POLL_MS = 5000;
 
+/** The stream's URL: `/api/stream` (with `?session=` for a chat session's thread), or a tmux session's mirror stream. */
+export function streamUrl(sessionId: string | undefined, mirror: boolean, afterSeq: number | undefined): string {
+  const q = new URLSearchParams();
+  const mirrored = mirror && sessionId !== undefined;
+  if (sessionId !== undefined) {
+    if (!mirrored) q.set("session", sessionId);
+    if (afterSeq !== undefined) q.set("afterSeq", String(afterSeq));
+  }
+  const qs = q.toString();
+  const base = mirrored ? `/api/sessions/${encodeURIComponent(sessionId)}/mirror/stream` : "/api/stream";
+  return `${base}${qs ? `?${qs}` : ""}`;
+}
+
 export interface EventStreamOptions {
   /** With a session: also that chat session's thread events (`?session=`). */
   sessionId?: string;
+  /** With a session: its transcript mirror's stream (a tmux session's Chat view) instead of `/api/stream`. It sends
+   *  the same thread events, plus `mirror` (onMirror), and no inbox events. */
+  mirror?: boolean;
+  onMirror?: (info: MirrorInfo) => void;
   /** False until the caller has what the stream needs (the loaded thread); nothing connects before. */
   enabled: boolean;
   /** The seq of the thread the caller holds, sent as `afterSeq` on a fresh connect. An EventSource reconnect
@@ -36,7 +54,7 @@ export function useEventStream(opts: EventStreamOptions): { paused: boolean; pol
   const [paused, setPaused] = useState(false);
   const [pollError, setPollError] = useState<string | null>(null);
   const [badFrame, setBadFrame] = useState<string | null>(null);
-  const { sessionId, enabled } = opts;
+  const { sessionId, enabled, mirror } = opts;
 
   useEffect(() => {
     if (!enabled) return;
@@ -60,14 +78,7 @@ export function useEventStream(opts: EventStreamOptions): { paused: boolean; pol
     const stopPoll = () => { clearInterval(poll); poll = undefined; };
 
     const connect = () => {
-      const q = new URLSearchParams();
-      if (sessionId !== undefined) {
-        q.set("session", sessionId);
-        const after = h.current.afterSeq?.();
-        if (after !== undefined) q.set("afterSeq", String(after));
-      }
-      const qs = q.toString();
-      const src = new EventSource(`/api/stream${qs ? `?${qs}` : ""}`);
+      const src = new EventSource(streamUrl(sessionId, mirror === true, sessionId !== undefined ? h.current.afterSeq?.() : undefined));
       es = src;
       src.onopen = () => { setPaused(false); stopPoll(); loadInbox(); };
       const on = <T>(type: string, handle: (data: T) => void) => src.addEventListener(type, (m) => {
@@ -86,6 +97,7 @@ export function useEventStream(opts: EventStreamOptions): { paused: boolean; pol
       on<ThreadEffort | null>("thread-effort", (d) => h.current.onEffort?.(d));
       on<AgentCommand[] | null>("thread-commands", (d) => h.current.onCommands?.(d));
       on<InboxItem | InboxRemoved>("inbox", (d) => h.current.onInbox?.(d));
+      on<MirrorInfo>("mirror", (d) => h.current.onMirror?.(d));
       src.onerror = () => {
         if (disposed) return;
         setPaused(true);
@@ -105,7 +117,7 @@ export function useEventStream(opts: EventStreamOptions): { paused: boolean; pol
       stopPoll();
       setPaused(false);
     };
-  }, [sessionId, enabled]);
+  }, [sessionId, enabled, mirror]);
 
   return { paused, pollError, badFrame };
 }

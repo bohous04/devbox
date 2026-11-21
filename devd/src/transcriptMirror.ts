@@ -678,7 +678,7 @@ export class TranscriptMirror {
     if (text.length > MAX_MESSAGE_CHARS) throw new MirrorSendRefused("bad-request", `text is longer than ${MAX_MESSAGE_CHARS} characters`);
     // An escape could end the bracketed paste early and turn the rest into keystrokes (`\e[201~` then `!cmd`).
     if (/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(text)) {
-      throw new MirrorSendRefused("bad-request", "text must not contain control characters other than newlines and tabs");
+      throw new MirrorSendRefused("bad-request", "The message contains invisible control characters (from a paste?); remove them and send again.");
     }
     if (text.split("\n").some((line) => /^[/!#]/.test(line.trimStart()))) {
       throw new MirrorSendRefused("bad-request", "Commands (a line starting with /, ! or #) can't be sent from the chat; type them in the terminal.");
