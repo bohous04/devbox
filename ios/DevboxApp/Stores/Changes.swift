@@ -234,7 +234,7 @@ final class ChangesStore: ObservableObject {
     private var cache: [String: Task<DiffView.Prepared, Error>] = [:]
     /// "Open diffs" on a long list fetches through this: at most four requests at once.
     private let limiter = AsyncLimiter(4)
-    private static let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+    static let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 
     init(sessionId: String, client: DevdClient) {
         base = "/api/sessions/\(pathSegment(sessionId))/changes"
@@ -308,4 +308,10 @@ final class AsyncLimiter {
         }
         return try await operation()
     }
+}
+
+/// The session repo's files whose path contains `query` (`GET /api/sessions/:id/files?q=`), for the composer's `@`.
+func searchSessionFiles(_ client: DevdClient, sessionId: String, query: String) async throws -> SessionFiles {
+    let q = query.addingPercentEncoding(withAllowedCharacters: ChangesStore.unreserved) ?? query
+    return try await client.get("/api/sessions/\(pathSegment(sessionId))/files?q=\(q)")
 }

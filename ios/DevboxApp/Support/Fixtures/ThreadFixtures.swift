@@ -22,12 +22,20 @@ enum ThreadFixtures {
         "GET /api/stats/live": { _ in raw(live) },
         "GET /api/stats/sessions": { _ in .json([Any]()) },
         "GET \(base)/changes": { _ in raw(changes) },
+        // The composer's `@`: the repo's paths containing the query.
+        "GET \(base)/files": { request in
+            let q = (URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "q" }?.value ?? "").lowercased()
+            return .json(["files": repoFiles.filter { q.isEmpty || $0.lowercased().contains(q) }])
+        },
         "GET \(base)/changes/diff": { request in
             let path = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "path" }?.value
             guard let path, let diff = diffs[path] else { return FixtureResponse(status: 404, body: Data(#"{"error":"no such changed file"}"#.utf8)) }
             return .json(["path": path, "status": diff.status, "base": "origin/main", "binary": false, "truncated": false, "diff": diff.text])
         },
     ]
+
+    private static let repoFiles = ["Dockerfile", "README.md", "package.json", "src/index.ts", "src/main.ts", "src/sync/manifest.ts",
+                                    "src/sync/merge.ts", "test/manifest.test.ts", "docs/release notes.md"]
 
     /// The run's work on disk: two new files and a one-line export, uncommitted, against origin/main.
     private static let changes = #"""
@@ -97,6 +105,10 @@ enum ThreadFixtures {
     private static let thread = #"""
     {"lastSeq":40,"seenSeq":40,"pending":[],"background":[],"native":null,
     "effort":{"model":"claude-opus-5-5","supported":["low","medium","high","xhigh","max"],"effective":"high","chosen":"high"},
+    "commands":[{"name":"compact","description":"Clear the conversation history but keep a summary in context"},
+     {"name":"review","description":"Review a pull request"},{"name":"init","description":"Initialize a new project instructions file"},
+     {"name":"pr-comments","description":"Get comments from a GitHub pull request"},{"name":"security-review","description":"Review the pending changes for security issues"},
+     {"name":"context","description":"Visualize current context usage as a colored grid","hint":"[detail]"}],
     "runs":[
      {"runId":"run-1","origin":"user","status":"completed","harness":"claude","nativeThreadId":"n-1","model":"claude-opus-5-5",
       "queuedAt":null,"startedAt":1790000000000,"endedAt":1790000012000,"endedSeq":8,"usage":null,"error":null},

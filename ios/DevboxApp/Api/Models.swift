@@ -1116,6 +1116,9 @@ struct ThreadSnapshot: Codable, Equatable {
     var native: NativeThread?
     /// The agent's reasoning effort as devd parsed it (bridge 1.7.0+); nil before one, and from a devd that predates it.
     var effort: ThreadEffort? = nil
+    /// The current harness's slash commands (bridge 1.9.0+, shared/thread.ts `commands`): nil when it sent none (an
+    /// older bridge, or Codex), and then the composer offers no `/`.
+    var commands: [AgentCommand]? = nil
 
     static let empty = ThreadSnapshot(lastSeq: 0, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: nil)
 }
@@ -1139,7 +1142,31 @@ extension ThreadSnapshot {
             modelsLogger.error("unreadable thread effort from devd, read as not reported: \(String(describing: error), privacy: .public)")
             effort = nil
         }
+        // Like the effort: a list of an unexpected shape is logged and read as none (no `/` menu), never a thread that
+        // fails to load.
+        do {
+            commands = try c.decodeIfPresent([AgentCommand].self, forKey: .commands)
+        } catch {
+            modelsLogger.error("unreadable command list from devd, read as none: \(String(describing: error), privacy: .public)")
+            commands = nil
+        }
     }
+}
+
+/// shared/thread.ts AgentCommand: a slash command the agent runs when a message starts with `/name`.
+struct AgentCommand: Codable, Equatable {
+    var name: String
+    var description: String?
+    var hint: String?
+}
+
+/// shared/changes.ts SessionFiles: `GET /api/sessions/:id/files?q=` for the composer's `@` picker.
+struct SessionFiles: Codable, Equatable {
+    var files: [String]
+    /// More files matched than were sent.
+    var more: Bool?
+    /// The repo lists more names than devd reads: files past that point were not searched.
+    var listingCapped: Bool?
 }
 
 /// shared/thread.ts ThreadEffort. `supported`: the levels the model takes ([] = none, nil = not known yet);

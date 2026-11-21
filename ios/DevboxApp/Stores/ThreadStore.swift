@@ -33,7 +33,14 @@ enum ThreadView {
             if let idx = runs.firstIndex(where: { $0.runId == r.runId }) { runs[idx] = r } else { runs.append(r) }
         }
         return ThreadSnapshot(lastSeq: max(t.lastSeq, s.lastSeq), seenSeq: s.seenSeq, runs: runs, items: items,
-                              pending: s.pending, background: s.background, native: s.native, effort: s.effort)
+                              pending: s.pending, background: s.background, native: s.native, effort: s.effort, commands: s.commands)
+    }
+
+    /// The current harness's commands from the stream (`thread-commands`, devd's parsed list; nil = it sent none).
+    static func applyCommands(_ t: ThreadSnapshot, _ commands: [AgentCommand]?) -> ThreadSnapshot {
+        var n = t
+        n.commands = commands
+        return n
     }
 
     /// The agent's effort from the stream (`thread-effort`, devd's parsed value; no seq of its own).
@@ -444,6 +451,7 @@ final class ThreadStore: ObservableObject {
             case "thread": update(ThreadView.apply(t, try JSONDecoder().decode(LoggedEvent.self, from: data)))
             case "thread-notice": update(ThreadView.applyNotice(t, try JSONDecoder().decode(ThreadItem.self, from: data)))
             case "thread-effort": update(ThreadView.applyEffort(t, try JSONDecoder().decode(ThreadEffort?.self, from: data)))
+            case "thread-commands": update(ThreadView.applyCommands(t, try JSONDecoder().decode([AgentCommand]?.self, from: data)))
             case "inbox", "ping": break
             default: Self.logger.notice("thread stream: ignoring event \(e.name, privacy: .public)")
             }
