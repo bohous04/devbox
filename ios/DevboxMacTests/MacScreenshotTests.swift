@@ -139,6 +139,15 @@ final class MacScreenshotTests: XCTestCase {
         try shoot(name: "thread-typed-light", look: "light", thread: "dev-orchard-sync", draft: "Pin Node 22 in the Dockerfile too")
     }
 
+    /// The composer's `/` and `@` menus above it, over the thread.
+    func testComposerTriggers() throws {
+        for look in ["light", "dark"] {
+            try shoot(name: "composer-commands-\(look)", look: look, thread: "dev-orchard-sync", draft: "/")
+            try shoot(name: "composer-files-\(look)", look: look, thread: "dev-orchard-sync", draft: "Check @sync")
+        }
+        try shoot(name: "composer-commands-filtered-light", look: "light", thread: "dev-orchard-sync", draft: "/rev")
+    }
+
     /// The thread's heading (title and place) at a normal and a narrow width. On macOS 26 it is a plain title: a
     /// Liquid Glass capsule (drawn plain here, so checked in the view tree) was too short for its two lines.
     func testThreadHeadingWidths() throws {
@@ -224,7 +233,7 @@ final class MacScreenshotTests: XCTestCase {
             // Typed as a user would: the field's editor takes the text and SwiftUI's binding follows.
             let field = try XCTUnwrap(Self.allViews(window.contentView!).first {
                 // The placeholder is styled (muted), so AppKit holds it as an attributed string.
-                ($0 as? NSTextField).map { ($0.placeholderAttributedString?.string ?? $0.placeholderString) == "Ask anything" } == true
+                ($0 as? NSTextField).map { ($0.placeholderAttributedString?.string ?? $0.placeholderString)?.hasPrefix("Ask anything") == true } == true
                     || ($0 is NSTextView && $0.frame.width > 300)
             },
                                       "no composer field")

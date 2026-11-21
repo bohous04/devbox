@@ -130,6 +130,9 @@ targets:
       # The thread title rule's cases (ChatLayoutTests; dashboard/src/threadTitle.test.ts runs them too).
       - path: ../shared/fixtures/thread-titles.json
         buildPhase: resources
+      # The composer's `/` and `@` cases (ComposerTriggerTests; dashboard/src/composerTriggerFixture.test.ts runs them too).
+      - path: ../shared/fixtures/composer-triggers.json
+        buildPhase: resources
     dependencies:
       - target: DevboxApp
     settings:
@@ -228,6 +231,8 @@ targets:
       - path: ../shared/fixtures/housekeeping-notices.json
         buildPhase: resources
       - path: ../shared/fixtures/thread-titles.json
+        buildPhase: resources
+      - path: ../shared/fixtures/composer-triggers.json
         buildPhase: resources
     dependencies:
       - target: DevboxMac

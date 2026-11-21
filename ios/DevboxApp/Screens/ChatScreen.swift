@@ -224,7 +224,10 @@ struct ChatScreen: View {
                         status
                         ComposerView(running: ThreadView.activeRun(t) != nil, chip: chip,
                                      onSend: { try await store.send(text: $0, images: $1) },
-                                     onStop: { try await store.interrupt() })
+                                     onStop: { try await store.interrupt() },
+                                     // A chat session always runs on the VPS (devd's chatRuntimeBlock), where devd lists files.
+                                     commands: t.commands,
+                                     searchFiles: { [client, sessionId] in try await searchSessionFiles(client, sessionId: sessionId, query: $0) })
                     }
                 }
                 .padding(.horizontal, Theme.S.screenPadding)

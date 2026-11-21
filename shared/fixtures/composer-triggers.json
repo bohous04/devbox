@@ -1,0 +1,848 @@
+{
+ "_doc": "Composer triggers (dashboard/src/composerTrigger.ts, ios ComposerTriggers.swift): both run every case. Offsets are UTF-16 code units.",
+ "active": [
+  {
+   "text": "/",
+   "caret": 1,
+   "expected": {
+    "kind": "/",
+    "query": "",
+    "start": 0,
+    "end": 1
+   }
+  },
+  {
+   "text": "/com",
+   "caret": 4,
+   "expected": {
+    "kind": "/",
+    "query": "com",
+    "start": 0,
+    "end": 4
+   }
+  },
+  {
+   "text": "/compactx",
+   "caret": 3,
+   "expected": {
+    "kind": "/",
+    "query": "co",
+    "start": 0,
+    "end": 9
+   }
+  },
+  {
+   "text": "/compact now",
+   "caret": 12,
+   "expected": null
+  },
+  {
+   "text": "/compact ",
+   "caret": 9,
+   "expected": null
+  },
+  {
+   "text": "see /tmp",
+   "caret": 8,
+   "expected": null
+  },
+  {
+   "text": " /x",
+   "caret": 3,
+   "expected": null
+  },
+  {
+   "text": "@",
+   "caret": 1,
+   "expected": {
+    "kind": "@",
+    "query": "",
+    "start": 0,
+    "end": 1
+   }
+  },
+  {
+   "text": "look at @src/ma",
+   "caret": 15,
+   "expected": {
+    "kind": "@",
+    "query": "src/ma",
+    "start": 8,
+    "end": 15
+   }
+  },
+  {
+   "text": "line\n@rea",
+   "caret": 9,
+   "expected": {
+    "kind": "@",
+    "query": "rea",
+    "start": 5,
+    "end": 9
+   }
+  },
+  {
+   "text": "@readme more",
+   "caret": 3,
+   "expected": {
+    "kind": "@",
+    "query": "re",
+    "start": 0,
+    "end": 7
+   }
+  },
+  {
+   "text": "mail me@host",
+   "caret": 12,
+   "expected": null
+  },
+  {
+   "text": "@src done",
+   "caret": 9,
+   "expected": null
+  },
+  {
+   "text": "héllo @dö",
+   "caret": 9,
+   "expected": {
+    "kind": "@",
+    "query": "dö",
+    "start": 6,
+    "end": 9
+   }
+  },
+  {
+   "text": "@src",
+   "caret": 0,
+   "expected": {
+    "kind": "@",
+    "query": "",
+    "start": 0,
+    "end": 4
+   }
+  },
+  {
+   "text": "/x",
+   "caret": 0,
+   "expected": {
+    "kind": "/",
+    "query": "",
+    "start": 0,
+    "end": 2
+   }
+  },
+  {
+   "text": "hi 👋 @fi",
+   "caret": 9,
+   "expected": {
+    "kind": "@",
+    "query": "fi",
+    "start": 6,
+    "end": 9
+   }
+  },
+  {
+   "text": "👋@x",
+   "caret": 4,
+   "expected": null
+  },
+  {
+   "text": "@👋r",
+   "caret": 4,
+   "expected": {
+    "kind": "@",
+    "query": "👋r",
+    "start": 0,
+    "end": 4
+   }
+  }
+ ],
+ "filter": {
+  "commands": [
+   {
+    "name": "review"
+   },
+   {
+    "name": "code-review",
+    "description": "Review the diff"
+   },
+   {
+    "name": "compact",
+    "description": "Summarize the conversation"
+   },
+   {
+    "name": "init",
+    "description": "Write the project config"
+   }
+  ],
+  "cases": [
+   {
+    "query": "",
+    "expected": [
+     "review",
+     "code-review",
+     "compact",
+     "init"
+    ]
+   },
+   {
+    "query": "RE",
+    "expected": [
+     "review",
+     "code-review"
+    ]
+   },
+   {
+    "query": "summ",
+    "expected": [
+     "compact"
+    ]
+   },
+   {
+    "query": "zzz",
+    "expected": []
+   },
+   {
+    "query": "co",
+    "expected": [
+     "code-review",
+     "compact"
+    ]
+   }
+  ]
+ },
+ "pick": [
+  {
+   "text": "/co",
+   "trigger": {
+    "kind": "/",
+    "query": "co",
+    "start": 0,
+    "end": 3
+   },
+   "value": "compact",
+   "expected": {
+    "text": "/compact ",
+    "caret": 9
+   }
+  },
+  {
+   "text": "see @sr and",
+   "trigger": {
+    "kind": "@",
+    "query": "sr",
+    "start": 4,
+    "end": 7
+   },
+   "value": "src/main.ts",
+   "expected": {
+    "text": "see @src/main.ts and",
+    "caret": 17
+   }
+  },
+  {
+   "text": "see @sr",
+   "trigger": {
+    "kind": "@",
+    "query": "sr",
+    "start": 4,
+    "end": 7
+   },
+   "value": "src/main.ts",
+   "expected": {
+    "text": "see @src/main.ts ",
+    "caret": 17
+   }
+  },
+  {
+   "text": "/co rest",
+   "trigger": {
+    "kind": "/",
+    "query": "co",
+    "start": 0,
+    "end": 3
+   },
+   "value": "compact",
+   "expected": {
+    "text": "/compact rest",
+    "caret": 9
+   }
+  },
+  {
+   "text": "@my",
+   "trigger": {
+    "kind": "@",
+    "query": "my",
+    "start": 0,
+    "end": 3
+   },
+   "value": "docs/my notes.md",
+   "expected": {
+    "text": "@\"docs/my notes.md\" ",
+    "caret": 20
+   }
+  },
+  {
+   "text": "hi 👋 @fi",
+   "trigger": {
+    "kind": "@",
+    "query": "fi",
+    "start": 6,
+    "end": 9
+   },
+   "value": "docs/👋 hi.md",
+   "expected": {
+    "text": "hi 👋 @\"docs/👋 hi.md\" ",
+    "caret": 23
+   }
+  }
+ ],
+ "placeholder": [
+  {
+   "running": false,
+   "commands": true,
+   "files": true,
+   "expected": "Ask anything · @ for files · / for commands"
+  },
+  {
+   "running": false,
+   "commands": false,
+   "files": true,
+   "expected": "Ask anything · @ for files"
+  },
+  {
+   "running": false,
+   "commands": false,
+   "files": false,
+   "expected": "Ask anything"
+  },
+  {
+   "running": true,
+   "commands": true,
+   "files": true,
+   "expected": "Queue a message for after this run"
+  }
+ ],
+ "keyAction": [
+  {
+   "menu": null,
+   "key": {
+    "key": "Enter",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "send"
+  },
+  {
+   "menu": null,
+   "key": {
+    "key": "Enter",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": false,
+   "expected": "default"
+  },
+  {
+   "menu": null,
+   "key": {
+    "key": "Enter",
+    "shiftKey": true,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "default"
+  },
+  {
+   "menu": null,
+   "key": {
+    "key": "Enter",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": true,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "default"
+  },
+  {
+   "menu": null,
+   "key": {
+    "key": "Enter",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 229
+   },
+   "enterSends": true,
+   "expected": "default"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": false,
+    "exact": false
+   },
+   "key": {
+    "key": "ArrowDown",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "next"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": false,
+    "exact": false
+   },
+   "key": {
+    "key": "ArrowUp",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "prev"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": false,
+    "exact": false
+   },
+   "key": {
+    "key": "ArrowDown",
+    "shiftKey": true,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "default"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": false,
+    "exact": false
+   },
+   "key": {
+    "key": "ArrowDown",
+    "shiftKey": false,
+    "altKey": true,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "default"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": false,
+    "exact": false
+   },
+   "key": {
+    "key": "ArrowDown",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": true,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "default"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": false,
+    "exact": false
+   },
+   "key": {
+    "key": "ArrowDown",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": true,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "default"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": false,
+    "exact": false
+   },
+   "key": {
+    "key": "Enter",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "pick"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": false,
+    "exact": false
+   },
+   "key": {
+    "key": "Enter",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": false,
+   "expected": "pick"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": false,
+    "exact": false
+   },
+   "key": {
+    "key": "Tab",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "pick"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": false,
+    "exact": false
+   },
+   "key": {
+    "key": "Tab",
+    "shiftKey": true,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "default"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": false,
+    "exact": false
+   },
+   "key": {
+    "key": "Enter",
+    "shiftKey": true,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "default"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": false,
+    "exact": false
+   },
+   "key": {
+    "key": "Escape",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "dismiss"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": false,
+    "exact": false
+   },
+   "key": {
+    "key": "Enter",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": true,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "default"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": false,
+    "exact": false
+   },
+   "key": {
+    "key": "Enter",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 229
+   },
+   "enterSends": true,
+   "expected": "default"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": false,
+    "exact": true
+   },
+   "key": {
+    "key": "Enter",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "send"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": false,
+    "exact": true
+   },
+   "key": {
+    "key": "Enter",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": false,
+   "expected": "default"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": false,
+    "exact": true
+   },
+   "key": {
+    "key": "Tab",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "pick"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": true,
+    "exact": false
+   },
+   "key": {
+    "key": "Enter",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "hold"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": true,
+    "exact": false
+   },
+   "key": {
+    "key": "Tab",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "hold"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": true,
+    "exact": false
+   },
+   "key": {
+    "key": "ArrowDown",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "default"
+  },
+  {
+   "menu": {
+    "options": 3,
+    "searching": true,
+    "exact": false
+   },
+   "key": {
+    "key": "Escape",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "dismiss"
+  },
+  {
+   "menu": {
+    "options": 0,
+    "searching": true,
+    "exact": false
+   },
+   "key": {
+    "key": "Enter",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "hold"
+  },
+  {
+   "menu": {
+    "options": 0,
+    "searching": false,
+    "exact": false
+   },
+   "key": {
+    "key": "Enter",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "send"
+  },
+  {
+   "menu": {
+    "options": 0,
+    "searching": false,
+    "exact": false
+   },
+   "key": {
+    "key": "Tab",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "default"
+  },
+  {
+   "menu": {
+    "options": 0,
+    "searching": false,
+    "exact": false
+   },
+   "key": {
+    "key": "ArrowDown",
+    "shiftKey": false,
+    "altKey": false,
+    "ctrlKey": false,
+    "metaKey": false,
+    "isComposing": false,
+    "keyCode": 0
+   },
+   "enterSends": true,
+   "expected": "default"
+  }
+ ]
+}

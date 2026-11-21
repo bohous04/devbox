@@ -29,6 +29,34 @@ final class ChatScreenshotTests: XCTestCase {
         try save(app, "ios-compact-ax-end")
     }
 
+    /// The composer's `/` and `@` suggestions in a bar over the keyboard; a tap on one puts it in the message.
+    func testComposerTriggers() throws {
+        for look in ["light", "dark"] {
+            let app = XCUIApplication()
+            openThread(app, extra: ["-DevboxAppearance", look])
+            let field = app.textFields["Message"].exists ? app.textFields["Message"] : app.textViews["Message"]
+            XCTAssertTrue(field.waitForExistence(timeout: 20))
+            field.tap()
+            field.typeText("/")
+            let review = app.buttons["/review, Review a pull request"]
+            XCTAssertTrue(review.waitForExistence(timeout: 5), "the commands bar")
+            try save(app, "ios-\(look)-commands")
+            review.tap()
+            XCTAssertTrue(review.waitForNonExistence(timeout: 3), "the bar closes after the pick")
+            XCTAssertEqual(field.value as? String, "/review ")
+            field.typeText("@sync")
+            let manifest = app.buttons["src/sync/manifest.ts"]
+            let shown = manifest.waitForExistence(timeout: 5)
+            if !shown { try save(app, "ios-\(look)-files-missing"); print(app.debugDescription) }
+            XCTAssertTrue(shown, "the files bar")
+            sleep(1)
+            try save(app, "ios-\(look)-files")
+            manifest.tap()
+            XCTAssertEqual(field.value as? String, "/review @src/sync/manifest.ts ")
+            app.terminate()
+        }
+    }
+
     private func shoot(appearance: String) throws {
         let app = XCUIApplication()
         let look = ["-DevboxAppearance", appearance]
