@@ -86,7 +86,8 @@ interface Link {
   version?: string | null;
 }
 
-/** devd's own first message of a session, with the effort to set before it (/new); null = none. */
+/** devd's own first message of a session, with the effort to set before it (/new); null = none, and once the thread
+ *  said why it was not set (a retry of the message does not say it again). */
 interface FirstTurn { text: string; effort: string | null }
 
 class MalformedFrame extends Error {}
@@ -335,7 +336,10 @@ export class BridgeLinks {
     const { text, effort } = first;
     const effortSet = async (): Promise<void> => {
       if (effort === null) return;
-      const notSet = (why: string) => this.d.store(sessionId).addNotice(`Effort ${effort} was not set: ${why}`, this.now());
+      const notSet = (why: string) => {
+        first.effort = null;
+        this.d.store(sessionId).addNotice(`Effort ${effort} was not set: ${why}`, this.now());
+      };
       if (version === null || version === undefined || !versionAtLeast(version, EFFORT_MIN_BRIDGE_VERSION)) return notSet(effortBridgeTooOld(version ?? null));
       try { await this.send(sessionId, { kind: "setEffort", effort }); }
       catch (err) {

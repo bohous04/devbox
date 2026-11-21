@@ -923,6 +923,20 @@ test("a first message cut off mid-effort waits for the next connection's handsha
   expect(notices(store)).toContainEqual("Effort high was not set: this session's agent bridge (1.6.0) cannot change the effort; it needs 1.7.0 — recreate the session's container");
 });
 
+test("a first message whose effort was refused, retried on the next connection, says the refusal once", async () => {
+  const { links, serve, store } = setup();
+  links.ensure(ID);
+  links.startTurnWhenConnected(ID, "fix it", undefined, null, "max");
+  const refuse = (c: { kind: string }): CmdReply | undefined => (c.kind === "setEffort" ? { ok: false, error: "effort max is not one of low, high" } : undefined);
+  const first = serve({ replyFor: (c) => refuse(c) ?? "never" });
+  await waitFor(() => first.cmds.length === 2, "effort refused, turn sent");
+  first.close();
+  const second = serve({ replyFor: refuse });
+  await waitFor(() => second.cmds.some((c) => (c as { kind: string }).kind === "startTurn"), "turn sent again");
+  expect(second.cmds).toEqual([{ kind: "startTurn", text: "fix it" }]);
+  expect(notices(store).filter((n) => n.startsWith("Effort max was not set"))).toHaveLength(1);
+});
+
 test("a first message's effort survives a devd restart with it", async () => {
   const { saved, pendingTurns } = persistence();
   const root = tmpRoot();
