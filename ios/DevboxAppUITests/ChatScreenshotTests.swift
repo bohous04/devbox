@@ -15,7 +15,7 @@ final class ChatScreenshotTests: XCTestCase {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     }
 
-    // The appearance is the simulator's (`xcrun simctl ui <device> appearance dark|light`); the name only labels the files.
+    // The app takes the appearance from its launch arguments (`-DevboxAppearance`), whatever the simulator's.
     func testDark() throws { try shoot(appearance: "dark") }
     func testLight() throws { try shoot(appearance: "light") }
 
@@ -31,21 +31,30 @@ final class ChatScreenshotTests: XCTestCase {
 
     private func shoot(appearance: String) throws {
         let app = XCUIApplication()
-        openThread(app)
+        let look = ["-DevboxAppearance", appearance]
+        openThread(app, extra: look)
         // The answer's last line: the thread has loaded and opened at its end.
         XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'example.com/docs/sync'")).firstMatch.waitForExistence(timeout: 20))
         sleep(1)
         try save(app, "ios-\(appearance)-end")
 
-        // The changed-files card: collapsed, then open with one file's diff.
-        let card = app.buttons.containing(NSPredicate(format: "label CONTAINS 'changed files'")).firstMatch
+        // The changed-files card, one row at the end; the header's +/− opens it, then one file's diff.
+        // In the thread, not the header's chip (whose label also names the changed files).
+        let card = app.scrollViews.buttons.containing(NSPredicate(format: "label CONTAINS 'changed files'")).firstMatch
+        let file = app.buttons["src/sync/queue.ts"]
         if card.waitForExistence(timeout: 5) {
-            card.tap()
+            XCTAssertFalse(file.exists, "the changes card starts as its one row")
+            let chip = app.navigationBars.buttons.containing(NSPredicate(format: "label CONTAINS 'lines added'")).firstMatch
+            XCTAssertTrue(chip.waitForExistence(timeout: 3), "the header carries the changes")
+            // From the top of the thread, where the lazy stack has not built the card: the chip still opens it.
+            for _ in 0..<6 { app.swipeDown(velocity: .fast) }
+            sleep(1)
+            XCTAssertFalse(card.exists && card.isHittable, "the card is scrolled off")
+            chip.tap()
+            XCTAssertTrue(file.waitForExistence(timeout: 3), "the header's changes open the card")
             sleep(1)
             try save(app, "ios-\(appearance)-changes")
-            card.tap()
-            let file = app.buttons["src/sync/queue.ts"]
-            if file.waitForExistence(timeout: 3) {
+            if file.exists {
                 file.tap()
                 sleep(2)
                 app.swipeUp(velocity: .slow)
@@ -94,7 +103,7 @@ final class ChatScreenshotTests: XCTestCase {
 
         // A fresh launch (no keyboard, no draft) for the top of the thread.
         app.terminate()
-        openThread(app)
+        openThread(app, extra: look)
         XCTAssertTrue(app.buttons.containing(NSPredicate(format: "label BEGINSWITH 'Worked for'")).firstMatch.waitForExistence(timeout: 20))
 
         // The top: the earlier turn, the notice and the long prompt.

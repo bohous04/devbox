@@ -111,8 +111,6 @@ enum ChangesView {
         (error as? DevdHTTPError)?.serverCode == "no_commits"
     }
 
-    /// The list starts open when it is short enough to read at a glance.
-    static let openMax = 6
     /// "Open diffs" is offered up to this many files.
     static let openAllMax = 30
 }

@@ -98,6 +98,11 @@ final class ChatLayoutTests: XCTestCase {
 extension ChatLayoutTests {
     func testModelLabel() {
         XCTAssertEqual(ChatSwitch.modelLabel("claude-opus-5-5"), "Opus 5.5")
+        // The iPhone's one-row chip: the family alone; an unknown id stays whole (the chip cuts it).
+        XCTAssertEqual(ChatSwitch.shortModelLabel("claude-opus-5-5-high"), "Opus")
+        XCTAssertEqual(ChatSwitch.shortModelLabel("gpt-6.1-sol"), "GPT-6.1")
+        XCTAssertEqual(ChatSwitch.shortModelLabel("mistral-medium-latest"), "Mistral")
+        XCTAssertEqual(ChatSwitch.shortModelLabel("my custom model"), "my custom model")
         XCTAssertEqual(ChatSwitch.modelLabel("claude-opus-5-5-high"), "Opus 5.5 High")
         XCTAssertEqual(ChatSwitch.modelLabel("claude-sonnet-4-20250514"), "Sonnet 4")
         XCTAssertEqual(ChatSwitch.modelLabel("gpt-6.1-sol"), "GPT-6.1 Sol")

@@ -328,13 +328,6 @@ export class ThreadStore {
     this.notice(this.lastSeq(), text, ts, () => {}, tone);
   }
 
-  /** `addNotice` once per `key` for the store's lifetime (persisted); false when it was said already. */
-  addNoticeOnce(key: string, text: string, ts: number): boolean {
-    if (this.db.query("SELECT 1 FROM meta WHERE key=?").get(`once:${key}`)) return false;
-    this.notice(this.lastSeq(), text, ts, () => this.setMeta(`once:${key}`, 1));
-    return true;
-  }
-
   /** Gives up on the bridge's event `seq` (above lastSeq), which devd cannot apply: it counts as applied, and the
    *  notice `text` takes its place at that seq. */
   skipEvent(seq: number, text: string, ts: number): void {

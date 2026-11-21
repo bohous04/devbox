@@ -125,6 +125,14 @@ enum ChatSwitch {
         return prefix + parts.map(cap).joined(separator: " ")
     }
 
+    /// The model's family for the iPhone's one-row chip ("Opus", "GPT-6.1"): the first word of `modelLabel`, or the
+    /// whole id when it is not one devbox names.
+    static func shortModelLabel(_ id: String) -> String {
+        let label = modelLabel(id)
+        guard label != id else { return id }
+        return label.components(separatedBy: " ").first ?? label
+    }
+
     /// The models devd accepts for the harness; a reported alias marks the model it runs, a variant marks nothing.
     static func modelOptions(_ t: ChatTarget) -> [Option] {
         let current = t.model.map { sameModelAliases[$0] ?? $0 }

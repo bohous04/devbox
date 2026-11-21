@@ -27,7 +27,7 @@ enum FixtureMode {
 
     static var isActive: Bool { requested != nil }
 
-    /// `-DevboxAppearance light|dark` (Mac): the app's appearance whatever the system's, for screenshots of both.
+    /// `-DevboxAppearance light|dark`: the app's appearance whatever the system's, for screenshots of both.
     static let appearance: String? = {
         let args = ProcessInfo.processInfo.arguments
         guard let i = args.firstIndex(of: "-DevboxAppearance") else { return nil }

@@ -26,8 +26,12 @@ struct ChatScreen: View {
     private let openTerminal: (() -> Void)?
     /// The Mac closes the thread's window when its session ended; nil on iPhone (back navigation does it).
     private let closeWindow: (() -> Void)?
-    /// The Mac header's changes chip: each new value scrolls the thread to the changes card.
+    /// The Mac header's changes chip: each new value scrolls the thread to the changes card and opens it.
     private let revealChanges: Int
+    /// The same from the iPhone's own header chip.
+    @State private var ownReveal = 0
+    /// The changes card's list. It starts shut each time the thread opens: the card is one row until asked.
+    @State private var changesOpen = false
 
     init(sessionId: String, client: DevdClient) {
         self.sessionId = sessionId
@@ -108,6 +112,10 @@ struct ChatScreen: View {
             #endif
             if openTerminal == nil {
                 ToolbarItem(placement: .primaryAction) {
+                    // As the Mac's header: the worktree's +/−, a tap away from anywhere in the thread.
+                    ChangesChip(store: store, client: client) { ownReveal += 1 }
+                }
+                ToolbarItem(placement: .primaryAction) {
                     Button { showTerminal = true } label: { Label("Terminal", systemImage: "terminal") }
                 }
             }
@@ -149,7 +157,7 @@ struct ChatScreen: View {
                                 .equatable()
                                 .modifier(ThreadEdge.Track(id: row.id, frames: rowFrames, quiet: r.item.kind == .notice && !r.failedRun && !r.item.warns))
                             if let anchor = store.changesAnchor, anchor.rowId == r.id {
-                                ChangesCard(sessionId: sessionId, client: client, refreshKey: anchor.endedSeq)
+                                ChangesCard(sessionId: sessionId, client: client, refreshKey: anchor.endedSeq, open: $changesOpen)
                                     .id(Self.changesId)
                                     .modifier(ThreadEdge.Track(id: Self.changesId, frames: rowFrames))
                             }
@@ -180,10 +188,11 @@ struct ChatScreen: View {
             .onChange(of: [t.lastSeq, t.items.count]) { _, _ in
                 if atEnd { proxy.scrollTo("end", anchor: .bottom) }
             }
-            .onChange(of: revealChanges) { _, _ in
+            .onChange(of: revealChanges + ownReveal) { _, _ in
                 // The card sits in its answer's ForEach row: a lazy stack scrolls to that row's identity even when it
                 // is not built yet, and to the card itself only once it is.
                 guard let anchor = store.changesAnchor else { return }
+                changesOpen = true
                 proxy.scrollTo(ThreadDisplayRow.itemId(anchor.rowId), anchor: .top)
                 DispatchQueue.main.async { withAnimation(.snappy) { proxy.scrollTo(Self.changesId, anchor: .top) } }
             }

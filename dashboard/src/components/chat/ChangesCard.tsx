@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, FileDiff as FileDiffIcon, Folder, RotateCw } from "lucide-react";
 import { api, type SessionChanges, type SessionFileDiff } from "@/api";
 import { cn } from "@/lib/utils";
-import { CHANGES_OPEN_MAX, changesError, changesTitle, countsIncomplete, fileStat, groupByFolder, splitPath, statusLetter } from "../../changesView";
+import { changesError, changesTitle, countsIncomplete, fileStat, groupByFolder, splitPath, statusLetter } from "../../changesView";
 import { Collapse } from "../primitives";
 import { FileDiff } from "./FileDiff";
 import { limiter, OPEN_ALL_MAX } from "../../diffView";
@@ -33,8 +33,8 @@ export function ChangesCard({ sessionId, refreshKey, onLayout }: {
 }) {
   const [changes, setChanges] = useState<SessionChanges | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // null until the user toggles: then a short list starts open.
-  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  // The card starts as its one header row (totals, Open diffs); the list opens on demand.
+  const [open, setOpen] = useState(false);
   // Files whose diff is shown, by path.
   const [shown, setShown] = useState<ReadonlySet<string>>(new Set());
 
@@ -78,7 +78,6 @@ export function ChangesCard({ sessionId, refreshKey, onLayout }: {
     );
   }
   if (changes === null || changes.totals.files === 0) return null;
-  const open = userOpen ?? changes.files.length <= CHANGES_OPEN_MAX;
   const groups = groupByFolder(changes.files);
   const allShown = changes.files.every((f) => shown.has(f.path));
   const toggleFile = (path: string) => setShown((s) => {
@@ -91,7 +90,7 @@ export function ChangesCard({ sessionId, refreshKey, onLayout }: {
     <section aria-label="Changed files" className="mt-3 overflow-hidden rounded-lg border border-border/80 bg-card/30 text-sm">
       {/* A disclosure in the thread, not a link away: the chevron points down and turns when open. */}
       <div className="flex min-w-0 items-center">
-      <button type="button" aria-expanded={open} onClick={() => setUserOpen(!open)} title={`Changes vs ${changes.base}`}
+      <button type="button" aria-expanded={open} onClick={() => setOpen(!open)} title={`Changes vs ${changes.base}`}
         className="flex min-h-10 min-w-0 flex-1 items-center gap-2 py-2 pl-3 pr-2 text-left transition-colors hover:bg-muted/40">
         <FileDiffIcon className="size-4 flex-none text-muted-foreground" aria-hidden="true" />
         <span className="flex-none font-medium text-foreground">{changesTitle(changes)}</span>
@@ -104,7 +103,7 @@ export function ChangesCard({ sessionId, refreshKey, onLayout }: {
         <span className="hidden min-w-0 truncate text-xs text-muted-foreground sm:inline">vs {changes.base}</span>
         <ChevronDown className={cn("ml-auto size-4 flex-none text-muted-foreground transition-transform", open && "rotate-180")} aria-hidden="true" />
       </button>
-      {changes.files.length <= OPEN_ALL_MAX && <button type="button" onClick={() => { setUserOpen(true); setShown(allShown ? new Set() : new Set(changes.files.map((f) => f.path))); }}
+      {changes.files.length <= OPEN_ALL_MAX && <button type="button" onClick={() => { setOpen(true); setShown(allShown ? new Set() : new Set(changes.files.map((f) => f.path))); }}
         className="mr-1.5 flex-none rounded-md px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground">
         {allShown ? "Hide diffs" : "Open diffs"}
       </button>}

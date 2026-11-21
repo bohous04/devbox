@@ -46,6 +46,10 @@ struct DevboxAppApp: App {
                 #endif
             }
                 .environmentObject(appModel)
+                #if DEBUG
+                // Screenshots of both appearances whatever the simulator's (FixtureMode.appearance).
+                .preferredColorScheme(FixtureMode.appearance.map { $0 == "dark" ? .dark : .light })
+                #endif
                 .task {
                     // End old cards from build 12 on EVERY launch (even in preview mode —
                     // it starts nothing new), see LegacySessionActivityCleanup.swift.

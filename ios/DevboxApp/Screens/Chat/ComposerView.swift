@@ -11,8 +11,8 @@ import UniformTypeIdentifiers
 /// (switching back while typing would make the field jump between widths). The Mac always has the two tiers.
 struct ComposerView: View {
     let running: Bool
-    /// The model chip (ChatSwitchers); nil while the session's target is unknown.
-    let chip: AnyView?
+    /// The model chip (ChatSwitchers), compact on the one-row box; nil while the session's target is unknown.
+    let chip: ((_ compact: Bool) -> AnyView)?
     let onSend: (String, [Data]) async throws -> Void
     let onStop: () async throws -> Void
 
@@ -119,7 +119,7 @@ struct ComposerView: View {
 
     @ViewBuilder
     private var controls: some View {
-        if let chip { chip }
+        if let chip { chip(!twoTier) }
         if running {
             Button { stop() } label: {
                 Image(systemName: "stop.fill").font(.system(size: ChatType.s(13))).foregroundStyle(Theme.C.foreground)

@@ -8,12 +8,14 @@ struct ChangesCard: View {
     /// The latest run's end seq: a new one refetches the card (and drops its cached diffs).
     let refreshKey: Int?
     @StateObject private var store: ChangesStore
-    /// nil until the user toggles: then a short list starts open.
-    @State private var userOpen: Bool?
+    /// The list is open. The thread keeps it: a lazy stack builds the card only on screen, so the header's changes
+    /// chip opens it there, before the card exists.
+    @Binding var open: Bool
     @State private var shown: Set<String> = []
 
-    init(sessionId: String, client: DevdClient, refreshKey: Int?) {
+    init(sessionId: String, client: DevdClient, refreshKey: Int?, open: Binding<Bool>) {
         self.refreshKey = refreshKey
+        _open = open
         _store = StateObject(wrappedValue: ChangesStore(sessionId: sessionId, client: client))
     }
 
@@ -46,12 +48,11 @@ struct ChangesCard: View {
     }
 
     private func card(_ c: SessionChanges) -> some View {
-        let open = userOpen ?? (c.files.count <= ChangesView.openMax)
         let groups = ChangesView.groupByFolder(c.files)
         let allShown = c.files.allSatisfy { shown.contains($0.path) }
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 4) {
-                Button { withAnimation(.snappy) { userOpen = !open } } label: {
+                Button { withAnimation(.snappy) { open.toggle() } } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "doc.badge.plus").foregroundStyle(Theme.C.mutedForeground).accessibilityHidden(true)
                         Text(ChangesView.title(c)).fontWeight(.medium).foregroundStyle(Theme.C.foreground).fixedSize()
@@ -74,7 +75,7 @@ struct ChangesCard: View {
                 if c.files.count <= ChangesView.openAllMax {
                     Button(allShown ? "Hide diffs" : "Open diffs") {
                         withAnimation(.snappy) {
-                            userOpen = true
+                            open = true
                             shown = allShown ? [] : Set(c.files.map(\.path))
                         }
                     }
