@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, MessageSquare, SquareTerminal } from "lucide-react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import type { ThreadSnapshot } from "../../../shared/thread";
@@ -11,7 +11,7 @@ import { EmptyState, RowsSkeleton } from "../components/primitives";
 import { threadHeading } from "../inboxView";
 import { useStore } from "../store";
 import { terminalTabUrl } from "../terminalRoute";
-import { activeRun, applyEffort, applyNotice, applyThreadEvent, criticRunIds, mergeSnapshot, queuedRunIds } from "../threadView";
+import { activeRun, applyCommands, applyEffort, applyNotice, applyThreadEvent, criticRunIds, mergeSnapshot, queuedRunIds } from "../threadView";
 import { useEventStream } from "../useEventStream";
 
 // Same lazy import as TerminalPage: xterm stays in its own chunk.
@@ -51,6 +51,7 @@ function ChatPage({ id }: { id: string }) {
     onThread: (e) => setThread((t) => (t ? applyThreadEvent(t, e) : t)),
     onNotice: (item) => setThread((t) => (t ? applyNotice(t, item) : t)),
     onEffort: (effort) => setThread((t) => (t ? applyEffort(t, effort) : t)),
+    onCommands: (commands) => setThread((t) => (t ? applyCommands(t, commands) : t)),
   });
 
   // Opening the page marks the thread seen; so does a run ending while the user looks at it, and coming back to
@@ -94,6 +95,9 @@ function ChatPage({ id }: { id: string }) {
   }, [loaded]);
 
   const running = thread ? activeRun(thread) !== undefined : false;
+  // devd searches the repo on the VPS only; an InstaBox session's repo is elsewhere.
+  const vpsRepo = session !== undefined && session.host !== "instabox";
+  const searchFiles = useMemo(() => (vpsRepo ? (q: string) => api.sessionFiles(id, q) : undefined), [id, vpsRepo]);
   const title = session?.name?.trim() || (session ? `${session.project}/${session.repo}` : id);
   // The header names the thread like a breadcrumb: where it runs, then what it is called, as in the inbox
   // (threadHeading). null while the thread loads (no nickname): the crumb alone stands in.
@@ -193,6 +197,7 @@ function ChatPage({ id }: { id: string }) {
                       await api.sendMessage(id, text, paths);
                     }}
                     controls={menus} notices={status}
+                    commands={thread.commands} searchFiles={searchFiles}
                   />
                 )}
               </Switchers>
