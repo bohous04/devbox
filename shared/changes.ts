@@ -56,7 +56,8 @@ export interface FileDiff {
 }
 
 /** GET /api/sessions/:id/files?q=&limit= — files of the session repo for the composer's @ picker (repo-relative
- *  paths, tracked and untracked, not ignored). Refusals as for the changes routes (ChangesErrorBody). */
+ *  paths, tracked and untracked, not ignored). Refusals as for the changes routes (ChangesErrorBody). devd reuses one
+ *  listing per session for 10 s, so a file created in that time shows up only after it. */
 export interface SessionFiles {
   files: string[];
   /** More files matched than `limit`. */

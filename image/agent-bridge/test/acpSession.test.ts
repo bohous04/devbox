@@ -1041,4 +1041,19 @@ describe("ACP commands (1.9.0)", () => {
     expect(logs).toEqual(["example: available_commands_update without a command list dropped"]);
     expect(commands).toEqual([]);
   });
+
+  test("a list sent before session/new answered is kept only when it is for the session that opened", async () => {
+    for (const [sentFor, expected] of [["sess-other", 0], ["sess-1", 1], [undefined, 1]] as const) {
+      const fake = fakeAgent();
+      fake.responders["session/new"] = (_p, id) => {
+        fake.push({ jsonrpc: "2.0", method: "session/update", params: { ...(sentFor ? { sessionId: sentFor } : {}), update: { sessionUpdate: "available_commands_update", availableCommands: [{ name: "plan" }] } } });
+        queueMicrotask(() => fake.push({ jsonrpc: "2.0", id, result: { sessionId: "sess-1" } }));
+        return undefined;
+      };
+      const { session, commands } = open(fake);
+      await session.ready;
+      await new Promise((r) => setTimeout(r, 10));
+      expect(commands).toHaveLength(expected);
+    }
+  });
 });

@@ -1315,7 +1315,8 @@ export function createApp(d: ApiDeps): Hono {
     return sessionChanges(c, (ws, expected) => collectFileDiff(ws, expected, path));
   });
 
-  // The composer's @ file picker: one listing per session and worktree serves the keystrokes of the next 10 s.
+  // The composer's @ file picker: one listing per session and worktree serves the keystrokes of the next 10 s, so a
+  // file created meanwhile appears up to 10 s late.
   const fileListings = new Map<string, { at: number; listing: Promise<{ paths: string[]; capped: boolean }> }>();
   app.get("/api/sessions/:id/files", (c) => {
     const rawLimit = c.req.query("limit");

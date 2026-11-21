@@ -107,7 +107,7 @@ export function mapSdkMessage(msg: SDKMessage, runId: string, cursor: { messageI
         out.push({ type: "tool.started", runId, itemId: block.id, tool: block.name, input: block.input });
       }
     }
-  } else if (msg.type === "system" && msg.subtype === "local_command_output") {
+  } else if (msg.type === "system" && msg.subtype === "local_command_output" && msg.content.trim() !== "") {
     // A local slash command (e.g. /voice) answers without the model; without this its run would end with nothing shown.
     out.push({ type: "message.final", runId, itemId: msg.uuid, role: "assistant", text: msg.content });
   } else if (msg.type === "user" && Array.isArray(msg.message.content)) {

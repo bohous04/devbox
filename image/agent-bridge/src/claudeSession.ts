@@ -249,6 +249,7 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
   let allCommands: SlashCommand[] | null = null;
   let terminalCommands: Set<string> | null = null;
   let sentCommands: string | null = null;
+  let askingCommands = false;
   function sendCommands(): void {
     // After close, a switch's next harness may already be current in devd, which files a list under the current one.
     if (ended || allCommands === null || terminalCommands === null) return;
@@ -265,15 +266,20 @@ export function openClaudeSession(o: ClaudeSessionOptions, queryFn: QueryFn = qu
       emit({ type: "thread.native", harness: "claude", nativeThreadId, account: null, model: msg.model, caps: CLAUDE_CAPABILITIES });
     }
     if (msg.type === "system" && msg.subtype === "init") {
-      const first = terminalCommands === null;
       terminalCommands = new Set(msg.terminal_slash_commands ?? []);
-      if (first && allCommands === null) {
+      // Asked until one answer (or push) came: a failed read is asked again with the next init.
+      if (allCommands === null && !askingCommands) {
+        askingCommands = true;
         stream.supportedCommands().then(
           (list) => {
+            askingCommands = false;
             allCommands ??= list; // a push that came meanwhile is newer
             sendCommands();
           },
-          (e) => logError(`claude: reading the command list failed: ${e instanceof Error ? e.message : String(e)}`),
+          (e) => {
+            askingCommands = false;
+            logError(`claude: reading the command list failed: ${e instanceof Error ? e.message : String(e)}`);
+          },
         );
       } else sendCommands();
     }
