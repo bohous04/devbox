@@ -264,7 +264,8 @@ export interface SwitchAgentResponse {
 /** `awaitingTarget`: the agent bridge waits for a target (after a restart or a failed resume); devd then allows a
  *  switch even with queued messages. */
 /** `bridgeVersion`: of the bridge's latest handshake; null before one (or for a 1.0.0 bridge). */
-export interface ChatTarget { agent: AgentName; harness: string; account: string | null; model: string | null; awaitingTarget: boolean; bridgeVersion: string | null }
+/** `bridgeOutdated`: the bridge is older than devd's (absent from a devd before it). */
+export interface ChatTarget { agent: AgentName; harness: string; account: string | null; model: string | null; awaitingTarget: boolean; bridgeVersion: string | null; bridgeOutdated?: boolean }
 /** 202 of the chat switch routes. `unchanged`: nothing was switched; `exhausted`: the target account is over its usage
  *  threshold (allowed, as for `dev switch`). Refusals come back as ApiError with the body (see switchErrorText). */
 export interface ChatSwitchResult {

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Check, ChevronRight, CircleAlert, Copy, ShieldCheck } from "lucide-react";
+import { Check, ChevronRight, CircleAlert, Copy, ShieldCheck, TriangleAlert } from "lucide-react";
 import type { PendingRequest, RunRow, ThreadItem } from "../../../../shared/thread";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -220,10 +220,16 @@ export function MessageList({ sessionId, items, runs, pending, queued, critic, o
             ) : it.kind === "request" ? (
               <RequestItem item={it} pending={pending.find((p) => p.requestId === it.itemId)} onAnswer={onAnswer} />
             ) : (
-              // A failed run's notice stays prominent; every other notice (devd's, the bridge's) is a faint centred divider.
+              // A failed run's notice stays prominent, and so does one the user has to act on (tone "warn"); every other
+              // notice (devd's, the bridge's) is a faint centred divider.
               it.runId !== null && failed.has(it.runId) ? (
                 <p className="flex items-start gap-2 text-xs text-red-700 dark:text-red-400">
                   <CircleAlert className="mt-px size-3.5 flex-none" aria-hidden="true" />
+                  <span className="min-w-0 break-words">{it.text}</span>
+                </p>
+              ) : it.tone === "warn" ? (
+                <p className="flex items-start gap-2 text-xs text-amber-700 dark:text-amber-300">
+                  <TriangleAlert className="mt-px size-3.5 flex-none" aria-hidden="true" />
                   <span className="min-w-0 break-words">{it.text}</span>
                 </p>
               ) : (

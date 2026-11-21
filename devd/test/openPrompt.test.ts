@@ -302,9 +302,12 @@ test("a prompt for a named session of the other runtime is refused, not lost", a
 test("reportFirstPromptFailed (also used after a devd restart) says it in the thread, the event log and a notification", () => {
   const db = openDb(":memory:");
   const notices: string[] = []; const notified: string[] = [];
-  reportFirstPromptFailed({ db, threads: () => ({ addNotice: (t: string) => { notices.push(t); } }), notify: (_t: string, b: string) => { notified.push(b); } },
+  const tones: (string | undefined)[] = [];
+  reportFirstPromptFailed({ db, threads: () => ({ addNotice: (t: string, _at: number, tone?: "warn") => { notices.push(t); tones.push(tone); } }), notify: (_t: string, b: string) => { notified.push(b); } },
     { id: "dev-p-r", project: "p", repo: "r" }, new Error("first message discarded before it was sent"));
   expect(notices[0]).toContain("Your first message was not delivered (first message discarded before it was sent)");
+  // Something the user has to act on: raised in the thread.
+  expect(tones).toEqual(["warn"]);
   expect(notified[0]).toContain("dev-p-r");
   expect((db.query("SELECT type FROM events").all() as { type: string }[]).map((e) => e.type)).toEqual(["first_prompt_failed"]);
 });

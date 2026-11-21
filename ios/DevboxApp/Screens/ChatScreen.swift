@@ -150,7 +150,7 @@ struct ChatScreen: View {
                             MessageRow(row: r, sessionId: sessionId, client: client,
                                        onAnswer: { try await store.answer(requestId: $0, answer: $1) })
                                 .equatable()
-                                .modifier(ThreadEdge.Track(id: row.id, frames: rowFrames, quiet: r.item.kind == .notice && !r.failedRun))
+                                .modifier(ThreadEdge.Track(id: row.id, frames: rowFrames, quiet: r.item.kind == .notice && !r.failedRun && !r.item.warns))
                             if let anchor = store.changesAnchor, anchor.rowId == r.id {
                                 ChangesCard(sessionId: sessionId, client: client, refreshKey: anchor.endedSeq)
                                     .id(Self.changesId)

@@ -4,7 +4,7 @@ import type { AccountView, ChatTarget, CodexAccountView } from "./api";
 import {
   effortChipLabel, effortFooter, effortMenuBlocked, effortOptions, newSessionEffort, newSessionEffortBlock, newSessionEffortHint,
   accountMenuBlocked, claudeAccountOptions, codexAccountOptions, harnessOptions, modelMenuBlocked, modelOptions,
-  awaitingTargetText, modelLabel, switchBlocked, switchErrorText, switchResultText,
+  awaitingTargetText, bridgeOutdatedText, modelLabel, switchBlocked, switchErrorText, switchResultText,
 } from "./switchView";
 import { CHAT_MODELS } from "../../shared/chatModels";
 // Tests may import devd (see newSession.test.ts): the model list is the one devd accepts.
@@ -231,4 +231,11 @@ test("effort hint on /new: Codex's levels come with its session, so the line say
   expect(newSessionEffortHint("codex", "chat")).toBe("Effort: set it in the thread once it opens");
   expect(newSessionEffortHint("codex", "tmux")).toBeNull();
   expect(newSessionEffortHint("claude", "chat")).toBeNull();
+});
+
+test("an outdated bridge is said beside the menus while devd says it is, with what to do", () => {
+  expect(bridgeOutdatedText({ bridgeOutdated: false, bridgeVersion: "1.8.0" })).toBeNull();
+  expect(bridgeOutdatedText({ bridgeOutdated: true, bridgeVersion: "1.7.0" })).toBe("This session's agent bridge (1.7.0) is outdated: recreate the session's container for the newer fixes.");
+  // A devd from before the field: nothing said.
+  expect(bridgeOutdatedText({ bridgeVersion: "1.7.0" })).toBeNull();
 });

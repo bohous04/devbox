@@ -1,4 +1,4 @@
-import type { RunRow, ThreadItem } from "../../shared/thread";
+import { isHousekeepingNotice, type RunRow, type ThreadItem } from "../../shared/thread";
 
 // How the chat thread is laid out: a finished run's work (its tool calls and the prose between them) folds into one
 // "Worked for …" row above the run's answer (its last assistant message). Nothing is dropped: opening the row shows
@@ -16,7 +16,8 @@ const ENDED: ReadonlySet<string> = new Set<WorkStatus>(["completed", "interrupte
 /** The thread's rows. A run folds only once it ended and only when it called a tool; a running run stays expanded
  *  (its last message may still turn out to be prose before the next tool). The fold sits where its first item was;
  *  user messages, requests and notices never fold. */
-export function threadRows(items: ThreadItem[], runs: RunRow[]): ThreadRow[] {
+export function threadRows(all: ThreadItem[], runs: RunRow[]): ThreadRow[] {
+  const items = all.filter((i) => !isHousekeepingNotice(i));
   const ended = new Map(runs.filter((r) => ENDED.has(r.status)).map((r) => [r.runId, r]));
   const answer = new Map<string, number>();
   const withTools = new Set<string>();

@@ -33,8 +33,16 @@ final class ChatSwitchTests: XCTestCase {
     }
 
     private func target(agent: String = "claude", harness: String = "claude", account: String? = "a1", model: String? = "claude-opus-5-5",
-                        awaiting: Bool = false, bridge: String? = "1.4.0") -> ChatTarget {
-        ChatTarget(agent: agent, harness: harness, account: account, model: model, awaitingTarget: awaiting, bridgeVersion: bridge)
+                        awaiting: Bool = false, bridge: String? = "1.4.0", outdated: Bool? = nil) -> ChatTarget {
+        ChatTarget(agent: agent, harness: harness, account: account, model: model, awaitingTarget: awaiting, bridgeVersion: bridge, bridgeOutdated: outdated)
+    }
+
+    func testOutdatedBridgeIsSaidWhileDevdSaysIt() {
+        XCTAssertNil(ChatSwitch.bridgeOutdatedText(target(bridge: "1.8.0", outdated: false)))
+        XCTAssertEqual(ChatSwitch.bridgeOutdatedText(target(bridge: "1.7.0", outdated: true)),
+                       "This session's agent bridge (1.7.0) is outdated: recreate the session's container for the newer fixes.")
+        // A devd from before the field: nothing said.
+        XCTAssertNil(ChatSwitch.bridgeOutdatedText(target(bridge: "1.7.0")))
     }
 
     private func run(_ status: RunRow.Status, endedSeq: Int?) -> RunRow {

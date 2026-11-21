@@ -34,6 +34,12 @@ export function switchBlocked(t: { runs: RunRow[] }, target: Pick<ChatTarget, "a
 }
 
 /** Shown while the bridge awaits its target: picking any model, account or agent (also the current one) sends it. */
+/** devd's `bridgeOutdated` (an older bridge than devd's), said beside the menus while true: it was a thread notice that
+ *  went stale once the bridge was updated. */
+export function bridgeOutdatedText(t: Pick<ChatTarget, "bridgeVersion"> & { bridgeOutdated?: boolean }): string | null {
+  return t.bridgeOutdated === true ? `This session's agent bridge (${t.bridgeVersion ?? "unknown version"}) is outdated: recreate the session's container for the newer fixes.` : null;
+}
+
 export function awaitingTargetText(t: Pick<ChatTarget, "awaitingTarget">): string | null {
   return t.awaitingTarget ? "Agent is waiting for a target: pick a model, account or agent to continue" : null;
 }

@@ -338,7 +338,7 @@ export class BridgeLinks {
       if (effort === null) return;
       const notSet = (why: string) => {
         first.effort = null;
-        this.d.store(sessionId).addNotice(`Effort ${effort} was not set: ${why}`, this.now());
+        this.d.store(sessionId).addNotice(`Effort ${effort} was not set: ${why}`, this.now(), "warn");
       };
       if (version === null || version === undefined || !versionAtLeast(version, EFFORT_MIN_BRIDGE_VERSION)) return notSet(effortBridgeTooOld(version ?? null));
       try { await this.send(sessionId, { kind: "setEffort", effort }); }
@@ -518,7 +518,7 @@ export class BridgeLinks {
     if (!link.refused) {
       link.refused = true;
       this.log(`bridge link ${sessionId}: refused: ${text}`);
-      try { this.d.store(sessionId).addNotice(text, Date.now()); }
+      try { this.d.store(sessionId).addNotice(text, Date.now(), "warn"); }
       catch (e) { this.log(`bridge link ${sessionId}: cannot add a notice: ${e instanceof Error ? e.message : String(e)}`); }
       const last = this.refusedNotifiedAt.get(sessionId);
       if (last === undefined || this.now() - last >= REFUSED_NOTIFY_MS) {
@@ -623,7 +623,7 @@ export class BridgeLinks {
     if (f.count === POISON_LIMIT) {
       const text = `the agent bridge keeps sending a frame devd cannot read (${what}); the link reconnects every ${this.retryMs} ms`;
       this.log(`bridge link ${sessionId}: ${text}`);
-      try { this.d.store(sessionId).addNotice(text, Date.now()); }
+      try { this.d.store(sessionId).addNotice(text, Date.now(), "warn"); }
       catch (e) { this.log(`bridge link ${sessionId}: cannot add a notice: ${e instanceof Error ? e.message : String(e)}`); }
     }
     return f.count;
@@ -689,12 +689,12 @@ export class BridgeLinks {
     link.ackFailLogged = false;
   }
 
-  /** M12: a bridge older than the one this devd ships keeps running until its container is recreated. Said once per
-   *  session and version, in the thread and the log. */
+  /** M12: a bridge older than the one this devd ships keeps running until its container is recreated. Logged on each
+   *  handshake; the user sees it as session state while it is true (the target's `bridgeOutdated`), not in the thread,
+   *  where it went stale once the bridge was updated. */
   private checkVersion(sessionId: string, version: string | null) {
     if (version !== null && versionAtLeast(version, BRIDGE_VERSION)) return;
-    const text = `this session's agent bridge is ${version ?? "older than 1.1.0"}, older than the current ${BRIDGE_VERSION}: it lacks the newer fixes until the session's container is recreated`;
-    if (this.d.store(sessionId).addNoticeOnce(`older-bridge:${version ?? "unknown"}`, text, Date.now())) this.log(`bridge link ${sessionId}: ${text}`);
+    this.log(`bridge link ${sessionId}: this session's agent bridge is ${version ?? "older than 1.1.0"}, older than the current ${BRIDGE_VERSION}: it lacks the newer fixes until the session's container is recreated`);
   }
 
   /** A host crash can lose the unsynced tail of the bridge's log after devd stored it. Detection only: the link
@@ -711,7 +711,7 @@ export class BridgeLinks {
       if (link.behindSince !== null) return;
       const text = `bridge log is behind devd's store (bridge ${bridgeSeq}, devd ${storeSeq}); new events may be missing`;
       this.log(`bridge link ${sessionId}: ${text}`);
-      store.addNotice(text, Date.now());
+      store.addNotice(text, Date.now(), "warn");
       link.behindSince = Date.now();
     }
     try { this.d.onBehind(sessionId); }

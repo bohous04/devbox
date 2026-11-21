@@ -1009,14 +1009,21 @@ struct ThreadItem: Codable, Equatable {
     /// A user message's images: container paths under `/inbox/<sessionId>/`.
     var attachments: [String]?
     var ts: Int
+    /// shared/thread.ts ThreadItem.tone: "warn" for a notice the user has to act on; nil (or a value of a later devd)
+    /// is a plain notice.
+    var tone: String?
+
+    /// A notice shown raised rather than as a faint line.
+    var warns: Bool { tone == "warn" }
 
     init(seq: Int, runId: String?, itemId: String?, kind: Kind, text: String, tool: String? = nil, input: JSONValue? = nil,
-         output: String? = nil, isError: Bool? = nil, status: Status? = nil, attachments: [String]? = nil, ts: Int) {
+         output: String? = nil, isError: Bool? = nil, status: Status? = nil, attachments: [String]? = nil, ts: Int, tone: String? = nil) {
         self.seq = seq; self.runId = runId; self.itemId = itemId; self.kind = kind; self.text = text; self.tool = tool
         self.input = input; self.output = output; self.isError = isError; self.status = status; self.attachments = attachments; self.ts = ts
+        self.tone = tone
     }
 
-    private enum CodingKeys: String, CodingKey { case seq, runId, itemId, kind, text, tool, input, output, isError, status, attachments, ts }
+    private enum CodingKeys: String, CodingKey { case seq, runId, itemId, kind, text, tool, input, output, isError, status, attachments, ts, tone }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -1033,6 +1040,7 @@ struct ThreadItem: Codable, Equatable {
         status = try c.decodeIfPresent(Status.self, forKey: .status)
         attachments = try c.decodeIfPresent([String].self, forKey: .attachments)
         ts = try c.decode(Int.self, forKey: .ts)
+        tone = try c.decodeIfPresent(String.self, forKey: .tone)
     }
 }
 
@@ -1329,6 +1337,8 @@ struct ChatTarget: Decodable, Equatable {
     let model: String?
     let awaitingTarget: Bool
     let bridgeVersion: String?
+    /// The bridge is older than devd's; nil from a devd before the field.
+    var bridgeOutdated: Bool? = nil
 }
 
 /// 202 of `POST /thread/model|account|harness`. `unchanged`: nothing was switched; `exhausted`: the target account is

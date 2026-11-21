@@ -74,6 +74,28 @@ final class ThreadStoreTests: XCTestCase {
         XCTAssertEqual(ThreadView.mergeSnapshot(.empty, frame).effort, ThreadEffort(model: "m", supported: ["low"], effective: nil, chosen: "low"))
     }
 
+    /// shared/fixtures/housekeeping-notices.json (dashboard/src/workGroups.test.ts runs the same lines).
+    func testBridgeHousekeepingStaysOutOfTheThread() throws {
+        struct Cases: Decodable { let hidden: [String]; let shown: [String] }
+        let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "housekeeping-notices", withExtension: "json"))
+        let cases = try JSONDecoder().decode(Cases.self, from: Data(contentsOf: url))
+        for text in cases.hidden { XCTAssertTrue(ThreadView.isHousekeeping(ThreadItem(seq: 1, runId: nil, itemId: nil, kind: .notice, text: text, ts: 1)), text) }
+        for text in cases.shown { XCTAssertFalse(ThreadView.isHousekeeping(ThreadItem(seq: 1, runId: nil, itemId: nil, kind: .notice, text: text, ts: 1)), text) }
+        // Only notices: a message with the same words is the conversation.
+        XCTAssertFalse(ThreadView.isHousekeeping(ThreadItem(seq: 1, runId: "r", itemId: "i", kind: .assistant, text: cases.hidden[0], ts: 1)))
+        let snapshot = ThreadSnapshot(lastSeq: 2, seenSeq: 0, runs: [], items: (cases.hidden + cases.shown).enumerated().map {
+            ThreadItem(seq: $0.offset, runId: nil, itemId: "notice:\($0.offset)", kind: .notice, text: $0.element, ts: 1)
+        }, pending: [], background: [], native: nil)
+        XCTAssertEqual(ThreadView.shownItems(snapshot).map(\.text), cases.shown)
+    }
+
+    func testANoticeKeepsItsTone() throws {
+        let json = #"{"seq":3,"runId":null,"itemId":"notice:1","kind":"notice","text":"Send it again.","status":"done","ts":1,"tone":"warn"}"#
+        XCTAssertTrue(try JSONDecoder().decode(ThreadItem.self, from: Data(json.utf8)).warns)
+        let plain = #"{"seq":3,"runId":null,"itemId":"notice:2","kind":"notice","text":"Switched","status":"done","ts":1}"#
+        XCTAssertFalse(try JSONDecoder().decode(ThreadItem.self, from: Data(plain.utf8)).warns)
+    }
+
     func testSnapshotReadsTheUncheckedLevels() throws {
         let json = #"{"lastSeq":0,"seenSeq":0,"runs":[],"items":[],"pending":[],"background":[],"native":null,"effort":{"model":null,"supported":null,"effective":null,"chosen":"xhigh","unchecked":["low","xhigh"]}}"#
         XCTAssertEqual(try JSONDecoder().decode(ThreadSnapshot.self, from: Data(json.utf8)).effort,
