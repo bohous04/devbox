@@ -57,6 +57,41 @@ final class ChatScreenshotTests: XCTestCase {
         }
     }
 
+    /// A tmux session's Chat view (devd's mirror): Claude takes messages, and a refused one locks the composer with
+    /// Open terminal and ×, keeping the text; Codex is read-only, its reason in the empty field.
+    func testMirror() throws {
+        for look in ["light", "dark"] {
+            let app = XCUIApplication()
+            app.launchArguments = ["-DevboxFixtures", "demo", "-DevboxAppearance", look]
+            app.launch()
+            app.open(URL(string: "devbox://thread/dev-orchard-api-3")!)
+            XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'answering 503'")).firstMatch.waitForExistence(timeout: 20))
+            sleep(1)
+            try save(app, "ios-\(look)-mirror-claude")
+            let field = app.textFields["Message"].exists ? app.textFields["Message"] : app.textViews["Message"]
+            XCTAssertTrue(field.waitForExistence(timeout: 5))
+            field.tap()
+            field.typeText("Make it listen first")
+            app.buttons["Send"].tap()
+            let dismiss = app.buttons["Dismiss"]
+            XCTAssertTrue(dismiss.waitForExistence(timeout: 5), "a refused send shows its lock")
+            XCTAssertEqual(field.value as? String, "Make it listen first", "the text stays")
+            XCTAssertTrue(app.buttons["Open terminal"].exists)
+            sleep(1)
+            try save(app, "ios-\(look)-mirror-refused")
+            dismiss.tap()
+            XCTAssertTrue(dismiss.waitForNonExistence(timeout: 3))
+
+            app.open(URL(string: "devbox://thread/dev-acme-cli")!)
+            let reason = "Sending from chat isn't available for Codex yet; reply in the terminal."
+            XCTAssertTrue(app.staticTexts[reason].waitForExistence(timeout: 20), "the Codex lock")
+            XCTAssertFalse(app.buttons["Dismiss"].exists, "devd's own reason cannot be dismissed")
+            sleep(1)
+            try save(app, "ios-\(look)-mirror-codex")
+            app.terminate()
+        }
+    }
+
     private func shoot(appearance: String) throws {
         let app = XCUIApplication()
         let look = ["-DevboxAppearance", appearance]

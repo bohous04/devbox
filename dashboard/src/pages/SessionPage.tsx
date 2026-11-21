@@ -14,7 +14,7 @@ import { threadHeading } from "../inboxView";
 import { useStore } from "../store";
 import { activeRun, applyCommands, applyEffort, applyNotice, applyThreadEvent, criticRunIds, mergeSnapshot, queuedRunIds } from "../threadView";
 import { useEventStream } from "../useEventStream";
-import { MIRROR_IMAGES_OFF, mirrorFieldOff, mirrorNotice, mirrorUnsupported, sendToMirror, type MirrorLock } from "../mirrorView";
+import { mirrorComposerProps, mirrorNotice, mirrorUnsupported, sendToMirror, type MirrorLock } from "../mirrorView";
 
 // Same lazy import as TerminalPage: xterm stays in its own chunk.
 const Terminal = lazy(() => import("../components/Terminal").then((m) => ({ default: m.Terminal })));
@@ -219,13 +219,11 @@ function ChatPage({ id }: { id: string }) {
           <div ref={composerBox} className="sticky bottom-16 z-10 -mx-4 -mb-8 mt-8 bg-[var(--dock)] px-4 pb-3 pt-3 [--dock:var(--background)] before:pointer-events-none before:absolute before:inset-x-0 before:-top-8 before:h-8 before:bg-gradient-to-t before:from-[var(--dock)] before:to-transparent sm:-mx-6 sm:px-6 lg:bottom-0 lg:-mx-10 lg:-mb-10 lg:px-10 lg:pb-5 dark:[--dock:color-mix(in_oklab,var(--muted)_35%,var(--background))]">
             <div className="mx-auto w-full max-w-[42rem]">
               {mirror ? (
-                // The terminal's agent: what is typed here goes into its pane. No switchers, no `/` commands (devd
-                // refuses them: they belong in the terminal), no images.
+                // The terminal's agent: what is typed here goes into its pane. No switchers (mirrorComposerProps).
                 <Composer
                   running={false} onStop={async () => {}}
                   onSend={(text) => sendToMirror(() => api.sendMirrorMessage(id, text), setSendLock)}
-                  fieldOff={mirrorFieldOff(mirror)} imagesOff={MIRROR_IMAGES_OFF} searchFiles={searchFiles}
-                  placeholder={mirrorFieldOff(mirror) ?? "Message the agent in the terminal"}
+                  {...mirrorComposerProps(mirror)}
                   notices={<>
                     {/* Always mounted, only its text changes, so screen readers hear each new line once. */}
                     <p role="status" className="sr-only">{mirrorLine ? `${mirrorLine.kind === "prompt" ? "Waiting for you in the terminal: " : ""}${mirrorLine.text}` : ""}</p>

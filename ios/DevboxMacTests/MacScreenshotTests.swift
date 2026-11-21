@@ -148,6 +148,19 @@ final class MacScreenshotTests: XCTestCase {
         try shoot(name: "composer-commands-filtered-light", look: "light", thread: "dev-orchard-sync", draft: "/rev")
     }
 
+    /// A tmux session's Chat tab (devd's mirror of its pane): Claude takes messages, a refused one shows its lock with
+    /// Open terminal and ×; Codex is read-only, locked with its reason in the field.
+    func testMirror() throws {
+        for look in ["light", "dark"] {
+            try shoot(name: "mirror-claude-\(look)", look: look, thread: nil, chat: MirrorFixtures.claudeId)
+            try shoot(name: "mirror-claude-refused-\(look)", look: look, thread: nil, chat: MirrorFixtures.claudeId,
+                      draft: "Make it listen first", refuse: true)
+            try shoot(name: "mirror-codex-\(look)", look: look, thread: nil, chat: MirrorFixtures.codexId)
+        }
+        // In the window: the Codex session has no inbox row here, so the window opens it on Chat.
+        try shoot(name: "mirror-codex-window-light", look: "light", thread: MirrorFixtures.codexId)
+    }
+
     /// The thread's heading (title and place) at a normal and a narrow width. On macOS 26 it is a plain title: a
     /// Liquid Glass capsule (drawn plain here, so checked in the view tree) was too short for its two lines.
     func testThreadHeadingWidths() throws {
@@ -196,13 +209,23 @@ final class MacScreenshotTests: XCTestCase {
         try png.write(to: dir.appending(path: "mac-\(name).png"))
     }
 
-    private func shoot(name: String, look: String, thread: String?, page: MacDashboardPage? = nil, draft: String? = nil, width: CGFloat = 1440, height: CGFloat = 900,
-                       inspect: ((NSView) throws -> Void)? = nil) throws {
+    /// `chat`: the Chat tab of that session alone (the window opens a tmux session on its terminal); `refuse` presses
+    /// Send on the draft, which the fixture refuses.
+    private func shoot(name: String, look: String, thread: String?, chat: String? = nil, page: MacDashboardPage? = nil, draft: String? = nil,
+                       refuse: Bool = false, width: CGFloat = 1440, height: CGFloat = 900, inspect: ((NSView) throws -> Void)? = nil) throws {
         let state = MacAppState(isTestRun: false, isFixtureRun: true)
         state.appModel.reloadConfiguration()
-        let root = MacWindowContent(thread: .constant(thread), page: .constant(page), newSession: .constant(false), findPending: .constant(false))
-            .environmentObject(state)
-            .environmentObject(state.appModel)
+        let shown = thread ?? chat
+        let root: AnyView
+        if let chat, let live = state.live, let client = state.appModel.client {
+            root = AnyView(ChatScreen(store: state.windows.store(for: chat, client: client), client: client, openTerminal: {}, closeWindow: nil)
+                .environmentObject(live).environmentObject(state).environmentObject(state.appModel))
+        } else {
+            XCTAssertNil(chat, "the fixture app has no live store or client")
+            root = AnyView(MacWindowContent(thread: .constant(thread), page: .constant(page), newSession: .constant(false), findPending: .constant(false))
+                .environmentObject(state)
+                .environmentObject(state.appModel))
+        }
         let size = NSSize(width: width, height: height)
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -223,23 +246,41 @@ final class MacScreenshotTests: XCTestCase {
         let deadline = Date().addingTimeInterval(8)
         while Date() < deadline {
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-            if state.inbox?.items != nil, thread == nil || state.windows.store(for: thread!, client: state.appModel.client!).thread != nil {
+            if state.inbox?.items != nil, shown == nil || state.windows.store(for: shown!, client: state.appModel.client!).thread != nil {
                 break
             }
         }
         RunLoop.main.run(until: Date().addingTimeInterval(1.5))
         XCTAssertNotNil(state.inbox?.items, "the fixture inbox did not load")
+        var fieldFrame: NSRect?
         if let draft {
             // Typed as a user would: the field's editor takes the text and SwiftUI's binding follows.
             let field = try XCTUnwrap(Self.allViews(window.contentView!).first {
                 // The placeholder is styled (muted), so AppKit holds it as an attributed string.
-                ($0 as? NSTextField).map { ($0.placeholderAttributedString?.string ?? $0.placeholderString)?.hasPrefix("Ask anything") == true } == true
+                ($0 as? NSTextField).map { ($0.placeholderAttributedString?.string ?? $0.placeholderString).map { $0.hasPrefix("Ask anything") || $0.hasPrefix(MirrorView.placeholder) } == true } == true
                     || ($0 is NSTextView && $0.frame.width > 300)
             },
                                       "no composer field")
             window.makeFirstResponder(field)
             let editor = try XCTUnwrap(window.firstResponder as? NSTextView, "the composer has no editor")
             editor.insertText(draft, replacementRange: NSRange(location: NSNotFound, length: 0))
+            RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+            fieldFrame = field.convert(field.bounds, to: nil)
+        }
+        if refuse, let chat, let fieldFrame {
+            // The composer's Send button, clicked: offscreen SwiftUI has no accessibility tree to find it by, so it is
+            // found where the Mac's two-tier box puts it, at the right end of the controls row under the field
+            // (ComposerView: 6 pt padding, 4 pt spacing, a 34 pt button).
+            let store = state.windows.store(for: chat, client: state.appModel.client!)
+            let send = NSPoint(x: fieldFrame.maxX - 17, y: fieldFrame.minY - 6 - 4 - 17)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: send, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                             windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+                window.sendEvent(event)
+            }
+            let until = Date().addingTimeInterval(5)
+            while store.sendLock == nil, Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
+            XCTAssertEqual(store.sendLock?.code, "terminal-has-draft", "the Send button's message is refused by the fixture")
             RunLoop.main.run(until: Date().addingTimeInterval(0.5))
         }
 

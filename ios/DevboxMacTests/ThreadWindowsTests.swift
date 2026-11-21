@@ -174,6 +174,29 @@ final class ThreadWindowsTests: XCTestCase {
         windows.dropStores()
     }
 
+    /// A tmux session's mirror is not saved: restored, it would stream from the chat thread's route, which refuses
+    /// it and ends the window. The relaunch loads it again through the mirror.
+    func testATmuxMirrorIsNotSaved() async throws {
+        MockURLProtocol.handler = { req in
+            if req.url?.path == "/api/sessions/t/thread" { return .init(statusCode: 409, data: Data(#"{"error":"not-a-chat-session"}"#.utf8)) }
+            let info = #"{"state":"live","agent":"Claude Code","conversationId":"c","activity":"idle","terminalPrompt":null,"sendBlock":null}"#
+            return .init(statusCode: 200, data: Data(#"{"mirror":\#(info),"snapshot":\#(String(decoding: self.snapshot(5), as: UTF8.self))}"#.utf8))
+        }
+        let windows = ThreadWindows(defaults: defaults, directory: directory)
+        windows.show(window: "w1", thread: "t")
+        let store = windows.store(for: "t", client: client(), connect: Streams().connect)
+        await store.start()
+        XCTAssertTrue(store.isTmux)
+        XCTAssertEqual(store.thread?.lastSeq, 5)
+        windows.willTerminate()
+        windows.dropStores()
+
+        let relaunched = ThreadWindows(defaults: defaults, directory: directory)
+        relaunched.show(window: "n1", thread: "t")
+        XCTAssertNil(relaunched.store(for: "t", client: client()).thread, "no saved copy: it loads again")
+        relaunched.dropStores()
+    }
+
     /// An ended session is not restored and its saved thread goes.
     func testAnEndedThreadIsForgotten() async throws {
         let windows = ThreadWindows(defaults: defaults, directory: directory)

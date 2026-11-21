@@ -24,12 +24,25 @@ export function mirrorSendLock(e: unknown): MirrorLock | null {
   return Object.hasOwn(SESSION_REFUSALS, b.error) ? { code: b.error as SessionRefusal, message: SESSION_REFUSALS[b.error as SessionRefusal] } : null;
 }
 
-/** The mirror composer's onSend: a refusal becomes the lock and keeps the text (`false`); a sent message clears it. */
+/** The mirror composer's fixed props. What is typed goes into the pane: no `/` commands (devd refuses them, they
+ *  belong in the terminal), no `@` files, no images; devd's standing reason turns the empty field off and says it. */
+export function mirrorComposerProps(info: MirrorInfo) {
+  const fieldOff = mirrorFieldOff(info);
+  return { commands: undefined, searchFiles: undefined, fieldOff, imagesOff: MIRROR_IMAGES_OFF,
+    placeholder: fieldOff ?? "Message the agent in the terminal" } as const;
+}
+
+/** A mirror send devd never answered (the network failed or dropped): it may have been typed into the pane. */
+export const MIRROR_SEND_UNCONFIRMED = "The message may have reached the terminal — check it before sending again.";
+
+/** The mirror composer's onSend: a refusal becomes the lock and keeps the text (`false`); a sent message clears it.
+ *  No answer at all is said as possibly sent, never retried. */
 export async function sendToMirror(send: () => Promise<unknown>, setLock: (lock: MirrorLock | null) => void): Promise<void | false> {
   try {
     await send();
     setLock(null);
   } catch (e) {
+    if (!(e instanceof ApiError)) throw new Error(MIRROR_SEND_UNCONFIRMED, { cause: e });
     const lock = mirrorSendLock(e);
     if (!lock) throw e;
     setLock(lock);

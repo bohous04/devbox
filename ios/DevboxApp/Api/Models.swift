@@ -1105,6 +1105,34 @@ struct NativeThread: Codable, Equatable {
     let model: String?
 }
 
+/// What devd knows about a tmux session's `main` pane, its Chat view (shared/mirror.ts `MirrorInfo`, the source of
+/// truth). `state`, `activity` and `sendBlock.code` stay strings: the views compare them only with the values they know.
+struct MirrorInfo: Decodable, Equatable {
+    struct TerminalPrompt: Decodable, Equatable { let text: String }
+    struct SendBlock: Decodable, Equatable {
+        let code: String
+        let message: String
+    }
+
+    /// `live`, `agent-exited`, `no-pane`, `unresolved`, `unsupported`.
+    let state: String
+    /// The pane agent's label ("Claude Code", "Codex"); nil when none runs.
+    let agent: String?
+    let conversationId: String?
+    /// `idle`, `busy`, `waiting`; nil when unknown.
+    let activity: String?
+    /// The agent waits for an answer only the terminal can give.
+    let terminalPrompt: TerminalPrompt?
+    /// Why sending would be refused now (Codex: always, `codex-send-unsupported`); nil = devd knows no reason.
+    let sendBlock: SendBlock?
+}
+
+/// `GET /api/sessions/:id/mirror`: the mirror's thread, in the chat thread's shape, and the pane's info.
+struct MirrorResponse: Decodable {
+    let snapshot: ThreadSnapshot
+    let mirror: MirrorInfo
+}
+
 /// Encodable too: the Mac app keeps the threads of its open windows across a relaunch (`ThreadWindows`).
 struct ThreadSnapshot: Codable, Equatable {
     var lastSeq: Int

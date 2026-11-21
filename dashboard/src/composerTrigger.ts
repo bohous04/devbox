@@ -5,6 +5,14 @@ import type { AgentCommand } from "../../shared/thread";
  *  word a pick replaces (to its end, also when the caret is inside it); `query` is the part before the caret. */
 export interface Trigger { kind: "/" | "@"; query: string; start: number; end: number }
 
+/** The trigger the composer opens a menu for: `/` only with commands to offer (an empty list offers nothing), `@`
+ *  only with a file search. */
+export function offeredTrigger(found: Trigger | null, offers: { commands?: readonly unknown[]; searchFiles?: unknown }): Trigger | null {
+  if (found === null) return null;
+  if (found.kind === "/") return offers.commands !== undefined && offers.commands.length > 0 ? found : null;
+  return offers.searchFiles ? found : null;
+}
+
 export function activeTrigger(text: string, caret: number): Trigger | null {
   let start = caret;
   while (start > 0 && !/\s/.test(text[start - 1]!)) start--;
