@@ -198,6 +198,39 @@ final class MacScreenshotTests: XCTestCase {
         }
     }
 
+    /// New Session (MacNewSession.swift) on synthetic data: the form for a repo that already has a session, devd's
+    /// progress mid-checkout and mid-clone, and a refusal from devd.
+    func testNewSessionSheet() throws {
+        let state = MacAppState(isTestRun: false, isFixtureRun: true)
+        state.appModel.reloadConfiguration()
+        let deadline = Date().addingTimeInterval(8)
+        while state.live?.live == nil, Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
+        let live = try XCTUnwrap(state.live, "the fixture live list did not load")
+        defer { state.inbox?.stop(); live.stop() }
+        let tree = try JSONDecoder().decode([TreeProject].self, from: Data(#"""
+            [{"folder":"orchard","project":"orchard","soloAgent":null,"repos":[
+              {"name":"sync","cloneUrl":"https://git.example/orchard/sync.git","provider":"github","cloned":true,"bare":true,"agent":"claude"},
+              {"name":"web","cloneUrl":"https://git.example/orchard/web.git","provider":"github","cloned":false,"bare":null,"agent":null}]}]
+            """#.utf8))
+        let actions = SessionActions(client: try XCTUnwrap(state.appModel.client))
+        func sheet(_ repo: String, _ phase: MacNewSession.Phase) -> some View {
+            MacNewSessionSheet(actions: actions, onStarted: {}, onOpen: { _ in }, tree: tree,
+                               selection: ("orchard", "orchard", repo, .claude), phase: phase)
+                .environmentObject(live)
+        }
+        var checkout = MacNewSession.Tracker()
+        checkout.apply(OpenProgress(step: "fetch"))
+        checkout.apply(OpenProgress(step: "worktree", git: .init(phase: "Updating files", percent: 62)))
+        var clone = MacNewSession.Tracker()
+        clone.apply(OpenProgress(step: "clone", clone: .init(phase: "Receiving objects", percent: 48, detail: "212.40 MiB | 18.02 MiB/s")))
+        for look in ["light", "dark"] {
+            try shootView(sheet("sync", .form), name: "new-session-form-\(look)", look: look)
+            try shootView(sheet("sync", .working(checkout, creates: true)), name: "new-session-progress-\(look)", look: look)
+            try shootView(sheet("web", .working(clone, creates: true)), name: "new-session-clone-\(look)", look: look)
+        }
+        try shootView(sheet("web", .failed("folder orchard is not configured on devd", retry: true)), name: "new-session-error-light", look: "light")
+    }
+
     private func shootView(_ view: some View, name: String, look: String) throws {
         let host = NSHostingView(rootView: view.background(Color(nsColor: .windowBackgroundColor)))
         host.appearance = NSAppearance(named: look == "dark" ? .darkAqua : .aqua)

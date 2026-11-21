@@ -79,6 +79,25 @@ test.skipIf(!hasDocker)("open → stop → reopen → end lifecycle", async () =
   expect(existsSync(barePath(d.root, "acme", PROJECT, "app"))).toBe(true); // repo stays
 }, 180_000);
 
+// The caller's requestId rides on every progress entry of its open, so a client polling the repo's progress can tell its
+// open from another one of the same repo.
+test.skipIf(!hasDocker)("open() progress carries the caller's requestId", async () => {
+  const d = makeDeps();
+  const mgr = new SessionManager(d);
+  const t = { folder: "acme", project: PROJECT, repo: "app", cloneUrl: d.bareUrl };
+  const seen: (string | undefined)[] = [];
+  const sample = setInterval(() => { const p = mgr.openProgressFor(t); if (p) seen.push(p.requestId); }, 5);
+  try {
+    const opened = await mgr.open({ ...t, requestId: "mac-7f3a" });
+    expect(seen.length).toBeGreaterThan(0);
+    expect(new Set(seen)).toEqual(new Set(["mac-7f3a"]));
+    expect(mgr.openProgressFor(t)).toBeNull();
+    await mgr.end(opened.session.id);
+  } finally {
+    clearInterval(sample);
+  }
+}, 180_000);
+
 // The core of Task 5: two sessions on ONE repo stop stepping on each other's files.
 // It verifies the result on disk and in the container, not that some command was issued.
 test.skipIf(!hasDocker)("two sessions of one repo have their own worktree and their own branch", async () => {

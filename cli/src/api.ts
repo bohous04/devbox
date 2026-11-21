@@ -125,7 +125,7 @@ export class ApiClient {
   // over a stopped one, on a tie the lowest ordinal wins (existingSessionId in sessions.ts) —
   // and creates a new one only when there is none. Not "the one with the base id": that was a silent bug
   // which, after the first session ended, quietly produced an extra container.
-  open(t: { folder: string; project: string; repo?: string; cloneUrl?: string; solo?: boolean; agent?: AgentName; fresh?: boolean }) {
+  open(t: { folder: string; project: string; repo?: string; cloneUrl?: string; solo?: boolean; agent?: AgentName; fresh?: boolean; requestId?: string }) {
     return this.req<OpenResult>("POST", "/api/sessions", t);
   }
   // Progress of a running open() of the same repo; an older devd lacks the endpoint → null, the spinner stays bare.

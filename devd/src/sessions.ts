@@ -440,6 +440,9 @@ export interface OpenProgress {
   git?: CloneProgress;
   /** What the step is doing inside (container: ownership, docker sidecar, start). */
   detail?: string;
+  /** The caller's own id for this open (POST /api/sessions `requestId`), so a client polling the repo's progress
+   *  can tell its open from another one of the same repo. Absent when the caller sent none. */
+  requestId?: string;
 }
 
 export class SessionManager {
@@ -860,7 +863,7 @@ export class SessionManager {
   /** `sessionId`: open (resume/attach) EXACTLY this existing session of the repo, not the one
    *  existingSessionId would pick — e.g. a paused InstaBox session when the repo also has a VPS
    *  session (smoke test, M8). Never creates a new one. */
-  async open(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; joinRuntimes?: SessionRuntime[]; fresh?: boolean; sessionId?: string }) {
+  async open(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; joinRuntimes?: SessionRuntime[]; fresh?: boolean; sessionId?: string; requestId?: string }) {
     // The repo key while the id is not known (a new session only gets it here); then also the id,
     // so open does not collide with stop/end/recreate of the same existing session.
     return this.locked([openKey(t)], "open", async () => {
@@ -890,7 +893,7 @@ export class SessionManager {
   // repo: 14 s → the sidecar alone ~3 s of it). openUnlocked still awaits it before the session
   // container runs, so "docker works from the first command" holds. When the open fails before
   // the container exists, the sidecar would be an orphaned privileged container — removed here.
-  private async openWithEarlyDind(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string }, id: string) {
+  private async openWithEarlyDind(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string; requestId?: string }, id: string) {
     const fresh = !t.sessionId && !getSession(this.d.db, id);   // sessionId never creates (see open)
     const dind = fresh && this.d.dind ? this.ensureDind(id).catch((e) => { console.error(`dind for ${id} failed:`, e); }) : undefined;
     try {
@@ -901,7 +904,7 @@ export class SessionManager {
     }
   }
 
-  private async openUnlocked(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string }, id: string, earlyDind?: Promise<void>) {
+  private async openUnlocked(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string; requestId?: string }, id: string, earlyDind?: Promise<void>) {
     const ws = workspacePath(this.d.root, t.folder, t.project, t.repo);
     const existing = getSession(this.d.db, id);
     // The session ended in the meantime (or belongs to another repo) → an error, not a silent new session with the same id.
@@ -982,7 +985,7 @@ export class SessionManager {
         ? sessionWorktreePath(this.d.root, id)
         : null;
     const dir = worktree ?? ws;                        // working directory of THIS session
-    const progress = (p: OpenProgress) => this.openProgress.set(openKey(t), p);
+    const progress = (p: OpenProgress) => this.openProgress.set(openKey(t), t.requestId ? { ...p, requestId: t.requestId } : p);
     const onClone = (clone: CloneProgress) => progress({ step: "clone", clone });
     let bornWorktree = false;
     let settledBranch: string | null = null;
