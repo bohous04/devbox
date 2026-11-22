@@ -158,9 +158,11 @@ final class MacNewSessionTests: XCTestCase {
         var seen = MacNewSession.Picks()
         /// The sessions the sheet opened, in order.
         var opened: [String] = []
+        /// This Mac's uptime at each open.
+        var openedAt: [TimeInterval] = []
         private let state: MacAppState
 
-        @MainActor init(tree: [TreeProject], phase: MacNewSession.Phase = .form) throws {
+        @MainActor init(tree: [TreeProject], phase: MacNewSession.Phase = .form, holdSeconds: TimeInterval = MacNewSession.holdSeconds) throws {
             FixtureMode.requested = "demo"
             state = MacAppState(isTestRun: false, isFixtureRun: true)
             state.appModel.reloadConfiguration()
@@ -168,8 +170,12 @@ final class MacNewSessionTests: XCTestCase {
             window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 520), styleMask: [.titled], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
             let host = NSHostingView(rootView: MacNewSessionSheet(actions: SessionActions(client: try XCTUnwrap(state.appModel.client)),
-                                                                  onStarted: {}, onOpen: { [weak self] in self?.opened.append($0) },
-                                                                  tree: tree, phase: phase, onPicks: { [weak self] in self?.seen = $0 })
+                                                                  onStarted: {}, onOpen: { [weak self] in
+                                                                      self?.opened.append($0)
+                                                                      self?.openedAt.append(ProcessInfo.processInfo.systemUptime)
+                                                                  },
+                                                                  tree: tree, phase: phase, onPicks: { [weak self] in self?.seen = $0 },
+                                                                  holdSeconds: holdSeconds)
                 .environmentObject(live))
             window.contentView = host
             window.setContentSize(host.fittingSize)
@@ -241,32 +247,64 @@ final class MacNewSessionTests: XCTestCase {
         XCTAssertEqual(N.createdAnnouncement(N.Tracker()), "Created", "a devd without step times has no total to say")
     }
 
-    /// The finished page stays for the hold, then the session opens, once.
+    /// Spins until `done` or the deadline; no fixed delay decides a result.
+    private func wait(upTo seconds: TimeInterval, until done: () -> Bool) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !done(), Date() < deadline { Host.spin(0.02) }
+    }
+
+    /// The finished page stays for the whole hold, then the session opens, once. Timed from before the sheet exists,
+    /// so a slow machine can only make the measured hold longer, never fail it.
     func testFinishedPageOpensTheSessionAfterTheHold() throws {
+        let before = ProcessInfo.processInfo.systemUptime
         let h = try Host(tree: tree, phase: .created(finishedTracker(), sessionId: "dev-shop-web"))
         defer { h.close() }
-        XCTAssertEqual(h.opened, [], "still showing after 0.5 s")
-        Host.spin(1.3)
+        wait(upTo: 10) { !h.opened.isEmpty }
         XCTAssertEqual(h.opened, ["dev-shop-web"])
-        Host.spin(0.5)
+        XCTAssertGreaterThanOrEqual((h.openedAt.first ?? 0) - before, N.holdSeconds, "not before the hold ran out")
+        Host.spin(0.3)
         XCTAssertEqual(h.opened, ["dev-shop-web"], "opened once")
     }
 
-    /// Any key opens it right away; the hold then opens nothing more.
-    func testAnyKeyOpensTheSessionAtOnce() throws {
-        let h = try Host(tree: tree, phase: .created(finishedTracker(), sessionId: "dev-shop-web"))
-        defer { h.close() }
-        try h.press("x", 7, throughApp: true, wait: 0.1)
-        XCTAssertEqual(h.opened, ["dev-shop-web"])
-        Host.spin(1.4)
-        XCTAssertEqual(h.opened, ["dev-shop-web"], "the hold does not open it again")
+    /// The monitor goes at its first event and when the session opens, so none is left to eat the app's keys and
+    /// clicks even if the page never gets its disappear.
+    func testTheInputMonitorNeverOutlivesItsOpen() throws {
+        let m = OpenOnAnyInput()
+        var opens = 0
+        m.start { opens += 1 }
+        XCTAssertTrue(m.running)
+        let key = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
+                                                 characters: "x", charactersIgnoringModifiers: "x", isARepeat: false, keyCode: 7))
+        NSApp.sendEvent(key)
+        XCTAssertEqual(opens, 1)
+        XCTAssertFalse(m.running, "gone after its first event")
+        NSApp.sendEvent(key)
+        XCTAssertEqual(opens, 1)
+        m.start { opens += 1 }
+        m.stop()
+        XCTAssertFalse(m.running)
     }
 
-    /// A click anywhere opens it right away too.
-    func testAClickOpensTheSessionAtOnce() throws {
-        let h = try Host(tree: tree, phase: .created(finishedTracker(), sessionId: "dev-shop-web"))
+    /// Any key opens it at once. The hold is set to a minute, so only the key can open it within the test. The key is
+    /// sent again until the open arrives: one sent before the page has put up its monitor reaches nothing.
+    func testAnyKeyOpensTheSessionAtOnce() throws {
+        let h = try Host(tree: tree, phase: .created(finishedTracker(), sessionId: "dev-shop-web"), holdSeconds: 60)
         defer { h.close() }
-        try h.click(wait: 0.1)
+        wait(upTo: 10) {
+            if h.opened.isEmpty { try? h.press("x", 7, throughApp: true, wait: 0.05) }
+            return !h.opened.isEmpty
+        }
+        XCTAssertEqual(h.opened, ["dev-shop-web"])
+    }
+
+    /// A click anywhere opens it at once too (same long hold, same resend).
+    func testAClickOpensTheSessionAtOnce() throws {
+        let h = try Host(tree: tree, phase: .created(finishedTracker(), sessionId: "dev-shop-web"), holdSeconds: 60)
+        defer { h.close() }
+        wait(upTo: 10) {
+            if h.opened.isEmpty { try? h.click(wait: 0.05) }
+            return !h.opened.isEmpty
+        }
         XCTAssertEqual(h.opened, ["dev-shop-web"])
     }
 
