@@ -95,13 +95,15 @@ struct EndedTranscriptScreen: View {
         .defaultScrollAnchor(.bottom)
         .safeAreaInset(edge: .bottom) {
             VStack(alignment: .leading, spacing: 6) {
-                if InboxView.canContinue(e) {
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 12) { line; Spacer(minLength: 0); button(e) }
-                        VStack(alignment: .leading, spacing: 10) { line; button(e).frame(maxWidth: .infinity) }
+                Group {
+                    if InboxView.canContinue(e) {
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 12) { line; Spacer(minLength: 0); button(e) }
+                            VStack(alignment: .leading, spacing: 10) { line; button(e).frame(maxWidth: .infinity) }
+                        }
+                    } else {
+                        line.frame(maxWidth: .infinity, alignment: .leading)
                     }
-                } else {
-                    line.frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(.horizontal, 14).padding(.vertical, 12)
                 .background(Theme.C.card, in: RoundedRectangle(cornerRadius: Theme.R.md))
