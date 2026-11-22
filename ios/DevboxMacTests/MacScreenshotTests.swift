@@ -289,7 +289,7 @@ final class MacScreenshotTests: XCTestCase {
             try shootView(sheet(.init(folder: "orchard", project: "orchard", page: .repo)), name: "new-session-repo-\(look)", look: look)
             try shootView(sheet(agent), name: "new-session-agent-\(look)", look: look)
             try shootView(sheet(agent, .working(checkout)), name: "new-session-progress-\(look)", look: look)
-            try shootView(sheet(agent, .working(finished)), name: "new-session-finished-\(look)", look: look)
+            try shootView(sheet(agent, .created(finished, sessionId: "dev-orchard-sync-2")), name: "new-session-finished-\(look)", look: look)
             try shootView(sheet(.init(folder: "orchard", project: "orchard", repo: "web", page: .agent), .working(clone)),
                           name: "new-session-clone-\(look)", look: look)
             try shootView(sheet(.init(folder: "orchard", project: "orchard", repo: "web", page: .agent),

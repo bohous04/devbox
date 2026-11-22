@@ -156,9 +156,11 @@ final class MacNewSessionTests: XCTestCase {
     private final class Host {
         let window: NSWindow
         var seen = MacNewSession.Picks()
+        /// The sessions the sheet opened, in order.
+        var opened: [String] = []
         private let state: MacAppState
 
-        @MainActor init(tree: [TreeProject]) throws {
+        @MainActor init(tree: [TreeProject], phase: MacNewSession.Phase = .form) throws {
             FixtureMode.requested = "demo"
             state = MacAppState(isTestRun: false, isFixtureRun: true)
             state.appModel.reloadConfiguration()
@@ -166,8 +168,8 @@ final class MacNewSessionTests: XCTestCase {
             window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 520), styleMask: [.titled], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
             let host = NSHostingView(rootView: MacNewSessionSheet(actions: SessionActions(client: try XCTUnwrap(state.appModel.client)),
-                                                                  onStarted: {}, onOpen: { _ in }, tree: tree,
-                                                                  onPicks: { [weak self] in self?.seen = $0 })
+                                                                  onStarted: {}, onOpen: { [weak self] in self?.opened.append($0) },
+                                                                  tree: tree, phase: phase, onPicks: { [weak self] in self?.seen = $0 })
                 .environmentObject(live))
             window.contentView = host
             window.setContentSize(host.fittingSize)
@@ -186,15 +188,83 @@ final class MacNewSessionTests: XCTestCase {
 
         static func spin(_ seconds: TimeInterval) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
 
-        @MainActor func press(_ chars: String, _ keyCode: UInt16, flags: NSEvent.ModifierFlags = []) throws {
+        /// `throughApp`: as the app delivers it, so its event monitors see it too.
+        @MainActor func press(_ chars: String, _ keyCode: UInt16, flags: NSEvent.ModifierFlags = [], throughApp: Bool = false,
+                              wait: TimeInterval = 0.4) throws {
             let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
                                                        windowNumber: window.windowNumber, context: nil, characters: chars,
                                                        charactersIgnoringModifiers: chars, isARepeat: false, keyCode: keyCode))
-            window.sendEvent(event)
-            Self.spin(0.4)
+            if throughApp { NSApp.sendEvent(event) } else { window.sendEvent(event) }
+            Self.spin(wait)
+        }
+
+        @MainActor func click(wait: TimeInterval) throws {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: NSPoint(x: 250, y: 200), modifierFlags: [],
+                                                         timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                                         context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+            NSApp.sendEvent(event)
+            Self.spin(wait)
         }
 
         @MainActor func down() throws { try press(String(UnicodeScalar(NSDownArrowFunctionKey)!), 125, flags: [.numericPad, .function]) }
+    }
+
+    private func finishedTracker() -> N.Tracker {
+        var t = N.Tracker()
+        t.apply(OpenProgress(step: "container", phases: [.init(step: "fetch", startedAt: 0, endedAt: 1_200)], now: 1_300))
+        t.finish(phases: [.init(step: "fetch", startedAt: 0, endedAt: 1_200), .init(step: "container", startedAt: 1_200, endedAt: 14_300)])
+        return t
+    }
+
+    private func result(notice: String? = nil, pull: String? = nil, runtime: String = "tmux") throws -> OpenResult {
+        let extra = (notice.map { #","runtimeNotice":"\#($0)""# } ?? "") + (pull.map { #","pull":{"status":"\#($0)"}"# } ?? "")
+        return try JSONDecoder().decode(OpenResult.self, from: Data(#"""
+            {"session":{"id":"dev-shop-web","folder":"acme","project":"shop","repo":"web","container":"c1","status":"running","solo":0,
+             "runtime":"\#(runtime)"},"created":true\#(extra)}
+            """#.utf8))
+    }
+
+    /// A session with nothing to read holds its finished page before it opens; one with something to read waits for
+    /// Open Session as before.
+    func testSuccessHoldsTheFinishedPageOnlyWhenThereIsNothingToRead() throws {
+        XCTAssertEqual(N.finish(try result()), .hold(sessionId: "dev-shop-web"))
+        XCTAssertEqual(N.finish(try result(runtime: "chat")), .hold(sessionId: "dev-shop-web"))
+        XCTAssertEqual(N.finish(try result(pull: "conflict")),
+                       .then(.show("dev-shop-web is running — pull conflict, the agent is resolving it now", chatId: nil)))
+        XCTAssertEqual(N.finish(try result(notice: "Chat cannot run this agent; started in tmux")),
+                       .then(.show("Session dev-shop-web running. Chat cannot run this agent; started in tmux", chatId: nil)))
+        XCTAssertEqual(N.holdSeconds, 1.5)
+    }
+
+    func testVoiceOverHearsTheTotal() {
+        XCTAssertEqual(N.createdAnnouncement(finishedTracker()), "Created in 14 s")
+        XCTAssertEqual(N.createdAnnouncement(N.Tracker()), "Created", "a devd without step times has no total to say")
+    }
+
+    /// The finished page stays for the hold, then the session opens, once.
+    func testFinishedPageOpensTheSessionAfterTheHold() throws {
+        let h = try Host(tree: tree, phase: .created(finishedTracker(), sessionId: "dev-shop-web"))
+        defer { h.close() }
+        XCTAssertEqual(h.opened, [], "still showing after 0.5 s")
+        Host.spin(1.3)
+        XCTAssertEqual(h.opened, ["dev-shop-web"])
+        Host.spin(0.5)
+        XCTAssertEqual(h.opened, ["dev-shop-web"], "opened once")
+    }
+
+    /// Any key, or a click, opens it right away; the hold then opens nothing more.
+    func testAnyKeyOrClickOpensTheSessionAtOnce() throws {
+        let h = try Host(tree: tree, phase: .created(finishedTracker(), sessionId: "dev-shop-web"))
+        defer { h.close() }
+        try h.press("x", 7, throughApp: true, wait: 0.1)
+        XCTAssertEqual(h.opened, ["dev-shop-web"])
+        Host.spin(1.4)
+        XCTAssertEqual(h.opened, ["dev-shop-web"], "the hold does not open it again")
+
+        let c = try Host(tree: tree, phase: .created(finishedTracker(), sessionId: "dev-shop-web"))
+        defer { c.close() }
+        try c.click(wait: 0.1)
+        XCTAssertEqual(c.opened, ["dev-shop-web"])
     }
 
     /// ↓ and Return walk the pages (skipping a flat folder's Project page), Esc goes back the same way.

@@ -349,6 +349,30 @@ enum MacNewSession {
         case failed(String, retry: Bool)
         /// devd answered with something to read first (a runtime notice, a pull conflict).
         case done(String, sessionId: String)
+        /// Created with nothing to read: the finished steps and their total stay for `holdSeconds`, then the session
+        /// opens; any key or click opens it at once.
+        case created(Tracker, sessionId: String)
+    }
+
+    /// How long the finished page stays before the session opens.
+    static let holdSeconds = 1.5
+
+    enum Finish: Equatable {
+        /// Nothing to read: hold the finished page, then open.
+        case hold(sessionId: String)
+        case then(NewSessionLogic.AfterOpen)
+    }
+
+    /// What a successful create does next: something to read first (a runtime notice, a pull conflict) waits for Open
+    /// Session; otherwise the finished page holds, then the session opens.
+    static func finish(_ r: OpenResult) -> Finish {
+        if r.runtimeNotice == nil, r.pull?.status != "conflict" { return .hold(sessionId: r.session.id) }
+        return .then(NewSessionLogic.afterOpen(r))
+    }
+
+    /// What VoiceOver says when the session is created: the total, when devd timed the steps.
+    static func createdAnnouncement(_ t: Tracker) -> String {
+        t.total(at: ProcessInfo.processInfo.systemUptime).map { "Created in \($0.text)" } ?? "Created"
     }
 
     /// The request may have reached devd: a timeout, a dropped connection, or a gateway giving up on a slow answer
@@ -390,6 +414,7 @@ struct MacNewSessionSheet: View {
     @State private var phase: MacNewSession.Phase
     @State private var work: Task<Void, Never>?
     @State private var confirmClose = false
+    @State private var opened = false
     @FocusState private var listFocused: Bool
 
     /// `tree`, `picks` and `phase` preset the sheet for the screenshot test; the app passes none.
@@ -421,6 +446,7 @@ struct MacNewSessionSheet: View {
             Divider()
             switch phase {
             case .working(let tracker): progress(tracker).padding(20)
+            case .created(let tracker, let id): progress(tracker).padding(20).modifier(OpensOnAnyInput { open(id) })
             case .done(let message, let id): done(message, id: id).padding(20)
             case .form, .failed: pages
             }
@@ -438,6 +464,13 @@ struct MacNewSessionSheet: View {
             }
             onPicks?(new)
         }
+        .task(id: heldSession) {
+            guard let held = heldSession, case .created(let t, _) = phase else { return }
+            announce(MacNewSession.createdAnnouncement(t))
+            try? await Task.sleep(for: .seconds(MacNewSession.holdSeconds))
+            guard !Task.isCancelled else { return }
+            open(held)
+        }
         .onChange(of: stage) { _, new in
             if let new, case .working(let t) = phase { announce(t.title(new)) }
         }
@@ -453,10 +486,10 @@ struct MacNewSessionSheet: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(working ? "Creating Session" : "New Session").font(.title3.weight(.semibold))
+            Text(heldSession != nil ? "Session Created" : working ? "Creating Session" : "New Session").font(.title3.weight(.semibold))
             Group {
                 switch phase {
-                case .working, .done:
+                case .working, .created, .done:
                     Text("\(picks.project)/\(repoName) · \(AgentProfiles.profile(for: picks.agent).label)")
                 case .form, .failed:
                     Text(breadcrumb ?? "Pick a folder, a repo and an agent. devd clones the repo if needed and starts a new session in its own container.")
@@ -668,6 +701,11 @@ struct MacNewSessionSheet: View {
         MacNewSession.settled(now: ProcessInfo.processInfo.systemUptime, pageChangedAt: pageChangedAt, doubleClick: NSEvent.doubleClickInterval)
     }
 
+    private var heldSession: String? {
+        if case .created(_, let id) = phase { return id }
+        return nil
+    }
+
     private var stage: MacNewSession.Stage? {
         if case .working(let t) = phase { return t.stage }
         return nil
@@ -780,6 +818,9 @@ struct MacNewSessionSheet: View {
                 Spacer()
                 Button("Cancel") { confirmClose = true }.keyboardShortcut(.cancelAction)
                 Button("Creating…") {}.disabled(true)
+            case .created(_, let id):
+                Spacer()
+                Button("Open Session") { open(id) }.keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
             case .done(_, let id):
                 Spacer()
                 Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
@@ -812,7 +853,10 @@ struct MacNewSessionSheet: View {
         do { tree = try await actions.tree() } catch { treeError = "Can't load the folders and repos: \(errorText(error))" }
     }
 
+    /// Once: the hold's end and a key or click can both ask.
     private func open(_ id: String) {
+        guard !opened else { return }
+        opened = true
         dismiss()
         onOpen(id)
     }
@@ -847,12 +891,12 @@ struct MacNewSessionSheet: View {
                 await onStarted()
                 // Closed meanwhile: the session is in the sidebar; the window stays where the user left it.
                 guard !Task.isCancelled else { return }
-                // Something to read first (a runtime notice, a pull conflict) waits for Open Session; otherwise the session
-                // opens right away.
-                if result.runtimeNotice == nil, result.pull?.status != "conflict" { open(result.session.id); return }
-                switch NewSessionLogic.afterOpen(result) {
-                case .openChat(let id): open(id)
-                case .show(let text, let chatId): phase = .done(text, sessionId: chatId ?? result.session.id)
+                switch MacNewSession.finish(result) {
+                case .hold(let id):
+                    guard case .working(let t) = phase else { return open(id) }
+                    phase = .created(t, sessionId: id)
+                case .then(.openChat(let id)): open(id)
+                case .then(.show(let text, let chatId)): phase = .done(text, sessionId: chatId ?? result.session.id)
                 }
             } catch {
                 guard !Task.isCancelled else { return }
@@ -864,5 +908,26 @@ struct MacNewSessionSheet: View {
                 }
             }
         }
+    }
+}
+
+/// While the finished page holds, any key or click in the app opens the session at once. An app-wide monitor, as the
+/// page has no control to take the key and a click may land anywhere in the window; the event is used up.
+private struct OpensOnAnyInput: ViewModifier {
+    let open: () -> Void
+    @State private var monitor: Any?
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear {
+                monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { _ in
+                    open()
+                    return nil
+                }
+            }
+            .onDisappear {
+                if let monitor { NSEvent.removeMonitor(monitor) }
+                monitor = nil
+            }
     }
 }
