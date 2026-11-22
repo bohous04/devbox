@@ -12,10 +12,12 @@ struct TerminalSheet: Equatable {
         return .terminal
     }
 
-    /// Opens once, when Chat first cannot show the session; a later reason does not open it again.
+    /// Opens once, when Chat first cannot show the session; a later reason does not open it again. A terminal the user
+    /// already opened stays theirs: closing it still remembers Chat.
     mutating func chatUnavailable(_ reason: String?) {
         guard reason != nil, !fellBack else { return }
         fellBack = true
+        guard !shown else { return }
         shown = true
         byUser = false
     }

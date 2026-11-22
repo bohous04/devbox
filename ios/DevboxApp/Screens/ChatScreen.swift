@@ -11,6 +11,8 @@ struct ChatScreen: View {
     @Environment(\.scenePhase) private var scenePhase
     /// The iPhone's full-screen terminal; the user's open and close are remembered for a tmux session's inbox row.
     @State private var terminalSheet = TerminalSheet()
+    /// The user's switch made before the mirror and the live list said which tmux session this is; stored once they do.
+    @State private var pendingTab: TmuxTabMemory.Tab?
     @State private var atEnd = true
     @State private var wentAway = false
     /// On screen (not under a pushed screen or another tab): only then does coming back reopen the stream.
@@ -150,6 +152,8 @@ struct ChatScreen: View {
         .onChange(of: chatUnavailable) { _, reason in
             if openTerminal == nil { terminalSheet.chatUnavailable(reason) }
         }
+        .onChange(of: store.isTmux) { storePendingTab() }
+        .onChange(of: sessionCreatedAt) { storePendingTab() }
         .task { await store.start() }
         .onAppear { visible = true }
         .onDisappear {
@@ -189,9 +193,20 @@ struct ChatScreen: View {
 
     /// The user's switch, for a tmux session's inbox row (InboxRoute.row); nil (an automatic one) stores nothing.
     private func remember(_ tab: TmuxTabMemory.Tab?) {
-        guard let tab, store.isTmux, let s = live.live?.sessions.first(where: { $0.id == sessionId }) else { return }
-        TmuxTabMemory.shared.remember(tab, for: TmuxTabMemory.key(s.id, createdAt: s.created_at))
+        guard let tab else { return }
+        pendingTab = tab
+        storePendingTab()
     }
+
+    /// Waits for the mirror (`isTmux`) and the live list's row (its created_at keys the memory); a chat session's
+    /// switch is never stored, its row always opening the thread.
+    private func storePendingTab() {
+        guard let tab = pendingTab, store.isTmux, let createdAt = sessionCreatedAt else { return }
+        TmuxTabMemory.shared.remember(tab, for: TmuxTabMemory.key(sessionId, createdAt: createdAt))
+        pendingTab = nil
+    }
+
+    private var sessionCreatedAt: Int? { live.live?.sessions.first(where: { $0.id == sessionId })?.created_at }
 
     private func conversation(_ t: ThreadSnapshot) -> some View {
         ScrollViewReader { proxy in

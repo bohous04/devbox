@@ -23,6 +23,16 @@ final class TerminalSheetTests: XCTestCase {
         XCTAssertEqual(sheet.closed(), .chat)
     }
 
+    func testAReasonArrivingWhileTheUsersTerminalIsOpenKeepsItTheirs() {
+        var sheet = TerminalSheet()
+        XCTAssertEqual(sheet.userOpens(), .terminal)
+        sheet.chatUnavailable("Could not load the terminal's conversation: timed out")
+        XCTAssertTrue(sheet.shown)
+        XCTAssertEqual(sheet.closed(), .chat, "closing the user's terminal still goes back to Chat")
+        sheet.chatUnavailable("Could not load the terminal's conversation: timed out")
+        XCTAssertFalse(sheet.shown, "the automatic opening was spent")
+    }
+
     func testNoReasonOpensNothing() {
         var sheet = TerminalSheet()
         sheet.chatUnavailable(nil)
