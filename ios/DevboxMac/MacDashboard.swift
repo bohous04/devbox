@@ -76,7 +76,7 @@ struct MacDashboardSidebar: View {
                 Section {
                     ForEach(section.pages, id: \.self) { p in
                         Label { Text(p.title).font(.system(size: 13)).foregroundStyle(MacInboxRow.style(.primary)) } icon: {
-                            Image(systemName: p.systemImage).foregroundStyle(Theme.C.mutedForeground)
+                            Image(systemName: p.systemImage).modifier(MacSelectionTone(color: Theme.C.mutedForeground, onSelection: MacInboxRow.style(.primary)))
                         }
                         .tag(p as MacDashboardPage?)
                     }

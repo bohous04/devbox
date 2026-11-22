@@ -619,12 +619,12 @@ struct MacInboxRow: View {
                 Spacer(minLength: 0)
                 if let word = Self.word(item) {
                     Text(word.text).font(.system(size: 11, weight: .semibold))
-                        .modifier(RowStatusTone(color: InboxTone.text(word.tone), onSelection: Self.style(.primary)))
+                        .modifier(MacSelectionTone(color: InboxTone.text(word.tone), onSelection: Self.style(.primary)))
                 } else {
                     HStack(spacing: 5) {
                         if item.attention.section == .working { LiveDot() }
                         Text(Self.when(item, now: now)).font(.system(size: 11)).monospacedDigit()
-                            .modifier(RowStatusTone(color: item.attention.section == .working ? InboxTone.busy : nil, onSelection: Self.style(.secondary)))
+                            .modifier(MacSelectionTone(color: item.attention.section == .working ? InboxTone.busy : nil, onSelection: Self.style(.secondary)))
                     }
                 }
             }
@@ -649,16 +649,20 @@ struct MacInboxRow: View {
     }
 }
 
-/// A status colour, except on the focused list's accent selection, where the row's light text style takes over (a
+/// A fixed colour, except on a focused sidebar list's accent selection, where the row's light text style takes over (a
 /// fixed colour there, red or blue on blue, would not read). Read where it is drawn: the row's own body does not see
 /// the selection's prominence change.
-private struct RowStatusTone: ViewModifier {
+struct MacSelectionTone: ViewModifier {
     let color: Color?
     let onSelection: AnyShapeStyle
     @Environment(\.backgroundProminence) private var prominence
 
     func body(content: Content) -> some View {
-        content.foregroundStyle(prominence == .increased || color == nil ? onSelection : AnyShapeStyle(color!))
+        if let color, prominence != .increased {
+            content.foregroundStyle(color)
+        } else {
+            content.foregroundStyle(onSelection)
+        }
     }
 }
 
@@ -668,7 +672,7 @@ private struct LiveDot: View {
     @State private var dim = false
 
     var body: some View {
-        Circle().frame(width: 6, height: 6).modifier(RowStatusTone(color: InboxTone.busy, onSelection: AnyShapeStyle(.primary)))
+        Circle().frame(width: 6, height: 6).modifier(MacSelectionTone(color: InboxTone.busy, onSelection: AnyShapeStyle(.primary)))
             .opacity(dim ? 0.35 : 1)
             .onAppear {
                 guard !reduceMotion else { return }

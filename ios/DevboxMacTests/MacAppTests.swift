@@ -23,9 +23,13 @@ final class MacAppTests: XCTestCase {
     /// A selected sidebar row's text turns light on the selection colour, which AppKit derives from the app's accent
     /// when the list has the keyboard. The shared brand accent (near-white in dark mode) made that light on near-white,
     /// so the Mac app declares no accent and keeps the system's; the plain selection colour (no keyboard) carries the
-    /// normal label colour. The contrast holds for the default (blue) accent; a user's own accent is the system's call.
+    /// normal label colour. The contrast is checked for the default (blue) accent only: a user's own accent (graphite,
+    /// yellow…) is the system's call.
     func testSidebarSelectionTextIsReadable() throws {
         XCTAssertNil(Bundle.main.object(forInfoDictionaryKey: "NSAccentColorName"), "the Mac app keeps the system accent")
+        guard UserDefaults.standard.object(forKey: "AppleAccentColor") == nil else {
+            throw XCTSkip("contrast checked for the default accent; this Mac has its own")
+        }
         func luminance(_ c: NSColor) -> CGFloat {
             let s = c.usingColorSpace(.sRGB)!
             func channel(_ v: CGFloat) -> CGFloat { v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
