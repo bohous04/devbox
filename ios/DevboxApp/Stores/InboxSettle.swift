@@ -138,6 +138,14 @@ class InboxSettler: ObservableObject {
         return moment == .left || !seenMoves(i)
     }
 
+    /// Whether opening an idle tmux session or coming back to it is a look to record (POST /seen): there is nothing to
+    /// clear, but devd restarts the inbox's auto-settle clock on it, so the row does not settle while it is open.
+    /// Leaving is no look; a finish or failure goes through `marksSeen`/`seen`, a chat session through its thread.
+    static func looks(_ i: InboxItem?, on moment: Moment) -> Bool {
+        guard let i, moment != .left else { return false }
+        return i.runtime == .tmux && i.attention.section == .idle
+    }
+
     /// `checked: false` skips the client's own refusal, so a test can see devd's.
     func settle(_ item: InboxItem, in store: InboxStore, checked: Bool = true) async {
         let title = InboxView.rowTitle(item)
@@ -197,6 +205,20 @@ class InboxSettler: ObservableObject {
             if !dismissedSeen.contains(key) {
                 report("Couldn't mark “\(InboxView.rowTitle(item))” seen: \(chatErrorText(error))", seen: key)
             }
+            return .failed
+        }
+    }
+
+    /// Records a look at an idle tmux session (`looks`): one post per look, so nothing is kept per session; a failed
+    /// one is shown.
+    @discardableResult
+    func look(_ item: InboxItem, in store: InboxStore) async -> Seen {
+        guard Self.looks(item, on: .foreground) else { return .skipped }
+        do {
+            try await store.seen(item.sessionId)
+            return .posted
+        } catch {
+            report("Couldn't mark “\(InboxView.rowTitle(item))” seen: \(chatErrorText(error))")
             return .failed
         }
     }

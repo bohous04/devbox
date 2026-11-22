@@ -98,8 +98,9 @@ struct InboxScreen: View {
 
     private func markSeen(_ id: String, _ moment: InboxSettler.Moment, reload: Bool) async {
         if reload { await store.load() }
-        guard let item = store.items?.first(where: { $0.sessionId == id }), InboxSettler.marksSeen(item, on: moment) else { return }
-        await settler.seen(item, in: store)
+        guard let item = store.items?.first(where: { $0.sessionId == id }) else { return }
+        if InboxSettler.marksSeen(item, on: moment) { await settler.seen(item, in: store) }
+        else if InboxSettler.looks(item, on: moment) { await settler.look(item, in: store) }
     }
 
     @ViewBuilder

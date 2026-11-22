@@ -265,11 +265,12 @@ struct MacInboxSidebar: View {
             // not marked either. Its finish then stays until he picks it again; better than clearing one unseen.
             guard activeState == .key else { return }
             markSeen(old)
-            markSeen(new, selected: true)
+            markSeen(new, selected: true, look: true)
         }
+        // Not a look: the selected row changed under him (an inbox update), so an idle one is not posted again.
         .onChange(of: selectedItem) { _, item in if activeState == .key { markSeen(item?.sessionId, selected: true) } }
-        .onChange(of: activeState) { _, active in if active == .key { markSeen(selection, selected: true) } }
-        .onAppear { if activeState == .key { markSeen(selection, selected: true) } }
+        .onChange(of: activeState) { _, active in if active == .key { markSeen(selection, selected: true, look: true) } }
+        .onAppear { if activeState == .key { markSeen(selection, selected: true, look: true) } }
     }
 
     private var selectedItem: InboxItem? { selection.flatMap { id in store.items?.first { $0.sessionId == id } } }
@@ -284,10 +285,16 @@ struct MacInboxSidebar: View {
         Task { await state.settler.settle(item, in: store) }
     }
 
-    private func markSeen(_ id: String?, selected: Bool = false) {
-        guard let item = id.flatMap({ id in store.items?.first { $0.sessionId == id } }), MacSettler.wantsSeen(item),
-              !(selected && MacSettler.seenMoves(item)) else { return }
-        Task { await state.settler.seen(item, in: store) }
+    /// `look`: he opened the row or came back to the window; an idle tmux session then records the look (devd
+    /// restarts its auto-settle clock), once per look (InboxSettler.look).
+    private func markSeen(_ id: String?, selected: Bool = false, look: Bool = false) {
+        guard let item = id.flatMap({ id in store.items?.first { $0.sessionId == id } }) else { return }
+        if MacSettler.wantsSeen(item) {
+            guard !(selected && MacSettler.seenMoves(item)) else { return }
+            Task { await state.settler.seen(item, in: store) }
+        } else if look, MacSettler.looks(item, on: .foreground) {
+            Task { await state.settler.look(item, in: store) }
+        }
     }
 
     /// Search and New session, above the list.
