@@ -277,8 +277,9 @@ enum InboxView {
         sessionTitle(sessionId: e.sessionId, name: e.title == "\(e.project)/\(e.repo)" ? nil : e.title, project: e.project, repo: e.repo, topic: e.topic)
     }
 
+    /// After the project badge, as a session row's (secondLine): the repo and the branch.
     static func endedSecondLine(_ e: EndedSession) -> String {
-        (["\(e.project)/\(e.repo)"] + [e.branch].compactMap { $0 }.filter { !$0.isEmpty }).joined(separator: " · ")
+        ([e.repo] + [e.branch].compactMap { $0 }.filter { !$0.isEmpty }).joined(separator: "  ·  ")
     }
 
     /// A transcript's row in a list whose selection holds session ids (the Mac sidebar): never a session id.

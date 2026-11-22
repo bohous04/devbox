@@ -240,7 +240,7 @@ final class EndedSessionTests: XCTestCase {
     func testRowWordsAndTheButtonLabel() throws {
         XCTAssertEqual(InboxView.endedTitle(try ended("e", endedAt: 1, title: "Login fix")), "Login fix")
         XCTAssertEqual(InboxView.endedTitle(try ended("e", endedAt: 1, topic: "Fix the login form")), "Fix the login form")
-        XCTAssertEqual(InboxView.endedSecondLine(try ended("e", endedAt: 1)), "acme/app · feat/x")
+        XCTAssertEqual(InboxView.endedSecondLine(try ended("e", endedAt: 1)), "app  ·  feat/x")
         XCTAssertEqual(InboxView.continueLabel(.resume), "Continue in a new session (resume)")
         XCTAssertEqual(InboxView.continueLabel(.handoff), "Start a new session with this chat (handoff)")
         XCTAssertEqual(InboxView.endedId(fromTag: InboxView.endedTag("dev-a-1")), "dev-a-1")

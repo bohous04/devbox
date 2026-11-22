@@ -61,7 +61,7 @@ test("a second continue of the same transcript joins the one in flight", async (
 test("an ended row is titled like a session row and says where it ran", () => {
   expect(endedTitle(ended("e", 1, { title: "Login fix" }))).toBe("Login fix");
   expect(endedTitle(ended("e", 1, { topic: "Fix the login form" }))).toBe("Fix the login form");
-  expect(endedSecondLine(ended("e", 1, { branch: "feat/x" }))).toBe("acme/app · feat/x");
+  expect(endedSecondLine(ended("e", 1, { branch: "feat/x" }))).toBe("app · feat/x");
   expect(endedHref(ended("dev-a b-1", 1))).toBe("/ended/dev-a%20b-1");
 });
 

@@ -63,8 +63,9 @@ export function endedTitle(e: EndedSession): string {
   return sessionTitle({ sessionId: e.sessionId, name: e.title === `${e.project}/${e.repo}` ? null : e.title, project: e.project, repo: e.repo, topic: e.topic });
 }
 
+/** After the project badge, as a session row's (inboxView.ts secondLine): the repo and the branch. */
 export function endedSecondLine(e: EndedSession): string {
-  return [`${e.project}/${e.repo}`, e.branch].filter(Boolean).join(" · ");
+  return [e.repo, e.branch].filter(Boolean).join(" · ");
 }
 
 export const endedHref = (e: Pick<EndedSession, "id">) => `/ended/${encodeURIComponent(e.id)}`;

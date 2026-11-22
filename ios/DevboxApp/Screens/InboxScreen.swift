@@ -637,6 +637,7 @@ struct InboxEndedRow: View {
                 .fixedSize()
             }
             HStack(spacing: 6) {
+                ProjectBadge(project: ended.project)
                 Text(InboxView.endedSecondLine(ended)).font(.subheadline).foregroundStyle(Theme.C.mutedForeground).lineLimit(1)
                 Spacer(minLength: 0)
                 if showAgent {
@@ -651,7 +652,7 @@ struct InboxEndedRow: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel([title, "ended", Format.agoLabel(Double(now - ended.endedAt)), InboxView.endedSecondLine(ended),
+        .accessibilityLabel([title, "ended", Format.agoLabel(Double(now - ended.endedAt)), "\(ended.project)/\(ended.repo)",
                              showAgent ? AgentProfiles.profile(for: AgentName(rawValue: ended.agent)).short : ""]
             .filter { !$0.isEmpty }.joined(separator: ", "))
     }
