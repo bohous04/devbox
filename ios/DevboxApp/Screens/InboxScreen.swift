@@ -62,6 +62,7 @@ struct InboxScreen: View {
             if let items = store.items {
                 content(InboxView.group(items))
                     .environment(\.inboxShowsAgent, InboxView.mixedAgents(items))
+                    .environment(\.inboxBadgeSlots, InboxView.badgeSlots(items))
             } else if let error = store.loadError {
                 ContentUnavailableView("Can't load the inbox", systemImage: "tray", description: Text(error))
             } else {
@@ -393,15 +394,18 @@ enum InboxTone {
         }
     }
 
-    /// Badge slots (InboxView.projectBadge's slot), the dashboard's Inbox.tsx BADGE: rose, amber, emerald, sky,
-    /// violet, fuchsia (500 at 15% behind 800 / 300 text).
+    /// Badge colours by InboxView.badgeSlots' slot, the dashboard's Inbox.tsx BADGE: sky, violet, emerald, teal, indigo,
+    /// fuchsia, lime, cyan (the 500 hue at 15% as the fill, the 800 hue as light text and 300 as dark). No rose or
+    /// amber: they would read as the danger and Answer chips.
     static let badge: [(fill: Color, text: Color)] = [
-        (Color(light: 0xF43F5E, dark: 0xF43F5E), Color(light: 0xBE123C, dark: 0xFDA4AF)),
-        (Color(light: 0xF59E0B, dark: 0xF59E0B), Color(light: 0x92400E, dark: 0xFCD34D)),
-        (Color(light: 0x10B981, dark: 0x10B981), Color(light: 0x065F46, dark: 0x6EE7B7)),
         (Color(light: 0x0EA5E9, dark: 0x0EA5E9), Color(light: 0x075985, dark: 0x7DD3FC)),
         (Color(light: 0x8B5CF6, dark: 0x8B5CF6), Color(light: 0x5B21B6, dark: 0xC4B5FD)),
+        (Color(light: 0x10B981, dark: 0x10B981), Color(light: 0x065F46, dark: 0x6EE7B7)),
+        (Color(light: 0x14B8A6, dark: 0x14B8A6), Color(light: 0x115E59, dark: 0x5EEAD4)),
+        (Color(light: 0x6366F1, dark: 0x6366F1), Color(light: 0x3730A3, dark: 0xA5B4FC)),
         (Color(light: 0xD946EF, dark: 0xD946EF), Color(light: 0x86198F, dark: 0xF0ABFC)),
+        (Color(light: 0x84CC16, dark: 0x84CC16), Color(light: 0x3F6212, dark: 0xBEF264)),
+        (Color(light: 0x06B6D4, dark: 0x06B6D4), Color(light: 0x155E75, dark: 0x67E8F9)),
     ]
 }
 
@@ -410,11 +414,13 @@ enum InboxTone {
 struct ProjectBadge: View {
     let project: String
     var size: CGFloat = 9
+    @Environment(\.inboxBadgeSlots) private var slots
 
     var body: some View {
-        let b = InboxView.projectBadge(project)
-        let tint = InboxTone.badge[b.slot]
-        Text(b.letters)
+        // badgeSlots is taken over the same items the rows come from: a missing project is a wiring bug.
+        guard let slot = slots[project] else { preconditionFailure("no badge slot for project \(project): set inboxBadgeSlots where the list is built") }
+        let tint = InboxTone.badge[slot]
+        return Text(InboxView.projectBadge(project))
             .font(.system(size: size, weight: .semibold))
             .tracking(0.3)
             .foregroundStyle(tint.text)
@@ -431,10 +437,18 @@ struct ProjectBadge: View {
 /// True by default on purpose: a row outside such a list names its agent rather than hide which one runs.
 private struct InboxShowsAgentKey: EnvironmentKey { static let defaultValue = true }
 
+/// Each project's badge colour (InboxView.badgeSlots over the whole inbox), set where the list is built.
+private struct InboxBadgeSlotsKey: EnvironmentKey { static let defaultValue: [String: Int] = [:] }
+
 extension EnvironmentValues {
     var inboxShowsAgent: Bool {
         get { self[InboxShowsAgentKey.self] }
         set { self[InboxShowsAgentKey.self] = newValue }
+    }
+
+    var inboxBadgeSlots: [String: Int] {
+        get { self[InboxBadgeSlotsKey.self] }
+        set { self[InboxBadgeSlotsKey.self] = newValue }
     }
 }
 
@@ -453,10 +467,14 @@ struct InboxRow: View {
         Date(timeIntervalSince1970: Double(ms) / 1000).formatted(.dateTime.weekday(.abbreviated).hour().minute())
     }
 
-    /// A chip's words: a snooze says when it ends (the time; the spoken label has the day too).
-    static func chipLabel(_ mark: InboxView.Mark, until: Int?) -> String {
+    /// A chip's words: a snooze says when it ends, the time on the same day, else the short weekday and the time
+    /// (inboxView.ts snoozeEnd).
+    static func chipLabel(_ mark: InboxView.Mark, until: Int?, now: Int, locale: Locale = .current) -> String {
         guard let until else { return mark.label }
-        return "\(mark.label) until \(Date(timeIntervalSince1970: Double(until) / 1000).formatted(.dateTime.hour().minute()))"
+        let end = Date(timeIntervalSince1970: Double(until) / 1000)
+        let today = Calendar.current.isDate(end, inSameDayAs: Date(timeIntervalSince1970: Double(now) / 1000))
+        let style: Date.FormatStyle = today ? .dateTime.hour().minute() : .dateTime.weekday(.abbreviated).hour().minute()
+        return "\(mark.label) until \(end.formatted(style.locale(locale)))"
     }
 
     var body: some View {
@@ -512,7 +530,7 @@ struct InboxRow: View {
             HStack(spacing: 4) {
                 Image(systemName: InboxTone.icon(mark.tone))
                     .foregroundStyle(mark.tone == .done ? InboxTone.doneIcon : InboxTone.text(mark.tone))
-                Text(Self.chipLabel(mark, until: parts.until)).monospacedDigit()
+                Text(Self.chipLabel(mark, until: parts.until, now: now)).monospacedDigit()
             }
             .font(loud ? .footnote.weight(.semibold) : .footnote)
             .foregroundStyle(InboxTone.text(mark.tone))

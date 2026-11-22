@@ -236,6 +236,7 @@ struct MacInboxSidebar: View {
                 }
             }
             .environment(\.inboxShowsAgent, store.items.map(InboxView.mixedAgents) ?? false)
+            .environment(\.inboxBadgeSlots, InboxView.badgeSlots(store.items ?? []))
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { sidebarHeight = $0 }
         .navigationTitle("Inbox")
@@ -547,11 +548,10 @@ private struct MacGroupHead: View {
 
 /// A sidebar row: the title with its state on the right (a chip when the row has something to say, InboxView.statusParts,
 /// otherwise how long ago, after a live dot while it works) and one muted line: the project's badge, `InboxView.secondLine`,
-/// and the agent's glyph and name and "tmux" (InboxView.metaTail; the agent only while the rows shown mix agents). Every
-/// title is regular: a row that needs you stands out by its chip; danger and asks are loud, the rest quiet. With
-/// `settle`, a ✓ takes the state's place while the pointer is over the row, as in T3 Code; it is disabled, with the
-/// reason, while a request is open. The message and the full project name are also in the tooltip and the spoken label,
-/// which starts with the chip.
+/// the agent's glyph (while the rows shown mix agents) and "tmux". Every title is regular: a row that needs you stands
+/// out by its chip; danger and asks are loud, the rest quiet. With `settle`, a ✓ takes the state's place while the
+/// pointer is over the row, as in T3 Code; it is disabled, with the reason, while a request is open. The message, the
+/// agent's name and the full project name are also in the tooltip and the spoken label, which starts with the chip.
 struct MacInboxRow: View {
     let item: InboxItem
     let now: Int
@@ -615,7 +615,9 @@ struct MacInboxRow: View {
         let detail = preview ? (message.isEmpty ? InboxView.reasonLabel(item.attention.reason) : message) : ""
         let parts = InboxView.statusParts(item, now: now)
         let mark = parts?.mark
-        let tail = InboxView.metaTail(item, showAgent: showAgent)
+        // The sidebar is narrow: the agent shows as its glyph only (its name is in the tooltip and the spoken label), so
+        // the line gives way from its end, the message, then the branch, the repo last.
+        let tail = InboxView.metaTail(item, showAgent: false)
         let spoken = InboxRow.spoken(item, now: now, title: title, detail: detail, showAgent: showAgent)
         // A row of the list with nothing to say reads a step quieter, so the eye lands on the marked ones first.
         let quiet = settle != nil && mark == nil
@@ -642,7 +644,7 @@ struct MacInboxRow: View {
                         Image(systemName: InboxTone.icon(mark.tone)).font(.system(size: 10))
                             .modifier(MacSelectionTone(color: mark.tone == .done ? InboxTone.doneIcon : Theme.C.mutedForeground,
                                                        onSelection: Self.style(.primary)))
-                        Text(InboxRow.chipLabel(mark, until: parts?.until)).font(.system(size: 11)).monospacedDigit()
+                        Text(InboxRow.chipLabel(mark, until: parts?.until, now: now)).font(.system(size: 11)).monospacedDigit()
                             .modifier(MacSelectionTone(color: Theme.C.mutedForeground, onSelection: Self.style(.secondary)))
                     }
                 } else {

@@ -126,13 +126,34 @@ export function shortAgo(ms: number): string {
   return h < 24 ? `${h}h` : `${Math.floor(h / 24)}d`;
 }
 
-/** A project's badge: up to two letters from its name's words, and a stable colour slot (0-5) from its name. */
-export function projectBadge(project: string): { letters: string; slot: number } {
+/** A project's badge letters: up to two from its name's words. */
+export function projectBadge(project: string): string {
   const words = project.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-  const letters = (words.length > 1 ? words[0][0] + words[1][0] : (words[0] ?? "?").slice(0, 2)).toUpperCase();
-  let h = 0;
-  for (const c of project) h = (h * 31 + c.codePointAt(0)!) >>> 0;
-  return { letters, slot: h % 6 };
+  return (words.length > 1 ? words[0][0] + words[1][0] : (words[0] ?? "?").slice(0, 2)).toUpperCase();
+}
+
+/** The badge colours there are (Inbox.tsx BADGE, the Apple apps' InboxTone.badge). */
+export const BADGE_SLOTS = 8;
+
+/** Each project's badge colour: its place among the inbox's projects in code-point order (the Apple apps sort the
+ *  same way), mod BADGE_SLOTS, so up to eight projects never share a colour. A project joining or leaving the inbox
+ *  can move the colours of the projects after it; the owner chose that over a hash, which collides almost always. */
+export function badgeSlots(items: InboxItem[]): Map<string, number> {
+  const cp = (s: string) => [...s].map((c) => c.codePointAt(0)!);
+  const byCodePoint = (a: string, b: string) => {
+    const x = cp(a), y = cp(b);
+    for (let n = 0; n < Math.min(x.length, y.length); n++) if (x[n] !== y[n]) return x[n] - y[n];
+    return x.length - y.length;
+  };
+  const projects = [...new Set(items.map((i) => i.project))].sort(byCodePoint);
+  return new Map(projects.map((p, n) => [p, n % BADGE_SLOTS]));
+}
+
+/** When a snooze ends, for its chip: the time on the same day, else the short weekday and the time. */
+export function snoozeEnd(until: number, now: number, locale?: string): string {
+  const end = new Date(until);
+  const today = end.toDateString() === new Date(now).toDateString();
+  return end.toLocaleString(locale, today ? { hour: "numeric", minute: "2-digit" } : { weekday: "short", hour: "numeric", minute: "2-digit" });
 }
 
 /** A message preview as plain text: markdown's code ticks, emphasis and heading marks would show raw in one line.

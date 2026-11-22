@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Attention, InboxItem } from "../../shared/thread";
-import { asks, branchLabel, groupInbox, inboxHref, inboxList, metaTail, secondLine, mixedAgents, plainPreview, projectBadge, reasonLabel, reasonStatus, rowStatus, rowTitle, statusParts, shelfBlock, shortAgo, snoozeTimes, splitNeedsYou, threadHeading, upsertInbox } from "./inboxView";
+import { asks, badgeSlots, branchLabel, groupInbox, snoozeEnd, inboxHref, inboxList, metaTail, secondLine, mixedAgents, plainPreview, projectBadge, reasonLabel, reasonStatus, rowStatus, rowTitle, statusParts, shelfBlock, shortAgo, snoozeTimes, splitNeedsYou, threadHeading, upsertInbox } from "./inboxView";
 
 const item = (sessionId: string, attention: Attention, runtime: InboxItem["runtime"] = "chat"): InboxItem => ({
   sessionId, runtime, title: sessionId, project: "p", repo: "r", agent: "claude", attention, lastText: null,
@@ -112,16 +112,28 @@ test("shortAgo: now, minutes, hours, days", () => {
   expect(shortAgo(50 * 3_600_000)).toBe("2d");
 });
 
-test("projectBadge: two initials from words, two letters from one word, a stable slot", () => {
-  expect(projectBadge("games/harbor_api").letters).toBe("GH");
-  expect(projectBadge("acme").letters).toBe("AC");
-  expect(projectBadge("Údržba města").letters).toBe("ÚM");
-  expect(projectBadge("").letters).toBe("?");
-  expect(projectBadge("apps").slot).toBe(projectBadge("apps").slot);
-  expect(projectBadge("apps").slot).toBeLessThan(6);
-  // The same slots as the Apple apps' InboxView.projectBadge (InboxRowTests), so a project has one colour everywhere.
-  expect(projectBadge("acme").slot).toBe(4);
-  expect(projectBadge("lumen").slot).toBe(5);
+test("projectBadge: two initials from words, two letters from one word", () => {
+  expect(projectBadge("games/harbor_api")).toBe("GH");
+  expect(projectBadge("acme")).toBe("AC");
+  expect(projectBadge("Údržba města")).toBe("ÚM");
+  expect(projectBadge("")).toBe("?");
+});
+
+test("badgeSlots: a project's place among the inbox's projects in code-point order, mod 8; the Apple apps' badgeSlots", () => {
+  const at = (project: string) => ({ ...item(project, { section: "idle", reason: null, since: 1 }), project });
+  const slots = badgeSlots([at("orchard"), at("acme"), at("lumen"), at("acme"), at("Zeta"), at("údržba")]);
+  expect([...slots]).toEqual([["Zeta", 0], ["acme", 1], ["lumen", 2], ["orchard", 3], ["údržba", 4]]);
+  // Up to eight projects never share a colour; a ninth comes round to the first.
+  const nine = badgeSlots("abcdefghi".split("").map(at));
+  expect(new Set([...nine.values()].slice(0, 8)).size).toBe(8);
+  expect(nine.get("i")).toBe(0);
+  expect(badgeSlots([]).size).toBe(0);
+});
+
+test("snoozeEnd: the time on the same day, the short weekday before it on another", () => {
+  const now = new Date(2026, 10, 24, 9, 0).getTime();
+  expect(snoozeEnd(new Date(2026, 10, 24, 21, 36).getTime(), now, "en-GB")).toBe("21:36");
+  expect(snoozeEnd(new Date(2026, 10, 25, 8, 0).getTime(), now, "en-GB")).toBe("Wed 08:00");
 });
 
 test("plainPreview drops markdown marks from a one-line preview", () => {

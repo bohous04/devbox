@@ -83,7 +83,7 @@ enum InboxView {
 
     static func ms(_ d: Date) -> Int { Int((d.timeIntervalSince1970 * 1000).rounded()) }
 
-    // MARK: - Row presentation (inboxView.ts: splitNeedsYou, rowStatus, statusParts, projectBadge, rowTitle)
+    // MARK: - Row presentation (inboxView.ts: splitNeedsYou, rowStatus, statusParts, projectBadge, badgeSlots, rowTitle)
 
     /// "Needs you" holds two asks: something to act on, and a run that merely finished unseen (`completed`). The
     /// screen shows them as separate groups; finished reads newest first, the rest keeps devd's order.
@@ -179,14 +179,21 @@ enum InboxView {
         return h < 24 ? "\(h)h" : "\(h / 24)d"
     }
 
-    /// A project's badge: up to two letters from its name's words and a stable colour slot (0-5), the same slot as
-    /// the dashboard's for the same name.
-    static func projectBadge(_ project: String) -> (letters: String, slot: Int) {
+    /// A project's badge letters: up to two from its name's words.
+    static func projectBadge(_ project: String) -> String {
         let words = project.split(whereSeparator: { !($0.isLetter || $0.isNumber) }).map(String.init)
-        let letters = words.count > 1 ? String(words[0].prefix(1)) + String(words[1].prefix(1)) : String((words.first ?? "?").prefix(2))
-        var h: UInt32 = 0
-        for c in project.unicodeScalars { h = h &* 31 &+ c.value }
-        return (letters.uppercased(), Int(h % 6))
+        return (words.count > 1 ? String(words[0].prefix(1)) + String(words[1].prefix(1)) : String((words.first ?? "?").prefix(2))).uppercased()
+    }
+
+    /// The badge colours there are (InboxTone.badge, the dashboard's Inbox.tsx BADGE).
+    static let badgeSlotCount = 8
+
+    /// Each project's badge colour: its place among the inbox's projects in code-point order (as the dashboard sorts
+    /// them), mod badgeSlotCount, so up to eight projects never share a colour. A project joining or leaving the inbox
+    /// can move the colours of the projects after it; the owner chose that over a hash, which collides almost always.
+    static func badgeSlots(_ items: [InboxItem]) -> [String: Int] {
+        let projects = Set(items.map(\.project)).sorted { $0.unicodeScalars.lexicographicallyPrecedes($1.unicodeScalars) }
+        return Dictionary(uniqueKeysWithValues: projects.enumerated().map { ($1, $0 % badgeSlotCount) })
     }
 
     private static let previewRules: [(NSRegularExpression, String)] = [

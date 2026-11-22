@@ -59,13 +59,39 @@ final class InboxRowTests: XCTestCase {
     }
 
     func testProjectBadge() {
-        XCTAssertEqual(InboxView.projectBadge("games/harbor_api").letters, "GH")
-        XCTAssertEqual(InboxView.projectBadge("acme").letters, "AC")
-        XCTAssertEqual(InboxView.projectBadge("Údržba města").letters, "ÚM")
-        XCTAssertEqual(InboxView.projectBadge("").letters, "?")
-        // The same slot as the dashboard's hash ((h * 31 + codePoint) >>> 0) % 6.
-        XCTAssertEqual(InboxView.projectBadge("acme").slot, 4)
-        XCTAssertEqual(InboxView.projectBadge("lumen").slot, 5)
+        XCTAssertEqual(InboxView.projectBadge("games/harbor_api"), "GH")
+        XCTAssertEqual(InboxView.projectBadge("acme"), "AC")
+        XCTAssertEqual(InboxView.projectBadge("Údržba města"), "ÚM")
+        XCTAssertEqual(InboxView.projectBadge(""), "?")
+    }
+
+    /// inboxView.test.ts badgeSlots: a project's place among the inbox's projects in code-point order, mod 8.
+    func testBadgeSlots() throws {
+        func at(_ project: String) throws -> InboxItem {
+            let json: [String: Any] = ["sessionId": project, "runtime": "chat", "title": project, "project": project, "repo": "r", "agent": "claude",
+                                       "attention": ["section": "idle", "since": 1, "reason": NSNull()], "lastText": NSNull()]
+            return try JSONDecoder().decode(InboxItem.self, from: JSONSerialization.data(withJSONObject: json))
+        }
+        let slots = InboxView.badgeSlots(try ["orchard", "acme", "lumen", "acme", "Zeta", "údržba"].map(at))
+        XCTAssertEqual(slots, ["Zeta": 0, "acme": 1, "lumen": 2, "orchard": 3, "údržba": 4])
+        let nine = InboxView.badgeSlots(try "abcdefghi".map { try at(String($0)) })
+        XCTAssertEqual(Set("abcdefgh".map { nine[String($0)]! }).count, 8, "up to eight projects never share a colour")
+        XCTAssertEqual(nine["i"], 0)
+        XCTAssertEqual(InboxTone.badge.count, InboxView.badgeSlotCount)
+    }
+
+    /// inboxView.test.ts snoozeEnd: the time on the same day, the short weekday before it on another.
+    func testSnoozeChipSaysTheDayWhenNotToday() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = .current
+        func ms(_ day: Int, _ h: Int, _ m: Int) -> Int {
+            InboxView.ms(cal.date(from: DateComponents(year: 2026, month: 11, day: day, hour: h, minute: m))!)
+        }
+        let mark = InboxView.Mark(label: "Snoozed", tone: .quiet)
+        let gb = Locale(identifier: "en_GB")
+        XCTAssertEqual(InboxRow.chipLabel(mark, until: ms(24, 21, 36), now: ms(24, 9, 0), locale: gb), "Snoozed until 21:36")
+        XCTAssertEqual(InboxRow.chipLabel(mark, until: ms(25, 8, 0), now: ms(24, 9, 0), locale: gb), "Snoozed until Wed 08:00")
+        XCTAssertEqual(InboxRow.chipLabel(InboxView.Mark(label: "Done", tone: .done), until: nil, now: 0, locale: gb), "Done")
     }
 
     func testPlainPreview() {

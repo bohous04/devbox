@@ -11,14 +11,13 @@ import { AppPage, Chevron, Collapse, RowsSkeleton } from "../components/primitiv
 import { SettleProblem } from "../components/SettleProblem";
 import { agoLabel } from "../format";
 import { claimsUndo, failureText, focusOwnsUndo, settleKey, settleShortcut } from "../inboxSettle";
-import { groupInbox, inboxHref, inboxList, metaTail, mixedAgents, projectBadge, reasonLabel, rowStatus, rowTitle, secondLine, shelfBlock, snoozeTimes, statusParts, upsertInbox, type StatusTone } from "../inboxView";
+import { badgeSlots, groupInbox, inboxHref, inboxList, metaTail, mixedAgents, projectBadge, reasonLabel, rowStatus, rowTitle, secondLine, shelfBlock, snoozeEnd, snoozeTimes, statusParts, upsertInbox, type StatusTone } from "../inboxView";
 import { cn } from "@/lib/utils";
 import { useNow } from "../store";
 import { useEventStream } from "../useEventStream";
 import { settler, useSettleState } from "../useSettler";
 
 const untilLabel = (ms: number) => new Date(ms).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" });
-const shortUntil = (ms: number) => new Date(ms).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 
 const MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 const MOD = MAC ? "⌘" : "Ctrl+";
@@ -117,7 +116,7 @@ function State({ item, now }: { item: InboxItem; now: number }) {
     const Icon = MARK_ICON[mark.tone];
     return (
       <span className={cn("flex flex-none items-center gap-1 text-xs", until !== null && "tabular-nums", MARK_TONE[mark.tone])}>
-        <Icon className="size-3.5 flex-none" aria-hidden="true" />{until !== null ? `${mark.label} until ${shortUntil(until)}` : mark.label}
+        <Icon className="size-3.5 flex-none" aria-hidden="true" />{until !== null ? `${mark.label} until ${snoozeEnd(until, now)}` : mark.label}
       </span>
     );
   }
@@ -129,23 +128,30 @@ function State({ item, now }: { item: InboxItem; now: number }) {
   );
 }
 
-/** Badge slots (projectBadge's slot): rose, amber, emerald, sky, violet, fuchsia; the Apple apps' InboxTone.badge. */
+/** Badge colours by badgeSlots' slot: sky, violet, emerald, teal, indigo, fuchsia, lime, cyan (500 at 15% behind 800 /
+ *  300 text); the Apple apps' InboxTone.badge. No rose or amber: they would read as the danger and Answer chips. */
 const BADGE = [
-  "bg-rose-500/15 text-rose-700 dark:text-rose-300",
-  "bg-amber-500/15 text-amber-800 dark:text-amber-300",
-  "bg-emerald-500/15 text-emerald-800 dark:text-emerald-300",
   "bg-sky-500/15 text-sky-800 dark:text-sky-300",
   "bg-violet-500/15 text-violet-800 dark:text-violet-300",
+  "bg-emerald-500/15 text-emerald-800 dark:text-emerald-300",
+  "bg-teal-500/15 text-teal-800 dark:text-teal-300",
+  "bg-indigo-500/15 text-indigo-800 dark:text-indigo-300",
   "bg-fuchsia-500/15 text-fuchsia-800 dark:text-fuchsia-300",
+  "bg-lime-500/15 text-lime-800 dark:text-lime-300",
+  "bg-cyan-500/15 text-cyan-800 dark:text-cyan-300",
 ];
+
+/** Each project's badge colour (badgeSlots over the whole inbox), set where the list is built. */
+const BadgeSlots = createContext<Map<string, number> | null>(null);
 
 /** The project as two letters on its colour, in front of the second line; the name itself is in the row's label. */
 function ProjectBadge({ project }: { project: string }) {
-  const b = projectBadge(project);
+  const slot = useContext(BadgeSlots)?.get(project);
+  if (slot === undefined) throw new Error(`no badge slot for project ${project}: is the row outside the Inbox page's BadgeSlots provider?`);
   return (
     <span aria-hidden="true" title={project}
-      className={cn("grid h-3.5 min-w-[18px] flex-none place-items-center rounded px-0.5 text-[9px] font-semibold leading-none tracking-wide", BADGE[b.slot])}>
-      {b.letters}
+      className={cn("grid h-3.5 min-w-[18px] flex-none place-items-center rounded px-0.5 text-[9px] font-semibold leading-none tracking-wide", BADGE[slot])}>
+      {projectBadge(project)}
     </span>
   );
 }
@@ -193,9 +199,15 @@ function Row({ item, now, onItem, quiet, settle }: { item: InboxItem; now: numbe
         <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
           <ProjectBadge project={item.project} />
           <span className="min-w-0 flex-1 truncate">{secondLine(item)}</span>
-          {tail.length > 0 && <span className="flex-none text-[11px] opacity-80">{tail.join(" · ")}</span>}
-          {showAgent && <AgentLogo name={logoForAgent(item.agent)} size={12} className="w-6 opacity-70 [@media(hover:hover)]:group-hover:invisible [@media(hover:hover)]:group-has-[:focus-visible]:invisible [@media(hover:hover)]:group-has-[[data-state=open]]:invisible" />}
-          {!showAgent && <span className="hidden w-6 flex-none [@media(hover:hover)]:block" aria-hidden="true" />}
+          {/* The agent's mark and name, as on the Apple apps; under the pointer the menu takes the tail's place. */}
+          {tail.length > 0 && (
+            <span className={cn("flex flex-none items-center gap-1 text-[11px] opacity-80", HIDE_ON_HOVER)}>
+              {showAgent && <AgentLogo name={logoForAgent(item.agent)} size={12} />}
+              {tail.join(" · ")}
+            </span>
+          )}
+          {/* Room for the menu under the pointer when there is no tail to give way. */}
+          {tail.length === 0 && <span className="hidden w-6 flex-none [@media(hover:hover)]:block" aria-hidden="true" />}
         </span>
       </Link>
       {settle && (
@@ -355,6 +367,7 @@ export function Inbox() {
       )}
       {!g ? (pollError ? <p role="alert" className="text-sm text-destructive">{pollError}</p> : <RowsSkeleton rows={4} />) : (
         <ShowAgent.Provider value={mixedAgents(items!)}>
+        <BadgeSlots.Provider value={badgeSlots(items!)}>
         <SettleRow.Provider value={settle}>
           <div ref={listRef} className="-mx-3 max-w-[720px]" data-inbox-column>
             {list.length === 0 ? (
@@ -377,6 +390,7 @@ export function Inbox() {
             </div>
           </div>
         </SettleRow.Provider>
+        </BadgeSlots.Provider>
         </ShowAgent.Provider>
       )}
     </AppPage>
