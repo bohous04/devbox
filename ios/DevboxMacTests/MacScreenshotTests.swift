@@ -164,11 +164,12 @@ final class MacScreenshotTests: XCTestCase {
     /// A tmux window opens on Terminal, and on Chat once Chat was the last view chosen for it (TmuxTabMemory).
     func testRememberedTab() throws {
         let id = MirrorFixtures.claudeId
-        TmuxTabMemory.shared.remember(.terminal, for: id)
+        let key = TmuxTabMemory.key(id, createdAt: MirrorFixtures.createdAt)
+        TmuxTabMemory.shared.remember(.terminal, for: key)
         try shoot(name: "remembered-terminal-light", look: "light", thread: id)
-        TmuxTabMemory.shared.remember(.chat, for: id)
+        TmuxTabMemory.shared.remember(.chat, for: key)
         try shoot(name: "remembered-chat-light", look: "light", thread: id)
-        TmuxTabMemory.shared.remember(.terminal, for: id)
+        TmuxTabMemory.shared.remember(.terminal, for: key)
     }
 
     /// The thread's heading (title and place) at a normal and a narrow width. On macOS 26 it is a plain title: a

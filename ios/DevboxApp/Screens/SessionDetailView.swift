@@ -108,14 +108,14 @@ struct SessionDetailView: View {
                     if running {
                         actionButton("Terminal", systemImage: "terminal", variant: .default) {
                             // The view a tmux session's inbox row opens next time (InboxRoute.row): this detail again.
-                            TmuxTabMemory.shared.remember(.terminal, for: session.id)
+                            rememberView(.terminal, session)
                             showTerminal = true
                         }
                             .disabled(appModel.client == nil)
                         // A chat session's thread, or a tmux session's terminal conversation (devd's mirror).
                         actionButton("Chat", systemImage: "bubble.left", variant: .outline) {
                             // A tmux session's inbox row opens straight into its chat from now on (InboxRoute.row).
-                            TmuxTabMemory.shared.remember(.chat, for: session.id)
+                            rememberView(.chat, session)
                             showChat = true
                         }
                             .disabled(appModel.client == nil)
@@ -521,6 +521,12 @@ struct SessionDetailView: View {
     private func shareLabel(_ share: ActiveShare, session: SessionLive) -> String {
         let nick = share.name?.trimmingCharacters(in: .whitespacesAndNewlines)
         return (nick?.isEmpty == false ? nick : nil) ?? session.repo
+    }
+
+    /// A tmux session's view for its inbox row (InboxRoute.row); a chat session's row always opens its thread.
+    private func rememberView(_ tab: TmuxTabMemory.Tab, _ session: SessionLive) {
+        guard session.runtime == .tmux else { return }
+        TmuxTabMemory.shared.remember(tab, for: TmuxTabMemory.key(session.id, createdAt: session.created_at))
     }
 
     /// Nickname when set and non-empty after trimming, otherwise repo — used for the navigation title

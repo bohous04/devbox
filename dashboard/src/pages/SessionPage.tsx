@@ -14,7 +14,7 @@ import { threadHeading } from "../inboxView";
 import { useStore } from "../store";
 import { activeRun, applyCommands, applyEffort, applyNotice, applyThreadEvent, criticRunIds, mergeSnapshot, queuedRunIds } from "../threadView";
 import { useEventStream } from "../useEventStream";
-import { browserStorage, openTab, rememberedTab, rememberTab, type TmuxTab } from "../tmuxTab";
+import { autoOpen, browserStorage, tabKey, type TabState, type TmuxTab, UNSETTLED, userChoose } from "../tmuxTab";
 import { mirrorComposerProps, mirrorNotice, mirrorUnsupported, sendToMirror, type MirrorLock } from "../mirrorView";
 
 // Same lazy import as TerminalPage: xterm stays in its own chunk.
@@ -29,7 +29,7 @@ function ChatPage({ id }: { id: string }) {
   const [thread, setThread] = useState<ThreadSnapshot | null>(null);
   const [loadErr, setLoadErr] = useState<{ status: number; message: string } | null>(null);
   const [seenErr, setSeenErr] = useState<string | null>(null);
-  const [tab, setTab] = useState<TmuxTab>("chat");
+  const [{ tab }, setTabState] = useState<TabState>(UNSETTLED);
   // A tmux session: its Claude transcript mirrored as the thread (devd/src/mirrorApi.ts), null for a chat session.
   const [mirror, setMirror] = useState<MirrorInfo | null>(null);
   const [sendLock, setSendLock] = useState<MirrorLock | null>(null);
@@ -47,7 +47,7 @@ function ChatPage({ id }: { id: string }) {
   useEffect(() => {
     let alive = true;
     // The tab too: another session's (now often a remembered Terminal) must not carry over to this one.
-    setThread(null); setLoadErr(null); setMirror(null); setSendLock(null); setMirrorFailed(false); setTab("chat");
+    setThread(null); setLoadErr(null); setMirror(null); setSendLock(null); setMirrorFailed(false); setTabState(UNSETTLED);
     const failed = (e: unknown) => { if (alive) setLoadErr({ status: e instanceof ApiError ? e.status : 0, message: (e as Error).message }); };
     api.thread(id).then(
       (t) => { if (alive) setThread(t); },
@@ -56,9 +56,6 @@ function ChatPage({ id }: { id: string }) {
         api.mirror(id).then((m) => {
           if (!alive) return;
           setMirror(m.mirror); setThread(m.snapshot);
-          // A tmux session opens on the tab last chosen for it here (tmuxTab.ts); Chat for an agent the mirror cannot
-          // read opens Terminal, its reason still on the Chat tab.
-          setTab(openTab(rememberedTab(browserStorage, id), m.mirror.state !== "unsupported"));
         }, (e2) => { if (alive) setMirrorFailed(true); failed(e2); });
       },
     );
@@ -125,11 +122,16 @@ function ChatPage({ id }: { id: string }) {
     return () => ro.disconnect();
   }, [loaded]);
 
+  // A tmux session's entry in this browser's remembered tabs (tmuxTab.ts), once both its mirror and its row are here.
+  const memoryKey = mirrored && session ? tabKey(id, session.created_at) : null;
+  // It opens on the tab last chosen for it; Chat for an agent the mirror cannot read opens Terminal, its reason still
+  // on the Chat tab. Once: the stream's later mirror states, or a tab the user already picked, are left alone.
+  const readable = mirror?.state !== "unsupported";
+  useEffect(() => {
+    if (memoryKey !== null) setTabState((st) => autoOpen(st, browserStorage, memoryKey, readable));
+  }, [memoryKey, readable]);
   // The user's own switch; a tmux session remembers it for next time (a chat session has no Terminal default to beat).
-  const choose = (next: TmuxTab) => {
-    setTab(next);
-    if (mirrorRef.current) rememberTab(browserStorage, id, next);
-  };
+  const choose = (next: TmuxTab) => setTabState(userChoose(browserStorage, memoryKey, next));
   const running = mirror ? mirror.activity === "busy" : thread ? activeRun(thread) !== undefined : false;
   const unsupported = mirror ? mirrorUnsupported(mirror) : null;
   const mirrorLine = mirror ? mirrorNotice(mirror, sendLock) : null;

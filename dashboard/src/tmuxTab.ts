@@ -10,8 +10,13 @@ export interface TabStorage {
   setItem(key: string, value: string): void;
 }
 
-/** Oldest choice first. A convenience of this browser: storage that refuses or holds something unreadable is said in
- *  the console and the session opens on its default, never a broken page. */
+/** A session reopened under the same id is another session: it starts on its default, not the old one's tab. */
+export function tabKey(sessionId: string, createdAt: number): string {
+  return `${sessionId}@${createdAt}`;
+}
+
+/** Oldest choice first. A convenience of this browser: storage that refuses is said in the console, and an unreadable
+ *  list is said and replaced by an empty one; the sessions open on their defaults, never a broken page. */
 function read(s: TabStorage): [string, TmuxTab][] {
   let raw: string | null;
   try { raw = s.getItem(KEY); } catch (e) { console.warn("tmux tabs: storage unavailable", e); return []; }
@@ -23,6 +28,7 @@ function read(s: TabStorage): [string, TmuxTab][] {
     }
   } catch { /* said below */ }
   console.warn("tmux tabs: unreadable stored list, starting over");
+  write(s, []);
   return [];
 }
 
@@ -36,21 +42,21 @@ export const browserStorage: TabStorage = {
   setItem: (k, v) => localStorage.setItem(k, v),
 };
 
-export function rememberedTab(s: TabStorage, sessionId: string): TmuxTab | null {
-  return read(s).find(([id]) => id === sessionId)?.[1] ?? null;
+export function rememberedTab(s: TabStorage, key: string): TmuxTab | null {
+  return read(s).find(([k]) => k === key)?.[1] ?? null;
 }
 
 /** The newest choice goes last; past the cap the least recently chosen goes. */
-export function rememberTab(s: TabStorage, sessionId: string, tab: TmuxTab): void {
-  const entries = read(s).filter(([id]) => id !== sessionId);
-  entries.push([sessionId, tab]);
+export function rememberTab(s: TabStorage, key: string, tab: TmuxTab): void {
+  const entries = read(s).filter(([k]) => k !== key);
+  entries.push([key, tab]);
   write(s, entries.slice(-MAX_REMEMBERED_TABS));
 }
 
-/** Drops sessions devd no longer has (`live`: every session it lists). Written only when something went. */
+/** Drops sessions devd no longer has (`live`: the `tabKey` of every session it lists). Written only when something went. */
 export function pruneTabs(s: TabStorage, live: Set<string>): void {
   const entries = read(s);
-  const kept = entries.filter(([id]) => live.has(id));
+  const kept = entries.filter(([k]) => live.has(k));
   if (kept.length !== entries.length) write(s, kept);
 }
 
@@ -60,4 +66,20 @@ export function pruneTabs(s: TabStorage, live: Set<string>): void {
 export function openTab(remembered: TmuxTab | null, readable: boolean): TmuxTab {
   if (remembered === "chat" && !readable) return "terminal";
   return remembered ?? "chat";
+}
+
+/** SessionPage's tab. `settled`: the user picked one, or the opening tab was applied; nothing automatic moves it then. */
+export interface TabState { tab: TmuxTab; settled: boolean }
+export const UNSETTLED: TabState = { tab: "chat", settled: false };
+
+/** The opening tab of a tmux session, once its mirror and its `tabKey` are known. Only reads: an automatic switch
+ *  never changes the stored choice. A tab the user already picked stays. */
+export function autoOpen(st: TabState, s: TabStorage, key: string, readable: boolean): TabState {
+  return st.settled ? st : { tab: openTab(rememberedTab(s, key), readable), settled: true };
+}
+
+/** The user's own switch; remembered when `key` is set (a tmux session whose `tabKey` is known). */
+export function userChoose(s: TabStorage, key: string | null, tab: TmuxTab): TabState {
+  if (key !== null) rememberTab(s, key, tab);
+  return { tab, settled: true };
 }

@@ -102,11 +102,13 @@ struct SessionLive: Decodable {
     /// The session's own git worktree, which ending the session deletes; nil = a shared workspace (repo in the old
     /// shape), which ending leaves alone (devd/src/db.ts `worktree`).
     let worktree: String?
+    /// tmux or chat (devd/src/db.ts `runtime`); nil from an older devd.
+    let runtime: InboxItem.Runtime?
 
     private enum CodingKeys: String, CodingKey {
         case id, folder, project, repo, container, port_base, status, solo, created_at,
              last_active_at, ports, claudeState, cpuPct, memBytes, workspace, important,
-             accountId, name, critic, agent, host, tainted, worktree
+             accountId, name, critic, agent, host, tainted, worktree, runtime
     }
 
     /// Custom `init(from:)`: `cpuPct`/`memBytes` tolerantly `decodeIfPresent ?? 0` — devd
@@ -138,6 +140,7 @@ struct SessionLive: Decodable {
         host = try c.decodeIfPresent(SessionHost.self, forKey: .host)
         tainted = try c.decodeIfPresent(Bool.self, forKey: .tainted)
         worktree = try c.decodeIfPresent(String.self, forKey: .worktree)
+        runtime = try c.decodeIfPresent(InboxItem.Runtime.self, forKey: .runtime)
     }
 }
 

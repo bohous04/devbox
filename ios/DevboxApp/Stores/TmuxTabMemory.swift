@@ -3,9 +3,10 @@ import os
 
 /// Which view a tmux session opens on (Chat or Terminal), remembered per session on this device: the one the user
 /// last switched to. The web keeps the same list in its localStorage (dashboard/src/tmuxTab.ts). A convenience of
-/// this device: an unreadable list is logged and started over, the sessions opening on their defaults.
+/// this device: an unreadable list is logged and replaced by an empty one, the sessions opening on their defaults.
+/// Observable, so an inbox row leads to the view chosen a moment ago (InboxRoute.row).
 @MainActor
-final class TmuxTabMemory {
+final class TmuxTabMemory: ObservableObject {
     enum Tab: String, Codable { case chat, terminal }
 
     private struct Entry: Codable {
@@ -32,7 +33,7 @@ final class TmuxTabMemory {
 
     private let defaults: UserDefaults
     /// Oldest choice first.
-    private var entries: [Entry]
+    @Published private var entries: [Entry]
 
     init(defaults: UserDefaults) {
         self.defaults = defaults
@@ -42,22 +43,26 @@ final class TmuxTabMemory {
         } catch {
             Self.logger.error("remembered tmux tabs unreadable, starting over: \(String(describing: error), privacy: .public)")
             entries = []
+            save()
         }
     }
 
-    func tab(for sessionId: String) -> Tab? {
-        entries.first { $0.id == sessionId }?.tab
+    /// A session reopened under the same id is another session: it starts on its default, not the old one's tab.
+    nonisolated static func key(_ sessionId: String, createdAt: Int) -> String { "\(sessionId)@\(createdAt)" }
+
+    func tab(for key: String) -> Tab? {
+        entries.first { $0.id == key }?.tab
     }
 
     /// The newest choice goes last; past the cap the least recently chosen goes.
-    func remember(_ tab: Tab, for sessionId: String) {
-        entries.removeAll { $0.id == sessionId }
-        entries.append(Entry(id: sessionId, tab: tab))
-        entries = Array(entries.suffix(Self.maxEntries))
+    func remember(_ tab: Tab, for key: String) {
+        var next = entries.filter { $0.id != key }
+        next.append(Entry(id: key, tab: tab))
+        entries = Array(next.suffix(Self.maxEntries))
         save()
     }
 
-    /// Drops sessions devd no longer has (`live`: every session it lists). Written only when something went.
+    /// Drops sessions devd no longer has (`live`: the `key` of every session it lists). Written only when something went.
     func prune(keeping live: Set<String>) {
         let kept = entries.filter { live.contains($0.id) }
         guard kept.count != entries.count else { return }

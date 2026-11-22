@@ -1,16 +1,20 @@
 #if DEBUG
 import Foundation
 
-/// Two tmux sessions of the `demo` set, shown through devd's mirror (`devbox://thread/<id>`): Claude Code in
-/// `dev-orchard-api-3`, which takes messages (a send is refused: text already sits in the terminal's prompt), and
-/// Codex in `dev-acme-cli`, which is read-only. Their streams are open and silent. Every name here is invented.
+/// Three tmux sessions of the `demo` set, shown through devd's mirror (`devbox://thread/<id>`): Claude Code in
+/// `dev-orchard-api-3`, which takes messages (a send is refused: text already sits in the terminal's prompt), Codex in
+/// `dev-acme-cli`, which is read-only, and Grok in `dev-lumen-sketch`, which the mirror cannot read. Their streams are
+/// open and silent. Every name here is invented.
 enum MirrorFixtures {
     static let claudeId = "dev-orchard-api-3"
     static let codexId = "dev-acme-cli"
+    static let unreadableId = "dev-lumen-sketch"
+    /// Every session's here.
+    static let createdAt = 1790000000000
 
     static let routes: [String: FixtureMode.Responder] = {
         var r: [String: FixtureMode.Responder] = [:]
-        for (id, body) in [(claudeId, claude), (codexId, codex)] {
+        for (id, body) in [(claudeId, claude), (codexId, codex), (unreadableId, grok)] {
             let base = "/api/sessions/\(id)"
             r["GET \(base)/thread"] = { _ in FixtureResponse(status: 409, body: Data(#"{"error":"not-a-chat-session"}"#.utf8)) }
             r["GET \(base)/mirror"] = { _ in FixtureResponse(body: Data(body.utf8)) }
@@ -37,11 +41,21 @@ enum MirrorFixtures {
     {"id":"dev-orchard-api-3","folder":"orchard","project":"orchard","repo":"api","container":"dev-orchard-api-3",
      "port_base":40200,"status":"running","solo":0,"created_at":1790000000000,"last_active_at":1790000600000,"important":0,
      "name":null,"critic":0,"agent":"claude","ports":[],"claudeState":"idle","cpuPct":0,"memBytes":0,
-     "workspace":"/workspace","accountId":null},
+     "workspace":"/workspace","accountId":null,"runtime":"tmux"},
     {"id":"dev-acme-cli","folder":"acme","project":"acme","repo":"cli","container":"dev-acme-cli",
      "port_base":40300,"status":"running","solo":0,"created_at":1790000000000,"last_active_at":1790000600000,"important":0,
      "name":null,"critic":0,"agent":"codex","ports":[],"claudeState":"idle","cpuPct":0,"memBytes":0,
-     "workspace":"/workspace","accountId":null}
+     "workspace":"/workspace","accountId":null,"runtime":"tmux"},
+    {"id":"dev-lumen-sketch","folder":"lumen","project":"lumen","repo":"sketch","container":"dev-lumen-sketch",
+     "port_base":40400,"status":"running","solo":0,"created_at":1790000000000,"last_active_at":1790000600000,"important":0,
+     "name":null,"critic":0,"agent":"grok","ports":[],"claudeState":"idle","cpuPct":0,"memBytes":0,
+     "workspace":"/workspace","accountId":null,"runtime":"tmux"}
+    """#
+
+    private static let grok = #"""
+    {"mirror":{"state":"unsupported","agent":"Grok","conversationId":null,"activity":null,"terminalPrompt":null,
+      "sendBlock":{"code":"unsupported-agent","message":"Chat view isn't supported for Grok yet."}},
+     "snapshot":{"lastSeq":0,"seenSeq":0,"pending":[],"background":[],"native":null,"runs":[],"items":[]}}
     """#
 
     private static let claude = #"""

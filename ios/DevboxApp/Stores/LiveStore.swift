@@ -114,7 +114,7 @@ final class LiveStore: ObservableObject {
         case .success(let value):
             live = value
             // The list holds every session devd has: a remembered tab of any other is for a session that ended.
-            TmuxTabMemory.shared.prune(keeping: Set(value.sessions.map(\.id)))
+            TmuxTabMemory.shared.prune(keeping: Set(value.sessions.map { TmuxTabMemory.key($0.id, createdAt: $0.created_at) }))
         case .failure(let error) where !isCancellation(error): errorMessage = errorText(error)
         case .failure: break
         }
