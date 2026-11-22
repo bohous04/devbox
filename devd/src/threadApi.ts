@@ -245,6 +245,14 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
   const requestOpen = (c: Context, s: SessionRow): Response | null =>
     d.inbox.item(s).attention.reason === "request" ? c.json({ error: "request-open", message: REQUEST_OPEN }, 409) : null;
   const noUsage = (c: Context) => c.json({ error: "usage limits are not configured" }, 503);
+  /** A tmux session has no thread to mark up to a seq (chat: /thread/seen): the owner looked at it now. */
+  app.post("/api/sessions/:id/seen", (c) => {
+    const r = anySession(c, c.req.param("id"));
+    if ("res" in r) return r.res;
+    if (storedRuntime(r.s) !== "tmux") return c.json({ error: "not-a-tmux-session" }, 409);
+    d.inbox.seen(r.s.id);
+    return c.body(null, 204);
+  });
   /** Each answers the session's new inbox item. */
   app.post("/api/sessions/:id/settle", (c) => {
     const r = anySession(c, c.req.param("id"));

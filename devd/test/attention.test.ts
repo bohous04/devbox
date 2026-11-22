@@ -148,6 +148,23 @@ test("tmux attention follows the hub's live state", () => {
   expect(tmuxAttention(null)).toEqual({ section: "idle", reason: null, since: 0 });
 });
 
+test("tmux done and failed are needs-you until seen at or after statusSince; a request is not cleared by seen", () => {
+  const live = (status: AgentLiveSnapshot["status"]): AgentLiveSnapshot =>
+    ({ status, body: "", reason: null, startedAt: 1, updatedAt: 9, statusSince: 5 });
+  // Seen before this state began: an older look does not cover it.
+  expect(tmuxAttention(live("done"), null, 0, 4)).toEqual({ section: "needs_you", reason: "completed", since: 5 });
+  expect(tmuxAttention(live("failed"), null, 0, 4)).toEqual({ section: "needs_you", reason: "failed", since: 5 });
+  for (const seenAt of [5, 6]) {
+    expect(tmuxAttention(live("done"), null, 0, seenAt)).toEqual({ section: "idle", reason: null, since: 5 });
+    expect(tmuxAttention(live("failed"), null, 0, seenAt)).toEqual({ section: "idle", reason: null, since: 5 });
+    expect(tmuxAttention(live("waiting"), null, 0, seenAt)).toEqual({ section: "needs_you", reason: "request", since: 5 });
+    expect(tmuxAttention(live("working"), null, 0, seenAt)).toEqual({ section: "working", reason: "running", since: 5 });
+  }
+  // A seen run still shows its PR's CI, as in chat.
+  expect(tmuxAttention(live("done"), { checks: "pending", since: 7 }, 0, 6)).toEqual({ section: "working", reason: "pr-checks", since: 7 });
+  expect(tmuxAttention(live("failed"), { checks: "failure", since: 7 }, 0, 6)).toEqual({ section: "needs_you", reason: "ci-failed", since: 7 });
+});
+
 test("a bridge log behind the store is needs-you", () => {
   const s = thread([started("r1"), completed("r1")]);
   s.markSeen(2);

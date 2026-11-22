@@ -8,7 +8,7 @@ import type { CodexView } from "../src/codexPoller";
 import { ChatHub } from "../src/chatHub";
 import {
   deleteSession, getSession, getSessionAttention, insertLease, insertSession, listNotifyLog, listSessions, openDb, upsertAccountUsage,
-  putSessionAttention, type SessionRow,
+  getTmuxSeenAt, putSessionAttention, type SessionRow,
 } from "../src/db";
 import { EventBus } from "../src/eventBus";
 import { AUTO_SETTLE_IDLE_MS, hubShelfDeps, resetDeps, untilReset, type ResetDeps } from "../src/sessionAttention";
@@ -311,6 +311,48 @@ test("an ended session's settle state is deleted with it", () => {
   t.inbox.settle(TMUX.id, "manual");
   deleteSession(t.db, TMUX.id);
   expect(getSessionAttention(t.db, TMUX.id)).toBeNull();
+});
+
+// --- tmux seen marker ---
+
+test("a finished tmux session is Done until seen; the next finish is Done again", () => {
+  const t = setup();
+  const tmux = getSession(t.db, TMUX.id)!;
+  t.hub.handle(tmux, "user_prompt_submit");
+  t.tick(1000);
+  t.hub.handle(tmux, "stop");
+  t.tick(2000);
+  t.hub.sweep();
+  expect(t.inbox.item(tmux).attention).toMatchObject({ section: "needs_you", reason: "completed" });
+  t.tick(1000);
+  t.inbox.seen(TMUX.id);
+  expect(t.published.at(-1)).toMatchObject({ sessionId: TMUX.id, attention: { section: "idle", reason: null } });
+  expect(getTmuxSeenAt(t.db, TMUX.id)).toBe(t.now());
+  t.tick(1000);
+  t.hub.handle(tmux, "user_prompt_submit");
+  t.tick(1000);
+  t.hub.handle(tmux, "stop");
+  t.tick(2000);
+  t.hub.sweep();
+  expect(t.section(TMUX.id)).toBe("needs_you");
+});
+
+test("a tmux failure stays needs-you until seen", () => {
+  const t = setup();
+  const tmux = getSession(t.db, TMUX.id)!;
+  t.hub.handle(tmux, "user_prompt_submit");
+  t.hub.handle(tmux, "stop_failure");
+  t.tick(60_000);
+  expect(t.inbox.item(tmux).attention).toMatchObject({ section: "needs_you", reason: "failed" });
+  t.inbox.seen(TMUX.id);
+  expect(t.section(TMUX.id)).toBe("idle");
+});
+
+test("a reused session id does not inherit the seen marker", () => {
+  const t = setup();
+  t.inbox.seen(TMUX.id);
+  deleteSession(t.db, TMUX.id);
+  expect(getTmuxSeenAt(t.db, TMUX.id)).toBeNull();
 });
 
 // --- until reset ---

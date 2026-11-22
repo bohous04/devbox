@@ -245,6 +245,10 @@ export function openDb(path: string): Database {
   db.run(`CREATE TABLE IF NOT EXISTS session_attention (
     session_id TEXT PRIMARY KEY, settled_at INTEGER, settled_reason TEXT,
     snooze_until INTEGER, snooze_kind TEXT, updated_at INTEGER NOT NULL)`);
+  // When the owner last looked at a tmux session (POST /api/sessions/:id/seen): a done or failed state that began at
+  // or before it is seen (tmuxAttention). Chat sessions keep theirs in the thread store (seenSeq). Deleted with the
+  // session (deleteSession).
+  db.run(`CREATE TABLE IF NOT EXISTS tmux_seen (session_id TEXT PRIMARY KEY, seen_at INTEGER NOT NULL)`);
   // The PR of a session's pushed branch as the PR watch last saw it (prWatch.ts). Kept across devd restarts so a
   // CI failure is notified once and a merge settles once. One row per session, deleted with it (deleteSession).
   // First deploy of the PR watch: the table is new, so PRs that are already failing or merged are not news. The
@@ -722,6 +726,7 @@ export function deleteSession(db: Database, id: string): void {
   db.query(`DELETE FROM sessions WHERE id=?`).run(id);
   // A later session may get the same id: it must not start settled or snoozed.
   db.query(`DELETE FROM session_attention WHERE session_id=?`).run(id);
+  db.query(`DELETE FROM tmux_seen WHERE session_id=?`).run(id);
   db.query(`DELETE FROM session_prs WHERE session_id=?`).run(id);
   // An undelivered first message must not reach a later session that reuses the id.
   db.query(`DELETE FROM pending_first_turns WHERE session_id=?`).run(id);
@@ -1176,6 +1181,14 @@ export function snoozedSessionIds(db: Database, now: number): string[] {
 export function putSessionAttention(db: Database, r: SessionAttentionRow): void {
   db.query(`INSERT OR REPLACE INTO session_attention (session_id,settled_at,settled_reason,snooze_until,snooze_kind,updated_at)
     VALUES (?,?,?,?,?,?)`).run(r.session_id, r.settled_at, r.settled_reason, r.snooze_until, r.snooze_kind, r.updated_at);
+}
+
+/** When the owner last looked at the tmux session; null = never. */
+export function getTmuxSeenAt(db: Database, sessionId: string): number | null {
+  return (db.query(`SELECT seen_at FROM tmux_seen WHERE session_id=?`).get(sessionId) as { seen_at: number } | null)?.seen_at ?? null;
+}
+export function setTmuxSeenAt(db: Database, sessionId: string, at: number): void {
+  db.query(`INSERT OR REPLACE INTO tmux_seen (session_id,seen_at) VALUES (?,?)`).run(sessionId, at);
 }
 
 export type PrStatus = "open" | "merged" | "closed";
