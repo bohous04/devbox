@@ -393,7 +393,8 @@ final class ThreadStore: ObservableObject {
     }
 
     /// Back from the background: what changed after our seq, then the stream again from the new seq.
-    func resume() async {
+    /// `look: false` when the caller marks the look itself (the Mac, on the window becoming key).
+    func resume(look: Bool = true) async {
         guard !ended else { return }
         stop()
         guard let t = thread else { return await start() }
@@ -414,7 +415,7 @@ final class ThreadStore: ObservableObject {
         }
         guard wantsStream else { return }
         openStream()
-        markSeen(look: true)
+        if look { markSeen(look: true) }
     }
 
     private func load() async {

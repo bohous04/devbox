@@ -15,7 +15,9 @@ final class ThreadWindowsTests: XCTestCase {
         defaults = UserDefaults(suiteName: suite)
         directory = FileManager.default.temporaryDirectory.appendingPathComponent(suite)
         MockURLProtocol.capturedRequests = []
-        MockURLProtocol.handler = nil
+        // Opening a thread posts a look (thread/seen) even when nothing is new; a request left unanswered (no handler)
+        // makes URLSession trap, so every test answers 204 unless it says otherwise.
+        MockURLProtocol.handler = { _ in .init(statusCode: 204) }
     }
 
     override func tearDown() {

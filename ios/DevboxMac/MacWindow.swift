@@ -770,7 +770,7 @@ enum MacTone {
 
 /// Turns off AppKit window restoration for the window hosting this view. One path for macOS 14 and 15+
 /// (`restorationBehavior(.disabled)` is a macOS 15 scene modifier).
-private struct WindowConfigurator: NSViewRepresentable {
+struct WindowConfigurator: NSViewRepresentable {
     let configure: (NSWindow) -> Void
 
     func makeNSView(context: Context) -> NSView { Probe(configure: configure) }

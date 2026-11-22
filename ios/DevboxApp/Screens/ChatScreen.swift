@@ -13,6 +13,13 @@ struct ChatScreen: View {
     @State private var terminalSheet = TerminalSheet()
     /// The user's switch made before the mirror and the live list said which tmux session this is; stored once they do.
     @State private var pendingTab: TmuxTabMemory.Tab?
+    #if os(macOS)
+    /// macOS does not move `scenePhase` when the owner switches to another app or window and back; the window becomes
+    /// key again (also when the app is activated: its key window resigns on deactivation). That is the look.
+    @State private var hostWindow: NSWindow?
+    /// The window was key before: becoming key again is a return. The first time is its opening, which start() marks.
+    @State private var wasKey = false
+    #endif
     @State private var atEnd = true
     @State private var wentAway = false
     /// On screen (not under a pushed screen or another tab): only then does coming back reopen the stream.
@@ -166,13 +173,33 @@ struct ChatScreen: View {
                 store.stop()
             } else if phase == .active, wentAway, visible {
                 wentAway = false
+                // On the Mac the window becoming key is the look (below), once.
+                #if os(macOS)
+                Task { await store.resume(look: false) }
+                #else
                 Task { await store.resume() }
+                #endif
             } else if phase == .active, visible {
-                // Back to the app or window without it going to the background (Mac: another app was in front):
-                // a look, which restarts devd's auto-settle clock. resume() above looks on its own.
+                // Back to the app without it going to the background (Control Center, a call): a look, which restarts
+                // devd's auto-settle clock. resume() above looks on its own.
+                #if os(iOS)
                 store.markSeen(look: true)
+                #endif
             }
         }
+        #if os(macOS)
+        .background(WindowConfigurator { w in
+            DispatchQueue.main.async {
+                hostWindow = w
+                if w.isKeyWindow { wasKey = true }
+            }
+        })
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { n in
+            guard let w = n.object as? NSWindow, w === hostWindow else { return }
+            if wasKey, visible { store.markSeen(look: true) }
+            wasKey = true
+        }
+        #endif
     }
 
     /// The header's state. A tmux session's comes from devd's look at the pane, as the web's: its transcript has no
