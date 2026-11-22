@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "../src/sessions";
@@ -100,6 +100,10 @@ test("end() keeps the thread and its images as an ended transcript and announces
     const img = "00000000-0000-4000-8000-000000000000.png";
     mkdirSync(join(root, "_inbox", "dev-a-b"), { recursive: true });
     writeFileSync(join(root, "_inbox", "dev-a-b", img), "x");
+    // The Claude conversation the container kept in its projects dir: continue resumes it from the archive.
+    const thread = "0b1c2d3e-0000-4000-8000-000000000001";
+    mkdirSync(join(root, "_claude-projects", "dev-a-b"), { recursive: true });
+    writeFileSync(join(root, "_claude-projects", "dev-a-b", `${thread}.jsonl`), "{}\n");
     const store = ThreadStore.open(root, "dev-a-b");
     store.apply({ seq: 1, ts: 1, event: { type: "message.final", runId: "r1", itemId: "u1", role: "user", text: "Tidy the readme" } });
     store.close();
@@ -120,6 +124,7 @@ test("end() keeps the thread and its images as an ended transcript and announces
     const dir = join(root, "_chat-archive", "dev-a-b-20261120-101500");
     expect(existsSync(join(dir, "dev-a-b.sqlite"))).toBe(true);
     expect(existsSync(join(dir, "images", img))).toBe(true);
+    expect(readFileSync(join(dir, `${thread}.jsonl`), "utf8")).toBe("{}\n");
     expect(existsSync(join(root, "_inbox", "dev-a-b"))).toBe(false);
     expect(ended.map((e) => [e.id, e.topic, e.runtime])).toEqual([["dev-a-b-20261120-101500", "Tidy the readme", "chat"]]);
     expect(listEnded(db)).toEqual(ended);

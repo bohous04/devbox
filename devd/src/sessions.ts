@@ -57,6 +57,9 @@ export class ExternalStartError extends Error {
 export const MAX_FIRST_PROMPT_BYTES = 64_000;
 
 /** A first prompt that would not reach the agent: refused before anything changes (POST /api/sessions answers 409). */
+/** An ended Claude conversation a new session starts on (endedSessions.ts continuePlan). */
+export interface ResumeSeed { thread: string; jsonl: Buffer }
+
 export class FirstPromptRefused extends Error {
   constructor(message: string) { super(message); this.name = "FirstPromptRefused"; }
 }
@@ -632,6 +635,30 @@ export class SessionManager {
     } catch (e) { console.error(`listing the ended transcript of ${id} (${dest}) failed:`, e); }
   }
 
+  /** A new session that continues an ended Claude conversation (POST /api/ended/:id/continue): the conversation's jsonl
+   *  goes into the session's Claude projects dir and `/run/devd/resume` tells agent-launch.sh (tmux) or the bridge
+   *  (chat) to start on it, once. Without one, a file an older image left unread for an earlier session with this id is
+   *  removed. Runs before the container does. */
+  private async syncResumeFile(id: string, resume?: ResumeSeed): Promise<void> {
+    const dir = this.ensureControlDir(id);
+    if (!resume) { rmSync(join(dir, "resume"), { force: true }); return; }
+    const projects = await this.ensureClaudeProjectsDir(id);
+    const owner = process.getuid?.() === 0 ? { owner: { uid: 1000, gid: 1000 } } : {};
+    // Claude Code appends to it as the conversation goes on: the agent's file.
+    withDir(projects, [], false, (d) => writeFileAt(d, `${resume.thread}.jsonl`, resume.jsonl, { mode: 0o600, replace: true, ...owner }));
+    withDir(dir, [], false, (d) => writeFileAt(d, "resume", `claude ${resume.thread}\n`, { mode: 0o666, replace: true }));
+  }
+
+  /** Why the session image cannot start a session on an ended conversation, null when it can. An image built before
+   *  agent-launch.sh and the bridge read /run/devd/resume lacks the `devbox.resume-file` label (image/Dockerfile);
+   *  continue then hands off instead and says so. */
+  async resumeImageBlock(): Promise<string | null> {
+    const r = await sh("/", "docker", "image", "inspect", "--format", '{{ index .Config.Labels "devbox.resume-file" }}', this.d.image);
+    if (r.code !== 0) return `the session image ${this.d.image} could not be inspected: ${r.stderr.trim()}`;
+    if (r.stdout.trim() === "1") return null;
+    return `the session image ${this.d.image} predates resuming ended conversations; new sessions get it after the next devbox-update image rebuild`;
+  }
+
   private claudeProjectsDir(id: string) {
     return join(this.d.root, "_claude-projects", id);
   }
@@ -929,7 +956,7 @@ export class SessionManager {
   /** `sessionId`: open (resume/attach) EXACTLY this existing session of the repo, not the one
    *  existingSessionId would pick — e.g. a paused InstaBox session when the repo also has a VPS
    *  session (smoke test, M8). Never creates a new one. */
-  async open(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; joinRuntimes?: SessionRuntime[]; fresh?: boolean; sessionId?: string; requestId?: string }) {
+  async open(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; joinRuntimes?: SessionRuntime[]; fresh?: boolean; sessionId?: string; requestId?: string; resume?: ResumeSeed }) {
     // The repo key while the id is not known (a new session only gets it here); then also the id,
     // so open does not collide with stop/end/recreate of the same existing session.
     return this.locked([openKey(t)], "open", async () => {
@@ -966,7 +993,7 @@ export class SessionManager {
   // repo: 14 s → the sidecar alone ~3 s of it). openUnlocked still awaits it before the session
   // container runs, so "docker works from the first command" holds. When the open fails before
   // the container exists, the sidecar would be an orphaned privileged container — removed here.
-  private async openWithEarlyDind(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string; requestId?: string }, id: string) {
+  private async openWithEarlyDind(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string; requestId?: string; resume?: ResumeSeed }, id: string) {
     const fresh = !t.sessionId && !getSession(this.d.db, id);   // sessionId never creates (see open)
     const dind = fresh && this.d.dind ? this.ensureDind(id).catch((e) => { console.error(`dind for ${id} failed:`, e); }) : undefined;
     try {
@@ -977,7 +1004,7 @@ export class SessionManager {
     }
   }
 
-  private async openUnlocked(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string; requestId?: string }, id: string, earlyDind?: Promise<void>) {
+  private async openUnlocked(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string; requestId?: string; resume?: ResumeSeed }, id: string, earlyDind?: Promise<void>) {
     const ws = workspacePath(this.d.root, t.folder, t.project, t.repo);
     const existing = getSession(this.d.db, id);
     // The session ended in the meantime (or belongs to another repo) → an error, not a silent new session with the same id.
@@ -988,6 +1015,8 @@ export class SessionManager {
     const journal = () => existsSync(join(this.controlDir(id), "recovery", "latest.json"));
     const refusedEarly = t.firstPrompt === undefined ? null : firstPromptRefusal(existing, t.runtime, "missing", journal());
     if (refusedEarly) throw new FirstPromptRefused(refusedEarly);
+    // A resume seeds the conversation before the agent's first start: only a session created now has one ahead.
+    if (t.resume && existing) throw new Error(`session ${id} already exists; a resumed conversation needs a new session`);
     if (existing?.host === "instabox") return this.openInstabox(existing, t);
     const agent = resolveAgent(t.agent, getRepoAgent(this.d.db, t.folder, t.project, t.repo));
     // The stored runtime wins over the request: a chat session must not be handed an agent the chat
@@ -1141,6 +1170,7 @@ export class SessionManager {
     const pull = await pullWithRebase(dir, authEnv);
     progress({ step: "container", detail: "setting file ownership" });
     const claudePrompt = this.syncPromptFile(id, existing ? storedRuntime(existing) : (t.runtime ?? "tmux"), pull, t.prompt, t.firstPrompt);
+    if (!existing) await this.syncResumeFile(id, t.resume);
     if (pull.status === "conflict") {
       logEvent(this.d.db, id, "pull-conflict", { files: pull.files });
       this.d.notify?.("devbox", `${t.project}/${t.repo}: pull conflict — Claude is resolving it`);

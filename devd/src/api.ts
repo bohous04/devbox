@@ -59,7 +59,7 @@ import { readUpload, UploadError } from "./uploads";
 import { InboxNameError, stageFile, stageShared } from "./inbox";
 import { registerThreadRoutes, type ThreadApiDeps } from "./threadApi";
 import { registerEndedRoutes } from "./endedApi";
-import { continueMode, getEnded, handoffPrompt, writeHandoffTranscript } from "./endedSessions";
+import { continueMode, continuePlan, getEnded, handoffPrompt, writeHandoffTranscript } from "./endedSessions";
 import type { ContinueResult } from "../../shared/ended";
 import { stageThreadImage, ThreadImageError } from "./threadImages";
 import type { SshKeyRef } from "./op";
@@ -1169,8 +1169,9 @@ export function createApp(d: ApiDeps): Hono {
     }
   });
 
-  /** Continues an ended session's work in a new session of the same repo, agent and runtime (endedSessions.ts). The
-   *  response says how: `handoff` (the new session's first message points at the whole transcript). */
+  /** Continues an ended session's work in a new session of the same repo, agent and runtime (endedSessions.ts
+   *  continuePlan). The response says how: `resume` (Claude Code starts on the ended conversation) or `handoff` (the new
+   *  session's first message points at the whole transcript), and `reason` why a resume became a handoff. */
   app.post("/api/ended/:id/continue", async (c) => {
     noIdleTimeout(c);
     const row = getEnded(d.db, c.req.param("id"));
@@ -1183,14 +1184,21 @@ export function createApp(d: ApiDeps): Hono {
       if (blocked) return c.json({ error: blocked }, 409);
       if (!d.links) return c.json({ error: "chat sessions cannot take a first message here (no bridge link)" }, 503);
     }
-    const mode = continueMode(row);
-    let prompt: string;
-    try { prompt = handoffPrompt(row, writeHandoffTranscript(d.root, row).container); }
-    catch (e) { return c.json({ error: `the transcript of ${row.id} could not be read: ${(e as Error).message}` }, 500); }
+    // The image check only where a resume is in question: it asks docker.
+    const plan = continuePlan(row, continueMode(row) === "resume" ? await d.mgr.resumeImageBlock() : null);
+    let prompt: string | undefined;
+    if (plan.mode === "handoff") {
+      try { prompt = handoffPrompt(row, writeHandoffTranscript(d.root, row).container, plan.reason); }
+      catch (e) { return c.json({ error: `the transcript of ${row.id} could not be read: ${(e as Error).message}` }, 500); }
+    }
     try {
-      const r = await d.mgr.open({ folder: row.folder, project: row.project, repo: row.repo, agent: row.agent, runtime: row.runtime, fresh: true, ...(row.runtime === "tmux" ? { firstPrompt: prompt } : {}) });
+      const r = await d.mgr.open({
+        folder: row.folder, project: row.project, repo: row.repo, agent: row.agent, runtime: row.runtime, fresh: true,
+        ...(plan.mode === "resume" ? { resume: { thread: plan.thread, jsonl: plan.jsonl } } : {}),
+        ...(row.runtime === "tmux" && prompt !== undefined ? { firstPrompt: prompt } : {}),
+      });
       linkOpenedChat(r, row.runtime === "chat" ? prompt : undefined);
-      const out: ContinueResult = { mode, sessionId: r.session.id, runtime: row.runtime };
+      const out: ContinueResult = { mode: plan.mode, sessionId: r.session.id, runtime: row.runtime, reason: plan.mode === "handoff" ? plan.reason : null };
       return c.json(out, 201);
     } catch (e) {
       if (e instanceof FirstPromptRefused) return c.json({ error: e.message }, 409);

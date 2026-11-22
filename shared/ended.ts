@@ -34,4 +34,7 @@ export interface ContinueResult {
   mode: ContinueMode;
   sessionId: string;
   runtime: "tmux" | "chat";
+  /** Why a conversation that should have resumed was handed off instead (no jsonl, an image that predates resume);
+   *  null when it resumed, or when resume does not exist for its agent. The new session's first message says it too. */
+  reason: string | null;
 }

@@ -3,7 +3,7 @@
 // it in Settled until it is hidden or purged, 30 days after the end. Continuing one opens a new session in the same
 // repo (api.ts, POST /api/ended/:id/continue).
 import type { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants as C, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ContinueMode, EndedSession } from "../../shared/ended";
 import type { ThreadItem } from "../../shared/thread";
@@ -24,10 +24,49 @@ export interface EndedRow {
 
 const clip = (t: string, max: number) => (t.length > max ? `${t.slice(0, max)}…` : t);
 
-/** What continue does for this transcript. No path starts a new session on an old native conversation yet, so every
- *  transcript continues by handoff; the resume handle (native_harness/native_thread) is recorded for when one does. */
-export function continueMode(_row: EndedRow): ContinueMode {
-  return "handoff";
+const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** How continue goes on with this transcript. `resume`: Claude Code starts on the ended session's own conversation,
+ *  whose jsonl `end()` archived with the transcript (chatArchive.ts); continue copies it into the new session.
+ *  `handoff`: the new session's first message points at the whole transcript. `reason` says why a Claude conversation
+ *  that should resume does not; it is null where resume is not wired (Codex, the other agents). */
+export type ContinuePlan = { mode: "resume"; thread: string; jsonl: Buffer } | { mode: "handoff"; reason: string | null };
+
+/** Why this transcript cannot resume, without reading the conversation: null when it can (as far as the archive
+ *  shows); `wired: false` when resume does not exist for its agent at all. */
+function resumeBlock(row: EndedRow): { wired: boolean; reason: string } | null {
+  if (row.native_harness !== "claude" || row.agent !== "claude" || row.native_thread === null || !THREAD_ID.test(row.native_thread)) {
+    return { wired: false, reason: "" };
+  }
+  const file = join(row.archive_dir, `${row.native_thread}.jsonl`);
+  let st;
+  try { st = lstatSync(file); } catch { return { wired: true, reason: `the Claude conversation ${row.native_thread} is not in the archive` }; }
+  // The archive was the agent's own directory: a link there could point anywhere on the host.
+  if (!st.isFile()) return { wired: true, reason: `the Claude conversation file ${row.native_thread}.jsonl could not be read: it is not a regular file` };
+  return null;
+}
+
+/** What the inbox and the transcript's button say continue will do (the button names the mode). */
+export function continueMode(row: EndedRow): ContinueMode {
+  return resumeBlock(row) === null ? "resume" : "handoff";
+}
+
+/** The plan continue carries out. `imageBlock`: why the session image cannot take a resume (an image built before
+ *  it could), null when it can. The conversation is read here, once, without following a link. */
+export function continuePlan(row: EndedRow, imageBlock: string | null): ContinuePlan {
+  const block = resumeBlock(row);
+  if (block !== null) return { mode: "handoff", reason: block.wired ? block.reason : null };
+  if (imageBlock !== null) return { mode: "handoff", reason: imageBlock };
+  const thread = row.native_thread!;
+  try {
+    const fd = openSync(join(row.archive_dir, `${thread}.jsonl`), C.O_RDONLY | C.O_NOFOLLOW);
+    try {
+      if (!fstatSync(fd).isFile()) throw new Error("not a regular file");
+      return { mode: "resume", thread, jsonl: readFileSync(fd) };
+    } finally { closeSync(fd); }
+  } catch (e) {
+    return { mode: "handoff", reason: `the Claude conversation file ${thread}.jsonl could not be read: ${(e as Error).message}` };
+  }
 }
 
 export function toEnded(r: EndedRow): EndedSession {
@@ -151,12 +190,14 @@ export function writeHandoffTranscript(root: string, row: EndedRow): { host: str
 }
 
 /** The new session's first message: what the ended session was about, its last message and where the rest is. */
-export function handoffPrompt(row: EndedRow, transcriptPath: string): string {
+/** `notResumed`: why the ended Claude conversation itself could not be resumed (continuePlan), said first. */
+export function handoffPrompt(row: EndedRow, transcriptPath: string, notResumed: string | null = null): string {
   // What reaches the agent is devd's own text; the quoted parts came from the agent and may carry control characters.
   // eslint-disable-next-line no-control-regex -- the point of the replace
   const plain = (t: string) => t.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, " ");
   const where = `${row.project}/${row.repo}${row.branch ? `, branch ${row.branch}` : ""}`;
   return [
+    ...(notResumed ? [`(The earlier conversation could not be resumed: ${plain(notResumed)}. This is a handoff instead.)`] : []),
     `This session continues an earlier one that has ended: "${plain(row.title)}" (${where}).`,
     ...(row.topic ? [`It started with: ${plain(row.topic)}`] : []),
     ...(row.last_text ? [`Its last message was: ${plain(row.last_text)}`] : []),

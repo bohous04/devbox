@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { ACP_AGENTS, isAcpAgent } from "./acpAgents";
 import { openAcpSession } from "./acpSession";
@@ -91,6 +91,27 @@ export interface ServeOptions {
   logCompactMinBytes?: number;
   /** Answers devd's hello nonce (server.ts); none serves unbound. */
   binding?: { session: string; secret: string } | null;
+  /** devd's one-time `<harness> <thread id>` for a session that continues an ended one (POST /api/ended/:id/continue):
+   *  the first start resumes that thread. Consumed at every start. */
+  resumeFile?: string;
+}
+
+/** Where devd leaves the thread a new session continues (devd/src/sessions.ts, also read by agent-launch.sh). */
+export const DEFAULT_RESUME_FILE = "/run/devd/resume";
+const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Reads and removes the resume file. `thread`: what to resume; `notice`: what bridge.started says about it. Only a
+ *  first start (`fresh`) uses it: a bridge with state already has its thread. */
+function takeResumeFile(path: string, harness: Harness, fresh: boolean): { thread: string | null; notice: string | null } {
+  let text: string;
+  try { text = readFileSync(path, "utf8"); } catch { return { thread: null, notice: null }; }
+  rmSync(path, { force: true });
+  if (!fresh) return { thread: null, notice: null };
+  const [h, id] = text.trim().split(/\s+/);
+  if (h === harness && id !== undefined && THREAD_ID.test(id)) {
+    return { thread: id, notice: `This session continues ${harness === "claude" ? "Claude" : harness} conversation ${id} of an ended session.` };
+  }
+  return { thread: null, notice: `The ended session's conversation was not resumed: devd asked for ${JSON.stringify(text.trim().slice(0, 80))}, which this ${harness} bridge cannot open; a new conversation starts.` };
 }
 
 export interface Bridge {
@@ -200,6 +221,7 @@ export interface ServeConfig {
   socketPath: string;
   /** From DEVD_SESSION_ID and DEVD_BRIDGE_SECRET; null when devd gave no secret. */
   binding: { session: string; secret: string } | null;
+  resumeFile: string;
 }
 
 function bindingFromEnv(env: Env): ServeConfig["binding"] {
@@ -235,6 +257,7 @@ export function serveConfigFromEnv(env: Env): ServeConfig {
     model: env.DEVD_AGENT_MODEL ? env.DEVD_AGENT_MODEL : null,
     bridgeDir: env.DEVD_BRIDGE_DIR ?? DEFAULT_BRIDGE_DIR,
     socketPath: env.DEVD_AGENT_SOCK ?? DEFAULT_SOCKET,
+    resumeFile: env.DEVD_RESUME_FILE ?? DEFAULT_RESUME_FILE,
     binding: bindingFromEnv(env),
   };
 }
@@ -342,7 +365,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   const statePath = join(o.bridgeDir, "state.json");
   const log = new EventLog(join(o.bridgeDir, "events.jsonl"), { logError, ...(o.logCompactMinBytes === undefined ? {} : { compactMinBytes: o.logCompactMinBytes }) });
   let loaded: BridgeState | null;
-  /** Said in this start's `bridge.started` when state.json had to be rebuilt. */
+  /** Said in this start's `bridge.started` when state.json had to be rebuilt, or about devd's resume file. */
   let recoveryNotice: string | null = null;
   try {
     loaded = loadState(statePath);
@@ -362,9 +385,12 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   if (loaded && loaded.target === null && !loaded.awaitingTarget && loaded.harness !== o.harness) {
     throw new ConfigError(`state.json belongs to a ${loaded.harness} thread but DEVD_AGENT is ${o.harness}; refusing to mix threads`);
   }
+  const resume = o.resumeFile === undefined ? { thread: null, notice: null } : takeResumeFile(o.resumeFile, o.harness, loaded === null);
+  if (resume.thread === null && resume.notice !== null) logError(`agent-bridge: ${resume.notice}`);
+  if (resume.notice !== null) recoveryNotice = recoveryNotice === null ? resume.notice : `${recoveryNotice} ${resume.notice}`;
   const state: BridgeState = loaded ?? {
     harness: o.harness,
-    nativeThreadId: null,
+    nativeThreadId: resume.thread,
     account: o.account,
     model: o.model,
     activeRunId: null,

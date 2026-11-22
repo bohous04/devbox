@@ -28,7 +28,11 @@ const CONVO: BridgeEvent[] = [
   { type: "run.completed", runId: "r1", nativeThreadId: "n", usage: null, costUsd: null },
 ];
 
-function setup(o: { runtime?: "chat" | "tmux"; remote?: string; open?: (t: Record<string, unknown>) => Promise<unknown> } = {}) {
+const THREAD = "0b1c2d3e-0000-4000-8000-000000000001";
+
+/** `claude`: the session's Claude conversation (thread.native) and its jsonl in the archive; `imageBlock`: what devd
+ *  says about an image that cannot take a resume. */
+function setup(o: { runtime?: "chat" | "tmux"; remote?: string; open?: (t: Record<string, unknown>) => Promise<unknown>; claude?: boolean; imageBlock?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), "ended-api-"));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const db = openDb(":memory:");
@@ -36,8 +40,10 @@ function setup(o: { runtime?: "chat" | "tmux"; remote?: string; open?: (t: Recor
   mkdirSync(join(dir, "images"), { recursive: true });
   writeFileSync(join(dir, "images", IMG), png(1, 1));
   const store = ThreadStore.openFile(join(dir, o.runtime === "tmux" ? "dev-acme-app.mirror.sqlite" : "dev-acme-app.sqlite"));
-  CONVO.forEach((event, i) => store.apply({ seq: i + 1, ts: 1000 * (i + 1), event }));
+  const events_: BridgeEvent[] = o.claude ? [{ type: "thread.native", harness: "claude", nativeThreadId: THREAD, account: null, model: null }, ...CONVO] : CONVO;
+  events_.forEach((event, i) => store.apply({ seq: i + 1, ts: 1000 * (i + 1), event }));
   store.close();
+  if (o.claude) writeFileSync(join(dir, `${THREAD}.jsonl`), '{"type":"user"}\n');
   recordEnded(db, { ...S, runtime: o.runtime ?? "chat" }, dir, 5_000);
   const bus = new EventBus();
   const events: unknown[] = [];
@@ -46,7 +52,7 @@ function setup(o: { runtime?: "chat" | "tmux"; remote?: string; open?: (t: Recor
   const firstTurns: [string, string][] = [];
   const open = o.open ?? (async (t: Record<string, unknown>) => ({ created: true, session: { ...S, id: "dev-acme-app-2", runtime: t.runtime, status: "running" } }));
   const a = createApp({
-    db, root, mgr: { isEnding: () => false, open: async (t: Record<string, unknown>) => { opened.push(t); return open(t); } } as never,
+    db, root, mgr: { isEnding: () => false, resumeImageBlock: async () => o.imageBlock ?? null, open: async (t: Record<string, unknown>) => { opened.push(t); return open(t); } } as never,
     cfg: { version: 1, settings: { autoStopHours: 4, portRangeStart: 40100, portsPerSession: 10, diskWarnPercent: 80 }, folders: {} },
     tree: async () => [], listener: {} as never, notify: () => {}, stats: () => ({ sessions: [], disk: {} }), cloneQueue: {} as never,
     configRepo: { read: () => ({ version: 1, settings: {}, folders: {} }) } as never, dashboardDir: root, bus,
@@ -107,7 +113,7 @@ test("continue opens a new chat session in the same repo with the handoff as its
   const t = setup();
   const r = await t.a.fetch(post(`/api/ended/${ID}/continue`));
   expect(r.status).toBe(201);
-  expect((await r.json()) as ContinueResult).toEqual({ mode: "handoff", sessionId: "dev-acme-app-2", runtime: "chat" });
+  expect((await r.json()) as ContinueResult).toEqual({ mode: "handoff", sessionId: "dev-acme-app-2", runtime: "chat", reason: null });
   expect(t.opened).toEqual([{ folder: "acme", project: "acme", repo: "app", agent: "claude", runtime: "chat", fresh: true }]);
   expect(t.firstTurns.length).toBe(1);
   expect(t.firstTurns[0]![1]).toContain(`/inbox/_ended/${ID}.md`);
@@ -139,4 +145,33 @@ test("nothing is written for the handoff when the transcript is gone", async () 
   expect(r.status).toBe(500);
   expect(t.opened).toEqual([]);
   expect(existsSync(join(t.root, "_inbox", "_ended", `${ID}.md`))).toBe(false);
+});
+
+test("continue resumes the Claude conversation: the new session gets its jsonl and no handoff message", async () => {
+  for (const runtime of ["chat", "tmux"] as const) {
+    const t = setup({ claude: true, runtime });
+    expect(((await (await t.a.fetch(new Request("http://x/api/ended"))).json()) as { items: EndedSession[] }).items[0]!.continueMode).toBe("resume");
+    const r = await t.a.fetch(post(`/api/ended/${ID}/continue`));
+    expect(r.status).toBe(201);
+    expect((await r.json()) as ContinueResult).toEqual({ mode: "resume", sessionId: "dev-acme-app-2", runtime, reason: null });
+    expect(t.opened).toEqual([{ folder: "acme", project: "acme", repo: "app", agent: "claude", runtime, fresh: true,
+      resume: { thread: THREAD, jsonl: Buffer.from('{"type":"user"}\n') } }]);
+    expect(t.firstTurns).toEqual([]);
+    expect(existsSync(join(t.root, "_inbox", "_ended", `${ID}.md`))).toBe(false);
+  }
+});
+
+test("a resume the image cannot take, or a conversation gone since the list, hands off and says why", async () => {
+  const t = setup({ claude: true, imageBlock: "the session image predates resume support (rebuild it with devbox-update)" });
+  const r = await t.a.fetch(post(`/api/ended/${ID}/continue`));
+  expect((await r.json()) as ContinueResult).toEqual({ mode: "handoff", sessionId: "dev-acme-app-2", runtime: "chat",
+    reason: "the session image predates resume support (rebuild it with devbox-update)" });
+  expect(t.opened[0]!.resume).toBeUndefined();
+  // The new session's first message says it too, where the user reads it.
+  expect(t.firstTurns[0]![1]).toContain("could not be resumed: the session image predates resume support");
+  const gone = setup({ claude: true });
+  rmSync(join(gone.root, "_chat-archive", ID, `${THREAD}.jsonl`));
+  const g = (await (await gone.a.fetch(post(`/api/ended/${ID}/continue`))).json()) as ContinueResult;
+  expect(g.mode).toBe("handoff");
+  expect(g.reason).toContain("not in the archive");
 });

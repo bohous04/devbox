@@ -1,10 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb, type SessionRow } from "../src/db";
 import {
-  continueMode, ENDED_RETENTION_MS, endedTranscriptFile, getEnded, handoffPrompt, hideEnded, listEnded, openTranscript,
+  continueMode, continuePlan, ENDED_RETENTION_MS, endedTranscriptFile, getEnded, handoffPrompt, hideEnded, listEnded, openTranscript,
   purgeEnded, recordEnded, renderTranscript, writeHandoffTranscript,
 } from "../src/endedSessions";
 import { ThreadStore } from "../src/threadStore";
@@ -173,10 +173,38 @@ test("renderTranscript puts each message under who said it and names tool calls"
   expect(md).toContain("## Assistant\n\ndone");
 });
 
-test("continueMode is handoff while no resume path is wired", () => {
+const THREAD = "0b1c2d3e-0000-4000-8000-000000000001";
+
+test("continue resumes a Claude conversation whose jsonl the archive kept, and hands off otherwise, saying why", () => {
   const root = tmp();
   const db = openDb(":memory:");
   const dir = join(root, "_chat-archive", "dev-acme-app-20261120-101500");
   archivedStore(dir, "dev-acme-app.sqlite", CONVO);
-  expect(continueMode(getEnded(db, recordEnded(db, S, dir, 5_000)!.id)!)).toBe("handoff");
+  const row = getEnded(db, recordEnded(db, S, dir, 5_000)!.id)!;
+  // No jsonl in the archive: nothing to resume.
+  expect(continueMode(row)).toBe("handoff");
+  expect(continuePlan(row, null)).toEqual({ mode: "handoff", reason: expect.stringContaining("not in the archive") });
+  writeFileSync(join(dir, `${THREAD}.jsonl`), '{"type":"user"}\n');
+  expect(continueMode(row)).toBe("resume");
+  expect(continuePlan(row, null)).toEqual({ mode: "resume", thread: THREAD, jsonl: Buffer.from('{"type":"user"}\n') });
+  // An image that cannot resume yet: handoff, and the reason says so.
+  expect(continuePlan(row, "the session image predates resume")).toEqual({ mode: "handoff", reason: "the session image predates resume" });
+  // Another agent now, or a Codex thread: resume is not wired for it, which is no failure to report.
+  expect(continueMode({ ...row, agent: "codex" })).toBe("handoff");
+  expect(continuePlan({ ...row, native_harness: "codex" }, null)).toEqual({ mode: "handoff", reason: null });
+  expect(continuePlan({ ...row, native_thread: null }, null)).toEqual({ mode: "handoff", reason: null });
+});
+
+test("continue never reads a planted link as the conversation, and never a thread id that is a path", () => {
+  const root = tmp();
+  const db = openDb(":memory:");
+  const dir = join(root, "_chat-archive", "dev-acme-app-20261120-101500");
+  archivedStore(dir, "dev-acme-app.sqlite", CONVO);
+  const row = getEnded(db, recordEnded(db, S, dir, 5_000)!.id)!;
+  const secret = join(root, "secret");
+  writeFileSync(secret, "host secret");
+  symlinkSync(secret, join(dir, `${THREAD}.jsonl`));
+  expect(continueMode(row)).toBe("handoff");
+  expect(continuePlan(row, null)).toMatchObject({ mode: "handoff", reason: expect.stringContaining("could not be read") });
+  expect(continuePlan({ ...row, native_thread: "../secret" }, null)).toEqual({ mode: "handoff", reason: null });
 });

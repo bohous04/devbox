@@ -217,6 +217,9 @@ ENV TZ=${TZ}
 ENV SHELL=/bin/zsh
 ENV CLAUDE_CONFIG_DIR=/home/dev/.claude
 ENV CODEX_HOME=/home/dev/.codex
+# agent-launch.sh and agent-bridge start a new session on an ended Claude conversation from /run/devd/resume; devd
+# checks this label before it continues one that way (devd/src/sessions.ts resumeImageBlock), and hands off otherwise.
+LABEL devbox.resume-file="1"
 ENTRYPOINT ["/usr/local/bin/devbox-entrypoint"]
 
 # Storage guard client (infra/storage-guard): /usr/local/bin/git, docker and devbox-scratch
