@@ -38,11 +38,20 @@ enum ImagePasteboard {
 
     /// The pasteboard's images, image files copied in Finder included.
     static func providers(in pb: NSPasteboard = pasteboard) -> [NSItemProvider] {
-        let files = (pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? [])
+        let files = imageFiles(in: pb)
+        return files.isEmpty ? imageData(in: pb) : files
+    }
+
+    /// Image files copied in Finder.
+    static func imageFiles(in pb: NSPasteboard) -> [NSItemProvider] {
+        (pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? [])
             .filter { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .image) == true }
             .compactMap { NSItemProvider(contentsOf: $0) }
-        if !files.isEmpty { return files }
-        return (pb.pasteboardItems ?? []).compactMap { item in
+    }
+
+    /// Image data (a screenshot, an image copied from a page).
+    static func imageData(in pb: NSPasteboard) -> [NSItemProvider] {
+        (pb.pasteboardItems ?? []).compactMap { item in
             guard let type = item.types.first(where: { UTType($0.rawValue)?.conforms(to: .image) == true }),
                   let data = item.data(forType: type) else { return nil }
             return NSItemProvider(item: data as NSData, typeIdentifier: type.rawValue)
@@ -58,10 +67,27 @@ enum ComposerPaste {
     static func isPasteKey(flags: NSEvent.ModifierFlags, key: String) -> Bool {
         flags.intersection([.command, .shift, .option, .control]) == .command && key == "v"
     }
+
+    /// The images ⌘V attaches. Image files copied in Finder (which also put their names as text); image data only when
+    /// no text comes with it: Excel, Numbers, Word and rich browser selections put both, and those paste as text.
+    static func images(in pb: NSPasteboard) -> [NSItemProvider] {
+        let files = ImagePasteboard.imageFiles(in: pb)
+        if !files.isEmpty { return files }
+        if pb.availableType(from: [.string, .rtf, .rtfd, .html]) != nil { return [] }
+        return ImagePasteboard.imageData(in: pb)
+    }
+
+    /// The window's focus is a text editor inside `area` (window coordinates): the composer's field, not the terminal
+    /// or the toolbar's search field.
+    static func ownsFocus(_ responder: NSResponder?, area: NSRect) -> Bool {
+        guard let editor = responder as? NSTextView, editor.window != nil else { return false }
+        let frame = editor.convert(editor.bounds, to: nil)
+        return area.contains(NSPoint(x: frame.midX, y: frame.midY))
+    }
 }
 
-/// Calls `onPaste` with the pasteboard's images for ⌘V in this view's window while `active`; other keys, and ⌘V
-/// with no image, go on to the field.
+/// Calls `onPaste` with the pasteboard's images (ComposerPaste.images) for ⌘V while `active` and the focus is an
+/// editor inside this view; other keys, ⌘V elsewhere and ⌘V with no image or with text go on as usual.
 struct ImagePasteKey: NSViewRepresentable {
     let active: Bool
     let onPaste: ([NSItemProvider]) -> Void
@@ -78,9 +104,10 @@ struct ImagePasteKey: NSViewRepresentable {
         let view = NSView()
         let c = context.coordinator
         c.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak c, weak view] event in
-            guard let c, let view, c.active, event.window === view.window,
-                  ComposerPaste.isPasteKey(flags: event.modifierFlags, key: event.charactersIgnoringModifiers ?? "") else { return event }
-            let images = ImagePasteboard.providers()
+            guard let c, let view, c.active, let window = view.window, event.window === window,
+                  ComposerPaste.isPasteKey(flags: event.modifierFlags, key: event.charactersIgnoringModifiers ?? ""),
+                  ComposerPaste.ownsFocus(window.firstResponder, area: view.convert(view.bounds, to: nil)) else { return event }
+            let images = ComposerPaste.images(in: ImagePasteboard.pasteboard)
             guard !images.isEmpty else { return event }
             c.onPaste(images)
             return nil

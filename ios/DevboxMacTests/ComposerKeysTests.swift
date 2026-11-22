@@ -78,26 +78,65 @@ final class ComposerKeysTests: XCTestCase {
     func testCommandVAttachesAClipboardImageInATerminalSession() throws { try commandVAttaches() }
 
     private func commandVAttaches() throws {
+        let attached = try pressCommandV(clipboard: { $0.setData(try Self.png(), forType: .png) }, typed: "look")
+        XCTAssertEqual(attached.count, 1, "the image is attached")
+        XCTAssertEqual(attached.editor.string, "look")
+    }
+
+    /// Text with an image (cells from Numbers, a rich selection) is the field's paste, as is text alone. (Whether the
+    /// field then pastes it is the system's: its editor reads the user's own clipboard, which tests leave alone.)
+    func testCommandVWithTextIsTheFieldsPaste() throws {
+        let both = try pressCommandV(clipboard: { pb in
+            pb.declareTypes([.string, .png], owner: nil)
+            pb.setString("A1\tB1", forType: .string)
+            pb.setData(try Self.png(), forType: .png)
+        }, typed: "look")
+        XCTAssertEqual(both.count, 0, "text and an image: nothing attached")
+        let text = try pressCommandV(clipboard: { $0.setString("hello", forType: .string) }, typed: "")
+        XCTAssertEqual(text.count, 0, "text alone: nothing attached")
+    }
+
+    /// ⌘V in another window, its own text field focused, is not the composer's.
+    func testCommandVInAnotherWindowIsNotCaught() throws {
+        _ = try type("look")
+        let other = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
+        other.isReleasedWhenClosed = false
+        defer { other.close() }
+        let field = NSTextField(frame: NSRect(x: 10, y: 10, width: 200, height: 24))
+        other.contentView!.addSubview(field)
+        other.setFrameOrigin(NSPoint(x: -21_000, y: -20_000))
+        other.makeKeyAndOrderFront(nil)
+        other.makeFirstResponder(field)
+        spin(0.3)
+        let attached = try pressCommandV(clipboard: { $0.setData(try Self.png(), forType: .png) }, in: other)
+        XCTAssertEqual(attached.count, 0)
+    }
+
+    private static func png() throws -> Data {
+        let ctx = CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        return try XCTUnwrap(NSBitmapImageRep(cgImage: ctx.makeImage()!).representation(using: .png, properties: [:]))
+    }
+
+    /// ⌘V through the app (menus included) with `clipboard` on a private pasteboard; the images it attached and the
+    /// composer's editor (`typed` into it first, unless the key goes to `target`, another window).
+    private func pressCommandV(clipboard: (NSPasteboard) throws -> Void, typed: String = "", in target: NSWindow? = nil)
+        throws -> (count: Int, editor: NSTextView) {
         let pb = NSPasteboard(name: NSPasteboard.Name("devbox-tests-\(UUID().uuidString)"))
         ImagePasteboard.pasteboard = pb
         defer { ImagePasteboard.pasteboard = .general; pb.releaseGlobally() }
-        let ctx = CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
-                            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
-        let png = try XCTUnwrap(NSBitmapImageRep(cgImage: ctx.makeImage()!).representation(using: .png, properties: [:]))
         pb.clearContents()
-        pb.setData(png, forType: .png)
-
-        let editor = try type("look")
+        try clipboard(pb)
+        let editor = target == nil ? try type(typed) : NSTextView()
         var attached = 0
         ComposerView.debugAttached = { attached = $0 }
         defer { ComposerView.debugAttached = nil }
         let v = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
-                                               windowNumber: window.windowNumber, context: nil, characters: "v",
+                                               windowNumber: (target ?? window).windowNumber, context: nil, characters: "v",
                                                charactersIgnoringModifiers: "v", isARepeat: false, keyCode: 9))
         NSApp.sendEvent(v)
         spin(1)
-        XCTAssertEqual(attached, 1, "the image is attached")
-        XCTAssertEqual(editor.string, "look")
+        return (attached, editor)
     }
 
     func testReturnPicksTheHighlightedCommand() throws {
