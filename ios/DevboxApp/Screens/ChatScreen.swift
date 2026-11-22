@@ -10,6 +10,8 @@ struct ChatScreen: View {
     @EnvironmentObject private var live: LiveStore
     @Environment(\.scenePhase) private var scenePhase
     @State private var showTerminal = false
+    /// The iPhone's terminal was opened once by itself, Chat being unable to show the session (`chatUnavailable`).
+    @State private var fellBack = false
     @State private var atEnd = true
     @State private var wentAway = false
     /// On screen (not under a pushed screen or another tab): only then does coming back reopen the stream.
@@ -141,7 +143,14 @@ struct ChatScreen: View {
             }
         }
         .fullScreenOrSheet(isPresented: $showTerminal) {
-            TerminalScreen(sessionId: sessionId, title: title, client: client)
+            TerminalScreen(sessionId: sessionId, title: title, client: client, notice: chatUnavailable)
+        }
+        // A Chat that cannot be shown opens the terminal, once, saying why; closing it leaves the reason here with
+        // Open terminal. The Mac switches its own tab instead (MacThreadDetail).
+        .onChange(of: chatUnavailable) { _, reason in
+            guard openTerminal == nil, reason != nil, !fellBack else { return }
+            fellBack = true
+            showTerminal = true
         }
         .task { await store.start() }
         .onAppear { visible = true }
@@ -168,6 +177,10 @@ struct ChatScreen: View {
         case "waiting": return "Needs you"
         default: return store.thread.flatMap { ThreadView.runState($0, now: InboxView.ms(now)) }
         }
+    }
+
+    private var chatUnavailable: String? {
+        MirrorView.chatUnavailable(mirror: store.mirror, loadError: store.loadError, isTmux: store.isTmux)
     }
 
     /// Open terminal: the Mac's tab, else the full-screen terminal. A refused send's lock goes with it, as on the web.

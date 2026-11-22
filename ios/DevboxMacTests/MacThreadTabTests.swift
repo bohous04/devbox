@@ -4,8 +4,9 @@ import SwiftUI
 import XCTest
 @testable import DevboxApp
 
-/// The tab a tmux window opens on (TmuxTabMemory), in the Mac window on the DEBUG fixtures: only the user's switch is
-/// stored; the automatic one to Terminal, for an agent the mirror cannot read, leaves the stored choice alone.
+/// The tab a tmux window opens on (TmuxTabMemory), in the Mac window on the DEBUG fixtures: the remembered one, else
+/// Chat. Only the user's switch is stored; the automatic one to Terminal, for an agent the mirror cannot read, leaves
+/// the stored choice alone.
 @MainActor
 final class MacThreadTabTests: XCTestCase {
     private let memory = TmuxTabMemory.shared
@@ -13,6 +14,7 @@ final class MacThreadTabTests: XCTestCase {
     override func setUp() {
         super.setUp()
         FixtureMode.requested = "demo"
+        memory.prune(keeping: [])
     }
 
     override func tearDown() {
@@ -29,6 +31,32 @@ final class MacThreadTabTests: XCTestCase {
         defer { window.close() }
         XCTAssertFalse(Self.terminals(in: window).isEmpty, "the window switched to its terminal")
         XCTAssertEqual(memory.tab(for: key), .chat, "the automatic switch did not overwrite the user's choice")
+    }
+
+    func testATmuxSessionNeverSwitchedOpensTheChat() throws {
+        let window = try open(MirrorFixtures.claudeId) { state in
+            state.windows.store(for: MirrorFixtures.claudeId, client: state.appModel.client!).thread != nil
+        }
+        defer { window.close() }
+        XCTAssertTrue(Self.terminals(in: window).isEmpty, "the window opened on Chat")
+        XCTAssertNil(memory.tab(for: TmuxTabMemory.key(MirrorFixtures.claudeId, createdAt: MirrorFixtures.createdAt)), "nothing stored")
+    }
+
+    func testARememberedTerminalOpensTheTerminal() throws {
+        let key = TmuxTabMemory.key(MirrorFixtures.claudeId, createdAt: MirrorFixtures.createdAt)
+        memory.remember(.terminal, for: key)
+        let window = try open(MirrorFixtures.claudeId) { _ in true }
+        defer { window.close() }
+        XCTAssertFalse(Self.terminals(in: window).isEmpty, "the window opened on its terminal")
+    }
+
+    func testAnUnreadableSessionNeverSwitchedOpensTheTerminal() throws {
+        let window = try open(MirrorFixtures.unreadableId) { state in
+            state.windows.store(for: MirrorFixtures.unreadableId, client: state.appModel.client!).mirror != nil
+        }
+        defer { window.close() }
+        XCTAssertFalse(Self.terminals(in: window).isEmpty, "the window fell back to its terminal")
+        XCTAssertNil(memory.tab(for: TmuxTabMemory.key(MirrorFixtures.unreadableId, createdAt: MirrorFixtures.createdAt)), "nothing stored")
     }
 
     func testARememberedChatOpensTheChat() throws {

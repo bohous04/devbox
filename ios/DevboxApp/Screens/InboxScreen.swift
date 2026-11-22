@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Where an inbox row leads on the Inbox tab's stack: a chat session's thread, or a tmux session's detail (its
-/// terminal is there), as the dashboard opens `/s/<id>` or `/terminal/<id>`.
+/// Where an inbox row leads on the Inbox tab's stack: a session's thread (a tmux session's is its Chat, the mirror),
+/// or a tmux session's detail (its terminal is there) when Terminal is the view remembered for it.
 enum InboxRoute: Hashable {
     case thread(String)
     case session(String)
@@ -17,13 +17,13 @@ enum InboxRoute: Hashable {
         onInboxTab ? path.last?.sessionId : nil
     }
 
-    /// A chat session opens its thread; a tmux one its detail, or its chat (the mirror) when that is the view last
-    /// opened for it on this device (TmuxTabMemory). `createdAt`: the session's, from the live list; nil before it loads.
+    /// Every session opens its thread (Chat); a tmux one its detail instead when Terminal is the view last opened for
+    /// it on this device (TmuxTabMemory). `createdAt`: the session's, from the live list; nil before it loads.
     @MainActor
     static func row(sessionId: String, runtime: InboxItem.Runtime, createdAt: Int?, memory: TmuxTabMemory = .shared) -> InboxRoute {
         guard runtime != .chat else { return .thread(sessionId) }
         let remembered = createdAt.flatMap { memory.tab(for: TmuxTabMemory.key(sessionId, createdAt: $0)) }
-        return remembered == .chat ? .thread(sessionId) : .session(sessionId)
+        return remembered == .terminal ? .session(sessionId) : .thread(sessionId)
     }
 }
 

@@ -52,6 +52,17 @@ final class MirrorViewTests: XCTestCase {
         XCTAssertNil(MirrorView.unsupported(codex))
     }
 
+    func testWhyChatCannotShowATmuxSession() {
+        let grok = with(live, state: "unsupported", agent: "Grok Build", block: .init(code: "unsupported-agent", message: "Chat view isn't supported for Grok Build yet."))
+        XCTAssertEqual(MirrorView.chatUnavailable(mirror: grok, loadError: nil, isTmux: true), "Chat view isn't supported for Grok Build yet.")
+        XCTAssertEqual(MirrorView.chatUnavailable(mirror: nil, loadError: "timed out", isTmux: true), "Could not load the terminal's conversation: timed out")
+        XCTAssertNil(MirrorView.chatUnavailable(mirror: live, loadError: nil, isTmux: true))
+        XCTAssertNil(MirrorView.chatUnavailable(mirror: nil, loadError: nil, isTmux: true), "still loading")
+        XCTAssertNil(MirrorView.chatUnavailable(mirror: nil, loadError: "timed out", isTmux: false), "a chat session's thread has no terminal to fall back to")
+        let codex = with(live, agent: "Codex", block: .init(code: "codex-send-unsupported", message: codexMessage))
+        XCTAssertNil(MirrorView.chatUnavailable(mirror: codex, loadError: nil, isTmux: true), "a locked mirror still shows its Chat, the lock in it")
+    }
+
     func testAnAgentTheMirrorCannotReadSaysSoByName() {
         XCTAssertNil(MirrorView.unsupported(live))
         let grok = with(live, state: "unsupported", agent: "Grok Build", block: .init(code: "unsupported-agent", message: "Chat view isn't supported for Grok Build yet."))

@@ -415,16 +415,28 @@ struct TerminalScreen: View {
 
     /// The Mac shows the terminal as a tab of the thread window: nothing to close there.
     private let closable: Bool
+    /// Why the terminal opened instead of Chat (MirrorView.chatUnavailable), shown under the header.
+    private let notice: String?
 
-    init(sessionId: String, title: String, client: DevdClient, closable: Bool = true) {
+    init(sessionId: String, title: String, client: DevdClient, closable: Bool = true, notice: String? = nil) {
         self.title = title
         self.closable = closable
+        self.notice = notice
         _model = StateObject(wrappedValue: TerminalScreenModel(sessionId: sessionId, client: client))
     }
 
     var body: some View {
         VStack(spacing: 0) {
             header
+            if let notice {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(Color(red: 0xfc / 255, green: 0xd3 / 255, blue: 0x4d / 255))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .accessibilityLabel("Chat unavailable: \(notice)")
+            }
             TerminalHostView(model: model)
                 .padding(6)
                 .overlay(alignment: .bottomTrailing) {

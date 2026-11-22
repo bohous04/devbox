@@ -39,10 +39,10 @@ export function upsertInbox(items: InboxItem[], next: InboxItem | InboxRemoved):
   return out;
 }
 
-/** Router path a row opens: chat sessions their session page, tmux sessions the terminal. */
+/** Router path a row opens: the session page, for a tmux session too. It opens on Chat, or on the Terminal tab when
+ *  that is the one remembered for the session (tmuxTab.ts); both mark a tmux session seen (useTmuxSeen). */
 export function inboxHref(i: InboxItem): string {
-  const id = encodeURIComponent(i.sessionId);
-  return i.runtime === "chat" ? `/s/${id}` : `/terminal/${id}`;
+  return `/s/${encodeURIComponent(i.sessionId)}`;
 }
 
 const REASON: Record<NonNullable<Attention["reason"]>, string> = {

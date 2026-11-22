@@ -790,8 +790,8 @@ private struct WindowConfigurator: NSViewRepresentable {
     }
 }
 
-/// The thread as chat or terminal. A tmux session starts on the one last chosen for it (TmuxTabMemory), else its
-/// terminal.
+/// The thread as chat or terminal. A tmux session starts on the one last chosen for it (TmuxTabMemory), else Chat;
+/// a Chat that cannot be shown opens the terminal, which says why.
 struct MacThreadDetail: View {
     private typealias Tab = TmuxTabMemory.Tab
 
@@ -804,6 +804,8 @@ struct MacThreadDetail: View {
     @Environment(\.dismissWindow) private var dismissWindow
     @State private var tab: Tab?
     @State private var revealChanges = 0
+    /// Why Chat cannot show this tmux session (MirrorView.chatUnavailable); the terminal shows it.
+    @State private var chatUnavailable: String?
 
     private var item: InboxItem? { inbox.items?.first { $0.sessionId == threadId } }
 
@@ -818,12 +820,16 @@ struct MacThreadDetail: View {
                            revealChanges: revealChanges)
                     .id(ObjectIdentifier(store))
                     .onReceive(store.$ended) { if $0 { state.windows.ended(threadId) } }
-                    // A remembered Chat for an agent the mirror cannot read opens Terminal, the reason still on the
-                    // Chat tab; the choice is kept for when it can. A session no longer on tmux stays on Chat: its
-                    // "reopen it" is the one useful thing to show.
-                    .onReceive(store.$mirror) { m in if tab == nil, m.flatMap(MirrorView.unsupported) != nil { tab = .terminal } }
+                    // A Chat that cannot be shown (an agent the mirror cannot read, a mirror that failed to load) opens
+                    // Terminal, which says why; the stored choice is kept for when it can. A session no longer on tmux
+                    // stays on Chat: its "reopen it" is the one useful thing to show.
+                    .onReceive(store.$mirror.combineLatest(store.$loadError)) { mirror, loadError in
+                        chatUnavailable = MirrorView.chatUnavailable(mirror: mirror, loadError: loadError, isTmux: store.isTmux)
+                        if tab == nil, chatUnavailable != nil { tab = .terminal }
+                    }
             case .terminal:
-                TerminalScreen(sessionId: threadId, title: item?.title ?? threadId, client: client, closable: false)
+                TerminalScreen(sessionId: threadId, title: item?.title ?? threadId, client: client, closable: false,
+                               notice: chatUnavailable)
             }
         }
         // The window names its thread, as the inbox row does, and where it runs.
@@ -860,10 +866,9 @@ struct MacThreadDetail: View {
         return TmuxTabMemory.key(s.id, createdAt: s.created_at)
     }
 
-    /// Before the user picks one in this window. A chat session has no Terminal default to remember against.
+    /// Before the user picks one in this window: the remembered one, else Chat (a chat session has no memory key).
     private var opening: Tab {
-        guard item?.runtime == .tmux else { return .chat }
-        return memoryKey.flatMap(TmuxTabMemory.shared.tab(for:)) ?? .terminal
+        memoryKey.flatMap(TmuxTabMemory.shared.tab(for:)) ?? .chat
     }
 
     private func choose(_ next: Tab) {

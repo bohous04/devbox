@@ -29,9 +29,9 @@ test("upsertInbox replaces a session's item or appends a new one", () => {
   expect(upsertInbox([a, b], c)).toEqual([a, b, c]);
 });
 
-test("inboxHref: chat rows open the session page, tmux rows the terminal", () => {
+test("inboxHref: every row opens the session page, which picks a tmux session's Chat or remembered Terminal", () => {
   expect(inboxHref(item("dev x", { section: "idle", reason: null, since: 0 }))).toBe("/s/dev%20x");
-  expect(inboxHref(item("dev-t", { section: "idle", reason: null, since: 0 }, "tmux"))).toBe("/terminal/dev-t");
+  expect(inboxHref(item("dev-t", { section: "idle", reason: null, since: 0 }, "tmux"))).toBe("/s/dev-t");
 });
 
 test("reasonLabel names every reason", () => {

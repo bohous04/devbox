@@ -114,7 +114,7 @@ struct SessionDetailView: View {
                             .disabled(appModel.client == nil)
                         // A chat session's thread, or a tmux session's terminal conversation (devd's mirror).
                         actionButton("Chat", systemImage: "bubble.left", variant: .outline) {
-                            // A tmux session's inbox row opens straight into its chat from now on (InboxRoute.row).
+                            // A tmux session's inbox row opens its chat again, the default (InboxRoute.row).
                             rememberView(.chat, session)
                             showChat = true
                         }

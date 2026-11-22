@@ -36,32 +36,32 @@ final class TmuxTabMemoryTests: XCTestCase {
         memory.remember(.chat, for: TmuxTabMemory.key("dev-a", createdAt: 1000))
         XCTAssertEqual(memory.tab(for: TmuxTabMemory.key("dev-a", createdAt: 1000)), .chat)
         XCTAssertNil(memory.tab(for: TmuxTabMemory.key("dev-a", createdAt: 2000)))
-        XCTAssertEqual(InboxRoute.row(sessionId: "dev-a", runtime: .tmux, createdAt: 2000, memory: memory), .session("dev-a"))
+        XCTAssertEqual(InboxRoute.row(sessionId: "dev-a", runtime: .tmux, createdAt: 2000, memory: memory), .thread("dev-a"))
         memory.prune(keeping: [TmuxTabMemory.key("dev-a", createdAt: 2000)])
         XCTAssertNil(memory.tab(for: TmuxTabMemory.key("dev-a", createdAt: 1000)))
     }
 
-    func testATmuxRowLastViewedInChatOpensTheChatOthersTheirDetail() {
-        XCTAssertEqual(InboxRoute.row(sessionId: "t", runtime: .tmux, createdAt: 5, memory: memory), .session("t"))
-        memory.remember(.chat, for: TmuxTabMemory.key("t", createdAt: 5))
-        XCTAssertEqual(InboxRoute.row(sessionId: "t", runtime: .tmux, createdAt: 5, memory: memory), .thread("t"))
-        XCTAssertEqual(InboxRoute.row(sessionId: "t", runtime: .tmux, createdAt: nil, memory: memory), .session("t"),
-                       "before the live list loads: the detail, as before")
+    func testATmuxRowOpensTheChatUnlessTerminalWasPicked() {
+        XCTAssertEqual(InboxRoute.row(sessionId: "t", runtime: .tmux, createdAt: 5, memory: memory), .thread("t"), "the default is Chat")
+        XCTAssertEqual(InboxRoute.row(sessionId: "t", runtime: .tmux, createdAt: nil, memory: memory), .thread("t"),
+                       "before the live list loads: Chat too")
         memory.remember(.terminal, for: TmuxTabMemory.key("t", createdAt: 5))
         XCTAssertEqual(InboxRoute.row(sessionId: "t", runtime: .tmux, createdAt: 5, memory: memory), .session("t"))
+        memory.remember(.chat, for: TmuxTabMemory.key("t", createdAt: 5))
+        XCTAssertEqual(InboxRoute.row(sessionId: "t", runtime: .tmux, createdAt: 5, memory: memory), .thread("t"), "switched back")
         XCTAssertEqual(InboxRoute.row(sessionId: "c", runtime: .chat, createdAt: 5, memory: memory), .thread("c"), "a chat session is unaffected")
     }
 
-    /// Chat picked in the detail, then the row tapped at once: the inbox watches the memory, so the row it draws
-    /// after the pick already leads to the chat.
-    func testChatPickedInTheDetailMakesTheRowOpenTheChatAtOnce() {
+    /// Terminal picked in the detail, then the row tapped at once: the inbox watches the memory, so the row it draws
+    /// after the pick already leads to the detail.
+    func testTerminalPickedInTheDetailMakesTheRowOpenTheDetailAtOnce() {
         let key = TmuxTabMemory.key("t", createdAt: 5)
         var changes = 0
         let watch = memory.objectWillChange.sink { changes += 1 }
         defer { watch.cancel() }
-        memory.remember(.chat, for: key)
+        memory.remember(.terminal, for: key)
         XCTAssertEqual(changes, 1, "the inbox is told to draw its rows again")
-        XCTAssertEqual(InboxRoute.row(sessionId: "t", runtime: .tmux, createdAt: 5, memory: memory), .thread("t"))
+        XCTAssertEqual(InboxRoute.row(sessionId: "t", runtime: .tmux, createdAt: 5, memory: memory), .session("t"))
     }
 
     func testEndedSessionsArePrunedAndTheListIsCapped() {

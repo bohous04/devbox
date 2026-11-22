@@ -60,6 +60,14 @@ enum MirrorView {
     /// field, so it can be sent again once the terminal is sorted out.
     static func fieldOff(_ info: MirrorInfo) -> String? { info.sendBlock?.message }
 
+    /// Why Chat cannot show a tmux session (an agent the mirror cannot read, or the mirror failed to load); its terminal
+    /// opens instead and says so (dashboard SessionPage's `chatUnavailable`). nil while it loads, or when Chat shows.
+    static func chatUnavailable(mirror: MirrorInfo?, loadError: String?, isTmux: Bool) -> String? {
+        guard isTmux else { return nil }
+        if let reason = mirror.flatMap(unsupported) { return reason }
+        return loadError.map { "Could not load the terminal's conversation: \($0)" }
+    }
+
     /// The Chat view of an agent the mirror cannot read yet (Grok, Antigravity) or of an InstaBox session.
     static func unsupported(_ info: MirrorInfo) -> String? {
         guard info.state == "unsupported" else { return nil }
