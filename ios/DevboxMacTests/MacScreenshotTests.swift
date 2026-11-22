@@ -25,7 +25,33 @@ final class MacScreenshotTests: XCTestCase {
     override func tearDown() {
         FixtureMode.requested = nil
         MacInboxRow.flatStyles = false
+        MacInboxRow.debugHovered = nil
         MacSidebarLayout.debugOpenShelves = []
+    }
+
+    /// The sidebar alone as one list (T3 Code's model): marks only where there is something to say, a hovered row's ✓
+    /// in place of its time, and the undo notice after a real settle against the fixture devd.
+    func testSidebarOneList() throws {
+        for look in ["light", "dark"] {
+            try shoot(name: "sidebar-list-\(look)", look: look, thread: nil, width: 1100, height: 820, sidebarOnly: true)
+        }
+        // Selected: the mark stays readable on the selection.
+        try shoot(name: "sidebar-selected-dark", look: "dark", thread: "dev-acme-billing", width: 1100, height: 820, sidebarOnly: true)
+        MacInboxRow.debugHovered = "dev-orchard-sync"
+        for look in ["light", "dark"] {
+            try shoot(name: "sidebar-hover-settle-\(look)", look: look, thread: nil, width: 1100, height: 820, sidebarOnly: true)
+        }
+        MacInboxRow.debugHovered = nil
+        for look in ["light", "dark"] {
+            try shoot(name: "sidebar-undo-notice-\(look)", look: look, thread: nil, width: 1100, height: 820, sidebarOnly: true) { state in
+                guard let inbox = state.inbox, let item = inbox.items?.first(where: { $0.sessionId == "dev-lumen-docs" }) else {
+                    return XCTFail("the fixture row to settle is missing")
+                }
+                await state.settler.settle(item, in: inbox)
+                XCTAssertNil(state.settler.problem)
+                XCTAssertNotNil(state.settler.notice)
+            }
+        }
     }
 
     /// The sidebar as a new window shows it (shelves shut), then with Working opened and its row selected. The inbox is
@@ -256,7 +282,8 @@ final class MacScreenshotTests: XCTestCase {
     /// `chat`: the Chat tab of that session alone (the window opens a tmux session on its terminal); `refuse` presses
     /// Send on the draft, which the fixture refuses.
     private func shoot(name: String, look: String, thread: String?, chat: String? = nil, page: MacDashboardPage? = nil, draft: String? = nil,
-                       refuse: Bool = false, width: CGFloat = 1440, height: CGFloat = 900, inspect: ((NSView) throws -> Void)? = nil) throws {
+                       refuse: Bool = false, width: CGFloat = 1440, height: CGFloat = 900, sidebarOnly: Bool = false,
+                       inspect: ((NSView) throws -> Void)? = nil, prepare: ((MacAppState) async -> Void)? = nil) throws {
         let state = MacAppState(isTestRun: false, isFixtureRun: true)
         state.appModel.reloadConfiguration()
         let shown = thread ?? chat
@@ -296,6 +323,12 @@ final class MacScreenshotTests: XCTestCase {
         }
         RunLoop.main.run(until: Date().addingTimeInterval(1.5))
         XCTAssertNotNil(state.inbox?.items, "the fixture inbox did not load")
+        if let prepare {
+            var done = false
+            Task { await prepare(state); done = true }
+            while !done { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+        }
         var fieldFrame: NSRect?
         if let draft {
             // Typed as a user would: the field's editor takes the text and SwiftUI's binding follows.
@@ -407,7 +440,17 @@ final class MacScreenshotTests: XCTestCase {
             }
             context.restoreGState()
         }
-        let png = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+        var out = rep
+        if sidebarOnly {
+            // The sidebar column alone: the split view's first pane, title bar included (its toggle sits over it).
+            let split = try XCTUnwrap(Self.allViews(frame).first { $0 is NSSplitView } as? NSSplitView, "no split view")
+            let pane = split.arrangedSubviews.first ?? split.subviews[0]
+            let r = pane.convert(pane.bounds, to: frame)
+            let crop = CGRect(x: 0, y: 0, width: r.maxX * scale, height: frame.bounds.height * scale).integral
+            let image = try XCTUnwrap(rep.cgImage?.cropping(to: crop))
+            out = NSBitmapImageRep(cgImage: image)
+        }
+        let png = try XCTUnwrap(out.representation(using: .png, properties: [:]))
         try png.write(to: dir.appending(path: "mac-\(name).png"))
         state.inbox?.stop()
         state.live?.stop()

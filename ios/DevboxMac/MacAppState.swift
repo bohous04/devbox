@@ -16,6 +16,8 @@ final class MacAppState: ObservableObject {
     @Published private(set) var live: LiveStore?
     /// Each thread asked to come forward (openThread): the window showing it leaves its dashboard.
     let focusedThread = PassthroughSubject<String, Never>()
+    /// Settle with undo and the tmux seen marker, for every window's sidebar.
+    let settler = MacSettler()
     /// A one-time notice from restoring the last run's windows (the window list was unreadable).
     @Published var restoreNotice: String?
     /// The test bundle runs inside this app: then nothing of the real app's startup runs (no devd connection, no login
@@ -33,6 +35,7 @@ final class MacAppState: ObservableObject {
     private var openWindow: OpenWindowAction?
     /// Threads asked for (a `devbox://` link) before any view could open a window.
     private var pending: [String] = []
+    private var undoKey: Any?
 
     init(isTestRun: Bool = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil,
          isFixtureRun: Bool = MacAppState.fixtureArgument) {
@@ -50,12 +53,29 @@ final class MacAppState: ObservableObject {
             windows = ThreadWindows(defaults: defaults, directory: FileManager.default.temporaryDirectory.appending(path: scratch))
             if isTestRun { return }
             clientWatch = appModel.$client.sink { [weak self] in self?.use($0) }
+            watchUndoKey()
             return
         }
         windows = ThreadWindows(defaults: .standard,
                                 directory: URL.applicationSupportDirectory.appending(path: "Devbox/threads", directoryHint: .isDirectory))
         restoreNotice = windows.restoreProblem
         clientWatch = appModel.$client.sink { [weak self] in self?.use($0) }
+        watchUndoKey()
+    }
+
+    /// ⌘Z undoes the last settle while its notice shows (MacSettler.claimsUndo). Seen before the menus, so Edit >
+    /// Undo keeps ⌘Z otherwise, and in a text field being edited (its own undo).
+    private func watchUndoKey() {
+        undoKey = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            MainActor.assumeIsolated {
+                guard let self, let inbox = self.inbox,
+                      MacSettler.claimsUndo(flags: event.modifierFlags, key: event.charactersIgnoringModifiers ?? "",
+                                            noticeShown: self.settler.notice != nil, editingText: event.window?.firstResponder is NSText)
+                else { return event }
+                Task { await self.settler.undo(in: inbox) }
+                return nil
+            }
+        }
     }
 
     nonisolated static var fixtureArgument: Bool {

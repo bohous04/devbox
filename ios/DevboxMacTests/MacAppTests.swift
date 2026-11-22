@@ -56,11 +56,11 @@ final class MacAppTests: XCTestCase {
         return try JSONDecoder().decode(InboxItem.self, from: JSONSerialization.data(withJSONObject: json))
     }
 
-    /// A sidebar row that needs you says why in one word; every other row shows its age.
+    /// A sidebar row that needs you, or finished unseen, says so in one word; every other row shows its age.
     func testSidebarRowStateIsOneWordOrTheAge() throws {
         XCTAssertEqual(MacInboxRow.word(try item("needs_you", reason: "request"))?.text, "Answer")
         XCTAssertEqual(MacInboxRow.word(try item("needs_you", reason: "failed"))?.text, "Failed")
-        XCTAssertNil(MacInboxRow.word(try item("needs_you", reason: "completed")), "a finished run shows its age")
+        XCTAssertEqual(MacInboxRow.word(try item("needs_you", reason: "completed"))?.text, "Done", "a finished run not yet seen")
         XCTAssertNil(MacInboxRow.word(try item("idle", reason: "failed")), "only Needs you rows get the word")
         XCTAssertEqual(MacInboxRow.when(try item("idle", reason: nil, since: 1_000), now: 1_000 + 3 * 60_000), "3m")
     }
@@ -149,12 +149,6 @@ final class MacAppTests: XCTestCase {
         XCTAssertEqual(pinned.map(\.items.count), [1, 1])
         let none = InboxView.Groups(needsYou: [needs], working: [], idle: [idle], snoozed: [], settled: [])
         XCTAssertTrue(MacSidebarLayout.pinnedShelves(none).isEmpty)
-        // What scrolls above them: needs you split from the merely finished runs (capped at five), then idle.
-        let finished = try item("needs_you", reason: "completed")
-        let all = InboxView.Groups(needsYou: [needs, finished], working: [working], idle: [idle], snoozed: [], settled: [settled])
-        XCTAssertEqual(MacSidebarLayout.scrollingGroups(all).map(\.label), ["Needs you", "Finished", "Idle"])
-        XCTAssertEqual(MacSidebarLayout.scrollingGroups(all).map(\.cap), [nil, 5, nil])
-        XCTAssertEqual(MacSidebarLayout.scrollingGroups(none).map(\.label), ["Needs you", "Idle"])
     }
 
     /// ↑/↓ cross the seam between the scrolling groups and the pinned shelves; elsewhere each list moves on its own.

@@ -34,9 +34,11 @@ struct DevboxMacApp: App {
 }
 
 /// ⌘N opens New session, ⌘⇧N a new window (the default ⌘N), ⌘F the sidebar's search, ⌘D switches the sidebar
-/// between the sessions and the dashboard, all in the key window.
+/// between the sessions and the dashboard, ⌘⇧S settles the selected session, all in the key window. ⌘Z after a
+/// settle is not a menu item: Edit > Undo keeps it for text, and MacAppState takes it only while the notice shows.
 struct MacWindowCommands: Commands {
     @FocusedValue(\.macWindowActions) private var actions
+    @FocusedValue(\.macSettle) private var settle
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
@@ -51,6 +53,11 @@ struct MacWindowCommands: Commands {
             Button("Find Session…") { actions?.find() }
                 .keyboardShortcut("f")
                 .disabled(actions == nil)
+        }
+        CommandMenu("Session") {
+            Button("Settle") { settle?.settle() }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(settle == nil || settle?.block != nil)
         }
         CommandGroup(after: .sidebar) {
             Button(actions?.inDashboard == true ? "Sessions" : "Dashboard") { actions?.toggleDashboard() }
