@@ -188,12 +188,12 @@ enum InboxView {
     /// The badge colours there are (InboxTone.badge, the dashboard's Inbox.tsx BADGE).
     static let badgeSlotCount = 8
 
-    /// Each project's badge colour: its place among the inbox's projects in code-point order (as the dashboard sorts
-    /// them), mod badgeSlotCount, so up to eight projects never share a colour. A project joining or leaving the inbox
-    /// can move the colours of the projects after it; the owner chose that over a hash, which collides almost always.
-    static func badgeSlots(_ items: [InboxItem]) -> [String: Int] {
-        let projects = Set(items.map(\.project)).sorted { $0.unicodeScalars.lexicographicallyPrecedes($1.unicodeScalars) }
-        return Dictionary(uniqueKeysWithValues: projects.enumerated().map { ($1, $0 % badgeSlotCount) })
+    /// Each project's badge colour: its place in devd's project list (/api/tree's project names) in code-point order
+    /// (as the dashboard sorts them), mod badgeSlotCount, so up to eight projects never share a colour. Projects are
+    /// added rarely, so the colours stay put; a session coming or going moves none (the inbox's own projects would).
+    static func badgeSlots(_ projects: [String]) -> [String: Int] {
+        let sorted = Set(projects).sorted { $0.unicodeScalars.lexicographicallyPrecedes($1.unicodeScalars) }
+        return Dictionary(uniqueKeysWithValues: sorted.enumerated().map { ($1, $0 % badgeSlotCount) })
     }
 
     private static let previewRules: [(NSRegularExpression, String)] = [
@@ -250,6 +250,9 @@ final class InboxStore: ObservableObject {
     @Published private(set) var paused = false
     /// The last frame that could not be read (also logged); the view may miss that update until the next load.
     @Published private(set) var badFrame: String?
+    /// Each project's badge colour (InboxView.badgeSlots over devd's project list); nil until /api/tree has answered,
+    /// and the badges are neutral meanwhile.
+    @Published private(set) var badgeSlots: [String: Int]?
 
     private static let logger = Logger(subsystem: "com.example.devbox", category: "Inbox")
     private let client: DevdClient
@@ -281,6 +284,17 @@ final class InboxStore: ObservableObject {
             loadError = nil
         } catch {
             loadError = errorText(error)
+        }
+    }
+
+    /// Loads the badge colours once; a failure is logged, the badges stay neutral and the next call tries again.
+    func loadBadgeSlots() async {
+        guard badgeSlots == nil else { return }
+        do {
+            let tree: [TreeProject] = try await client.get("/api/tree")
+            badgeSlots = InboxView.badgeSlots(tree.map(\.project))
+        } catch {
+            Self.logger.error("project list for the badge colours failed: \(errorText(error), privacy: .public)")
         }
     }
 

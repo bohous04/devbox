@@ -164,6 +164,14 @@ final class InboxSettleTests: XCTestCase {
 
     private func row(_ store: InboxStore, _ id: String) throws -> InboxItem { try XCTUnwrap(store.items?.first { $0.sessionId == id }) }
 
+    /// The badge colours come from devd's project list; nil (neutral badges) until it has answered.
+    func testBadgeSlotsLoadFromTheProjectList() async throws {
+        let store = try await fixtureStore()
+        XCTAssertNil(store.badgeSlots)
+        await store.loadBadgeSlots()
+        XCTAssertEqual(store.badgeSlots, ["acme": 0, "lumen": 1, "orchard": 2])
+    }
+
     /// Settle moves the row to the shelf and shows the notice; undo brings it back and clears the notice; the notice
     /// also goes on its own after its lifetime.
     func testSettleThenUndo() async throws {

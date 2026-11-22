@@ -65,19 +65,31 @@ final class InboxRowTests: XCTestCase {
         XCTAssertEqual(InboxView.projectBadge(""), "?")
     }
 
-    /// inboxView.test.ts badgeSlots: a project's place among the inbox's projects in code-point order, mod 8.
-    func testBadgeSlots() throws {
-        func at(_ project: String) throws -> InboxItem {
-            let json: [String: Any] = ["sessionId": project, "runtime": "chat", "title": project, "project": project, "repo": "r", "agent": "claude",
-                                       "attention": ["section": "idle", "since": 1, "reason": NSNull()], "lastText": NSNull()]
-            return try JSONDecoder().decode(InboxItem.self, from: JSONSerialization.data(withJSONObject: json))
-        }
-        let slots = InboxView.badgeSlots(try ["orchard", "acme", "lumen", "acme", "Zeta", "údržba"].map(at))
-        XCTAssertEqual(slots, ["Zeta": 0, "acme": 1, "lumen": 2, "orchard": 3, "údržba": 4])
-        let nine = InboxView.badgeSlots(try "abcdefghi".map { try at(String($0)) })
+    /// inboxView.test.ts badgeSlots: a project's place in devd's project list in code-point order, mod 8.
+    func testBadgeSlots() {
+        XCTAssertEqual(InboxView.badgeSlots(["orchard", "acme", "lumen", "acme", "Zeta", "údržba"]),
+                       ["Zeta": 0, "acme": 1, "lumen": 2, "orchard": 3, "údržba": 4])
+        let nine = InboxView.badgeSlots("abcdefghi".map(String.init))
         XCTAssertEqual(Set("abcdefgh".map { nine[String($0)]! }).count, 8, "up to eight projects never share a colour")
         XCTAssertEqual(nine["i"], 0)
         XCTAssertEqual(InboxTone.badge.count, InboxView.badgeSlotCount)
+    }
+
+    /// The colours come from devd's project list, not the inbox: ending a project's only session moves no other badge.
+    func testEndingAProjectsOnlySessionLeavesTheOtherColours() throws {
+        func at(_ id: String, _ project: String) throws -> InboxItem {
+            let json: [String: Any] = ["sessionId": id, "runtime": "chat", "title": id, "project": project, "repo": "r", "agent": "claude",
+                                       "attention": ["section": "idle", "since": 1, "reason": NSNull()], "lastText": NSNull()]
+            return try JSONDecoder().decode(InboxItem.self, from: JSONSerialization.data(withJSONObject: json))
+        }
+        let slots = InboxView.badgeSlots(["acme", "lumen", "orchard"])
+        let before = try [at("a", "acme"), at("l", "lumen"), at("o", "orchard")]
+        let after = before.filter { $0.sessionId != "a" }
+        func colour(_ items: [InboxItem]) -> [String: Int] {
+            Dictionary(uniqueKeysWithValues: items.map { ($0.sessionId, slots[$0.project]!) })
+        }
+        XCTAssertEqual(colour(before), ["a": 0, "l": 1, "o": 2])
+        XCTAssertEqual(colour(after), ["l": 1, "o": 2])
     }
 
     /// inboxView.test.ts snoozeEnd: the time on the same day, the short weekday before it on another.

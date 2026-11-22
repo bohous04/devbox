@@ -236,7 +236,8 @@ struct MacInboxSidebar: View {
                 }
             }
             .environment(\.inboxShowsAgent, store.items.map(InboxView.mixedAgents) ?? false)
-            .environment(\.inboxBadgeSlots, InboxView.badgeSlots(store.items ?? []))
+            .environment(\.inboxBadgeSlots, store.badgeSlots)
+            .task { await store.loadBadgeSlots() }
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { sidebarHeight = $0 }
         .navigationTitle("Inbox")

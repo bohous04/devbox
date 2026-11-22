@@ -141,16 +141,18 @@ const BADGE = [
   "bg-cyan-500/15 text-cyan-800 dark:text-cyan-300",
 ];
 
-/** Each project's badge colour (badgeSlots over the whole inbox), set where the list is built. */
+/** Each project's badge colour (badgeSlots over devd's project list); null until /api/tree has answered. */
 const BadgeSlots = createContext<Map<string, number> | null>(null);
+
+/** A badge without its colour yet: the project list has not arrived (or failed, logged), or the project is not in it. */
+const BADGE_NEUTRAL = "bg-muted text-muted-foreground";
 
 /** The project as two letters on its colour, in front of the second line; the name itself is in the row's label. */
 function ProjectBadge({ project }: { project: string }) {
   const slot = useContext(BadgeSlots)?.get(project);
-  if (slot === undefined) throw new Error(`no badge slot for project ${project}: is the row outside the Inbox page's BadgeSlots provider?`);
   return (
     <span aria-hidden="true" title={project}
-      className={cn("grid h-3.5 min-w-[18px] flex-none place-items-center rounded px-0.5 text-[9px] font-semibold leading-none tracking-wide", BADGE[slot])}>
+      className={cn("grid h-3.5 min-w-[18px] flex-none place-items-center rounded px-0.5 text-[9px] font-semibold leading-none tracking-wide", slot === undefined ? BADGE_NEUTRAL : BADGE[slot])}>
       {projectBadge(project)}
     </span>
   );
@@ -300,6 +302,12 @@ export function Inbox() {
     // Until the first full list arrives a single item would read as the whole inbox.
     onInbox: (item) => setItems((cur) => (cur === null ? cur : upsertInbox(cur, item))),
   });
+  // The badge colours come from devd's project list, loaded once per visit; the badges stay neutral until it answers.
+  const [slots, setSlots] = useState<Map<string, number> | null>(null);
+  useEffect(() => {
+    api.tree().then((t) => setSlots(badgeSlots(t.map((p) => p.project))),
+      (e: unknown) => console.error(`inbox: project list for the badge colours failed: ${failureText(e)}`));
+  }, []);
   const g = items ? groupInbox(items) : null;
   const list = g ? inboxList(g) : [];
   // A row action answers the session's new item: shown at once, the SSE event that follows is the same.
@@ -367,7 +375,7 @@ export function Inbox() {
       )}
       {!g ? (pollError ? <p role="alert" className="text-sm text-destructive">{pollError}</p> : <RowsSkeleton rows={4} />) : (
         <ShowAgent.Provider value={mixedAgents(items!)}>
-        <BadgeSlots.Provider value={badgeSlots(items!)}>
+        <BadgeSlots.Provider value={slots}>
         <SettleRow.Provider value={settle}>
           <div ref={listRef} className="-mx-3 max-w-[720px]" data-inbox-column>
             {list.length === 0 ? (

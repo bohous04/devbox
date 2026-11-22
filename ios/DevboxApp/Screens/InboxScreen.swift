@@ -62,7 +62,7 @@ struct InboxScreen: View {
             if let items = store.items {
                 content(InboxView.group(items))
                     .environment(\.inboxShowsAgent, InboxView.mixedAgents(items))
-                    .environment(\.inboxBadgeSlots, InboxView.badgeSlots(items))
+                    .environment(\.inboxBadgeSlots, store.badgeSlots)
             } else if let error = store.loadError {
                 ContentUnavailableView("Can't load the inbox", systemImage: "tray", description: Text(error))
             } else {
@@ -73,6 +73,7 @@ struct InboxScreen: View {
         .background(Theme.C.background)
         .navigationTitle("Inbox")
         .task { store.start() }
+        .task { await store.loadBadgeSlots() }
         .onAppear { visible = true }
         .onDisappear {
             visible = false
@@ -407,6 +408,8 @@ enum InboxTone {
         (Color(light: 0x84CC16, dark: 0x84CC16), Color(light: 0x3F6212, dark: 0xBEF264)),
         (Color(light: 0x06B6D4, dark: 0x06B6D4), Color(light: 0x155E75, dark: 0x67E8F9)),
     ]
+    /// A badge before its colour is known (InboxStore.badgeSlots not loaded yet).
+    static let badgeNeutral = (fill: Color(light: 0x71717A, dark: 0xA1A1AA), text: Theme.C.mutedForeground)
 }
 
 /// A project as two letters on its colour (InboxView.projectBadge), in front of a row's second line. The name itself is
@@ -417,9 +420,8 @@ struct ProjectBadge: View {
     @Environment(\.inboxBadgeSlots) private var slots
 
     var body: some View {
-        // badgeSlots is taken over the same items the rows come from: a missing project is a wiring bug.
-        guard let slot = slots[project] else { preconditionFailure("no badge slot for project \(project): set inboxBadgeSlots where the list is built") }
-        let tint = InboxTone.badge[slot]
+        // Neutral until devd's project list has arrived (or for a project not in it): no colour is guessed.
+        let tint = slots?[project].map { InboxTone.badge[$0] } ?? InboxTone.badgeNeutral
         return Text(InboxView.projectBadge(project))
             .font(.system(size: size, weight: .semibold))
             .tracking(0.3)
@@ -437,8 +439,8 @@ struct ProjectBadge: View {
 /// True by default on purpose: a row outside such a list names its agent rather than hide which one runs.
 private struct InboxShowsAgentKey: EnvironmentKey { static let defaultValue = true }
 
-/// Each project's badge colour (InboxView.badgeSlots over the whole inbox), set where the list is built.
-private struct InboxBadgeSlotsKey: EnvironmentKey { static let defaultValue: [String: Int] = [:] }
+/// Each project's badge colour (InboxStore.badgeSlots), set where the list is built; nil until it has loaded.
+private struct InboxBadgeSlotsKey: EnvironmentKey { static let defaultValue: [String: Int]? = nil }
 
 extension EnvironmentValues {
     var inboxShowsAgent: Bool {
@@ -446,7 +448,7 @@ extension EnvironmentValues {
         set { self[InboxShowsAgentKey.self] = newValue }
     }
 
-    var inboxBadgeSlots: [String: Int] {
+    var inboxBadgeSlots: [String: Int]? {
         get { self[InboxBadgeSlotsKey.self] }
         set { self[InboxBadgeSlotsKey.self] = newValue }
     }

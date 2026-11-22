@@ -119,15 +119,24 @@ test("projectBadge: two initials from words, two letters from one word", () => {
   expect(projectBadge("")).toBe("?");
 });
 
-test("badgeSlots: a project's place among the inbox's projects in code-point order, mod 8; the Apple apps' badgeSlots", () => {
-  const at = (project: string) => ({ ...item(project, { section: "idle", reason: null, since: 1 }), project });
-  const slots = badgeSlots([at("orchard"), at("acme"), at("lumen"), at("acme"), at("Zeta"), at("údržba")]);
+test("badgeSlots: a project's place in devd's project list (/api/tree) in code-point order, mod 8; the Apple apps' badgeSlots", () => {
+  const slots = badgeSlots(["orchard", "acme", "lumen", "acme", "Zeta", "údržba"]);
   expect([...slots]).toEqual([["Zeta", 0], ["acme", 1], ["lumen", 2], ["orchard", 3], ["údržba", 4]]);
   // Up to eight projects never share a colour; a ninth comes round to the first.
-  const nine = badgeSlots("abcdefghi".split("").map(at));
+  const nine = badgeSlots("abcdefghi".split(""));
   expect(new Set([...nine.values()].slice(0, 8)).size).toBe(8);
   expect(nine.get("i")).toBe(0);
   expect(badgeSlots([]).size).toBe(0);
+});
+
+test("badgeSlots: ending the only session of a project leaves the other badges' colours as they were", () => {
+  const at = (sessionId: string, project: string) => ({ ...item(sessionId, { section: "idle", reason: null, since: 1 }), project });
+  const tree = ["acme", "lumen", "orchard"];
+  const before = [at("a", "acme"), at("l", "lumen"), at("o", "orchard")];
+  const after = before.filter((i) => i.sessionId !== "a");
+  const colour = (items: InboxItem[]) => Object.fromEntries(items.map((i) => [i.sessionId, badgeSlots(tree).get(i.project)]));
+  expect(colour(after)).toEqual({ l: colour(before).l, o: colour(before).o });
+  expect(colour(before)).toEqual({ a: 0, l: 1, o: 2 });
 });
 
 test("snoozeEnd: the time on the same day, the short weekday before it on another", () => {

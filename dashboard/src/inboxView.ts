@@ -135,18 +135,17 @@ export function projectBadge(project: string): string {
 /** The badge colours there are (Inbox.tsx BADGE, the Apple apps' InboxTone.badge). */
 export const BADGE_SLOTS = 8;
 
-/** Each project's badge colour: its place among the inbox's projects in code-point order (the Apple apps sort the
- *  same way), mod BADGE_SLOTS, so up to eight projects never share a colour. A project joining or leaving the inbox
- *  can move the colours of the projects after it; the owner chose that over a hash, which collides almost always. */
-export function badgeSlots(items: InboxItem[]): Map<string, number> {
+/** Each project's badge colour: its place in devd's project list (/api/tree's project names) in code-point order (the
+ *  Apple apps sort the same way), mod BADGE_SLOTS, so up to eight projects never share a colour. Projects are added
+ *  rarely, so the colours stay put; a session coming or going moves none (the inbox's own projects would, daily). */
+export function badgeSlots(projects: string[]): Map<string, number> {
   const cp = (s: string) => [...s].map((c) => c.codePointAt(0)!);
   const byCodePoint = (a: string, b: string) => {
     const x = cp(a), y = cp(b);
     for (let n = 0; n < Math.min(x.length, y.length); n++) if (x[n] !== y[n]) return x[n] - y[n];
     return x.length - y.length;
   };
-  const projects = [...new Set(items.map((i) => i.project))].sort(byCodePoint);
-  return new Map(projects.map((p, n) => [p, n % BADGE_SLOTS]));
+  return new Map([...new Set(projects)].sort(byCodePoint).map((p, n) => [p, n % BADGE_SLOTS]));
 }
 
 /** When a snooze ends, for its chip: the time on the same day, else the short weekday and the time. */
