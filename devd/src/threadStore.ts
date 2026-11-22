@@ -50,20 +50,25 @@ export class ThreadStore {
   static open(root: string, sessionId: string, opts: { onNotice?: (item: ThreadItem) => void; dir?: StoreDir } = {}): ThreadStore {
     const dir = opts.dir ?? "_threads";
     mkdirSync(join(root, dir), { recursive: true });
-    const db = new Database(ThreadStore.path(root, sessionId, dir));
+    return ThreadStore.openFile(ThreadStore.path(root, sessionId, dir), opts.onNotice);
+  }
+
+  /** A store at an explicit path: an ended session's archived transcript (endedSessions.ts). */
+  static openFile(path: string, onNotice?: (item: ThreadItem) => void): ThreadStore {
+    const db = new Database(path);
     db.run("PRAGMA busy_timeout = 5000");
     db.run("PRAGMA journal_mode = WAL");
     db.run("PRAGMA synchronous = NORMAL");
     const version = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
     if (version > THREAD_STORE_SCHEMA) {
       db.close();
-      throw new Error(`thread store schema ${version} is newer than this devd's (${THREAD_STORE_SCHEMA}): ${ThreadStore.path(root, sessionId, dir)}`);
+      throw new Error(`thread store schema ${version} is newer than this devd's (${THREAD_STORE_SCHEMA}): ${path}`);
     }
     if (version === 0) db.transaction(() => ThreadStore.createSchema1(db))();
     if (version <= 1) db.transaction(() => ThreadStore.migrateTo2(db))();
     if (version <= 2) db.transaction(() => ThreadStore.migrateTo3(db))();
     if (version <= 3) db.transaction(() => ThreadStore.migrateTo4(db))();
-    return new ThreadStore(db, opts.onNotice ?? (() => {}));
+    return new ThreadStore(db, onNotice ?? (() => {}));
   }
 
   /** Schema 1: every store from before `user_version` (steps 2-5 created and extended them without one) and every new

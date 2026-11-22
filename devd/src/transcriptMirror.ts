@@ -11,7 +11,7 @@
 // The mapped events go into a ThreadStore of its own (`_mirrors/<id>.sqlite`), so the snapshot, paging and SSE replay
 // work exactly like a chat thread's. Polling runs only while a client watches (SSE) and on the session's hook events.
 // Transcript content never goes to logs.
-import { closeSync, constants as C, fstatSync, openSync, readSync, rmSync } from "node:fs";
+import { closeSync, constants as C, fstatSync, openSync, readSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { MirrorInfo, MirrorSendError } from "../../shared/mirror";
@@ -525,8 +525,12 @@ export class TranscriptMirror {
   /** Per session, for the pane's codex process (`pid:start`): the rollouts it was seen with open, and the newest hook
    *  row at the time an unchosen one newly opened (see codexThread). */
   private codexWatch = new Map<string, CodexWatch>();
+  /** Sessions whose last read before the end runs now (finalRefresh): for it alone they are not ending yet. */
+  private finalizing = new Set<string>();
 
   constructor(private d: MirrorDeps) {}
+
+  private ending(id: string): boolean { return this.d.isEnding(id) && !this.finalizing.has(id); }
 
   private now() { return this.d.now?.() ?? Date.now(); }
   private log(msg: string) { (this.d.log ?? ((m) => console.error(m)))(msg); }
@@ -536,7 +540,7 @@ export class TranscriptMirror {
     const s = getSession(this.d.db, id);
     if (!s) return { error: "unknown-session" };
     if (storedRuntime(s) !== "tmux") return { error: "not-a-tmux-session" };
-    if (this.d.isEnding(id)) return { error: "session-ending" };
+    if (this.ending(id)) return { error: "session-ending" };
     return { s };
   }
 
@@ -545,7 +549,7 @@ export class TranscriptMirror {
   store(id: string): ThreadStore {
     const open = this.stores.get(id);
     if (open) return open;
-    if (this.d.isEnding(id)) throw new Error(`session ${id} is ending`);
+    if (this.ending(id)) throw new Error(`session ${id} is ending`);
     const store = ThreadStore.open(this.d.root, id, { dir: "_mirrors", onNotice: (item) => this.d.bus.publish(`mirror:${id}`, { notice: item }) });
     this.stores.set(id, store);
     return store;
@@ -592,8 +596,20 @@ export class TranscriptMirror {
     return run;
   }
 
-  /** Session stopped (close the store) or ended (and delete it: the transcript itself stays). */
-  release(id: string, ended = false): void {
+  /** The last read of an ending session, while its container still runs: end() (sessions.ts) archives the store as
+   *  the ended session's transcript. Waits for a refresh in progress (it stops at its next step: the session is
+   *  ending), then reads once more. Never throws. */
+  async finalRefresh(id: string): Promise<void> {
+    await this.running.get(id);
+    this.finalizing.add(id);
+    const run = this.tick(id).catch((e) => this.log(`mirror ${id}: final refresh failed: ${(e as Error).message}`))
+      .finally(() => { this.finalizing.delete(id); this.running.delete(id); });
+    this.running.set(id, run);
+    return run;
+  }
+
+  /** Session stopped or ended: closes the store. An ended session's store stays on disk for end() to archive. */
+  release(id: string): void {
     this.generation.set(id, this.gen(id) + 1);
     const w = this.watchers.get(id);
     if (w) { clearInterval(w.timer); this.watchers.delete(id); }
@@ -606,7 +622,6 @@ export class TranscriptMirror {
     this.panes.delete(id);
     this.codexWatch.delete(id);
     this.pending.delete(id);
-    if (ended) for (const x of ["", "-wal", "-shm"]) rmSync(join(this.d.root, "_mirrors", `${id}.sqlite${x}`), { force: true });
   }
 
   private async locate(s: SessionRow): Promise<PaneAgent | null> {
@@ -663,7 +678,7 @@ export class TranscriptMirror {
     if ("error" in r) return;
     const { s } = r;
     const gen = this.gen(id);
-    const current = () => gen === this.gen(id) && !this.d.isEnding(id);
+    const current = () => gen === this.gen(id) && !this.ending(id);
     const pane = (s.host ?? "vps") === "instabox" || s.status !== "running" ? null : await this.locate(s);
     if (!current()) return;
     // The pane is known to a send only together with the info from the same refresh: one that fails partway (a read

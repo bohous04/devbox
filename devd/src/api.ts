@@ -58,6 +58,9 @@ import { basename, join } from "node:path";
 import { readUpload, UploadError } from "./uploads";
 import { InboxNameError, stageFile, stageShared } from "./inbox";
 import { registerThreadRoutes, type ThreadApiDeps } from "./threadApi";
+import { registerEndedRoutes } from "./endedApi";
+import { continueMode, getEnded, handoffPrompt, writeHandoffTranscript } from "./endedSessions";
+import type { ContinueResult } from "../../shared/ended";
 import { stageThreadImage, ThreadImageError } from "./threadImages";
 import type { SshKeyRef } from "./op";
 import { resolveSshTarget, type SshServer } from "./sshServers";
@@ -398,6 +401,7 @@ export function createApp(d: ApiDeps): Hono {
   });
   app.route("/api/live-activities", liveActivitiesRoutes(d.db, d.liveActivities));
   if (d.mirror) registerMirrorRoutes(app, d.mirror);
+  if (d.bus) registerEndedRoutes(app, { db: d.db, bus: d.bus });
   registerThreadRoutes(app, d.links && d.threads && d.bus && d.inbox && d.bridgeVersion
     ? { db: d.db, root: d.root, mgr: d.mgr, links: d.links, threads: d.threads, bus: d.bus, inbox: d.inbox, bridgeVersion: d.bridgeVersion, switcher: d.switcher, untilReset: d.untilReset } : null);
 
@@ -1159,6 +1163,35 @@ export function createApp(d: ApiDeps): Hono {
       const r = await d.mgr.open({ folder: body.folder, project: body.project, repo: body.repo, cloneUrl: body.cloneUrl, agent, runtime: picked.runtime, joinRuntimes, fresh: body.fresh, requestId });
       linkOpenedChat(r);
       return c.json(r.created && picked.notice ? { ...r, runtimeNotice: picked.notice } : r, r.created ? 201 : 200);
+    } catch (e) {
+      if (e instanceof FirstPromptRefused) return c.json({ error: e.message }, 409);
+      return busy(c, e) ?? c.json({ error: (e as Error).message }, 400);
+    }
+  });
+
+  /** Continues an ended session's work in a new session of the same repo, agent and runtime (endedSessions.ts). The
+   *  response says how: `handoff` (the new session's first message points at the whole transcript). */
+  app.post("/api/ended/:id/continue", async (c) => {
+    noIdleTimeout(c);
+    const row = getEnded(d.db, c.req.param("id"));
+    if (!row) return c.json({ error: "unknown ended session" }, 404);
+    // The new session starts with instructions, so the same rule as a first prompt (POST /api/sessions).
+    if (!isApprovalAllowed(d.remoteAddr?.(c), d.sshApprovalAllowExtra ?? [])) return c.json({ error: "an ended session can only be continued from the dashboard or a trusted device, not from a container" }, 403);
+    if (!isAgentName(row.agent)) return c.json({ error: `the ended session's agent ${row.agent} is no longer known` }, 409);
+    if (row.runtime === "chat") {
+      const blocked = chatRuntimeBlock(row.agent, "vps");
+      if (blocked) return c.json({ error: blocked }, 409);
+      if (!d.links) return c.json({ error: "chat sessions cannot take a first message here (no bridge link)" }, 503);
+    }
+    const mode = continueMode(row);
+    let prompt: string;
+    try { prompt = handoffPrompt(row, writeHandoffTranscript(d.root, row).container); }
+    catch (e) { return c.json({ error: `the transcript of ${row.id} could not be read: ${(e as Error).message}` }, 500); }
+    try {
+      const r = await d.mgr.open({ folder: row.folder, project: row.project, repo: row.repo, agent: row.agent, runtime: row.runtime, fresh: true, ...(row.runtime === "tmux" ? { firstPrompt: prompt } : {}) });
+      linkOpenedChat(r, row.runtime === "chat" ? prompt : undefined);
+      const out: ContinueResult = { mode, sessionId: r.session.id, runtime: row.runtime };
+      return c.json(out, 201);
     } catch (e) {
       if (e instanceof FirstPromptRefused) return c.json({ error: e.message }, 409);
       return busy(c, e) ?? c.json({ error: (e as Error).message }, 400);

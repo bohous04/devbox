@@ -1,6 +1,8 @@
 import { loadRemoteRoute, inspectRemoteContainer, prepareRemoteWorkspace, restoreExactSession, retainRemoteWorkspace, type RemoteRoute } from "../../infra/codex-remote/restoreSession";
 import { archiveChats } from "./chatArchive";
-import { removeThreadImages } from "./threadImages";
+import { archiveThreadImages, removeThreadImages } from "./threadImages";
+import { recordEnded } from "./endedSessions";
+import type { EndedSession } from "../../shared/ended";
 import { codexRemoteLaunchScope } from "./codexRemoteLaunch";
 import type { Database } from "bun:sqlite";
 import { chmodSync, existsSync, fchownSync, lstatSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
@@ -144,6 +146,11 @@ export interface SessionDeps {
   /** Offsite backup of the session before its container is deleted (storageGuard.ts). It can take
    *  tens of minutes — End must wait for it, otherwise the storage guard refuses `docker rm`. */
   preserveForEnd?: (container: string) => Promise<void>;
+  /** The last read of a tmux session's transcript mirror while its container still runs (TranscriptMirror.finalRefresh):
+   *  end() archives the mirror as the ended session's transcript. Never throws. */
+  finalizeTranscript?: (s: SessionRow) => Promise<void>;
+  /** An ended session's transcript was kept (endedSessions.ts): the inbox lists it (SSE `inbox-ended`). */
+  onEnded?: (e: EndedSession) => void;
 }
 
 /** Chat sessions share Codex threads, history and sqlite across accounts through one volume; tmux sessions keep
@@ -598,10 +605,31 @@ export class SessionManager {
   // so does `--resume <id>` across account profiles (accountSwitch), the overlay is the same for all
   // profiles. Deliberately under `root` (=/srv/dev): that directory is in the borg backup
   // (infra/devbox-backup.sh), so the conversation history is not lost from the backup.
-  private keepChats(id: string) {
+  private keepChats(id: string): string | null {
     // A failed move leaves the transcripts in place (and logged) — never deletes them.
-    try { archiveChats(this.d.root, id, new Date(this.now())); }
-    catch (e) { console.error(`archiving chats of ${id} failed, what did not move is left in _claude-projects / _threads:`, e); }
+    try { return archiveChats(this.d.root, id, new Date(this.now())); }
+    catch (e) { console.error(`archiving chats of ${id} failed, what did not move is left in _claude-projects / _threads / _mirrors:`, e); return null; }
+  }
+
+  /** After the archive: the chat images go next to the transcript, and the transcript is listed as an ended session.
+   *  Failures are logged and must not leave the session row behind (end() deletes it after this). */
+  private keepTranscript(s: SessionRow, dest: string | null) {
+    const id = s.id;
+    // A mirror store the archive did not take must not greet a later session that reuses the id.
+    for (const x of ["", "-wal", "-shm"]) rmSync(join(this.d.root, "_mirrors", `${id}.sqlite${x}`), { force: true });
+    if (dest !== null) {
+      try { archiveThreadImages(this.d.root, id, dest); }
+      catch (e) { console.error(`moving the chat images of ${id} to ${dest} failed, they are removed with the session:`, e); }
+    }
+    // Its chat images go only now (S5-R23): the bridge that read them is gone with the container. Images the archive
+    // took are no longer there. A failure leaves them on disk (logged).
+    try { removeThreadImages(this.d.root, id); }
+    catch (e) { console.error(`removing the chat images of ${id} failed, they stay in _inbox/${id}:`, e); }
+    if (dest === null) return;
+    try {
+      const ended = recordEnded(this.d.db, s, dest, this.now());
+      if (ended) this.d.onEnded?.(ended);
+    } catch (e) { console.error(`listing the ended transcript of ${id} (${dest}) failed:`, e); }
   }
 
   private claudeProjectsDir(id: string) {
@@ -1523,6 +1551,7 @@ export class SessionManager {
       // Native history may resume after end(): retain its exact files, including uncommitted work.
       // Validate authority BEFORE removing Docker or files; malformed registry fails closed.
       const keepRemote = retainRemoteWorkspace(s, this.d.root);
+      await this.d.finalizeTranscript?.(s);
       await this.d.preserveForEnd?.(s.container);
       await removeContainer(id);
       // The worktree belongs to the session, so it goes with it — except for `keepWorktree` (see above).
@@ -1542,11 +1571,7 @@ export class SessionManager {
       // The chat store is released only now: until the container is gone the bridge may still send events, and
       // the store takes them (isEnding keeps readers out). Closed here, it is archived with no handle open.
       this.d.releaseThread?.(id, true);
-      this.keepChats(id);
-      // Its chat images go only now (S5-R23): the bridge that read them is gone with the container. A failure leaves
-      // them on disk (logged) and must not leave the session row behind, like the lease release below.
-      try { removeThreadImages(this.d.root, id); }
-      catch (e) { console.error(`removing the chat images of ${id} failed, they stay in _inbox/${id}:`, e); }
+      this.keepTranscript(s, this.keepChats(id));
       deleteGitStat(this.d.db, id);
       // The lease belongs to the session — without releasing it the account would look occupied until the
       // period expires and the poller would needlessly keep it at the fast cadence. An error here must not, however,

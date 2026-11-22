@@ -79,6 +79,7 @@ import { ChatSwitch } from "./chatSwitch";
 import { EventBus } from "./eventBus";
 import { Inbox } from "./sessionInbox";
 import { AUTO_SETTLE_TICK_MS, hubShelfDeps, resetDeps, untilReset } from "./sessionAttention";
+import { ENDED_PURGE_TICK_MS, purgeEnded } from "./endedSessions";
 import { checkPrs, PR_WATCH_TICK_MS, PrWatch } from "./prWatch";
 import { chatAttention, chatBusy } from "./attention";
 import { contextLengthCached } from "./openrouterModels";
@@ -527,7 +528,7 @@ reportPrunedFirstPrompts({ db, threads: threadStore, notify }, prunedFirstTurns)
   if (legacy) console.error(legacy);
 }
 const releaseThread = (id: string, ended = false) => {
-  transcriptMirror.release(id, ended);
+  transcriptMirror.release(id);
   bridgeLinks.drop(id);
   if (ended) bridgeLinks.forget(id);
   chatHub.drop(id);
@@ -578,6 +579,9 @@ const mgr = new SessionManager({
   tz: env("DEVD_TZ", Intl.DateTimeFormat().resolvedOptions().timeZone),
   dind: dindEnabled,
   preserveForEnd: (container) => preserveForEnd(container),
+  // Late-bound: transcriptMirror is created below; end() never runs before startup finishes.
+  finalizeTranscript: (s): Promise<void> => (storedRuntime(s) === "tmux" ? transcriptMirror.finalRefresh(s.id) : Promise.resolve()),
+  onEnded: (e) => bus.publish("inbox-ended", e),
   storageGuard: () => existsSync(STORAGE_GUARD),
   // A shared / tainted session gets no dind sidecar (shareTaint.ts, final review C2).
   shareRestricted: async (id) => {
@@ -867,7 +871,7 @@ const dockerExec = (container: string, cmd: string[], timeoutMs: number) =>
   runDocker(container, ["exec", container, ...cmd], { timeoutMs });
 const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // The Chat view of tmux sessions. `-i` only when the command reads stdin (the message typed into the pane).
-const transcriptMirror = new TranscriptMirror({
+const transcriptMirror: TranscriptMirror = new TranscriptMirror({
   db, root, bus, isEnding: (id) => mgr.isEnding(id), live: (id) => agentEvents.liveSnapshot(id),
   exec: (container, cmd, timeoutMs, stdin) =>
     runDocker(container, ["exec", ...(stdin === undefined ? [] : ["-i"]), container, ...cmd], stdin === undefined ? { timeoutMs } : { timeoutMs, stdin }),
@@ -1364,6 +1368,12 @@ setInterval(() => {
 // Snoozes a previous devd set still end with an inbox update; then settle quiet sessions (24 h once seen, else 7 days; sessionAttention.ts).
 try { inbox.armSnoozes(); } catch (e) { console.error("inbox: snooze timers not armed:", e); }
 setInterval(guardedTick("auto-settle", async () => { inbox.autoSettle(); }), AUTO_SETTLE_TICK_MS);
+// Ended transcripts are kept 30 days (endedSessions.ts); a failed removal is logged there and retried on the next run.
+const purgeEndedTick = () => {
+  for (const id of purgeEnded(db, root, Date.now(), (m) => console.error(m))) bus.publish("inbox-ended", { id, removed: true });
+};
+setInterval(guardedTick("ended transcript purge", async () => purgeEndedTick()), ENDED_PURGE_TICK_MS);
+try { purgeEndedTick(); } catch (e) { console.error("ended transcript purge failed:", e); }
 setInterval(guardedTick("pr watch", () => prWatch.tick()), PR_WATCH_TICK_MS);
 // Hardware: the tick itself decides what is currently due (see INTERVALS in hardware.ts),
 // so this interval is only a fine sieve, not the refresh cadence.

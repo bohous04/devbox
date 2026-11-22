@@ -256,9 +256,29 @@ test("a refresh still running when the session is released does not reopen the s
   const t = setup({ sid: SID });
   t.write(SID, fixtureLines());
   const pending = t.mirror.refresh(TMUX.id);
-  t.mirror.release(TMUX.id, true);
+  t.mirror.release(TMUX.id);
   await pending;
   expect(existsSync(join(t.root, "_mirrors", `${TMUX.id}.sqlite`))).toBe(false);
+});
+
+// end() (sessions.ts) keeps the mirror as the ended session's transcript: one last read while the session is ending.
+test("finalRefresh reads the transcript of an ending session that plain refreshes skip, and release leaves the store for the archive", async () => {
+  let ending = false;
+  const t = setup({ sid: SID }, () => ending);
+  const lines = fixtureLines();
+  t.write(SID, lines.slice(0, 10));
+  await t.mirror.refresh(TMUX.id);
+  t.write(SID, lines.slice(10));
+  ending = true;
+  await t.mirror.refresh(TMUX.id);
+  await t.mirror.finalRefresh(TMUX.id);
+  t.mirror.release(TMUX.id);
+  expect(existsSync(join(t.root, "_mirrors", `${TMUX.id}.sqlite`))).toBe(true);
+  const store = ThreadStore.open(t.root, TMUX.id, { dir: "_mirrors" });
+  cleanups.push(() => store.close());
+  expect(store.snapshot().items.map(brief)).toEqual(render(lines).snapshot.items.map(brief));
+  // After the final read the session is ending again for everyone else.
+  expect(t.mirror.session(TMUX.id)).toEqual({ error: "session-ending" });
 });
 
 test("a rewritten transcript is read again from the start with a notice", async () => {
