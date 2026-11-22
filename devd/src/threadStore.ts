@@ -71,6 +71,27 @@ export class ThreadStore {
     return new ThreadStore(db, onNotice ?? (() => {}));
   }
 
+  /** Makes an archived store readable without writing to it again: migrated to this devd's schema and off WAL (a
+   *  read-only connection to a WAL database needs its -shm). end() does this once, when it keeps the transcript. */
+  static sealArchive(path: string): void {
+    const store = ThreadStore.openFile(path);
+    try { store.db.run("PRAGMA journal_mode = DELETE"); } finally { store.close(); }
+  }
+
+  /** An archived store (endedSessions.ts), read-only: no WAL switch, no migration. One sealed by an older devd is
+   *  sealed again (migrated) first, once. */
+  static openArchived(path: string): ThreadStore {
+    let db = new Database(path, { readonly: true });
+    const version = (db.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+    if (version !== THREAD_STORE_SCHEMA) {
+      db.close();
+      ThreadStore.sealArchive(path);
+      db = new Database(path, { readonly: true });
+    }
+    db.run("PRAGMA busy_timeout = 5000");
+    return new ThreadStore(db, () => {});
+  }
+
   /** Schema 1: every store from before `user_version` (steps 2-5 created and extended them without one) and every new
    *  store. Idempotent on purpose: an unversioned store may be of any shape step 2-5 shipped, so tables are created if
    *  missing and the columns added since step 2 are added if missing. */

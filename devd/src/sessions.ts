@@ -1,13 +1,13 @@
 import { loadRemoteRoute, inspectRemoteContainer, prepareRemoteWorkspace, restoreExactSession, retainRemoteWorkspace, type RemoteRoute } from "../../infra/codex-remote/restoreSession";
-import { archiveChats } from "./chatArchive";
+import { archiveChats, archiveStamp } from "./chatArchive";
 import { archiveThreadImages, removeThreadImages } from "./threadImages";
-import { recordEnded } from "./endedSessions";
+import { HANDOFF_TRANSCRIPT, recordEnded } from "./endedSessions";
 import type { EndedSession } from "../../shared/ended";
 import { codexRemoteLaunchScope } from "./codexRemoteLaunch";
 import type { Database } from "bun:sqlite";
 import { chmodSync, existsSync, fchownSync, lstatSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { openDirNoFollow, withDir, writeFileAt, type DirHandle } from "./noFollowFs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { liveAgentPresent, staleAccountMounts } from "./accountMountRepair";
 import { chatRuntimeBlock, specFor, tmuxRuntimeBlock, usesProxy, type Upstream } from "./agents";
 import { parseProcTree, PS_TREE_CMD } from "./ccUpkeep";
@@ -59,6 +59,8 @@ export const MAX_FIRST_PROMPT_BYTES = 64_000;
 /** A first prompt that would not reach the agent: refused before anything changes (POST /api/sessions answers 409). */
 /** An ended Claude conversation a new session starts on (endedSessions.ts continuePlan). */
 export interface ResumeSeed { thread: string; jsonl: Buffer }
+/** The handoff transcript's name in the control dir (/run/devd), endedSessions.ts HANDOFF_TRANSCRIPT. */
+const HANDOFF_FILE = basename(HANDOFF_TRANSCRIPT);
 
 export class FirstPromptRefused extends Error {
   constructor(message: string) { super(message); this.name = "FirstPromptRefused"; }
@@ -150,8 +152,8 @@ export interface SessionDeps {
    *  tens of minutes — End must wait for it, otherwise the storage guard refuses `docker rm`. */
   preserveForEnd?: (container: string) => Promise<void>;
   /** The last read of a tmux session's transcript mirror while its container still runs (TranscriptMirror.finalRefresh):
-   *  end() archives the mirror as the ended session's transcript. Never throws. */
-  finalizeTranscript?: (s: SessionRow) => Promise<void>;
+   *  end() archives the mirror as the ended session's transcript. `truncated`: the read stopped short. Never throws. */
+  finalizeTranscript?: (s: SessionRow) => Promise<{ truncated: boolean }>;
   /** An ended session's transcript was kept (endedSessions.ts): the inbox lists it (SSE `inbox-ended`). */
   onEnded?: (e: EndedSession) => void;
 }
@@ -609,17 +611,23 @@ export class SessionManager {
   // profiles. Deliberately under `root` (=/srv/dev): that directory is in the borg backup
   // (infra/devbox-backup.sh), so the conversation history is not lost from the backup.
   private keepChats(id: string): string | null {
-    // A failed move leaves the transcripts in place (and logged) — never deletes them.
+    // A failed move leaves the transcripts in place (and logged, and said) — never deletes them.
     try { return archiveChats(this.d.root, id, new Date(this.now())); }
-    catch (e) { console.error(`archiving chats of ${id} failed, what did not move is left in _claude-projects / _threads / _mirrors:`, e); return null; }
+    catch (e) {
+      console.error(`archiving chats of ${id} failed, what did not move is left in _claude-projects / _threads / _mirrors:`, e);
+      this.d.notify?.("devbox", `${id} ended, but its transcript could not be archived (${(e as Error).message}); it stays in _claude-projects / _threads / _mirrors`);
+      return null;
+    }
   }
 
   /** After the archive: the chat images go next to the transcript, and the transcript is listed as an ended session.
-   *  Failures are logged and must not leave the session row behind (end() deletes it after this). */
-  private keepTranscript(s: SessionRow, dest: string | null) {
+   *  Never throws (end() deletes the session row after this, the container is already gone); a failure is logged and,
+   *  where the owner loses something, notified. `truncated`: the last mirror read stopped short. */
+  private keepTranscript(s: SessionRow, dest: string | null, truncated: boolean) {
     const id = s.id;
     // A mirror store the archive did not take must not greet a later session that reuses the id.
-    for (const x of ["", "-wal", "-shm"]) rmSync(join(this.d.root, "_mirrors", `${id}.sqlite${x}`), { force: true });
+    try { for (const x of ["", "-wal", "-shm"]) rmSync(join(this.d.root, "_mirrors", `${id}.sqlite${x}`), { force: true }); }
+    catch (e) { console.error(`removing the leftover mirror store of ${id} failed:`, e); }
     if (dest !== null) {
       try { archiveThreadImages(this.d.root, id, dest); }
       catch (e) { console.error(`moving the chat images of ${id} to ${dest} failed, they are removed with the session:`, e); }
@@ -628,20 +636,29 @@ export class SessionManager {
     // took are no longer there. A failure leaves them on disk (logged).
     try { removeThreadImages(this.d.root, id); }
     catch (e) { console.error(`removing the chat images of ${id} failed, they stay in _inbox/${id}:`, e); }
-    if (dest === null) return;
     try {
-      const ended = recordEnded(this.d.db, s, dest, this.now());
+      const ended = recordEnded(this.d.db, s, dest, this.now(), { id: `${id}-${archiveStamp(new Date(this.now()))}`, truncated });
+      if (ended?.transcript === "truncated") console.error(`the ended transcript of ${id} is cut short: the last read did not reach the end`);
       if (ended) this.d.onEnded?.(ended);
-    } catch (e) { console.error(`listing the ended transcript of ${id} (${dest}) failed:`, e); }
+    } catch (e) {
+      console.error(`listing the ended transcript of ${id} (${dest}) failed:`, e);
+      this.d.notify?.("devbox", `${id} ended, but its transcript could not be listed in the inbox (${(e as Error).message})${dest ? `; it is archived in ${dest}` : ""}`);
+    }
   }
 
-  /** A new session that continues an ended Claude conversation (POST /api/ended/:id/continue): the conversation's jsonl
-   *  goes into the session's Claude projects dir and `/run/devd/resume` tells agent-launch.sh (tmux) or the bridge
-   *  (chat) to start on it, once. Without one, a file an older image left unread for an earlier session with this id is
-   *  removed. Runs before the container does. */
-  private async syncResumeFile(id: string, resume?: ResumeSeed): Promise<void> {
+  /** A new session that continues an ended one (POST /api/ended/:id/continue). `resume`: the Claude conversation's jsonl
+   *  goes into the session's Claude projects dir and `/run/devd/resume` tells agent-launch.sh (tmux) or the bridge (chat)
+   *  to start on it, once. `handoff`: the ended transcript as Markdown, at /run/devd/ended-transcript.md
+   *  (endedSessions.ts HANDOFF_TRANSCRIPT). Both live in this session's own control dir or projects dir, which no
+   *  other container mounts. Files an earlier session with this id left are removed. Runs before the container does. */
+  private async syncContinueFiles(id: string, t: { resume?: ResumeSeed; handoff?: string }): Promise<void> {
     const dir = this.ensureControlDir(id);
-    if (!resume) { rmSync(join(dir, "resume"), { force: true }); return; }
+    for (const name of ["resume", HANDOFF_FILE]) rmSync(join(dir, name), { force: true });
+    if (t.handoff !== undefined) {
+      withDir(dir, [], false, (d) => writeFileAt(d, HANDOFF_FILE, t.handoff!, { mode: 0o644, replace: true }));
+    }
+    const resume = t.resume;
+    if (!resume) return;
     const projects = await this.ensureClaudeProjectsDir(id);
     const owner = process.getuid?.() === 0 ? { owner: { uid: 1000, gid: 1000 } } : {};
     // Claude Code appends to it as the conversation goes on: the agent's file.
@@ -956,7 +973,7 @@ export class SessionManager {
   /** `sessionId`: open (resume/attach) EXACTLY this existing session of the repo, not the one
    *  existingSessionId would pick — e.g. a paused InstaBox session when the repo also has a VPS
    *  session (smoke test, M8). Never creates a new one. */
-  async open(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; joinRuntimes?: SessionRuntime[]; fresh?: boolean; sessionId?: string; requestId?: string; resume?: ResumeSeed }) {
+  async open(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; joinRuntimes?: SessionRuntime[]; fresh?: boolean; sessionId?: string; requestId?: string; resume?: ResumeSeed; handoff?: string }) {
     // The repo key while the id is not known (a new session only gets it here); then also the id,
     // so open does not collide with stop/end/recreate of the same existing session.
     return this.locked([openKey(t)], "open", async () => {
@@ -993,7 +1010,7 @@ export class SessionManager {
   // repo: 14 s → the sidecar alone ~3 s of it). openUnlocked still awaits it before the session
   // container runs, so "docker works from the first command" holds. When the open fails before
   // the container exists, the sidecar would be an orphaned privileged container — removed here.
-  private async openWithEarlyDind(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string; requestId?: string; resume?: ResumeSeed }, id: string) {
+  private async openWithEarlyDind(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string; requestId?: string; resume?: ResumeSeed; handoff?: string }, id: string) {
     const fresh = !t.sessionId && !getSession(this.d.db, id);   // sessionId never creates (see open)
     const dind = fresh && this.d.dind ? this.ensureDind(id).catch((e) => { console.error(`dind for ${id} failed:`, e); }) : undefined;
     try {
@@ -1004,7 +1021,7 @@ export class SessionManager {
     }
   }
 
-  private async openUnlocked(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string; requestId?: string; resume?: ResumeSeed }, id: string, earlyDind?: Promise<void>) {
+  private async openUnlocked(t: { folder: string; project: string; repo: string; cloneUrl?: string; prompt?: string; firstPrompt?: string; agent?: AgentName; runtime?: SessionRuntime; fresh?: boolean; sessionId?: string; requestId?: string; resume?: ResumeSeed; handoff?: string }, id: string, earlyDind?: Promise<void>) {
     const ws = workspacePath(this.d.root, t.folder, t.project, t.repo);
     const existing = getSession(this.d.db, id);
     // The session ended in the meantime (or belongs to another repo) → an error, not a silent new session with the same id.
@@ -1016,7 +1033,7 @@ export class SessionManager {
     const refusedEarly = t.firstPrompt === undefined ? null : firstPromptRefusal(existing, t.runtime, "missing", journal());
     if (refusedEarly) throw new FirstPromptRefused(refusedEarly);
     // A resume seeds the conversation before the agent's first start: only a session created now has one ahead.
-    if (t.resume && existing) throw new Error(`session ${id} already exists; a resumed conversation needs a new session`);
+    if ((t.resume || t.handoff !== undefined) && existing) throw new Error(`session ${id} already exists; continuing an ended session needs a new one`);
     if (existing?.host === "instabox") return this.openInstabox(existing, t);
     const agent = resolveAgent(t.agent, getRepoAgent(this.d.db, t.folder, t.project, t.repo));
     // The stored runtime wins over the request: a chat session must not be handed an agent the chat
@@ -1170,7 +1187,7 @@ export class SessionManager {
     const pull = await pullWithRebase(dir, authEnv);
     progress({ step: "container", detail: "setting file ownership" });
     const claudePrompt = this.syncPromptFile(id, existing ? storedRuntime(existing) : (t.runtime ?? "tmux"), pull, t.prompt, t.firstPrompt);
-    if (!existing) await this.syncResumeFile(id, t.resume);
+    if (!existing) await this.syncContinueFiles(id, t);
     if (pull.status === "conflict") {
       logEvent(this.d.db, id, "pull-conflict", { files: pull.files });
       this.d.notify?.("devbox", `${t.project}/${t.repo}: pull conflict — Claude is resolving it`);
@@ -1581,8 +1598,9 @@ export class SessionManager {
       // Native history may resume after end(): retain its exact files, including uncommitted work.
       // Validate authority BEFORE removing Docker or files; malformed registry fails closed.
       const keepRemote = retainRemoteWorkspace(s, this.d.root);
-      await this.d.finalizeTranscript?.(s);
       await this.d.preserveForEnd?.(s.container);
+      // The last read right before the container goes: nothing the agent writes after it is lost but the end itself.
+      const final = await this.d.finalizeTranscript?.(s);
       await removeContainer(id);
       // The worktree belongs to the session, so it goes with it — except for `keepWorktree` (see above).
       // The branch does NOT: there may be work in progress on it and deleting it quietly when the window is closed
@@ -1601,7 +1619,7 @@ export class SessionManager {
       // The chat store is released only now: until the container is gone the bridge may still send events, and
       // the store takes them (isEnding keeps readers out). Closed here, it is archived with no handle open.
       this.d.releaseThread?.(id, true);
-      this.keepTranscript(s, this.keepChats(id));
+      this.keepTranscript(s, this.keepChats(id), final?.truncated ?? false);
       deleteGitStat(this.d.db, id);
       // The lease belongs to the session — without releasing it the account would look occupied until the
       // period expires and the poller would needlessly keep it at the fast cadence. An error here must not, however,

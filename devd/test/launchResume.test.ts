@@ -55,8 +55,14 @@ function manager() {
   const root = mkdtempSync(join(tmpdir(), "continue-resume-"));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const mgr = new SessionManager({ db, cfg: DEFAULT_CONFIG, root, image: "devbox:test", controlRoot: join(root, "ctl") });
-  const seed = (mgr as unknown as { syncResumeFile: (id: string, r?: { thread: string; jsonl: Buffer }) => Promise<void> }).syncResumeFile.bind(mgr);
-  return { mgr, root, seed };
+  const priv = mgr as unknown as {
+    syncContinueFiles: (id: string, t: { resume?: { thread: string; jsonl: Buffer }; handoff?: string }) => Promise<void>;
+    runOpts: (id: string, ws: string, portBase: number, project: string, repo: string, agent: string, runtime: string) => Promise<{ extraMounts: string[] }>;
+  };
+  const seed = (id: string, resume?: { thread: string; jsonl: Buffer }) => priv.syncContinueFiles.call(mgr, id, resume ? { resume } : {});
+  const handoff = (id: string, text: string) => priv.syncContinueFiles.call(mgr, id, { handoff: text });
+  const mounts = async (id: string) => (await priv.runOpts.call(mgr, id, join(root, "ws"), 41500, "a", "b", "claude", "chat")).extraMounts;
+  return { mgr, root, seed, handoff, mounts };
 }
 
 const THREAD = "0b1c2d3e-0000-4000-8000-000000000001";
@@ -88,4 +94,18 @@ test("resumeImageBlock asks the image for its resume label and says why it canno
   } finally {
     process.env.PATH = orig;
   }
+});
+
+test("a handoff transcript goes to the new session alone: its control dir, never the /inbox every container mounts", async () => {
+  const { root, handoff, mounts } = manager();
+  await handoff("dev-a-b", "# Secret plan\n");
+  expect(readFileSync(join(root, "ctl", "dev-a-b", "ended-transcript.md"), "utf8")).toBe("# Secret plan\n");
+  expect(existsSync(join(root, "_inbox"))).toBe(false);
+  // Another session mounts its own control dir and the shared /inbox: neither holds the file.
+  const other = await mounts("dev-c-d");
+  expect(other).toContain(`${join(root, "ctl", "dev-c-d")}:/run/devd`);
+  expect(other.some((m) => m.startsWith(join(root, "ctl", "dev-a-b")))).toBe(false);
+  const inbox = other.find((m) => m.endsWith(":/inbox:ro"))!;
+  expect(existsSync(join(inbox.split(":")[0]!, "_ended"))).toBe(false);
+  expect((await mounts("dev-a-b"))).toContain(`${join(root, "ctl", "dev-a-b")}:/run/devd`);
 });

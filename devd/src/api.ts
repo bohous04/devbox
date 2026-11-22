@@ -59,7 +59,7 @@ import { readUpload, UploadError } from "./uploads";
 import { InboxNameError, stageFile, stageShared } from "./inbox";
 import { registerThreadRoutes, type ThreadApiDeps } from "./threadApi";
 import { registerEndedRoutes } from "./endedApi";
-import { continueMode, continuePlan, getEnded, handoffPrompt, writeHandoffTranscript } from "./endedSessions";
+import { continueMode, continuePlan, getEnded, handoffPrompt, handoffTranscript, TranscriptGone } from "./endedSessions";
 import type { ContinueResult } from "../../shared/ended";
 import { stageThreadImage, ThreadImageError } from "./threadImages";
 import type { SshKeyRef } from "./op";
@@ -1172,6 +1172,8 @@ export function createApp(d: ApiDeps): Hono {
   /** Continues an ended session's work in a new session of the same repo, agent and runtime (endedSessions.ts
    *  continuePlan). The response says how: `resume` (Claude Code starts on the ended conversation) or `handoff` (the new
    *  session's first message points at the whole transcript), and `reason` why a resume became a handoff. */
+  /** Ended sessions a continue is starting a session for. */
+  const continuing = new Set<string>();
   app.post("/api/ended/:id/continue", async (c) => {
     noIdleTimeout(c);
     const row = getEnded(d.db, c.req.param("id"));
@@ -1184,17 +1186,24 @@ export function createApp(d: ApiDeps): Hono {
       if (blocked) return c.json({ error: blocked }, 409);
       if (!d.links) return c.json({ error: "chat sessions cannot take a first message here (no bridge link)" }, 503);
     }
-    // The image check only where a resume is in question: it asks docker.
-    const plan = continuePlan(row, continueMode(row) === "resume" ? await d.mgr.resumeImageBlock() : null);
-    let prompt: string | undefined;
-    if (plan.mode === "handoff") {
-      try { prompt = handoffPrompt(row, writeHandoffTranscript(d.root, row).container, plan.reason); }
-      catch (e) { return c.json({ error: `the transcript of ${row.id} could not be read: ${(e as Error).message}` }, 500); }
-    }
+    // A second press while the first still starts its session would start another one.
+    if (continuing.has(row.id)) return c.json({ error: "this ended session is already being continued" }, 409);
+    continuing.add(row.id);
     try {
+      // The image check only where a resume is in question: it asks docker.
+      const plan = await continuePlan(row, continueMode(row) === "resume" ? await d.mgr.resumeImageBlock() : null);
+      let prompt: string | undefined, transcript: string | undefined;
+      if (plan.mode === "handoff") {
+        try { transcript = handoffTranscript(row); }
+        catch (e) {
+          if (e instanceof TranscriptGone) return c.json({ error: `there is nothing to hand off: ${e.message}${plan.reason ? `, and ${plan.reason}` : ""}` }, 409);
+          return c.json({ error: `the transcript of ${row.id} could not be read: ${(e as Error).message}` }, 500);
+        }
+        prompt = handoffPrompt(row, plan.reason);
+      }
       const r = await d.mgr.open({
         folder: row.folder, project: row.project, repo: row.repo, agent: row.agent, runtime: row.runtime, fresh: true,
-        ...(plan.mode === "resume" ? { resume: { thread: plan.thread, jsonl: plan.jsonl } } : {}),
+        ...(plan.mode === "resume" ? { resume: { thread: plan.thread, jsonl: plan.jsonl } } : { handoff: transcript! }),
         ...(row.runtime === "tmux" && prompt !== undefined ? { firstPrompt: prompt } : {}),
       });
       linkOpenedChat(r, row.runtime === "chat" ? prompt : undefined);
@@ -1203,6 +1212,8 @@ export function createApp(d: ApiDeps): Hono {
     } catch (e) {
       if (e instanceof FirstPromptRefused) return c.json({ error: e.message }, 409);
       return busy(c, e) ?? c.json({ error: (e as Error).message }, 400);
+    } finally {
+      continuing.delete(row.id);
     }
   });
 

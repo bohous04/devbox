@@ -2,6 +2,10 @@
  *  conversation, `handoff` starts a new one whose first message carries a summary and the transcript's path. */
 export type ContinueMode = "resume" | "handoff";
 
+/** How much of the conversation the transcript holds: all of it; what the last read before the end got to (it stopped
+ *  short, see devd's TranscriptMirror.finalRefresh); or nothing (a tmux session whose Chat view was never read). */
+export type TranscriptState = "complete" | "truncated" | "missing";
+
 /** A session that ended and left its transcript behind (`GET /api/ended`, SSE `inbox-ended`). It lives in the inbox's
  *  Settled section only, read-only, until it is hidden or purged (30 days after it ended). */
 export interface EndedSession {
@@ -21,6 +25,7 @@ export interface EndedSession {
   endedAt: number;
   /** What continue will do, so the button can say it. */
   continueMode: ContinueMode;
+  transcript: TranscriptState;
 }
 
 /** SSE `inbox-ended` when a transcript was hidden or purged. */

@@ -1,7 +1,7 @@
 import type { Context, Hono } from "hono";
 import type { Database } from "bun:sqlite";
 import type { EndedRemoved } from "../../shared/ended";
-import { endedImagesDir, getEnded, hideEnded, listEnded, openTranscript, toEnded, type EndedRow } from "./endedSessions";
+import { endedImagesDir, getEnded, hideEnded, listEnded, openTranscript, toEnded, TranscriptGone, type EndedRow } from "./endedSessions";
 import type { EventBus } from "./eventBus";
 import { imageInDir } from "./threadImages";
 
@@ -39,7 +39,13 @@ export function registerEndedRoutes(app: Hono, d: EndedApiDeps): void {
       if (n === null) return c.json({ error: `${key} must be a non-negative integer` }, 400);
       opts[key] = n;
     }
-    const store = openTranscript(r);
+    let store;
+    try { store = openTranscript(r); }
+    catch (e) {
+      // Gone, not a server fault: the session ended without one, or it was removed from the archive.
+      if (e instanceof TranscriptGone) return c.json({ error: e.message }, 410);
+      throw e;
+    }
     try { return c.json(store.snapshot(opts)); } finally { store.close(); }
   });
 

@@ -24,8 +24,7 @@ export function archiveChats(root: string, id: string, now: Date): string | null
     rmSync(src, { recursive: true, force: true });
     return null;
   }
-  const stamp = now.toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
-  const dest = join(root, "_chat-archive", `${id}-${stamp}`);
+  const dest = join(root, "_chat-archive", `${id}-${archiveStamp(now)}`);
   if (entries.length) {
     // One rename of the whole directory: a failure cannot split the transcripts between two places.
     mkdirSync(join(root, "_chat-archive"), { recursive: true });
@@ -36,4 +35,9 @@ export function archiveChats(root: string, id: string, now: Date): string | null
   }
   for (const [f, name] of threadFiles) renameSync(f, join(dest, name));
   return dest;
+}
+
+/** The archive's time stamp (`20261120-101500`, UTC); an ended session's id is `<session id>-<stamp>`. */
+export function archiveStamp(now: Date): string {
+  return now.toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
 }

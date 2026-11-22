@@ -114,10 +114,11 @@ test("continue opens a new chat session in the same repo with the handoff as its
   const r = await t.a.fetch(post(`/api/ended/${ID}/continue`));
   expect(r.status).toBe(201);
   expect((await r.json()) as ContinueResult).toEqual({ mode: "handoff", sessionId: "dev-acme-app-2", runtime: "chat", reason: null });
-  expect(t.opened).toEqual([{ folder: "acme", project: "acme", repo: "app", agent: "claude", runtime: "chat", fresh: true }]);
+  expect(t.opened).toEqual([{ folder: "acme", project: "acme", repo: "app", agent: "claude", runtime: "chat", fresh: true, handoff: expect.stringContaining("Make the header sticky") }]);
   expect(t.firstTurns.length).toBe(1);
-  expect(t.firstTurns[0]![1]).toContain(`/inbox/_ended/${ID}.md`);
-  expect(readFileSync(join(t.root, "_inbox", "_ended", `${ID}.md`), "utf8")).toContain("Make the header sticky");
+  expect(t.firstTurns[0]![1]).toContain("/run/devd/ended-transcript.md");
+  // The transcript goes to the new session alone (open's `handoff`), never into the /inbox every container mounts.
+  expect(existsSync(join(t.root, "_inbox"))).toBe(false);
 });
 
 test("continue gives a tmux session the handoff as its first prompt", async () => {
@@ -125,7 +126,7 @@ test("continue gives a tmux session the handoff as its first prompt", async () =
   const r = await t.a.fetch(post(`/api/ended/${ID}/continue`));
   expect(((await r.json()) as ContinueResult).runtime).toBe("tmux");
   expect(t.opened[0]).toMatchObject({ runtime: "tmux", fresh: true });
-  expect(String(t.opened[0]!.firstPrompt)).toContain(`/inbox/_ended/${ID}.md`);
+  expect(String(t.opened[0]!.firstPrompt)).toContain("/run/devd/ended-transcript.md");
   expect(t.firstTurns).toEqual([]);
 });
 
@@ -138,13 +139,28 @@ test("continue is refused from a container, for an unknown id, and reports a fai
   expect(((await r.json()) as { error: string }).error).toBe("clone failed");
 });
 
-test("nothing is written for the handoff when the transcript is gone", async () => {
+test("a transcript gone from the archive is 410 to read and 409 to hand off; nothing is opened", async () => {
   const t = setup();
   rmSync(join(t.root, "_chat-archive", ID, "dev-acme-app.sqlite"));
+  expect((await t.a.fetch(new Request(`http://x/api/ended/${ID}/transcript`))).status).toBe(410);
   const r = await t.a.fetch(post(`/api/ended/${ID}/continue`));
-  expect(r.status).toBe(500);
+  expect(r.status).toBe(409);
+  expect(((await r.json()) as { error: string }).error).toContain("nothing to hand off");
   expect(t.opened).toEqual([]);
-  expect(existsSync(join(t.root, "_inbox", "_ended", `${ID}.md`))).toBe(false);
+});
+
+test("a second continue while the first still starts its session is refused, and allowed once it is done", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const t = setup({ open: async (o) => { await gate; return { created: true, session: { ...S, id: "dev-acme-app-2", runtime: o.runtime, status: "running" } }; } });
+  const first = t.a.fetch(post(`/api/ended/${ID}/continue`));
+  await new Promise((r) => setTimeout(r, 20));
+  const second = await t.a.fetch(post(`/api/ended/${ID}/continue`));
+  expect(second.status).toBe(409);
+  expect(((await second.json()) as { error: string }).error).toContain("already being continued");
+  release();
+  expect((await first).status).toBe(201);
+  expect((await t.a.fetch(post(`/api/ended/${ID}/continue`))).status).toBe(201);
 });
 
 test("continue resumes the Claude conversation: the new session gets its jsonl and no handoff message", async () => {

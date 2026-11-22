@@ -495,7 +495,13 @@ export interface MirrorDeps {
   live: (id: string) => AgentLiveSnapshot | null;
   now?: () => number;
   log?: (msg: string) => void;
+  /** How long the last read before an end may take (FINAL_READ_MS); tests shorten it. */
+  finalReadMs?: number;
 }
+
+/** The last read before an end reads a Codex backlog to its end, not CODEX_TICK_CHUNKS of it, but for at most this
+ *  long: end() waits for it with the session locked. */
+export const FINAL_READ_MS = 60_000;
 
 interface Pending { text: string; at: number }
 
@@ -527,6 +533,8 @@ export class TranscriptMirror {
   private codexWatch = new Map<string, CodexWatch>();
   /** Sessions whose last read before the end runs now (finalRefresh): for it alone they are not ending yet. */
   private finalizing = new Set<string>();
+  /** Sessions whose last read stopped short (the time cap, a read that failed): their transcript is not complete. */
+  private cutShort = new Set<string>();
 
   constructor(private d: MirrorDeps) {}
 
@@ -598,14 +606,20 @@ export class TranscriptMirror {
 
   /** The last read of an ending session, while its container still runs: end() (sessions.ts) archives the store as
    *  the ended session's transcript. Waits for a refresh in progress (it stops at its next step: the session is
-   *  ending), then reads once more. Never throws. */
-  async finalRefresh(id: string): Promise<void> {
+   *  ending), then reads to the end of the transcript, within FINAL_READ_MS. `truncated`: it did not get there (the
+   *  cap, a failed read), logged. Never throws. */
+  async finalRefresh(id: string): Promise<{ truncated: boolean }> {
     await this.running.get(id);
     this.finalizing.add(id);
-    const run = this.tick(id).catch((e) => this.log(`mirror ${id}: final refresh failed: ${(e as Error).message}`))
-      .finally(() => { this.finalizing.delete(id); this.running.delete(id); });
+    this.cutShort.delete(id);
+    const run = this.tick(id).catch((e) => {
+      this.cutShort.add(id);
+      this.log(`mirror ${id}: final refresh failed, the transcript ends where the last read got to: ${(e as Error).message}`);
+    }).finally(() => { this.finalizing.delete(id); this.running.delete(id); });
     this.running.set(id, run);
-    return run;
+    await run;
+    const truncated = this.cutShort.delete(id);
+    return { truncated };
   }
 
   /** Session stopped or ended: closes the store. An ended session's store stays on disk for end() to archive. */
@@ -756,13 +770,19 @@ export class TranscriptMirror {
     }
     if (pane.home === null || thread === null) return { thread: null, busy: false };
     const proc = `${pane.pid}:${pane.start}`;
+    const final = this.finalizing.has(id);
+    const deadline = Date.now() + (this.d.finalReadMs ?? FINAL_READ_MS);
     for (let chunk = 1; ; chunk++) {
       const r = await this.d.exec(s.container, ["python3", "-I", "-c", MIRROR_CODEX_READ, pane.home, thread,
         JSON.stringify({ sid: cur.sid, offset: cur.offset, ino: cur.ino, headLen: cur.headLen, headHash: cur.headHash, home: cur.home }),
         String(CODEX_CHUNK_BYTES), String(CODEX_LINE_CAP)], 10_000);
       if (!current()) return null;
       const out = r.code === 0 && !r.timedOut ? parseCodexRead(r.stdout) : null;
-      if (out === null) { this.log(`mirror ${id}: the Codex rollout could not be read`); return null; }
+      if (out === null) {
+        this.log(`mirror ${id}: the Codex rollout could not be read`);
+        if (final) this.cutShort.add(id);
+        return null;
+      }
       if (out.id === null) return { thread: null, busy: false };
       const pre: BridgeEvent[] = [];
       const closeOpenRun = () => {
@@ -793,8 +813,14 @@ export class TranscriptMirror {
       if (advanced || pre.length || moved) this.commit(id, store, pre, mapped.events, cur);
       this.markSeen(id, mapped.seen);
       const done = !advanced || out.next >= out.size;
-      // A long backlog continues on the next refresh, so one refresh stays a bounded read.
-      if (done || chunk >= CODEX_TICK_CHUNKS) return { thread: out.id, busy: map.turn !== null };
+      if (done) return { thread: out.id, busy: map.turn !== null };
+      // A long backlog continues on the next refresh, so one refresh stays a bounded read; the last one has no next.
+      if (!final && chunk >= CODEX_TICK_CHUNKS) return { thread: out.id, busy: map.turn !== null };
+      if (final && Date.now() >= deadline) {
+        this.cutShort.add(id);
+        this.log(`mirror ${id}: the last read stopped after ${chunk} chunks (${out.next} of ${out.size} bytes): the transcript is cut short`);
+        return { thread: out.id, busy: map.turn !== null };
+      }
       if (!current()) return null;
     }
   }

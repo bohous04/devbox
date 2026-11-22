@@ -3,9 +3,10 @@
 // it in Settled until it is hidden or purged, 30 days after the end. Continuing one opens a new session in the same
 // repo (api.ts, POST /api/ended/:id/continue).
 import type { Database } from "bun:sqlite";
-import { closeSync, constants as C, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { constants as C, existsSync, lstatSync, rmSync } from "node:fs";
+import { open } from "node:fs/promises";
 import { join } from "node:path";
-import type { ContinueMode, EndedSession } from "../../shared/ended";
+import type { ContinueMode, EndedSession, TranscriptState } from "../../shared/ended";
 import type { ThreadItem } from "../../shared/thread";
 import { threadTitle } from "../../shared/threadTitle";
 import type { SessionRow } from "./db";
@@ -19,7 +20,9 @@ const LAST_TEXT_MAX = 200;
 export interface EndedRow {
   id: string; session_id: string; folder: string; project: string; repo: string; agent: string; runtime: "tmux" | "chat";
   title: string; branch: string | null; topic: string | null; last_text: string | null; ended_at: number;
+  /** "" with transcript `missing` when end() archived nothing. */
   archive_dir: string; store_file: string; native_harness: string | null; native_thread: string | null; hidden_at: number | null;
+  transcript: TranscriptState;
 }
 
 const clip = (t: string, max: number) => (t.length > max ? `${t.slice(0, max)}…` : t);
@@ -32,10 +35,14 @@ const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
  *  that should resume does not; it is null where resume is not wired (Codex, the other agents). */
 export type ContinuePlan = { mode: "resume"; thread: string; jsonl: Buffer } | { mode: "handoff"; reason: string | null };
 
+/** Codex continues by handoff only. Its rollout lives in the account's CODEX_HOME volume, which end() neither archives
+ *  nor owns; resuming it would need that same account leased to the new session and a Codex resume path in
+ *  agent-launch.sh and the bridge's first start. Claude resumes because its jsonl sits in the session's own
+ *  `_claude-projects/<id>`, which archiveChats moves into the archive: resume depends on that. */
 /** Why this transcript cannot resume, without reading the conversation: null when it can (as far as the archive
  *  shows); `wired: false` when resume does not exist for its agent at all. */
 function resumeBlock(row: EndedRow): { wired: boolean; reason: string } | null {
-  if (row.native_harness !== "claude" || row.agent !== "claude" || row.native_thread === null || !THREAD_ID.test(row.native_thread)) {
+  if (row.native_harness !== "claude" || row.agent !== "claude" || row.native_thread === null || !THREAD_ID.test(row.native_thread) || row.archive_dir === "") {
     return { wired: false, reason: "" };
   }
   const file = join(row.archive_dir, `${row.native_thread}.jsonl`);
@@ -52,18 +59,18 @@ export function continueMode(row: EndedRow): ContinueMode {
 }
 
 /** The plan continue carries out. `imageBlock`: why the session image cannot take a resume (an image built before
- *  it could), null when it can. The conversation is read here, once, without following a link. */
-export function continuePlan(row: EndedRow, imageBlock: string | null): ContinuePlan {
+ *  it could), null when it can. The conversation is read here, once, without following a link, off the event loop. */
+export async function continuePlan(row: EndedRow, imageBlock: string | null): Promise<ContinuePlan> {
   const block = resumeBlock(row);
   if (block !== null) return { mode: "handoff", reason: block.wired ? block.reason : null };
   if (imageBlock !== null) return { mode: "handoff", reason: imageBlock };
   const thread = row.native_thread!;
   try {
-    const fd = openSync(join(row.archive_dir, `${thread}.jsonl`), C.O_RDONLY | C.O_NOFOLLOW);
+    const f = await open(join(row.archive_dir, `${thread}.jsonl`), C.O_RDONLY | C.O_NOFOLLOW);
     try {
-      if (!fstatSync(fd).isFile()) throw new Error("not a regular file");
-      return { mode: "resume", thread, jsonl: readFileSync(fd) };
-    } finally { closeSync(fd); }
+      if (!(await f.stat()).isFile()) throw new Error("not a regular file");
+      return { mode: "resume", thread, jsonl: await f.readFile() };
+    } finally { await f.close(); }
   } catch (e) {
     return { mode: "handoff", reason: `the Claude conversation file ${thread}.jsonl could not be read: ${(e as Error).message}` };
   }
@@ -73,6 +80,7 @@ export function toEnded(r: EndedRow): EndedSession {
   return {
     id: r.id, sessionId: r.session_id, runtime: r.runtime, title: r.title, folder: r.folder, project: r.project, repo: r.repo,
     agent: r.agent, branch: r.branch, topic: r.topic, lastText: r.last_text, endedAt: r.ended_at, continueMode: continueMode(r),
+    transcript: r.transcript,
   };
 }
 
@@ -82,28 +90,41 @@ function archivedStoreFile(archiveDir: string, sessionId: string): string | null
   return null;
 }
 
-/** Lists the ended session whose store end() archived into `archiveDir`; null when it left no store (a tmux session
- *  whose transcript was never mirrored, an InstaBox session). Throws when the archived store cannot be read. */
-export function recordEnded(db: Database, s: SessionRow, archiveDir: string, endedAt: number): EndedSession | null {
-  const file = archivedStoreFile(archiveDir, s.id);
-  if (file === null) return null;
-  const store = ThreadStore.openFile(join(archiveDir, file));
-  let first: string | null, last: string | null, native: { harness: string; nativeThreadId: string } | null;
-  try {
-    first = store.firstUserText();
-    last = store.lastMessageText();
-    native = store.snapshot({ limit: 0 }).native;
-  } finally { store.close(); }
+/** Lists the ended session whose store end() archived into `archiveDir` (`<id>-<stamp>`, chatArchive.ts). Without a
+ *  store, a tmux session (whose Chat view was never mirrored) is listed as ended without a transcript, so its owner
+ *  sees it ended; anything else (an InstaBox session, a chat that never opened) is not listed: null. `archiveDir` null:
+ *  nothing was archived; `id` names the row then. `truncated`: the last read before the end stopped short
+ *  (TranscriptMirror.finalRefresh). Seals the store for read-only use (ThreadStore.sealArchive). Throws when the
+ *  archived store cannot be read. */
+export function recordEnded(db: Database, s: SessionRow, archiveDir: string | null, endedAt: number,
+  o: { id?: string; truncated?: boolean } = {}): EndedSession | null {
+  const file = archiveDir === null ? null : archivedStoreFile(archiveDir, s.id);
+  const runtime = s.runtime === "chat" ? "chat" : "tmux";
+  if (file === null && runtime !== "tmux") return null;
+  const id = archiveDir === null ? o.id : archiveDir.slice(archiveDir.lastIndexOf("/") + 1);
+  if (id === undefined) throw new Error(`recordEnded: no archive and no id for ${s.id}`);
+  let first: string | null = null, last: string | null = null, native: { harness: string; nativeThreadId: string } | null = null;
+  if (file !== null) {
+    const path = join(archiveDir!, file);
+    ThreadStore.sealArchive(path);
+    const store = ThreadStore.openArchived(path);
+    try {
+      first = store.firstUserText();
+      last = store.lastMessageText();
+      native = store.snapshot({ limit: 0 }).native;
+    } finally { store.close(); }
+  }
   const row: EndedRow = {
-    id: archiveDir.slice(archiveDir.lastIndexOf("/") + 1), session_id: s.id, folder: s.folder, project: s.project, repo: s.repo,
+    id, session_id: s.id, folder: s.folder, project: s.project, repo: s.repo,
     // `agent` is optional in SessionRow only for insert literals; the column is NOT NULL.
-    agent: s.agent!, runtime: s.runtime === "chat" ? "chat" : "tmux", title: s.name || `${s.project}/${s.repo}`, branch: s.branch ?? null,
+    agent: s.agent!, runtime, title: s.name || `${s.project}/${s.repo}`, branch: s.branch ?? null,
     topic: first === null ? null : threadTitle(first), last_text: last === null ? null : clip(last, LAST_TEXT_MAX), ended_at: endedAt,
-    archive_dir: archiveDir, store_file: file, native_harness: native?.harness ?? null, native_thread: native?.nativeThreadId ?? null, hidden_at: null,
+    archive_dir: archiveDir ?? "", store_file: file ?? "", native_harness: native?.harness ?? null, native_thread: native?.nativeThreadId ?? null, hidden_at: null,
+    transcript: file === null ? "missing" : o.truncated ? "truncated" : "complete",
   };
-  db.query(`INSERT OR REPLACE INTO ended_sessions (id,session_id,folder,project,repo,agent,runtime,title,branch,topic,last_text,ended_at,archive_dir,store_file,native_harness,native_thread,hidden_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(row.id, row.session_id, row.folder, row.project, row.repo, row.agent, row.runtime, row.title,
-    row.branch, row.topic, row.last_text, row.ended_at, row.archive_dir, row.store_file, row.native_harness, row.native_thread);
+  db.query(`INSERT OR REPLACE INTO ended_sessions (id,session_id,folder,project,repo,agent,runtime,title,branch,topic,last_text,ended_at,archive_dir,store_file,native_harness,native_thread,hidden_at,transcript)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)`).run(row.id, row.session_id, row.folder, row.project, row.repo, row.agent, row.runtime, row.title,
+    row.branch, row.topic, row.last_text, row.ended_at, row.archive_dir, row.store_file, row.native_harness, row.native_thread, row.transcript);
   return toEnded(row);
 }
 
@@ -121,32 +142,32 @@ export function hideEnded(db: Database, id: string, now: number): boolean {
   return db.query(`UPDATE ended_sessions SET hidden_at=? WHERE id=? AND hidden_at IS NULL`).run(now, id).changes > 0;
 }
 
-/** The archived store, opened for reading its snapshot. The caller closes it. */
+/** The transcript is not there to read: the session ended without one, or it was removed from the archive. */
+export class TranscriptGone extends Error {}
+
+/** The archived store, opened read-only for its snapshot. The caller closes it. */
 export function openTranscript(row: EndedRow): ThreadStore {
+  if (row.transcript === "missing") throw new TranscriptGone(`${row.id} ended without a transcript`);
   const path = join(row.archive_dir, row.store_file);
-  // openFile would create an empty store in place of a missing one.
-  if (!existsSync(path)) throw new Error(`the transcript of ${row.id} is missing: ${path}`);
-  return ThreadStore.openFile(path);
+  if (!existsSync(path)) throw new TranscriptGone(`the transcript of ${row.id} is missing: ${path}`);
+  return ThreadStore.openArchived(path);
 }
 
 /** The archived images of an ended session (archiveThreadImages). */
 export const endedImagesDir = (row: EndedRow) => join(row.archive_dir, "images");
 
-/** `<root>/_inbox/_ended/<id>.md`, which every container sees as `/inbox/_ended/<id>.md` (read-only, like the images). */
-export const endedTranscriptFile = (root: string, id: string) => join(root, "_inbox", "_ended", `${id}.md`);
-
-/** Removes transcripts that ended more than 30 days ago: the store, its images and a handoff copy. The Claude jsonl
- *  transcripts next to them stay, as they did before transcripts were kept. A failed removal is logged and the row
- *  stays for the next run. Returns the purged ids. */
-export function purgeEnded(db: Database, root: string, now: number, log: (msg: string) => void,
-  remove: (path: string) => void = (p) => rmSync(p, { recursive: true, force: true })): string[] {
+/** Removes the transcripts that ended more than 30 days ago from the inbox. It deletes only what keeping transcripts
+ *  added: the row and a tmux session's mirror store. The chat archive stays as it always did, forever: a chat thread's
+ *  `<id>.sqlite`, the Claude jsonl and the images. (A handoff's copy of the transcript lives in the new session's own
+ *  control dir and goes with that session.) A failed removal is logged and the row stays for the next run. Returns the
+ *  purged ids. */
+export function purgeEnded(db: Database, now: number, log: (msg: string) => void,
+  remove: (path: string) => void = (p) => rmSync(p, { force: true })): string[] {
   const due = db.query(`SELECT * FROM ended_sessions WHERE ended_at < ?`).all(now - ENDED_RETENTION_MS) as EndedRow[];
   const purged: string[] = [];
   for (const r of due) {
     try {
-      for (const x of ["", "-wal", "-shm"]) remove(join(r.archive_dir, `${r.store_file}${x}`));
-      remove(endedImagesDir(r));
-      remove(endedTranscriptFile(root, r.id));
+      if (r.store_file.endsWith(".mirror.sqlite")) for (const x of ["", "-wal", "-shm"]) remove(join(r.archive_dir, `${r.store_file}${x}`));
     } catch (e) {
       log(`ended transcripts: purging ${r.id} failed, retried on the next run: ${(e as Error).message}`);
       continue;
@@ -178,20 +199,19 @@ export function renderTranscript(meta: { title: string; project: string; repo: s
   return out.join("\n");
 }
 
-/** Writes the whole transcript where the new session's container reads it. Returns both paths. */
-export function writeHandoffTranscript(root: string, row: EndedRow): { host: string; container: string } {
+/** Where the new session reads the handoff's transcript: its own control dir, mounted into it alone (sessions.ts
+ *  syncContinueFiles), never the shared /inbox. */
+export const HANDOFF_TRANSCRIPT = "/run/devd/ended-transcript.md";
+
+/** The whole transcript as Markdown, for the new session (HANDOFF_TRANSCRIPT). Throws TranscriptGone without one. */
+export function handoffTranscript(row: EndedRow): string {
   const store = openTranscript(row);
-  let md: string;
-  try { md = renderTranscript(row, store.snapshot()); } finally { store.close(); }
-  const host = endedTranscriptFile(root, row.id);
-  mkdirSync(join(root, "_inbox", "_ended"), { recursive: true });
-  writeFileSync(host, md);
-  return { host, container: `/inbox/_ended/${row.id}.md` };
+  try { return renderTranscript(row, store.snapshot()); } finally { store.close(); }
 }
 
 /** The new session's first message: what the ended session was about, its last message and where the rest is. */
 /** `notResumed`: why the ended Claude conversation itself could not be resumed (continuePlan), said first. */
-export function handoffPrompt(row: EndedRow, transcriptPath: string, notResumed: string | null = null): string {
+export function handoffPrompt(row: EndedRow, notResumed: string | null = null): string {
   // What reaches the agent is devd's own text; the quoted parts came from the agent and may carry control characters.
   // eslint-disable-next-line no-control-regex -- the point of the replace
   const plain = (t: string) => t.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, " ");
@@ -201,6 +221,6 @@ export function handoffPrompt(row: EndedRow, transcriptPath: string, notResumed:
     `This session continues an earlier one that has ended: "${plain(row.title)}" (${where}).`,
     ...(row.topic ? [`It started with: ${plain(row.topic)}`] : []),
     ...(row.last_text ? [`Its last message was: ${plain(row.last_text)}`] : []),
-    `The whole earlier conversation is in ${transcriptPath} (read-only). Read it, then say in a few sentences where it left off and wait for what I want next.`,
+    `The whole earlier conversation is in ${HANDOFF_TRANSCRIPT}. Read it, then say in a few sentences where it left off and wait for what I want next.`,
   ].join("\n\n");
 }

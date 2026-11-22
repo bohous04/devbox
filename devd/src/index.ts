@@ -580,7 +580,7 @@ const mgr = new SessionManager({
   dind: dindEnabled,
   preserveForEnd: (container) => preserveForEnd(container),
   // Late-bound: transcriptMirror is created below; end() never runs before startup finishes.
-  finalizeTranscript: (s): Promise<void> => (storedRuntime(s) === "tmux" ? transcriptMirror.finalRefresh(s.id) : Promise.resolve()),
+  finalizeTranscript: (s): Promise<{ truncated: boolean }> => (storedRuntime(s) === "tmux" ? transcriptMirror.finalRefresh(s.id) : Promise.resolve({ truncated: false })),
   onEnded: (e) => bus.publish("inbox-ended", e),
   storageGuard: () => existsSync(STORAGE_GUARD),
   // A shared / tainted session gets no dind sidecar (shareTaint.ts, final review C2).
@@ -1370,7 +1370,7 @@ try { inbox.armSnoozes(); } catch (e) { console.error("inbox: snooze timers not 
 setInterval(guardedTick("auto-settle", async () => { inbox.autoSettle(); }), AUTO_SETTLE_TICK_MS);
 // Ended transcripts are kept 30 days (endedSessions.ts); a failed removal is logged there and retried on the next run.
 const purgeEndedTick = () => {
-  for (const id of purgeEnded(db, root, Date.now(), (m) => console.error(m))) bus.publish("inbox-ended", { id, removed: true });
+  for (const id of purgeEnded(db, Date.now(), (m) => console.error(m))) bus.publish("inbox-ended", { id, removed: true });
 };
 setInterval(guardedTick("ended transcript purge", async () => purgeEndedTick()), ENDED_PURGE_TICK_MS);
 try { purgeEndedTick(); } catch (e) { console.error("ended transcript purge failed:", e); }
