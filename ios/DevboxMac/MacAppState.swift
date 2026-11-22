@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import SwiftTerm
 import SwiftUI
 import os
 
@@ -63,14 +64,16 @@ final class MacAppState: ObservableObject {
         watchUndoKey()
     }
 
-    /// ⌘Z undoes the last settle while its notice shows (MacSettler.claimsUndo). Seen before the menus, so Edit >
-    /// Undo keeps ⌘Z otherwise, and in a text field being edited (its own undo).
+    /// ⌘Z undoes the last settle while the key window's sidebar shows its notice (MacSettler.claimsUndo). Seen
+    /// before the menus, so Edit > Undo keeps ⌘Z otherwise; a text field being edited and the terminal keep theirs.
     private func watchUndoKey() {
         undoKey = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             MainActor.assumeIsolated {
-                guard let self, let inbox = self.inbox,
+                let responder = event.window?.firstResponder
+                guard let self, let inbox = self.inbox, let window = event.window,
                       MacSettler.claimsUndo(flags: event.modifierFlags, key: event.charactersIgnoringModifiers ?? "",
-                                            noticeShown: self.settler.notice != nil, editingText: event.window?.firstResponder is NSText)
+                                            noticeShown: self.settler.notice != nil && self.settler.sidebarWindows.contains(window.windowNumber),
+                                            focusOwnsUndo: responder is NSText || responder is TerminalView)
                 else { return event }
                 Task { await self.settler.undo(in: inbox) }
                 return nil

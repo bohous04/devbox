@@ -137,7 +137,7 @@ final class MacAppTests: XCTestCase {
         for shelf in ["Working", "Snoozed", "Settled"] { XCTAssertFalse(MacSidebarLayout.startsOpen(shelf), shelf) }
     }
 
-    /// The shelves pinned under the scrolling groups: Working, Snoozed, Settled in that order, the empty ones left out;
+    /// The shelves pinned under the list: Working, Snoozed, Settled in that order, the empty ones left out;
     /// none at all (so no block and no rule) when every shelf is empty.
     func testPinnedShelvesAreTheNonEmptyShelvesInOrder() throws {
         let working = try item("working", reason: "running"), settled = try item("settled", reason: "completed")
@@ -151,17 +151,17 @@ final class MacAppTests: XCTestCase {
         XCTAssertTrue(MacSidebarLayout.pinnedShelves(none).isEmpty)
     }
 
-    /// ↑/↓ cross the seam between the scrolling groups and the pinned shelves; elsewhere each list moves on its own.
+    /// ↑/↓ cross the seam between the list and the pinned shelves; elsewhere each list moves on its own.
     func testArrowsCrossBetweenTheGroupsAndTheShelves() {
         let groups = ["a", "b"], shelves = ["w", "s"]
-        XCTAssertEqual(MacSidebarLayout.crossing(from: "b", down: true, groups: groups, shelves: shelves), "w")
-        XCTAssertEqual(MacSidebarLayout.crossing(from: "w", down: false, groups: groups, shelves: shelves), "b")
-        XCTAssertNil(MacSidebarLayout.crossing(from: "a", down: true, groups: groups, shelves: shelves))
-        XCTAssertNil(MacSidebarLayout.crossing(from: "s", down: false, groups: groups, shelves: shelves))
-        XCTAssertNil(MacSidebarLayout.crossing(from: "w", down: true, groups: groups, shelves: shelves))
-        XCTAssertNil(MacSidebarLayout.crossing(from: "b", down: true, groups: groups, shelves: []), "every shelf shut: nowhere to go")
-        XCTAssertNil(MacSidebarLayout.crossing(from: "w", down: false, groups: [], shelves: shelves))
-        XCTAssertNil(MacSidebarLayout.crossing(from: nil, down: true, groups: groups, shelves: shelves))
+        XCTAssertEqual(MacSidebarLayout.crossing(from: "b", down: true, list: groups, shelves: shelves), "w")
+        XCTAssertEqual(MacSidebarLayout.crossing(from: "w", down: false, list: groups, shelves: shelves), "b")
+        XCTAssertNil(MacSidebarLayout.crossing(from: "a", down: true, list: groups, shelves: shelves))
+        XCTAssertNil(MacSidebarLayout.crossing(from: "s", down: false, list: groups, shelves: shelves))
+        XCTAssertNil(MacSidebarLayout.crossing(from: "w", down: true, list: groups, shelves: shelves))
+        XCTAssertNil(MacSidebarLayout.crossing(from: "b", down: true, list: groups, shelves: []), "every shelf shut: nowhere to go")
+        XCTAssertNil(MacSidebarLayout.crossing(from: "w", down: false, list: [], shelves: shelves))
+        XCTAssertNil(MacSidebarLayout.crossing(from: nil, down: true, list: groups, shelves: shelves))
     }
 
     /// The pinned block is as tall as its content, up to 45 % of the sidebar; it scrolls inside beyond that.
@@ -171,7 +171,7 @@ final class MacAppTests: XCTestCase {
         XCTAssertEqual(MacSidebarLayout.shelfHeight(content: 360, sidebar: 800, chrome: 90), 360)
     }
 
-    /// In a short window the scrolling groups keep 120 pt between the tools and the footer, so Needs you stays in reach.
+    /// In a short window the list keeps 120 pt between the tools and the footer, so what needs you stays in reach.
     func testPinnedBlockLeavesTheGroupsRoomInAShortWindow() {
         // 350 − 90 (tools and footer) − 120 = 140, under 45 % (157.5).
         XCTAssertEqual(MacSidebarLayout.shelfHeight(content: 400, sidebar: 350, chrome: 90), 140)

@@ -162,7 +162,7 @@ struct MacInboxSidebar: View {
     @State private var query = ""
     @FocusState private var searching: Bool
     @State private var sidebarHeight: CGFloat = 0
-    /// The tools' and the footer's heights: the shelves leave the scrolling groups room under the one and over the other.
+    /// The tools' and the footer's heights: the shelves leave the list room under the one and over the other.
     @State private var toolsHeight: CGFloat = 0
     @State private var footerHeight: CGFloat = 0
     /// The pinned shelves' list height with all its rows, once it has measured itself (macOS 15+).
@@ -171,6 +171,8 @@ struct MacInboxSidebar: View {
     @FocusState private var focusedList: MacSidebarLayout.Part?
     /// Key, active or inactive: a tmux session in a window that becomes key again is being looked at.
     @Environment(\.controlActiveState) private var activeState
+    /// This sidebar's window, once it is in one.
+    @State private var windowNumber: Int?
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 15)) { context in
@@ -179,7 +181,7 @@ struct MacInboxSidebar: View {
             let g = shown.map(InboxView.group)
             let list = g.map(MacSidebarLayout.list) ?? []
             let pinned = g.map(MacSidebarLayout.pinnedShelves) ?? []
-            let seam = (groups: list.map(\.sessionId), shelves: pinned.flatMap(visibleRows).map(\.sessionId))
+            let seam = (list: list.map(\.sessionId), shelves: pinned.flatMap(visibleRows).map(\.sessionId))
             ScrollViewReader { proxy in List(selection: $selection) {
                 if store.paused || store.badFrame != nil {
                     Text(store.paused ? "Live updates paused — refreshing every 5 s\(store.loadError.map { " (last refresh failed: \($0))" } ?? "")"
@@ -213,9 +215,9 @@ struct MacInboxSidebar: View {
                 }
             }
             .listStyle(.sidebar)
-            .focused($focusedList, equals: .groups)
+            .focused($focusedList, equals: .list)
             .onKeyPress(.downArrow) { cross(down: true, seam) }
-            .onChange(of: focusedList) { _, part in reveal(in: part, .groups, proxy) }
+            .onChange(of: focusedList) { _, part in reveal(in: part, .list, proxy) }
             } // ScrollViewReader
             // An opaque sidebar, one tone with the window, instead of the translucent material.
             .scrollContentBackground(.hidden)
@@ -247,14 +249,25 @@ struct MacInboxSidebar: View {
         }
         .macSessionActions(sessionActions, inbox: store)
         .focusedSceneValue(\.macSettle, settleAction)
-        .onChange(of: selection) { old, new in
-            // Leaving a session marks it seen too: a finish that came in while it was open is no longer news.
-            markSeen(old)
-            if activeState == .key { markSeen(new) }
+        .modifier(MacSettleFocus(settler: state.settler) { Task { await state.settler.undo(in: store) } })
+        // ⌘Z is taken only in a window whose sidebar shows the notice (MacAppState).
+        .background(WindowConfigurator { window in DispatchQueue.main.async { windowNumber = window.windowNumber } })
+        .onChange(of: windowNumber) { old, new in
+            if let old { state.settler.leftSidebar(window: old) }
+            if let new { state.settler.showingSidebar(window: new) }
         }
-        .onChange(of: selectedItem) { _, item in if activeState == .key, let item { markSeen(item.sessionId) } }
-        .onChange(of: activeState) { _, active in if active == .key { markSeen(selection) } }
-        .onAppear { markSeen(selection) }
+        .onDisappear { if let windowNumber { state.settler.leftSidebar(window: windowNumber) } }
+        // Seen only in the window the owner is using. The selected row is marked only where that leaves it in place
+        // (MacSettler.seenMoves); otherwise when he leaves it, so no row jumps from under the pointer.
+        .onChange(of: selection) { old, new in
+            state.settler.actionTaken()
+            guard activeState == .key else { return }
+            markSeen(old)
+            markSeen(new, selected: true)
+        }
+        .onChange(of: selectedItem) { _, item in if activeState == .key { markSeen(item?.sessionId, selected: true) } }
+        .onChange(of: activeState) { _, active in if active == .key { markSeen(selection, selected: true) } }
+        .onAppear { if activeState == .key { markSeen(selection, selected: true) } }
     }
 
     private var selectedItem: InboxItem? { selection.flatMap { id in store.items?.first { $0.sessionId == id } } }
@@ -269,12 +282,13 @@ struct MacInboxSidebar: View {
         Task { await state.settler.settle(item, in: store) }
     }
 
-    private func markSeen(_ id: String?) {
-        guard let item = id.flatMap({ id in store.items?.first { $0.sessionId == id } }), MacSettler.wantsSeen(item) else { return }
+    private func markSeen(_ id: String?, selected: Bool = false) {
+        guard let item = id.flatMap({ id in store.items?.first { $0.sessionId == id } }), MacSettler.wantsSeen(item),
+              !(selected && MacSettler.seenMoves(item)) else { return }
         Task { await state.settler.seen(item, in: store) }
     }
 
-    /// Search and New session, above the groups.
+    /// Search and New session, above the list.
     private var tools: some View {
         HStack(spacing: 6) {
             HStack(spacing: 6) {
@@ -310,7 +324,7 @@ struct MacInboxSidebar: View {
         .background(MacTone.sidebar)
     }
 
-    /// The Dashboard button and Settings (⌘,), anchored under the groups; the connection only when it has a problem.
+    /// The Dashboard button and Settings (⌘,), anchored under the list; the connection only when it has a problem.
     private var footer: some View {
         MacSidebarFooter(store: store, showsConnection: false) { MacDashboardButton(action: openDashboard) }
     }
@@ -323,11 +337,11 @@ struct MacInboxSidebar: View {
         return ("Connected", InboxTone.doneIcon)
     }
 
-    /// The shelves, pinned under the scrolling groups and over the footer, under a rule: what runs on its own, and
+    /// The shelves, pinned under the list and over the footer, under a rule: what runs on its own, and
     /// what was put aside. A list of their own, sharing the selection, as tall as its rows up to `shelfShare` of the
     /// sidebar and scrolling inside beyond that. Nothing, rule included, while every shelf is empty.
     @ViewBuilder
-    private func shelves(_ pinned: [MacSidebarLayout.Group], now: Int, seam: (groups: [String], shelves: [String])) -> some View {
+    private func shelves(_ pinned: [MacSidebarLayout.Group], now: Int, seam: (list: [String], shelves: [String])) -> some View {
         if !pinned.isEmpty {
             let estimate = MacSidebarLayout.estimatedContent(headers: pinned.count, rows: seam.shelves.count)
             ScrollViewReader { proxy in
@@ -351,12 +365,12 @@ struct MacInboxSidebar: View {
     }
 
     /// Moves the selection and the keyboard to the other list when ↑/↓ reaches the seam; elsewhere the list moves it.
-    private func cross(down: Bool, _ seam: (groups: [String], shelves: [String])) -> KeyPress.Result {
-        guard let next = MacSidebarLayout.crossing(from: selection, down: down, groups: seam.groups, shelves: seam.shelves) else {
+    private func cross(down: Bool, _ seam: (list: [String], shelves: [String])) -> KeyPress.Result {
+        guard let next = MacSidebarLayout.crossing(from: selection, down: down, list: seam.list, shelves: seam.shelves) else {
             return .ignored
         }
         selection = next
-        focusedList = down ? .shelves : .groups
+        focusedList = down ? .shelves : .list
         return .handled
     }
 
@@ -416,7 +430,7 @@ struct MacInboxSidebar: View {
                         Button("Back to the Inbox") {
                             Task {
                                 do { try await store.unsettle(item.sessionId) } catch {
-                                    state.settler.problem = "Couldn't bring back “\(InboxView.rowTitle(item))”: \(chatErrorText(error))"
+                                    state.settler.report("Couldn't bring back “\(InboxView.rowTitle(item))”: \(chatErrorText(error))")
                                 }
                             }
                         }
@@ -439,7 +453,7 @@ enum MacSidebarLayout {
     }
 
     /// The sidebar's two lists.
-    enum Part { case groups, shelves }
+    enum Part { case list, shelves }
 
     /// The one list: what asks for action (a request or a failure) pinned on top, the longest wait first, as devd
     /// orders it; then the finished and the idle rows together, newest first. The owner chose this over T3 Code's
@@ -455,7 +469,7 @@ enum MacSidebarLayout {
     /// The share of the sidebar's height the pinned shelves may take before they scroll inside.
     static let shelfShare: CGFloat = 0.45
     /// The height the scrolling list keeps at least, so what needs you stays in reach in a short window.
-    static let groupsMinimum: CGFloat = 120
+    static let listMinimum: CGFloat = 120
     /// A sidebar list's group header, its two-line row and its own padding, as macOS draws them at the default
     /// sidebar size (measured on the screenshot test's render).
     static let headerHeight: CGFloat = 24, rowHeight: CGFloat = 50, listPadding: CGFloat = 36
@@ -467,12 +481,12 @@ enum MacSidebarLayout {
          Group(label: "Settled", items: g.settled, preview: false)].filter { !$0.items.isEmpty }
     }
 
-    /// Where ↑/↓ goes across the seam between the lists' visible rows: from the last scrolling row down to the first
+    /// Where ↑/↓ goes across the seam between the lists' visible rows: from the last row of the list down to the first
     /// shelf row, and back up. Nil elsewhere, where the list itself moves the selection.
-    static func crossing(from id: String?, down: Bool, groups: [String], shelves: [String]) -> String? {
+    static func crossing(from id: String?, down: Bool, list: [String], shelves: [String]) -> String? {
         guard let id else { return nil }
-        if down, id == groups.last { return shelves.first }
-        if !down, id == shelves.first { return groups.last }
+        if down, id == list.last { return shelves.first }
+        if !down, id == shelves.first { return list.last }
         return nil
     }
 
@@ -483,9 +497,9 @@ enum MacSidebarLayout {
     }
 
     /// The pinned shelves' height: their content, up to `shelfShare` of the sidebar and never into the room the
-    /// scrolling groups keep between the tools and the footer (`chrome`).
+    /// list keeps between the tools and the footer (`chrome`).
     static func shelfHeight(content: CGFloat, sidebar: CGFloat, chrome: CGFloat) -> CGFloat {
-        let cap = min(sidebar * shelfShare, sidebar - chrome - groupsMinimum)
+        let cap = min(sidebar * shelfShare, sidebar - chrome - listMinimum)
         return max(0, min(content, cap)).rounded()
     }
 
@@ -579,7 +593,7 @@ struct MacInboxRow: View {
 
     /// The second line. A row that needs you says what it asks (the message, or the reason without one): that is
     /// the point of the row. Any other row says where it runs: the repo and what distinguishes its branch
-    /// (InboxView.branchLabel), else the latest message in the groups about it. The tooltip has the full branch.
+    /// (InboxView.branchLabel), else the latest message on a row that shows it (`preview`). The tooltip has the full branch.
     static func secondLine(_ i: InboxItem, detail: String) -> String {
         if word(i) != nil, !detail.isEmpty { return "\(i.repo)  ·  \(detail)" }
         let place = "\(i.project)/\(i.repo)"
@@ -608,14 +622,37 @@ struct MacInboxRow: View {
         }
     }
 
-    /// A mark's colour: Done in green, as T3 Code's; the rest as the inbox's tones.
-    static func color(_ tone: InboxView.Tone) -> Color { tone == .done ? InboxTone.doneIcon : InboxTone.text(tone) }
+    /// The title of a row with nothing to say: a step under the others, still well over AA on the sidebar.
+    static let quietTitle = Theme.C.foreground.opacity(0.66)
+
+    /// What VoiceOver and the tooltip say. A marked row says its mark first and not again as the state ("Answer, …",
+    /// not also "waiting for your answer"); the others say their state as the iPhone's rows do.
+    static func spoken(_ i: InboxItem, now: Int, title: String, detail: String, showAgent: Bool) -> String {
+        let branch = i.branch.map { $0.isEmpty ? "" : ", branch \($0)" } ?? ""
+        guard let mark = word(i) else { return InboxRow.spokenLabel(i, now: now, title: title, detail: detail, showAgent: showAgent) + branch }
+        let when = i.attention.since > 0 ? Format.agoLabel(Double(now - i.attention.since)) : ""
+        let agent = showAgent ? AgentProfiles.profile(for: AgentName(rawValue: i.agent)).short : ""
+        return [mark.text, title, when, "\(i.project)/\(i.repo)", agent, i.runtime == .tmux ? "tmux" : "",
+                detail == InboxView.reasonLabel(i.attention.reason) ? "" : detail]
+            .filter { !$0.isEmpty }.joined(separator: ", ") + branch
+    }
 
     #if DEBUG
     nonisolated(unsafe) static var flatStyles = false
     /// The row the screenshot test draws as hovered (offscreen there is no pointer).
     nonisolated(unsafe) static var debugHovered: String?
+    /// The row the screenshot test draws as on the focused list's accent selection: offscreen the window is never
+    /// key, so the system never raises the selected row's prominence itself.
+    nonisolated(unsafe) static var debugEmphasized: String?
     #endif
+
+    private var emphasizedForShot: Bool {
+        #if DEBUG
+        Self.debugEmphasized == item.sessionId
+        #else
+        false
+        #endif
+    }
 
     private var showsSettle: Bool {
         guard settle != nil else { return false }
@@ -636,24 +673,33 @@ struct MacInboxRow: View {
         let message = item.lastText.map(InboxView.plainPreview) ?? ""
         let detail = preview ? (message.isEmpty ? InboxView.reasonLabel(item.attention.reason) : message) : ""
         let mark = Self.word(item)
-        let spoken = (mark.map { "\($0.text), " } ?? "") + InboxRow.spokenLabel(item, now: now, title: title, detail: detail, showAgent: showAgent)
-            + (item.branch.map { $0.isEmpty ? "" : ", branch \($0)" } ?? "")
+        let spoken = Self.spoken(item, now: now, title: title, detail: detail, showAgent: showAgent)
+        // A row of the list with nothing to say reads a step quieter, so the eye lands on the marked ones first.
+        let quiet = settle != nil && mark == nil
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 // Hierarchical styles: on the focused list's accent selection they turn light, as the system's rows do.
                 Text(title)
                     .font(.system(size: 13))
-                    .foregroundStyle(Self.style(.primary))
+                    .modifier(MacSelectionTone(color: quiet ? Self.quietTitle : nil, onSelection: Self.style(.primary)))
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 if showsSettle, let settle {
                     settleButton(settle)
+                } else if let word = mark, word.tone == .done {
+                    // A finished run is news, not a block: a green check and a regular muted word, under the asks.
+                    HStack(spacing: 3) {
+                        Image(systemName: InboxTone.icon(.done)).font(.system(size: 10))
+                            .modifier(MacSelectionTone(color: InboxTone.doneIcon, onSelection: Self.style(.primary)))
+                        Text(word.text).font(.system(size: 11))
+                            .modifier(MacSelectionTone(color: Theme.C.mutedForeground, onSelection: Self.style(.secondary)))
+                    }
                 } else if let word = mark {
                     HStack(spacing: 3) {
                         Image(systemName: InboxTone.icon(word.tone)).font(.system(size: 10, weight: .semibold))
                         Text(word.text).font(.system(size: 11, weight: .semibold))
                     }
-                    .modifier(MacSelectionTone(color: Self.color(word.tone), onSelection: Self.style(.primary)))
+                    .modifier(MacSelectionTone(color: InboxTone.text(word.tone), onSelection: Self.style(.primary)))
                 } else {
                     HStack(spacing: 5) {
                         if item.attention.section == .working { LiveDot() }
@@ -665,12 +711,12 @@ struct MacInboxRow: View {
             HStack(spacing: 6) {
                 Text(Self.secondLine(item, detail: detail))
                     .font(.system(size: 11.5))
-                    .foregroundStyle(Self.style(.secondary))
+                    .modifier(MacSelectionTone(color: nil, onSelection: Self.style(.secondary)))
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 if showAgent {
                     AgentLogo(mark: AgentLogo.Mark(agent: item.agent), size: 11)
-                        .foregroundStyle(Self.style(.tertiary))
+                        .modifier(MacSelectionTone(color: nil, onSelection: Self.style(.tertiary)))
                         .accessibilityHidden(true)
                 }
             }
@@ -685,6 +731,7 @@ struct MacInboxRow: View {
             }
         }
         .onHover { hovering = $0 }
+        .modifier(MacForcedProminence(on: emphasizedForShot))
         .help(spoken)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(spoken)
@@ -708,6 +755,15 @@ struct MacInboxRow: View {
         .contentShape(Rectangle())
         .help(block ?? "Settle (⌘⇧S)")
         .accessibilityLabel("Settle")
+    }
+}
+
+/// The screenshot test's stand-in for the focused selection (MacInboxRow.debugEmphasized).
+private struct MacForcedProminence: ViewModifier {
+    let on: Bool
+
+    func body(content: Content) -> some View {
+        if on { content.environment(\.backgroundProminence, .increased) } else { content }
     }
 }
 
@@ -736,9 +792,21 @@ struct MacSelectionTone: ViewModifier {
     func body(content: Content) -> some View {
         if let color, prominence != .increased {
             content.foregroundStyle(color)
+        } else if Self.flatSelection, prominence == .increased {
+            content.foregroundStyle(.white)
         } else {
             content.foregroundStyle(onSelection)
         }
+    }
+
+    /// The screenshot test's flat styles (MacInboxRow.flatStyles) cannot turn light on the accent selection as the
+    /// hierarchical ones do, so there they are drawn white, the system's text on it.
+    private static var flatSelection: Bool {
+        #if DEBUG
+        MacInboxRow.flatStyles
+        #else
+        false
+        #endif
     }
 }
 

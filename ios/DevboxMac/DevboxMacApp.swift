@@ -34,11 +34,12 @@ struct DevboxMacApp: App {
 }
 
 /// ⌘N opens New session, ⌘⇧N a new window (the default ⌘N), ⌘F the sidebar's search, ⌘D switches the sidebar
-/// between the sessions and the dashboard, ⌘⇧S settles the selected session, all in the key window. ⌘Z after a
-/// settle is not a menu item: Edit > Undo keeps it for text, and MacAppState takes it only while the notice shows.
+/// between the sessions and the dashboard, ⌘⇧S settles the selected session and Undo Settle (⌘Z) takes it back while
+/// the notice shows, all in the key window.
 struct MacWindowCommands: Commands {
     @FocusedValue(\.macWindowActions) private var actions
     @FocusedValue(\.macSettle) private var settle
+    @FocusedValue(\.macUndoSettle) private var undoSettle
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
@@ -58,6 +59,11 @@ struct MacWindowCommands: Commands {
             Button("Settle") { settle?.settle() }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
                 .disabled(settle == nil || settle?.block != nil)
+            // Listed for discovery and VoiceOver; the key itself is taken first by MacAppState's monitor, before Edit >
+            // Undo's ⌘Z, in the same cases this item is enabled.
+            Button("Undo Settle") { undoSettle?.undo() }
+                .keyboardShortcut("z")
+                .disabled(undoSettle == nil)
         }
         CommandGroup(after: .sidebar) {
             Button(actions?.inDashboard == true ? "Sessions" : "Dashboard") { actions?.toggleDashboard() }

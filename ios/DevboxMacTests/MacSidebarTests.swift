@@ -56,14 +56,33 @@ final class MacSidebarTests: XCTestCase {
         XCTAssertTrue(MacSettler.canSettle(try item("a", "idle", reason: nil)))
     }
 
-    /// ⌘Z undoes a settle while its notice shows and no text field is being edited; anything else keeps its own ⌘Z.
+    /// ⌘Z undoes a settle while the key window's sidebar shows its notice and the keyboard is not in a text field
+    /// being edited or the terminal; anything else keeps its own ⌘Z.
     func testUndoClaimsCommandZOnlyWhileTheNoticeShows() {
-        XCTAssertTrue(MacSettler.claimsUndo(flags: [.command], key: "z", noticeShown: true, editingText: false))
-        XCTAssertFalse(MacSettler.claimsUndo(flags: [.command], key: "z", noticeShown: false, editingText: false), "no notice")
-        XCTAssertFalse(MacSettler.claimsUndo(flags: [.command], key: "z", noticeShown: true, editingText: true), "the field's undo")
-        XCTAssertFalse(MacSettler.claimsUndo(flags: [.command, .shift], key: "z", noticeShown: true, editingText: false), "redo")
-        XCTAssertFalse(MacSettler.claimsUndo(flags: [.command], key: "x", noticeShown: true, editingText: false))
-        XCTAssertTrue(MacSettler.claimsUndo(flags: [.command, .capsLock], key: "Z", noticeShown: true, editingText: false), "caps lock")
+        XCTAssertTrue(MacSettler.claimsUndo(flags: [.command], key: "z", noticeShown: true, focusOwnsUndo: false))
+        XCTAssertFalse(MacSettler.claimsUndo(flags: [.command], key: "z", noticeShown: false, focusOwnsUndo: false), "no notice here")
+        XCTAssertFalse(MacSettler.claimsUndo(flags: [.command], key: "z", noticeShown: true, focusOwnsUndo: true), "the field's undo")
+        XCTAssertFalse(MacSettler.claimsUndo(flags: [.command, .shift], key: "z", noticeShown: true, focusOwnsUndo: false), "redo")
+        XCTAssertFalse(MacSettler.claimsUndo(flags: [.command], key: "x", noticeShown: true, focusOwnsUndo: false))
+        XCTAssertTrue(MacSettler.claimsUndo(flags: [.command, .capsLock], key: "Z", noticeShown: true, focusOwnsUndo: false), "caps lock")
+    }
+
+    /// The selected row is marked seen only where it stays put: a failure would drop out of the pinned top.
+    func testSeenOfTheSelectedRowNeverMovesIt() throws {
+        XCTAssertTrue(MacSettler.seenMoves(try item("a", "needs_you", reason: "failed", runtime: "tmux")))
+        XCTAssertFalse(MacSettler.seenMoves(try item("a", "needs_you", reason: "completed", runtime: "tmux")))
+    }
+
+    /// A marked row says its mark once: not again as the state.
+    func testSpokenLabelSaysTheMarkOnce() throws {
+        let answer = try item("dev-p-r-1", "needs_you", reason: "request", since: 1_000)
+        let label = MacInboxRow.spoken(answer, now: 1_000 + 60_000, title: "Pick a library", detail: "date-fns or Temporal?", showAgent: false)
+        XCTAssertTrue(label.hasPrefix("Answer, Pick a library, "), label)
+        XCTAssertFalse(label.contains("waiting for your answer"), label)
+        XCTAssertTrue(label.hasSuffix("date-fns or Temporal?"), label)
+        let failed = try item("dev-p-r-2", "needs_you", reason: "failed")
+        XCTAssertEqual(MacInboxRow.spoken(failed, now: 0, title: "Fix", detail: InboxView.reasonLabel(.failed), showAgent: false), "Failed, Fix, p/r")
+        XCTAssertTrue(MacInboxRow.spoken(try item("a", "idle", reason: nil), now: 0, title: "Idle", detail: "", showAgent: false).hasPrefix("Idle"))
     }
 
     /// A tmux session is marked seen while it shows a finish or a failure; not while it waits on an answer, works or
@@ -96,7 +115,7 @@ final class MacSidebarTests: XCTestCase {
     /// also goes on its own after its lifetime.
     func testSettleThenUndo() async throws {
         let store = try await fixtureStore()
-        let settler = MacSettler(lifetime: .seconds(60))
+        let settler = MacSettler(lifetime: .seconds(60), voiceOver: { false })
         await settler.settle(try row(store, "dev-orchard-sync"), in: store)
         XCTAssertNil(settler.problem)
         XCTAssertEqual(settler.notice?.sessionId, "dev-orchard-sync")
@@ -109,13 +128,29 @@ final class MacSidebarTests: XCTestCase {
         let again = await settler.undo(in: store)
         XCTAssertFalse(again, "nothing left to undo")
 
-        let brief = MacSettler(lifetime: .milliseconds(100))
+        let brief = MacSettler(lifetime: .milliseconds(100), voiceOver: { false })
         await brief.settle(try row(store, "dev-lumen-docs"), in: store)
         XCTAssertNotNil(brief.notice)
         try await Task.sleep(for: .milliseconds(400))
         XCTAssertNil(brief.notice, "the notice goes after its lifetime")
         let late = await brief.undo(in: store)
         XCTAssertFalse(late, "⌘Z after the notice went does nothing")
+    }
+
+    /// With VoiceOver the notice stays until the next action, not for a few seconds.
+    func testWithVoiceOverTheNoticeStaysUntilTheNextAction() async throws {
+        let store = try await fixtureStore()
+        let spoken = MacSettler(lifetime: .milliseconds(100), voiceOver: { true })
+        await spoken.settle(try row(store, "dev-orchard-sync"), in: store)
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertNotNil(spoken.notice, "kept past its lifetime")
+        spoken.actionTaken()
+        XCTAssertNil(spoken.notice, "gone with the next action")
+
+        let seen = MacSettler(lifetime: .seconds(60), voiceOver: { false })
+        await seen.settle(try row(store, "dev-lumen-docs"), in: store)
+        seen.actionTaken()
+        XCTAssertNotNil(seen.notice, "without VoiceOver a click elsewhere leaves it to its time")
     }
 
     /// devd's refusal is said, not swallowed; the row stays and no undo is offered.
@@ -129,19 +164,27 @@ final class MacSidebarTests: XCTestCase {
         XCTAssertEqual(try row(store, "dev-acme-billing").attention.section, .needsYou)
     }
 
-    /// Seen posts once per finish of a tmux session; a failed post is shown.
-    func testSeenPostsOncePerFinishAndShowsFailures() async throws {
+    /// Seen posts once per finish of a tmux session. A failed post is shown and tried once more; a failure the owner
+    /// dismissed is not raised again.
+    func testSeenPostsOncePerFinishAndRetriesOnce() async throws {
         let store = try await fixtureStore()
         let settler = MacSettler()
         let tmux = try item("dev-orchard-api-3", "needs_you", reason: "completed", since: 7, runtime: "tmux")
         let first = await settler.seen(tmux, in: store)
-        XCTAssertTrue(first)
+        XCTAssertEqual(first, .posted)
         XCTAssertNil(settler.problem)
         let repeated = await settler.seen(tmux, in: store)
-        XCTAssertFalse(repeated, "the same finish is not posted twice")
+        XCTAssertEqual(repeated, .skipped, "the same finish is not posted twice")
+
         let unknown = try item("dev-gone", "needs_you", reason: "completed", since: 7, runtime: "tmux")
         let failed = await settler.seen(unknown, in: store)
-        XCTAssertFalse(failed)
+        XCTAssertEqual(failed, .failed)
         XCTAssertEqual(settler.problem?.hasPrefix("Couldn't mark “Title of dev-gone” seen"), true, settler.problem ?? "nil")
+        settler.dismissProblem()
+        let retried = await settler.seen(unknown, in: store)
+        XCTAssertEqual(retried, .failed, "tried once more")
+        XCTAssertNil(settler.problem, "a dismissed failure is not raised again")
+        let third = await settler.seen(unknown, in: store)
+        XCTAssertEqual(third, .skipped, "no third try for the same finish")
     }
 }

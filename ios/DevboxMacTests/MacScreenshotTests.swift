@@ -26,6 +26,7 @@ final class MacScreenshotTests: XCTestCase {
         FixtureMode.requested = nil
         MacInboxRow.flatStyles = false
         MacInboxRow.debugHovered = nil
+        MacInboxRow.debugEmphasized = nil
         MacSidebarLayout.debugOpenShelves = []
     }
 
@@ -35,8 +36,14 @@ final class MacScreenshotTests: XCTestCase {
         for look in ["light", "dark"] {
             try shoot(name: "sidebar-list-\(look)", look: look, thread: nil, width: 1100, height: 820, sidebarOnly: true)
         }
-        // Selected: the mark stays readable on the selection.
-        try shoot(name: "sidebar-selected-dark", look: "dark", thread: "dev-acme-billing", width: 1100, height: 820, sidebarOnly: true)
+        // Selected in the list that has the keyboard: the system accent selection, the row's text and mark light on it
+        // (#122's contrast). Offscreen the window is never key, so the row is told it is on the accent selection.
+        MacInboxRow.debugEmphasized = "dev-acme-billing"
+        for look in ["light", "dark"] {
+            try shoot(name: "sidebar-selected-accent-\(look)", look: look, thread: "dev-acme-billing", width: 1100, height: 820,
+                      sidebarOnly: true, focusList: true)
+        }
+        MacInboxRow.debugEmphasized = nil
         MacInboxRow.debugHovered = "dev-orchard-sync"
         for look in ["light", "dark"] {
             try shoot(name: "sidebar-hover-settle-\(look)", look: look, thread: nil, width: 1100, height: 820, sidebarOnly: true)
@@ -55,8 +62,8 @@ final class MacScreenshotTests: XCTestCase {
     }
 
     /// The sidebar as a new window shows it (shelves shut), then with Working opened and its row selected. The inbox is
-    /// short, so the shelves must still sit at the bottom, right over the footer, not under Idle. Then a short window
-    /// with every shelf open: the shelves stop short of the groups' room and scroll inside.
+    /// short, so the shelves must still sit at the bottom, right over the footer, not under the list's last row. Then a short window
+    /// with every shelf open: the shelves stop short of the list's room and scroll inside.
     func testSidebarShelves() throws {
         for look in ["light", "dark"] { try shoot(name: "sidebar-\(look)", look: look, thread: nil, inspect: Self.shelvesPinned()) }
         MacSidebarLayout.debugOpenShelves = ["Working"]
@@ -67,11 +74,11 @@ final class MacScreenshotTests: XCTestCase {
         try shoot(name: "sidebar-short-window-light", look: "light", thread: nil, height: 420, inspect: Self.shelvesPinned(capped: true))
     }
 
-    /// ↓ on the last scrolling row goes on into the open Working shelf, and ↑ comes back, scrolled into view: real key
-    /// events into the lists of a short window, where the last Idle row is out of sight.
+    /// ↓ on the last row of the list goes on into the open Working shelf, and ↑ comes back, scrolled into view: real key
+    /// events into the lists of a short window, where the list's last row is out of sight.
     func testArrowsCrossIntoThePinnedShelves() throws {
         MacSidebarLayout.debugOpenShelves = ["Working"]
-        var selected: String? = "dev-lumen-onboarding" // the last Idle row of the fixtures
+        var selected: String? = "dev-lumen-onboarding" // the list's last row in the fixtures (the oldest idle one)
         let state = MacAppState(isTestRun: false, isFixtureRun: true)
         state.appModel.reloadConfiguration()
         let root = MacWindowContent(thread: Binding(get: { selected }, set: { selected = $0 }), page: .constant(nil),
@@ -105,7 +112,7 @@ final class MacScreenshotTests: XCTestCase {
             spin(0.5)
         }
         try press(NSDownArrowFunctionKey, in: lists[0])
-        XCTAssertEqual(selected, "dev-lumen-app", "↓ goes on from Idle into Working")
+        XCTAssertEqual(selected, "dev-lumen-app", "↓ goes on from the list into Working")
         XCTAssertTrue(window.firstResponder === lists[1], "the keyboard follows into the shelves")
         // The selected row lies in its list's room: inside the scroll view, clear of the insets over it.
         func inSight(_ table: NSTableView) -> Bool {
@@ -115,26 +122,26 @@ final class MacScreenshotTests: XCTestCase {
         }
         XCTAssertTrue(inSight(lists[1]), "the Working row is in sight")
         try press(NSUpArrowFunctionKey, in: lists[1])
-        XCTAssertEqual(selected, "dev-lumen-onboarding", "↑ comes back to the last Idle row")
-        XCTAssertTrue(inSight(lists[0]), "the last Idle row is scrolled into sight")
+        XCTAssertEqual(selected, "dev-lumen-onboarding", "↑ comes back to the list's last row")
+        XCTAssertTrue(inSight(lists[0]), "the list's last row is scrolled into sight")
     }
 
-    /// The sidebar's two lists, the groups that scroll over the shelves pinned under them, ordered by their scroll views
+    /// The sidebar's two lists, the one that scrolls over the shelves pinned under them, ordered by their scroll views
     /// (which stay put when the lists scroll).
     private static func sidebarLists(in view: NSView) -> [NSTableView] {
         func top(_ list: NSView) -> CGFloat { let v = list.enclosingScrollView ?? list; return v.convert(v.bounds, to: nil).maxY }
         return views(in: view, named: "SwiftUIOutlineListView").compactMap { $0 as? NSTableView }.sorted { top($0) > top($1) }
     }
 
-    /// The groups' list spans the column under its insets; the shelves' list sits in its bottom inset with only the
+    /// The main list spans the column under its insets; the shelves' list sits in its bottom inset with only the
     /// footer under it, as tall as its rows (or, `capped`, shorter and scrolling), at most `shelfShare` of the sidebar,
-    /// and leaving the groups at least `groupsMinimum` of visible room.
+    /// and leaving the list at least `listMinimum` of visible room.
     private static func shelvesPinned(capped: Bool = false) -> (NSView) throws -> Void { { frame in
         let tables = sidebarLists(in: frame)
-        XCTAssertEqual(tables.count, 2, "expected the groups' list and the shelves' list")
-        guard tables.count == 2, let groups = tables[0].enclosingScrollView, let shelves = tables[1].enclosingScrollView else { return }
-        let (g, s) = (groups.convert(groups.bounds, to: nil), shelves.convert(shelves.bounds, to: nil))
-        XCTAssertEqual(s.maxY, g.minY + groups.contentInsets.bottom, accuracy: 1, "the shelves sit right under the groups' room")
+        XCTAssertEqual(tables.count, 2, "expected the main list and the shelves' list")
+        guard tables.count == 2, let list = tables[0].enclosingScrollView, let shelves = tables[1].enclosingScrollView else { return }
+        let (g, s) = (list.convert(list.bounds, to: nil), shelves.convert(shelves.bounds, to: nil))
+        XCTAssertEqual(s.maxY, g.minY + list.contentInsets.bottom, accuracy: 1, "the shelves sit right under the list's room")
         XCTAssertGreaterThan(s.minY, g.minY + 20, "the footer is under the shelves")
         if capped {
             XCTAssertLessThan(s.height, tables[1].frame.height - 1, "capped: the shelves scroll inside")
@@ -142,8 +149,8 @@ final class MacScreenshotTests: XCTestCase {
             XCTAssertEqual(s.height, tables[1].frame.height, accuracy: 1, "the shelves take their rows' height")
         }
         XCTAssertLessThanOrEqual(s.height, g.height * MacSidebarLayout.shelfShare + 1)
-        XCTAssertGreaterThanOrEqual(g.height - groups.contentInsets.top - groups.contentInsets.bottom, MacSidebarLayout.groupsMinimum - 1,
-                                    "the groups keep their room")
+        XCTAssertGreaterThanOrEqual(g.height - list.contentInsets.top - list.contentInsets.bottom, MacSidebarLayout.listMinimum - 1,
+                                    "the list keeps its room")
     } }
 
     /// Dashboard mode on a few of its native screens.
@@ -283,7 +290,7 @@ final class MacScreenshotTests: XCTestCase {
     /// Send on the draft, which the fixture refuses.
     private func shoot(name: String, look: String, thread: String?, chat: String? = nil, page: MacDashboardPage? = nil, draft: String? = nil,
                        refuse: Bool = false, width: CGFloat = 1440, height: CGFloat = 900, sidebarOnly: Bool = false,
-                       inspect: ((NSView) throws -> Void)? = nil, prepare: ((MacAppState) async -> Void)? = nil) throws {
+                       focusList: Bool = false, inspect: ((NSView) throws -> Void)? = nil, prepare: ((MacAppState) async -> Void)? = nil) throws {
         let state = MacAppState(isTestRun: false, isFixtureRun: true)
         state.appModel.reloadConfiguration()
         let shown = thread ?? chat
@@ -362,17 +369,23 @@ final class MacScreenshotTests: XCTestCase {
         }
 
         let frame = try XCTUnwrap(window.contentView?.superview, "the window has no frame view")
+        if focusList {
+            let list = try XCTUnwrap(Self.sidebarLists(in: frame).first, "no sidebar list")
+            XCTAssertTrue(window.makeFirstResponder(list), "the list takes the keyboard")
+            RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+        }
         try inspect?(frame)
         // The sidebar list makes its rows when it is drawn on a screen; offscreen they are made here.
         for case let table as NSTableView in Self.views(in: frame, named: "SwiftUIOutlineListView") {
             for row in 0..<table.numberOfRows { _ = table.rowView(atRow: row, makeIfNecessary: true) }
             // The selected row's highlight is a material too: drawn as the plain selection colour of a list that does
-            // not have the focus (the thread does, after a click on a row).
+            // not have the focus (the thread does, after a click on a row), or with `focusList` the accent colour.
             for row in Self.views(in: table, named: "ListTableRowView") {
                 for effect in row.subviews where effect is NSVisualEffectView {
                     effect.layer?.sublayers?.forEach { $0.isHidden = true }
                     window.effectiveAppearance.performAsCurrentDrawingAppearance {
-                        effect.layer?.backgroundColor = NSColor.unemphasizedSelectedContentBackgroundColor.cgColor
+                        effect.layer?.backgroundColor = (focusList ? NSColor.selectedContentBackgroundColor
+                                                         : NSColor.unemphasizedSelectedContentBackgroundColor).cgColor
                     }
                     effect.layer?.cornerRadius = 6
                 }
