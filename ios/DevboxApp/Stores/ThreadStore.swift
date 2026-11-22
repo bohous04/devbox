@@ -571,11 +571,7 @@ final class ThreadStore: ObservableObject {
 
     /// Uploads the (already prepared) images into the session's inbox, then sends the message with their paths.
     func send(text: String, images: [Data]) async throws {
-        var paths: [String] = []
-        for image in images {
-            let up: ThreadUpload = try await client.upload("\(base)/inbox?for=thread", data: image)
-            paths.append(up.path)
-        }
+        let paths = try await upload(images)
         let _: Queued = try await client.post("\(base)/thread/messages",
                                               body: Message(text: text, attachments: paths.isEmpty ? nil : paths.map(Attachment.init)))
     }
@@ -583,11 +579,24 @@ final class ThreadStore: ObservableObject {
     private struct MirrorMessage: Encodable { let text: String }
     private struct Sent: Decodable { let sent: Bool }
 
-    /// A tmux session: types the text into its pane's agent. A refusal devd explains (409, 404) becomes `sendLock` and
-    /// returns false, so the composer keeps the text; other failures throw.
-    func sendToPane(text: String) async throws -> Bool {
+    /// The images into the session's own inbox dir (`/inbox/<id>` in its container); their container paths.
+    private func upload(_ images: [Data]) async throws -> [String] {
+        var paths: [String] = []
+        for image in images {
+            let up: ThreadUpload = try await client.upload("\(base)/inbox?for=thread", data: image)
+            paths.append(up.path)
+        }
+        return paths
+    }
+
+    /// A tmux session: types the text into its pane's agent, the images uploaded first and typed as their paths
+    /// (MirrorView.messageText). A refusal devd explains (409, 404) becomes `sendLock` and returns false, so the composer
+    /// keeps the text; other failures throw.
+    func sendToPane(text: String, images: [Data] = []) async throws -> Bool {
+        // Outside the catch below: a failed upload typed nothing, so it is its own error, not "may have arrived".
+        let paths = try await upload(images)
         do {
-            let _: Sent = try await client.post("\(base)/mirror/messages", body: MirrorMessage(text: text))
+            let _: Sent = try await client.post("\(base)/mirror/messages", body: MirrorMessage(text: MirrorView.messageText(text, imagePaths: paths)))
             sendLock = nil
             return true
         } catch let e as DevdHTTPError {

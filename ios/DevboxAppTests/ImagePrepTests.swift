@@ -84,6 +84,37 @@ final class ImagePrepTests: XCTestCase {
         XCTAssertNil(ImagePrep.take(attached: 0, adding: 10).message)
     }
 
+    /// What a drop, a paste or the file picker hands over: image data, an image file (Finder's drag is a file URL), or
+    /// something else, which is refused by its name instead of being dropped silently.
+    func testLoadImageTakesImageDataAndImageFilesAndNamesTheRest() async throws {
+        let png = try image(width: 4, height: 4, type: .png)
+        let fromData = try await ImagePrep.loadImage(NSItemProvider(item: png as NSData, typeIdentifier: UTType.png.identifier))
+        XCTAssertEqual(fromData, png)
+
+        let dir = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let shot = dir.appending(path: "shot.png")
+        try png.write(to: shot)
+        let fromFile = try await ImagePrep.loadImage(NSItemProvider(object: shot as NSURL))
+        XCTAssertEqual(fromFile, png)
+
+        let notes = dir.appending(path: "notes.pdf")
+        try Data("%PDF".utf8).write(to: notes)
+        do {
+            _ = try await ImagePrep.loadImage(NSItemProvider(object: notes as NSURL))
+            XCTFail("a pdf is not an image")
+        } catch {
+            XCTAssertEqual(chatErrorText(error), "notes.pdf is not an image; only images can be attached")
+        }
+        do {
+            _ = try await ImagePrep.loadImage(NSItemProvider(object: "hello" as NSString))
+            XCTFail("text is not an image")
+        } catch {
+            XCTAssertEqual(chatErrorText(error), "This item is not an image; only images can be attached")
+        }
+    }
+
     func testAttachmentPathForTheThumbnailRoute() {
         XCTAssertEqual(ImagePrep.attachmentPath(sessionId: "s1", path: "/inbox/s1/ab c.jpg"), "/api/sessions/s1/thread/attachments/ab%20c.jpg")
     }

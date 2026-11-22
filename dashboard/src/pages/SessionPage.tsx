@@ -17,7 +17,7 @@ import { activeRun, applyCommands, applyEffort, applyNotice, applyThreadEvent, c
 import { useEventStream } from "../useEventStream";
 import { useTmuxSeen } from "../useSettler";
 import { autoOpen, browserStorage, tabKey, type TabState, type TmuxTab, UNSETTLED, userChoose } from "../tmuxTab";
-import { mirrorComposerProps, mirrorNotice, mirrorUnsupported, sendToMirror, type MirrorLock } from "../mirrorView";
+import { mirrorComposerProps, mirrorMessageText, mirrorNotice, mirrorUnsupported, sendToMirror, type MirrorLock } from "../mirrorView";
 
 // Same lazy import as TerminalPage: xterm stays in its own chunk.
 const Terminal = lazy(() => import("../components/Terminal").then((m) => ({ default: m.Terminal })));
@@ -243,7 +243,12 @@ function ChatPage({ id }: { id: string }) {
                 // The terminal's agent: what is typed here goes into its pane. No switchers (mirrorComposerProps).
                 <Composer
                   running={false} onStop={async () => {}}
-                  onSend={(text) => sendToMirror(() => api.sendMirrorMessage(id, text), setSendLock)}
+                  onSend={async (text, images) => {
+                    // Uploaded first: a failed upload typed nothing, so it is the composer's error, not "may have arrived".
+                    const paths: string[] = [];
+                    for (const image of images) paths.push((await api.uploadThreadImage(id, image)).path);
+                    return sendToMirror(() => api.sendMirrorMessage(id, mirrorMessageText(text, paths)), setSendLock);
+                  }}
                   {...mirrorComposerProps(mirror)}
                   notices={<>
                     {/* Always mounted, only its text changes, so screen readers hear each new line once. */}

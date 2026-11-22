@@ -494,6 +494,40 @@ final class ThreadStoreLiveTests: XCTestCase {
         store.stop()
     }
 
+    /// A tmux session's images go up as a chat's do (the session's own inbox dir, `/inbox/<id>` in the container), then
+    /// their container paths are typed after the text, each on its own line: the terminal's agent reads them as files.
+    func testSendToPaneUploadsImagesAndTypesTheirPaths() async throws {
+        MockURLProtocol.handler = { req in
+            if req.url?.path == "/api/sessions/s1/inbox" { return .init(statusCode: 201, data: Data(#"{"path":"/inbox/s1/x.jpg","size":3}"#.utf8)) }
+            return .init(statusCode: 202, data: Data(#"{"sent":true}"#.utf8))
+        }
+        let store = ThreadStore(sessionId: "s1", client: client(), connect: { _, _ in AsyncThrowingStream { _ in } })
+        let sent = try await store.sendToPane(text: "look", images: [Data([1]), Data([2])])
+        XCTAssertTrue(sent)
+        XCTAssertEqual(requests, ["POST /api/sessions/s1/inbox?for=thread", "POST /api/sessions/s1/inbox?for=thread",
+                                  "POST /api/sessions/s1/mirror/messages"])
+        let body = MockURLProtocol.capturedRequests.last { $0.url?.path == "/api/sessions/s1/mirror/messages" }.map(bodyJSON)
+        XCTAssertEqual(body as NSDictionary?, ["text": "look\n\nAttached image: /inbox/s1/x.jpg\nAttached image: /inbox/s1/x.jpg"] as NSDictionary)
+    }
+
+    /// An upload devd refuses is the composer's error, as it is: nothing was typed, so it is neither a lock nor
+    /// "may have reached the terminal".
+    func testSendToPaneWithARefusedImageTypesNothing() async throws {
+        MockURLProtocol.handler = { req in
+            if req.url?.path == "/api/sessions/s1/inbox" { return .init(statusCode: 415, data: Data(#"{"error":"Only png, jpeg, webp or gif images can be attached"}"#.utf8)) }
+            return .init(statusCode: 202, data: Data(#"{"sent":true}"#.utf8))
+        }
+        let store = ThreadStore(sessionId: "s1", client: client(), connect: { _, _ in AsyncThrowingStream { _ in } })
+        do {
+            _ = try await store.sendToPane(text: "look", images: [Data([1])])
+            XCTFail("a refused upload sends nothing")
+        } catch {
+            XCTAssertEqual(chatErrorText(error), "Only png, jpeg, webp or gif images can be attached")
+        }
+        XCTAssertEqual(requests, ["POST /api/sessions/s1/inbox?for=thread"])
+        XCTAssertNil(store.sendLock)
+    }
+
     /// A send devd never answered (a timeout, a dropped connection) may have reached the pane: the composer says so,
     /// and no lock stands in for it.
     func testSendToPaneWithoutAnAnswerSaysItMayHaveArrived() async throws {

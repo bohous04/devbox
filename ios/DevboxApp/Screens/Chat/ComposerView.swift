@@ -4,8 +4,8 @@ import UniformTypeIdentifiers
 
 /// Message input (dashboard/src/components/chat/Composer.tsx). A message sent while a run is active is queued by the
 /// bridge and shows as queued. On a failed send the text and images stay and nothing is retried. Images picked
-/// from Photos or pasted (at most 10) are scaled down and re-encoded (`ImagePrep`), previewed, and go with the
-/// next message.
+/// from Photos or Files, pasted (the paperclip's menu; ⌘V on the Mac) or dropped on the box (at most 10) are scaled
+/// down and re-encoded (`ImagePrep`), previewed, and go with the next message; anything that is not an image is said.
 /// One box (the web's composer): attach, the field, the model chip and send on one row; from the field's second line
 /// the box grows into two tiers, the field on top and the controls under it, and stays so until the text is cleared
 /// (switching back while typing would make the field jump between widths). The Mac always has the two tiers.
@@ -25,7 +25,7 @@ struct ComposerView: View {
     var placeholder: String? = nil
     /// Why nothing can be sent now: the empty field is off and says it (text already typed stays editable).
     var fieldOff: String? = nil
-    /// Why images cannot go with a message: the attach button is off and says it.
+    /// Why images cannot go with a message: the attach button is off and says it, and a paste or drop says it.
     var imagesOff: String? = nil
 
     private struct Attached: Identifiable {
@@ -34,9 +34,16 @@ struct ComposerView: View {
         let preview: PlatformImage?
     }
 
+    #if DEBUG
+    /// Tests see what was attached (the previews are drawn, not views a test can find): the number now attached.
+    static var debugAttached: ((Int) -> Void)?
+    #endif
+
     @State private var text = ""
     @State private var images: [Attached] = []
     @State private var picks: [PhotosPickerItem] = []
+    @State private var choosingFiles = false
+    @State private var dropping = false
     @State private var busy = false
     @State private var stopping = false
     @State private var preparing = 0
@@ -113,7 +120,11 @@ struct ComposerView: View {
             }
             .padding(.leading, twoTier ? 14 : 6).padding(.trailing, 6).padding(.vertical, 6)
             .background(Theme.C.card, in: RoundedRectangle(cornerRadius: 22))
-            .overlay(RoundedRectangle(cornerRadius: 22).strokeBorder(Theme.C.border))
+            .overlay(RoundedRectangle(cornerRadius: 22).strokeBorder(dropping ? Theme.C.primary : Theme.C.border))
+            .onDrop(of: [.image, .fileURL], isTargeted: $dropping) { items in
+                attach(items)
+                return true
+            }
             #if os(macOS)
             // Above the box, over the thread: it takes no room in the composer's own layout.
             .overlay(alignment: .top) {
@@ -152,6 +163,15 @@ struct ComposerView: View {
             picks = []
             Task { await attach(items.count) { i in try await items[i].loadTransferable(type: Data.self) } }
         }
+        .fileImporter(isPresented: $choosingFiles, allowedContentTypes: [.image], allowsMultipleSelection: true) { result in
+            switch result {
+            case .success(let urls): Task { await attach(urls.count) { i in try ImagePrep.readFile(urls[i]) } }
+            case .failure(let e): error = "Image: \(chatErrorText(e))"
+            }
+        }
+        #if os(macOS)
+        .background(ImagePasteKey(active: focused) { attach($0) })
+        #endif
     }
 
     private var attach: some View {
@@ -159,15 +179,19 @@ struct ComposerView: View {
             PhotosPicker(selection: $picks, maxSelectionCount: max(1, ImagePrep.maxImagesPerMessage - images.count), matching: .images) {
                 Label("Photo library", systemImage: "photo.on.rectangle")
             }
-            Button { pasteImages() } label: { Label("Paste image", systemImage: "doc.on.clipboard") }
-                .disabled(!ImagePasteboard.hasImages)
+            Button { choosingFiles = true } label: { Label("Choose files…", systemImage: "folder") }
+            // Not disabled by what the clipboard held when the menu was drawn (that went stale); it says when it has none.
+            Button {
+                let items = ImagePasteboard.providers()
+                if items.isEmpty { error = "The clipboard has no image" } else { attach(items) }
+            } label: { Label("Paste image", systemImage: "doc.on.clipboard") }
         } label: {
             Image(systemName: "paperclip").font(.system(size: ChatType.s(17))).foregroundStyle(Theme.C.mutedForeground)
                 .frame(width: 36, height: 36).contentShape(Rectangle())
         }
         .labelOnlyMenu()
         .disabled(images.count >= ImagePrep.maxImagesPerMessage || imagesOff != nil)
-        .help(imagesOff ?? "Attach images")
+        .help(imagesOff ?? "Attach images, or paste or drop them here")
         .accessibilityLabel("Attach images")
         .accessibilityHint(imagesOff ?? "")
     }
@@ -275,17 +299,10 @@ struct ComposerView: View {
         .accessibilityLabel("Send")
     }
 
-    private func pasteImages() {
-        let providers = ImagePasteboard.providers()
-        Task {
-            await attach(providers.count) { i in
-                try await withCheckedThrowingContinuation { (c: CheckedContinuation<Data?, Error>) in
-                    _ = providers[i].loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, err in
-                        if let err { c.resume(throwing: err) } else { c.resume(returning: data) }
-                    }
-                }
-            }
-        }
+    /// Pasted or dropped items; while images are off, their reason is said instead.
+    private func attach(_ items: [NSItemProvider]) {
+        if let imagesOff { error = imagesOff; return }
+        Task { await attach(items.count) { i in try await ImagePrep.loadImage(items[i]) } }
     }
 
     /// Loads and prepares up to the remaining slots; what does not fit or fails is said, never dropped silently.
@@ -299,6 +316,9 @@ struct ComposerView: View {
                 guard let raw = try await load(i) else { error = "An image could not be read"; continue }
                 let data = try await Task.detached(priority: .userInitiated) { try ImagePrep.prepare(raw) }.value
                 images.append(Attached(data: data, preview: PlatformImage(data: data)))
+                #if DEBUG
+                Self.debugAttached?(images.count)
+                #endif
             } catch {
                 self.error = "Image: \(chatErrorText(error))"
             }

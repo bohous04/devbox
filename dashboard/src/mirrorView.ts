@@ -1,9 +1,6 @@
 import type { MirrorInfo, MirrorSendError } from "../../shared/mirror";
 import { ApiError } from "./api";
 
-/** A tmux session takes no images through its Chat view: they would have to reach the pane as files. */
-export const MIRROR_IMAGES_OFF = "Images can't be sent to a terminal session; paste them in the terminal.";
-
 export type SessionRefusal = "session-ending" | "unknown-session" | "not-a-tmux-session";
 export interface MirrorLock { code: MirrorSendError | SessionRefusal; message: string }
 
@@ -25,11 +22,17 @@ export function mirrorSendLock(e: unknown): MirrorLock | null {
 }
 
 /** The mirror composer's fixed props. What is typed goes into the pane: no `/` commands (devd refuses them, they
- *  belong in the terminal), no `@` files, no images; devd's standing reason turns the empty field off and says it. */
+ *  belong in the terminal), no `@` files; images go as files (mirrorMessageText). devd's standing reason turns the
+ *  empty field off and says it. */
 export function mirrorComposerProps(info: MirrorInfo) {
   const fieldOff = mirrorFieldOff(info);
-  return { commands: undefined, searchFiles: undefined, fieldOff, imagesOff: MIRROR_IMAGES_OFF,
-    placeholder: fieldOff ?? "Message the agent in the terminal" } as const;
+  return { commands: undefined, searchFiles: undefined, fieldOff, placeholder: fieldOff ?? "Message the agent in the terminal" } as const;
+}
+
+/** The text typed into the pane: the images, uploaded as a chat's are (`/inbox/<id>/…`, mounted in the container),
+ *  follow as their paths, one per line, for the agent to read. A line may not start with `/`: devd refuses commands. */
+export function mirrorMessageText(text: string, imagePaths: string[]): string {
+  return imagePaths.length === 0 ? text : `${text}\n\n${imagePaths.map((p) => `Attached image: ${p}`).join("\n")}`;
 }
 
 /** A mirror send devd never answered (the network failed or dropped): it may have been typed into the pane. */
