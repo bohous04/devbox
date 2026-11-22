@@ -8,7 +8,7 @@ import type { CodexView } from "../src/codexPoller";
 import { ChatHub } from "../src/chatHub";
 import {
   deleteSession, getSession, getSessionAttention, insertLease, insertSession, listNotifyLog, listSessions, openDb, upsertAccountUsage,
-  putSessionAttention, type SessionRow,
+  getTmuxSeenAt, putSessionAttention, type SessionRow,
 } from "../src/db";
 import { EventBus } from "../src/eventBus";
 import { AUTO_SETTLE_IDLE_MS, hubShelfDeps, resetDeps, untilReset, type ResetDeps } from "../src/sessionAttention";
@@ -50,7 +50,7 @@ function fakeTimers(clock: () => number) {
 }
 
 /** A hub, a chat hub and an inbox over one clock, wired like index.ts. Chat events are stamped with that clock. */
-function setup(opts: { snoozedThrows?: boolean; activityThrows?: boolean } = {}) {
+function setup(opts: { snoozedThrows?: boolean; activityThrows?: boolean; quietMs?: number } = {}) {
   let now = T0;
   const clock = () => now;
   const timers = fakeTimers(clock);
@@ -72,7 +72,7 @@ function setup(opts: { snoozedThrows?: boolean; activityThrows?: boolean } = {})
     snoozed: (id) => { if (opts.snoozedThrows) throw new Error("db locked"); return inbox.snoozed(id); },
   }, (m) => logs.push(m));
   const hub = new AgentEventHub({
-    db, notify: (title, message) => notified.push(`${title}: ${message}`), now: () => now, quietMs: 1000, ...shelf,
+    db, notify: (title, message) => notified.push(`${title}: ${message}`), now: () => now, quietMs: opts.quietMs ?? 1000, ...shelf,
   });
   const chatHub = new ChatHub({ hub, session: (id) => getSession(db, id), now: () => now });
   inbox = new Inbox({
@@ -311,6 +311,61 @@ test("an ended session's settle state is deleted with it", () => {
   t.inbox.settle(TMUX.id, "manual");
   deleteSession(t.db, TMUX.id);
   expect(getSessionAttention(t.db, TMUX.id)).toBeNull();
+});
+
+// --- tmux seen marker ---
+
+test("a finished tmux session is Done until seen; the next finish is Done again", () => {
+  const t = setup();
+  const tmux = getSession(t.db, TMUX.id)!;
+  t.hub.handle(tmux, "user_prompt_submit");
+  t.tick(1000);
+  t.hub.handle(tmux, "stop");
+  t.tick(2000);
+  t.hub.sweep();
+  expect(t.inbox.item(tmux).attention).toMatchObject({ section: "needs_you", reason: "completed" });
+  t.tick(1000);
+  t.inbox.seen(TMUX.id);
+  expect(t.published.at(-1)).toMatchObject({ sessionId: TMUX.id, attention: { section: "idle", reason: null } });
+  expect(getTmuxSeenAt(t.db, TMUX.id)).toBe(t.now());
+  t.tick(1000);
+  t.hub.handle(tmux, "user_prompt_submit");
+  t.tick(1000);
+  t.hub.handle(tmux, "stop");
+  t.tick(2000);
+  t.hub.sweep();
+  expect(t.section(TMUX.id)).toBe("needs_you");
+});
+
+test("a tmux failure stays needs-you until seen", () => {
+  const t = setup();
+  const tmux = getSession(t.db, TMUX.id)!;
+  t.hub.handle(tmux, "user_prompt_submit");
+  t.hub.handle(tmux, "stop_failure");
+  t.tick(60_000);
+  expect(t.inbox.item(tmux).attention).toMatchObject({ section: "needs_you", reason: "failed" });
+  t.inbox.seen(TMUX.id);
+  expect(t.section(TMUX.id)).toBe("idle");
+});
+
+test("a reused session id does not inherit the seen marker: the new session's done is needs-you", () => {
+  // No quiet window and a frozen clock: the new session's done begins at the very ms of the old look, so an
+  // inherited marker would cover it (seen_at >= statusSince).
+  const t = setup({ quietMs: 0 });
+  const finish = () => {
+    const tmux = getSession(t.db, TMUX.id)!;
+    t.hub.handle(tmux, "user_prompt_submit");
+    t.hub.handle(tmux, "stop");
+    t.hub.sweep();
+  };
+  finish();
+  t.inbox.seen(TMUX.id);
+  expect(t.section(TMUX.id)).toBe("idle");
+  deleteSession(t.db, TMUX.id);
+  expect(getTmuxSeenAt(t.db, TMUX.id)).toBeNull();
+  insertSession(t.db, { ...TMUX, created_at: t.now(), last_active_at: t.now() });
+  finish();
+  expect(t.inbox.item(getSession(t.db, TMUX.id)!).attention).toMatchObject({ section: "needs_you", reason: "completed", since: t.now() });
 });
 
 // --- until reset ---

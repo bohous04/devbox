@@ -85,16 +85,19 @@ export function chatBusy(t: ThreadSnapshot, a: Attention): boolean {
   return a.section === "working" || t.pending.length > 0;
 }
 
-/** The hub's live state of a tmux session. `done` stays needs_you until the next prompt: tmux has no seen marker.
- *  Without live state (no hook event since devd started) the session is idle since `lastActive`, the session's
- *  recorded activity, so its row still says how long ago. */
-export function tmuxAttention(live: AgentLiveSnapshot | null, pr: PrHold | null = null, lastActive = 0): Attention {
+/** The hub's live state of a tmux session. `done` and `failed` are needs_you until the owner has seen them: `seenAt`
+ *  (POST /api/sessions/:id/seen; null = never) at or after the state began. Like a seen chat run, a seen one then
+ *  shows its PR's CI, else idle. Without live state (no hook event since devd started) the session is idle since
+ *  `lastActive`, the session's recorded activity, so its row still says how long ago. */
+export function tmuxAttention(live: AgentLiveSnapshot | null, pr: PrHold | null = null, lastActive = 0, seenAt: number | null = null): Attention {
   if (!live) return prAttention(pr, 0) ?? { section: "idle", reason: null, since: lastActive };
   const since = live.statusSince;
+  const seen = seenAt !== null && seenAt >= since;
   switch (live.status) {
     case "waiting": return { section: "needs_you", reason: "request", since };
-    case "failed": return { section: "needs_you", reason: "failed", since };
-    case "done": return prAttention(pr, since) ?? { section: "needs_you", reason: "completed", since };
+    case "failed":
+      return seen ? prAttention(pr, since) ?? { section: "idle", reason: null, since } : { section: "needs_you", reason: "failed", since };
+    case "done": return prAttention(pr, since) ?? (seen ? { section: "idle", reason: null, since } : { section: "needs_you", reason: "completed", since });
     case "working":
     case "stalled": return { section: "working", reason: "running", since };
     // Unknown (after a devd restart) says nothing about when the last run ended: any seen failure stands.

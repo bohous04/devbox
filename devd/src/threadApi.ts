@@ -62,7 +62,7 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
   if (!d) {
     const off = (c: Context) => c.json({ error: "chat runtime is not configured" }, 503);
     for (const path of ["/api/sessions/:id/thread", "/api/sessions/:id/thread/*", "/api/inbox", "/api/stream",
-      "/api/sessions/:id/settle", "/api/sessions/:id/unsettle", "/api/sessions/:id/snooze", "/api/sessions/:id/snooze-reset"]) app.all(path, off);
+      "/api/sessions/:id/seen", "/api/sessions/:id/settle", "/api/sessions/:id/unsettle", "/api/sessions/:id/snooze", "/api/sessions/:id/snooze-reset"]) app.all(path, off);
     return;
   }
   /** The chat session's row and store, or the error response: 404 unknown, 409 tmux or ending. */
@@ -245,6 +245,14 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
   const requestOpen = (c: Context, s: SessionRow): Response | null =>
     d.inbox.item(s).attention.reason === "request" ? c.json({ error: "request-open", message: REQUEST_OPEN }, 409) : null;
   const noUsage = (c: Context) => c.json({ error: "usage limits are not configured" }, 503);
+  /** A tmux session has no thread to mark up to a seq (chat: /thread/seen): the owner looked at it now. */
+  app.post("/api/sessions/:id/seen", (c) => {
+    const r = anySession(c, c.req.param("id"));
+    if ("res" in r) return r.res;
+    if (storedRuntime(r.s) !== "tmux") return c.json({ error: "not-a-tmux-session" }, 409);
+    d.inbox.seen(r.s.id);
+    return c.body(null, 204);
+  });
   /** Each answers the session's new inbox item. */
   app.post("/api/sessions/:id/settle", (c) => {
     const r = anySession(c, c.req.param("id"));

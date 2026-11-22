@@ -3,7 +3,7 @@ import type { InboxItem, InboxRemoved, InboxSection } from "../../shared/thread"
 import { threadTitle } from "../../shared/threadTitle";
 import type { AgentLiveSnapshot } from "./agentEvents";
 import { chatAttention, lastEndedRun, tmuxAttention, WORKING_GRACE_MS, type LinkState, type PrHold } from "./attention";
-import { getSessionAttention, putSessionAttention, snoozedSessionIds, type SessionRow, type SettleReason, type SnoozeKind } from "./db";
+import { getSessionAttention, getTmuxSeenAt, putSessionAttention, setTmuxSeenAt, snoozedSessionIds, type SessionRow, type SettleReason, type SnoozeKind } from "./db";
 import type { EventBus } from "./eventBus";
 import { autoSettleDue, shelve, snoozeActive, type Activity } from "./sessionAttention";
 import { storedRuntime } from "./sessions";
@@ -103,6 +103,12 @@ export class Inbox {
     this.changedSafe(sessionId);
   }
 
+  /** The owner looked at the tmux session: its current done or failed state is seen. */
+  seen(sessionId: string): void {
+    setTmuxSeenAt(this.d.db, sessionId, this.now());
+    this.changedSafe(sessionId);
+  }
+
   snoozed(sessionId: string): boolean {
     return snoozeActive(getSessionAttention(this.d.db, sessionId), this.now());
   }
@@ -159,7 +165,7 @@ export class Inbox {
     // Read outside the store's try: a failing DB read is not an unreadable thread store.
     const pr = this.d.prHold?.(s.id) ?? null;
     if (runtime === "tmux") {
-      return { item: { ...base, attention: tmuxAttention(this.d.tmuxLive(s.id), pr, Math.max(s.last_active_at, s.created_at)), lastText: null, topic: null }, recheckAt: null };
+      return { item: { ...base, attention: tmuxAttention(this.d.tmuxLive(s.id), pr, Math.max(s.last_active_at, s.created_at), getTmuxSeenAt(this.d.db, s.id)), lastText: null, topic: null }, recheckAt: null };
     }
     let built: { item: InboxItem; recheckAt: number | null };
     try { built = this.buildChat(s, base, pr); }
