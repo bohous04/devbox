@@ -10,19 +10,26 @@ final class ComposerLinks {
     /// The composer's current text: only the field editor holding it is the composer's (as CaretField does).
     var text = ""
     private var monitor: Any?
+    private var handCursor = false
 
     func install() {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .mouseMoved, .flagsChanged]) { [weak self] event in
             guard let self, let editor = self.editor(of: event) else { return event }
+            let overLink = event.modifierFlags.contains(.command) && Self.link(at: event, in: editor) != nil
             if event.type == .leftMouseDown {
-                guard event.modifierFlags.contains(.command), let url = Self.link(at: event, in: editor) else { return event }
+                guard overLink, let url = Self.link(at: event, in: editor) else { return event }
                 NSWorkspace.shared.open(url)
                 return nil
             }
-            if event.modifierFlags.contains(.command), Self.link(at: event, in: editor) != nil {
+            if overLink {
+                self.handCursor = true
                 // After the text view's own cursor update.
                 DispatchQueue.main.async { NSCursor.pointingHand.set() }
+            } else if self.handCursor {
+                // ⌘ released (or the pointer left the address) without a mouse move to reset the cursor.
+                self.handCursor = false
+                DispatchQueue.main.async { NSCursor.iBeam.set() }
             }
             return event
         }
@@ -41,7 +48,9 @@ final class ComposerLinks {
     }
 
     private static func link(at event: NSEvent, in editor: NSTextView) -> URL? {
-        let p = editor.convert(event.locationInWindow, from: nil)
+        // A flags-changed event carries no position: ask the window where the pointer is.
+        let where_ = event.type == .flagsChanged ? (editor.window?.mouseLocationOutsideOfEventStream ?? .zero) : event.locationInWindow
+        let p = editor.convert(where_, from: nil)
         guard editor.bounds.contains(p) else { return nil }
         return link(atCharacter: editor.characterIndexForInsertion(at: p), in: editor.string)
     }
@@ -75,6 +84,8 @@ final class ComposerLinks {
     /// The focused field editor, when it holds this composer's text.
     func decorateFocused() {
         guard let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.isFieldEditor, editor.string == text else { return }
+        // Hover (the pointing hand) needs the window's mouse-moved events.
+        editor.window?.acceptsMouseMovedEvents = true
         Self.decorate(editor)
     }
 }

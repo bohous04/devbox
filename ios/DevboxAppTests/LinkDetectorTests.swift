@@ -30,4 +30,9 @@ final class LinkDetectorTests: XCTestCase {
         XCTAssertEqual(String(a.characters), s)
         XCTAssertEqual(a.runs.compactMap(\.link), [URL(string: "https://x.y/z?a=1")!])
     }
+
+    func testJSONAndBackticksDoNotLeakIntoTheAddress() {
+        XCTAssertEqual(found(#"{"url":"https://x.y/z","b":1}"#), ["https://x.y/z"])
+        XCTAssertEqual(found("run `https://x.y/z` now and **https://a.b/c**"), ["https://x.y/z", "https://a.b/c"])
+    }
 }

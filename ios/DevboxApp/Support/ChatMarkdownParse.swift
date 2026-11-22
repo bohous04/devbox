@@ -24,7 +24,6 @@ enum ChatMarkdownParse {
     private static let bullet = regex(#"^\s*[-*+]\s+"#)
     private static let number = regex(#"^\s*\d+[.)]\s+"#)
     private static let tableRule = regex(#"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$"#)
-    private static let bareURL = regex(#"(?<![(<\[])\bhttps?://[^\s<>()\[\]]+"#)
     /// A markdown link `[text](target)`: a bare URL inside one is already linked (or is its text).
     private static let mdLink = regex(#"\[[^\]]*\]\([^)]*\)"#)
     private static let scheme = regex(#"^https?://"#)
@@ -142,12 +141,11 @@ enum ChatMarkdownParse {
             let whole = NSRange(location: 0, length: ns.length)
             let links = mdLink.matches(in: part, range: whole).map(\.range)
             var result = part
-            for m in bareURL.matches(in: part, range: whole).reversed()
-            where !links.contains(where: { NSIntersectionRange($0, m.range).length > 0 }) {
-                var url = ns.substring(with: m.range)
-                // Sentence punctuation after a link is not part of it.
-                while let last = url.last, ".,;:!?\"'".contains(last) { url.removeLast() }
-                let r = Range(NSRange(location: m.range.location, length: (url as NSString).length), in: result)!
+            for m in LinkDetector.ranges(in: part).reversed()
+            where !links.contains(where: { NSIntersectionRange($0, m).length > 0 })
+                && !(m.location > 0 && "(<[".contains(ns.character(at: m.location - 1).asCharacter)) {
+                let url = ns.substring(with: m)
+                let r = Range(m, in: result)!
                 result.replaceSubrange(r, with: "[\(shortURL(url))](\(url))")
             }
             return result
@@ -203,4 +201,8 @@ enum ChatMarkdownParse {
         if !cur.isEmpty { out.append(.text(cur)) }
         return out
     }
+}
+
+private extension unichar {
+    var asCharacter: Character { Character(Unicode.Scalar(self) ?? " ") }
 }
