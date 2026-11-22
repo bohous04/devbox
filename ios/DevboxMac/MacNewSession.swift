@@ -417,6 +417,7 @@ struct MacNewSessionSheet: View {
     @State private var work: Task<Void, Never>?
     @State private var confirmClose = false
     @State private var opened = false
+    @State private var anyInput = OpenOnAnyInput()
     @FocusState private var listFocused: Bool
 
     /// `tree`, `picks` and `phase` preset the sheet for the screenshot test; the app passes none.
@@ -449,7 +450,10 @@ struct MacNewSessionSheet: View {
             Divider()
             switch phase {
             case .working(let tracker): progress(tracker).padding(20)
-            case .created(let tracker, let id): progress(tracker).padding(20).modifier(OpensOnAnyInput { open(id) })
+            case .created(let tracker, let id):
+                progress(tracker).padding(20)
+                    .onAppear { anyInput.start { open(id) } }
+                    .onDisappear { anyInput.stop() }
             case .done(let message, let id): done(message, id: id).padding(20)
             case .form, .failed: pages
             }
@@ -858,6 +862,7 @@ struct MacNewSessionSheet: View {
 
     /// Once: the hold's end and a key or click can both ask.
     private func open(_ id: String) {
+        anyInput.stop()
         guard !opened else { return }
         opened = true
         dismiss()
@@ -915,22 +920,25 @@ struct MacNewSessionSheet: View {
 }
 
 /// While the finished page holds, any key or click in the app opens the session at once. An app-wide monitor, as the
-/// page has no control to take the key and a click may land anywhere in the window; the event is used up.
-private struct OpensOnAnyInput: ViewModifier {
-    let open: () -> Void
-    @State private var monitor: Any?
+/// page has no control to take the key and a click may land anywhere in the window; the event is used up. It removes
+/// itself at its first event and whenever the session opens, not only when the page disappears: a monitor left behind
+/// would eat every key and click in the app.
+final class OpenOnAnyInput {
+    private var monitor: Any?
 
-    func body(content: Content) -> some View {
-        content
-            .onAppear {
-                monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { _ in
-                    open()
-                    return nil
-                }
-            }
-            .onDisappear {
-                if let monitor { NSEvent.removeMonitor(monitor) }
-                monitor = nil
-            }
+    func start(_ open: @escaping () -> Void) {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            self?.stop()
+            open()
+            return nil
+        }
     }
+
+    func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+    }
+
+    var running: Bool { monitor != nil }
 }

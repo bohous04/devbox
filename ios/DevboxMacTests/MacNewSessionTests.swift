@@ -266,6 +266,25 @@ final class MacNewSessionTests: XCTestCase {
         XCTAssertEqual(h.opened, ["dev-shop-web"], "opened once")
     }
 
+    /// The monitor goes at its first event and when the session opens, so none is left to eat the app's keys and
+    /// clicks even if the page never gets its disappear.
+    func testTheInputMonitorNeverOutlivesItsOpen() throws {
+        let m = OpenOnAnyInput()
+        var opens = 0
+        m.start { opens += 1 }
+        XCTAssertTrue(m.running)
+        let key = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
+                                                 characters: "x", charactersIgnoringModifiers: "x", isARepeat: false, keyCode: 7))
+        NSApp.sendEvent(key)
+        XCTAssertEqual(opens, 1)
+        XCTAssertFalse(m.running, "gone after its first event")
+        NSApp.sendEvent(key)
+        XCTAssertEqual(opens, 1)
+        m.start { opens += 1 }
+        m.stop()
+        XCTAssertFalse(m.running)
+    }
+
     /// Any key opens it at once. The hold is set to a minute, so only the key can open it within the test. The key is
     /// sent again until the open arrives: one sent before the page has put up its monitor reaches nothing.
     func testAnyKeyOpensTheSessionAtOnce() throws {
