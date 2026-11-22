@@ -11,7 +11,7 @@ import {
   getTmuxSeenAt, putSessionAttention, type SessionRow,
 } from "../src/db";
 import { EventBus } from "../src/eventBus";
-import { AUTO_SETTLE_IDLE_MS, hubShelfDeps, resetDeps, untilReset, type ResetDeps } from "../src/sessionAttention";
+import { AUTO_SETTLE_IDLE_MS, AUTO_SETTLE_SEEN_IDLE_MS, autoSettleDue, hubShelfDeps, resetDeps, untilReset, type ResetDeps } from "../src/sessionAttention";
 import { Inbox } from "../src/sessionInbox";
 import { ThreadStore } from "../src/threadStore";
 import type { BackgroundWork, BridgeEvent, InboxItem } from "../../shared/thread";
@@ -263,13 +263,32 @@ test("a shelf that cannot be updated is logged; the hook is still handled", () =
 
 // --- auto-settle ---
 
-test("auto-settle: a session idle for 7 days is settled (reason idle), not before", () => {
+test("auto-settle: idle (seen, nothing to say) after 24 h; needs-you (unseen done, failed, CI) after 7 days", () => {
+  const s: SessionRow = { ...TMUX, created_at: 0, last_active_at: 0 };
+  const idle = { section: "idle", reason: null, since: 0 } as const;
+  expect(AUTO_SETTLE_SEEN_IDLE_MS).toBe(DAY);
+  expect(autoSettleDue(idle, s, null, DAY - 60_000)).toBe(false); // 23:59
+  expect(autoSettleDue(idle, s, null, DAY)).toBe(true);
+  for (const reason of ["completed", "failed", "ci-failed"] as const) {
+    const needsYou = { section: "needs_you", reason, since: 0 } as const;
+    expect(autoSettleDue(needsYou, s, null, DAY)).toBe(false);
+    expect(autoSettleDue(needsYou, s, null, AUTO_SETTLE_IDLE_MS - 1)).toBe(false);
+    expect(autoSettleDue(needsYou, s, null, AUTO_SETTLE_IDLE_MS)).toBe(true);
+  }
+});
+
+test("auto-settle: a quiet seen session after 24 h, an unseen completion after 7 days (reason idle), not before", () => {
   const t = setup();
-  t.feed(CHAT.id, [started("r1"), completed("r1")]);
-  t.tick(AUTO_SETTLE_IDLE_MS - 1);
+  t.feed(CHAT.id, [started("r1"), completed("r1")]); // unseen: needs-you
+  t.tick(AUTO_SETTLE_SEEN_IDLE_MS - 1);
   expect(t.inbox.autoSettle()).toEqual([]);
   t.tick(1);
-  expect(t.inbox.autoSettle().sort()).toEqual([CHAT.id, TMUX.id]);
+  expect(t.inbox.autoSettle()).toEqual([TMUX.id]); // idle since its creation
+  expect(getSessionAttention(t.db, TMUX.id)?.settled_reason).toBe("idle");
+  t.tick(AUTO_SETTLE_IDLE_MS - AUTO_SETTLE_SEEN_IDLE_MS - 1);
+  expect(t.inbox.autoSettle()).toEqual([]);
+  t.tick(1);
+  expect(t.inbox.autoSettle()).toEqual([CHAT.id]);
   expect(t.section(CHAT.id)).toBe("settled");
   expect(getSessionAttention(t.db, CHAT.id)?.settled_reason).toBe("idle");
   expect(t.inbox.autoSettle()).toEqual([]); // already settled
@@ -278,8 +297,10 @@ test("auto-settle: a session idle for 7 days is settled (reason idle), not befor
 test("auto-settle counts idle time from the last activity of the session, not from an old attention", () => {
   const t = setup();
   t.db.run("UPDATE sessions SET last_active_at=? WHERE id=?", [T0 + 3 * DAY, TMUX.id]);
-  t.tick(AUTO_SETTLE_IDLE_MS);
-  expect(t.inbox.autoSettle()).toEqual([CHAT.id]);
+  t.tick(3 * DAY + AUTO_SETTLE_SEEN_IDLE_MS - 1);
+  expect(t.inbox.autoSettle()).toEqual([CHAT.id]); // idle since T0
+  t.tick(1);
+  expect(t.inbox.autoSettle()).toEqual([TMUX.id]);
 });
 
 test("a pending request, an active run, holding work or a snooze block auto-settle", () => {

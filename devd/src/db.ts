@@ -240,7 +240,7 @@ export function openDb(path: string): Database {
   if (!pendingCols.includes("tag")) db.run(`ALTER TABLE pending_first_turns ADD COLUMN tag TEXT`);
   // effort: the level /new asked for, set right before the message (null = the agent's default).
   if (!pendingCols.includes("effort")) db.run(`ALTER TABLE pending_first_turns ADD COLUMN effort TEXT`);
-  // The inbox shelves of a session (sessionAttention.ts): settled (by hand or after 7 days idle) and snoozed. One row
+  // The inbox shelves of a session (sessionAttention.ts): settled (by hand or after a quiet day or week) and snoozed. One row
   // per session, deleted with it (deleteSession).
   db.run(`CREATE TABLE IF NOT EXISTS session_attention (
     session_id TEXT PRIMARY KEY, settled_at INTEGER, settled_reason TEXT,

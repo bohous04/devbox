@@ -11,11 +11,13 @@ import type { ThreadStore } from "./threadStore";
 
 /** The Settled and Snoozed shelves of the inbox. The state is one `session_attention` row per session; the Inbox
  *  (sessionInbox.ts) writes it and lays it over the attention a session has on its own.
- *  - Settled: by hand, or automatically after AUTO_SETTLE_IDLE_MS without activity. A new run, a request or a
+ *  - Settled: by hand, or automatically without activity: after AUTO_SETTLE_SEEN_IDLE_MS when there is nothing left
+ *    to see (idle), after AUTO_SETTLE_IDLE_MS otherwise (an unseen completion or failure). A new run, a request or a
  *    failure unsettles.
  *  - Snoozed: until a time, or until the session's active usage limit resets. Only a request or a failure wakes it
  *    early; its completions are silent (AgentEventHub.sweep). */
 export const AUTO_SETTLE_IDLE_MS = 7 * 86_400_000;
+export const AUTO_SETTLE_SEEN_IDLE_MS = 86_400_000;
 export const AUTO_SETTLE_TICK_MS = 10 * 60_000;
 
 /** What the AgentEventHub reports for the shelves: a new run (prompt), a request (question, approval), a failure. */
@@ -56,13 +58,15 @@ export function shelve(base: Attention, row: SessionAttentionRow | null, now: nu
   return base;
 }
 
-/** Auto-settle: nothing has happened for AUTO_SETTLE_IDLE_MS (the attention's own time and the session's last
- *  prompt and creation all count), and nothing blocks it: a pending request, an active run or holding work (both
- *  "working"), a snooze, or a settle already in place. */
+/** Auto-settle: nothing has happened for AUTO_SETTLE_SEEN_IDLE_MS when the session is idle (seen, nothing to say),
+ *  else for AUTO_SETTLE_IDLE_MS (the attention's own time and the session's last prompt and creation all count), and
+ *  nothing blocks it: a pending request, an active run or holding work (both "working"), a snooze, or a settle
+ *  already in place. */
 export function autoSettleDue(base: Attention, s: SessionRow, row: SessionAttentionRow | null, now: number): boolean {
   if (row?.settled_at != null || snoozeActive(row, now)) return false;
   if (base.section === "working" || base.reason === "request") return false;
-  return now - Math.max(base.since, s.last_active_at, s.created_at) >= AUTO_SETTLE_IDLE_MS;
+  const quietFor = base.section === "idle" ? AUTO_SETTLE_SEEN_IDLE_MS : AUTO_SETTLE_IDLE_MS;
+  return now - Math.max(base.since, s.last_active_at, s.created_at) >= quietFor;
 }
 
 /** When "snooze until the limit resets" would end, or why it is not possible. */
