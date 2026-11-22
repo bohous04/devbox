@@ -10,7 +10,7 @@ import { AgentLogo, logoForAgent } from "../components/agentLogos";
 import { AppPage, Chevron, Collapse, RowsSkeleton } from "../components/primitives";
 import { SettleProblem } from "../components/SettleProblem";
 import { agoLabel } from "../format";
-import { claimsUndo, focusOwnsUndo, settleKey, settleShortcut } from "../inboxSettle";
+import { claimsUndo, failureText, focusOwnsUndo, settleKey, settleShortcut } from "../inboxSettle";
 import { groupInbox, inboxHref, inboxList, mixedAgents, reasonLabel, rowMark, rowTitle, secondLine, shelfBlock, shortAgo, snoozeTimes, upsertInbox, type MarkTone } from "../inboxView";
 import { cn } from "@/lib/utils";
 import { profileFor } from "../newSession";
@@ -47,13 +47,13 @@ function RowMenu({ item, label, onItem, setError, className }: {
   const section = item.attention.section;
   const run = (p: Promise<InboxItem>) => {
     setError(null);
-    p.then(onItem, (e: Error) => setError(e.message || "action failed"));
+    p.then(onItem, (e: unknown) => setError(failureText(e)));
   };
   const blocked = shelfBlock(item);
   const open = (o: boolean) => {
     if (!o || section === "settled" || section === "snoozed" || blocked !== null) return;
     setReset(null);
-    api.snoozeReset(item.sessionId).then(setReset, (e: Error) => setReset({ reason: e.message || "could not ask devd" }));
+    api.snoozeReset(item.sessionId).then(setReset, (e: unknown) => setReset({ reason: failureText(e) }));
   };
   const t = snoozeTimes(new Date());
   return (
@@ -268,11 +268,12 @@ export function Inbox() {
   const listRef = useRef<HTMLDivElement | null>(null);
 
   const rowLink = (id: string) => listRef.current?.querySelector<HTMLElement>(`[data-inbox-row="${CSS.escape(id)}"] a`);
-  /** Once devd answered, the keyboard goes to row `id`, but only if it is still where the gesture left it (or lost
-   *  with the row that left): someone who moved on during a slow request keeps their focus. */
-  const focusAfter = (id: string | undefined, before: Element | null) => requestAnimationFrame(() => {
-    const now = document.activeElement;
-    if (id && (now === before || now === null || now === document.body)) rowLink(id)?.focus();
+  /** Once devd answered, the keyboard goes to row `id`, but only if it is still where the gesture left it, in the row
+   *  the gesture was on (a closed menu hands focus back to its trigger there), or lost with that row: someone who
+   *  moved on during a slow request keeps their focus. */
+  const focusAfter = (id: string | undefined, before: Element | null, row?: Element | null) => requestAnimationFrame(() => {
+    const active = document.activeElement;
+    if (id && (active === before || active === null || active === document.body || (!!row && row.contains(active)))) rowLink(id)?.focus();
   });
   // A settled row leaves: the keyboard moves on to the row that takes its place (or the one above the last).
   const settle = (item: InboxItem) => {
@@ -282,7 +283,7 @@ export function Inbox() {
     void settler.settle(item).then((next) => {
       if (!next) return;
       onItem(next);
-      focusAfter(nextId, before);
+      focusAfter(nextId, before, li);
     });
   };
   // An undone row comes back with the keyboard on it.
@@ -303,7 +304,7 @@ export function Inbox() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const focused = document.activeElement as HTMLElement | null;
-      if (settleShortcut(e, MAC) || settleKey(e, focusOwnsUndo(focused as HTMLInputElement | null))) {
+      if (settleShortcut(e, MAC) || (!e.defaultPrevented && settleKey(e, focusOwnsUndo(focused as HTMLInputElement | null)))) {
         const id = (document.activeElement?.closest("[data-inbox-row]") as HTMLElement | null)?.dataset.inboxRow;
         const item = id ? itemsRef.current?.find((i) => i.sessionId === id) : undefined;
         if (!item || item.attention.section === "settled" || item.attention.section === "snoozed") return;
