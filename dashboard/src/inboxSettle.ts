@@ -1,7 +1,7 @@
 import type { InboxItem } from "../../shared/thread";
 import { asks, rowTitle, shelfBlock } from "./inboxView";
 
-/** Settling from the inbox in one gesture (the row's ✓, ⌘⇧S), the "Settled · ⌘Z to undo" notice that follows it, and
+/** Settling from the inbox in one gesture (the row's ✓, E, ⌘⇧S), the "Settled · ⌘Z to undo" notice that follows it, and
  *  the tmux seen marker: the web's MacSettler (ios/DevboxMac/MacSettle.swift), same rules. Failures are kept in
  *  `problem` for the page to show until dismissed, never dropped. */
 
@@ -11,8 +11,13 @@ type Keys = { key: string; metaKey: boolean; ctrlKey: boolean; shiftKey: boolean
 const commandOnly = (e: Keys, mac: boolean, shift: boolean) =>
   (mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey) && e.shiftKey === shift && !e.altKey;
 
-/** ⌘⇧S (Ctrl+Shift+S off a Mac): settle the focused row, as in T3 Code. */
+/** ⌘⇧S (Ctrl+Shift+S off a Mac): settle the focused row, as in T3 Code. Some browsers keep that chord for themselves
+ *  (Firefox's screenshot, Edge's web capture), so `settleKey` is the one that always reaches the page. */
 export const settleShortcut = (e: Keys, mac: boolean): boolean => commandOnly(e, mac, true) && e.key.toLowerCase() === "s";
+
+/** E on a focused row settles it, as Gmail's archive: no browser claims a bare letter. Not from a text field. */
+export const settleKey = (e: Keys & { repeat?: boolean }, focusOwnsKeys: boolean): boolean =>
+  !focusOwnsKeys && !e.repeat && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "e";
 
 /** ⌘Z undoes the last settle while its notice shows, unless the focus has an undo of its own (a text field). */
 export const claimsUndo = (e: Keys, mac: boolean, s: { noticeShown: boolean; focusOwnsUndo: boolean }): boolean =>
@@ -20,17 +25,19 @@ export const claimsUndo = (e: Keys, mac: boolean, s: { noticeShown: boolean; foc
 
 const NOT_TEXT = new Set(["button", "checkbox", "radio", "range", "color", "file", "submit", "reset", "image"]);
 
-/** Whether the focused element undoes typing itself on ⌘Z. */
+/** Whether the focused element takes typing (and undoes it itself on ⌘Z). */
 export function focusOwnsUndo(el: { tagName: string; isContentEditable: boolean; type?: string } | null): boolean {
   if (!el) return false;
   if (el.isContentEditable || el.tagName === "TEXTAREA") return true;
   return el.tagName === "INPUT" && !NOT_TEXT.has((el.type ?? "text").toLowerCase());
 }
 
-/** A tmux session's finish or failure clears once the owner has looked at it (POST /seen). A chat session marks its
- *  thread seen itself (SessionPage), and waiting, working or idle sessions have nothing to clear. */
+/** A tmux session's finish or failure clears once the owner has looked at it (POST /seen): devd clears `done` and
+ *  `failed` only (attention.ts tmuxAttention). A chat session marks its thread seen itself (SessionPage); an open
+ *  request, a PR's CI and everything else stay whatever seen says. */
 export const wantsSeen = (i: InboxItem | undefined): i is InboxItem =>
-  i !== undefined && i.runtime === "tmux" && i.attention.section === "needs_you" && i.attention.reason !== "request";
+  i !== undefined && i.runtime === "tmux" && i.attention.section === "needs_you"
+  && (i.attention.reason === "completed" || i.attention.reason === "failed");
 
 /** Whether marking a row seen moves it in the list: a failure pinned on top drops into the newest-first part, while a
  *  finish keeps its time there (devd keeps `since`) and stays put. Such a row is marked when it is left instead. */
@@ -49,21 +56,37 @@ interface SettleApi {
   seen: (id: string) => Promise<void>;
 }
 
-const message = (e: unknown) => (e instanceof Error && e.message) || "request failed";
+interface Timers {
+  set: (fn: () => void, ms: number) => unknown;
+  clear: (handle: unknown) => void;
+}
+
+/** Why a request failed, with its HTTP status when the error carries one (api.ts ApiError) and its text does not
+ *  already say it. */
+export function failureText(e: unknown): string {
+  if (!(e instanceof Error)) return String(e);
+  const text = e.message || e.name;
+  const status = (e as { status?: unknown }).status;
+  return typeof status === "number" && !text.includes(String(status)) ? `${text} (HTTP ${status})` : text;
+}
 
 export class Settler {
   state: SettleState = { notice: null, problem: null };
   private listeners = new Set<() => void>();
   private nextId = 1;
+  /** The notice's timer (MacSettler's lifetime): it runs whatever page is open, so a notice never outlives it and
+   *  comes back stale. Held (no timer) while the pointer or the keyboard is on the notice. */
+  private timer: unknown = null;
+  private held = false;
   /** Seen posts per finish ("id@since"): a failed one is tried once more, a done one never again. */
   private seenAttempts = new Map<string, number>();
-  /** The finish whose failure `problem` shows, and the finishes whose failure the owner dismissed. */
+  /** The failure `problem` shows when it is about seen, and the ones the owner dismissed (not raised again). */
   private problemSeenKey: string | null = null;
   private dismissedSeen = new Set<string>();
   /** Finishes with a post on its way: the window's focus and visibility events arrive together. */
   private seenInFlight = new Set<string>();
 
-  constructor(private api: SettleApi) {}
+  constructor(private api: SettleApi, private lifetime = 5_000, private timers: Timers = { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) }) {}
 
   subscribe = (fn: () => void): (() => void) => {
     this.listeners.add(fn);
@@ -72,8 +95,27 @@ export class Settler {
 
   private set(next: Partial<SettleState>, seenKey: string | null = null) {
     if ("problem" in next) this.problemSeenKey = seenKey;
+    // A new notice (or none) starts unheld: the pointer that rested on the last one is not on this one.
+    if ("notice" in next) { this.held = false; this.arm(next.notice?.id ?? null); }
     this.state = { ...this.state, ...next };
     for (const fn of this.listeners) fn();
+  }
+
+  private arm(id: number | null) {
+    if (this.timer !== null) this.timers.clear(this.timer);
+    this.timer = null;
+    if (id === null || this.held) return;
+    this.timer = this.timers.set(() => {
+      this.timer = null;
+      if (this.state.notice?.id === id) this.set({ notice: null });
+    }, this.lifetime);
+  }
+
+  /** The pointer or the keyboard is on the notice (true) or left it (false: a full lifetime from now). */
+  hold(on: boolean) {
+    if (this.held === on) return;
+    this.held = on;
+    this.arm(this.state.notice?.id ?? null);
   }
 
   /** Settles the row and shows the notice; the session's new item, or null when it was refused (the reason shown). */
@@ -83,7 +125,7 @@ export class Settler {
     if (block) { this.set({ problem: `Couldn't settle “${title}”: ${block}` }); return null; }
     let next: InboxItem;
     try { next = await this.api.settle(item.sessionId); }
-    catch (e) { this.set({ problem: `Couldn't settle “${title}”: ${message(e)}` }); return null; }
+    catch (e) { this.set({ problem: `Couldn't settle “${title}”: ${failureText(e)}` }); return null; }
     this.set({ notice: { sessionId: item.sessionId, title, id: this.nextId++ } });
     return next;
   }
@@ -94,17 +136,18 @@ export class Settler {
     if (!undone) return null;
     this.set({ notice: null });
     try { return await this.api.unsettle(undone.sessionId); }
-    catch (e) { this.set({ problem: `Couldn't undo the settle of “${undone.title}”: ${message(e)}` }); return null; }
+    catch (e) { this.set({ problem: `Couldn't undo the settle of “${undone.title}”: ${failureText(e)}` }); return null; }
   }
 
-  /** The notice's time is up; a later settle's notice stays. */
-  expire(id: number) {
-    if (this.state.notice?.id === id) this.set({ notice: null });
+  /** A seen failure outside `seen` (the inbox could not be read), under `key` so a dismissal holds for it too. */
+  report(problem: string, key: string) {
+    if (!this.dismissedSeen.has(key)) this.set({ problem }, key);
   }
 
-  /** A failure around the settle or seen flow that happened outside these methods (the inbox could not be read). */
-  report(problem: string) {
-    this.set({ problem });
+  /** What `key` was about worked now: its failure goes, and a later one is shown again. */
+  cleared(key: string) {
+    this.dismissedSeen.delete(key);
+    if (this.problemSeenKey === key) this.set({ problem: null });
   }
 
   dismiss() {
@@ -124,13 +167,69 @@ export class Settler {
     try {
       await this.api.seen(item.sessionId);
     } catch (e) {
-      if (!this.dismissedSeen.has(key)) this.set({ problem: `Couldn't mark “${rowTitle(item)}” seen: ${message(e)}` }, key);
+      this.report(`Couldn't mark “${rowTitle(item)}” seen: ${failureText(e)}`, key);
       return "failed";
     } finally {
       this.seenInFlight.delete(key);
     }
     this.seenAttempts.set(key, 2);
-    if (this.problemSeenKey === key) this.set({ problem: null });
+    this.cleared(key);
     return "posted";
+  }
+}
+
+/** How soon a focus or visibility change looks at the inbox again: the two arrive together, and a window switched
+ *  back and forth should not refetch the whole inbox each time. Opening and leaving always look. */
+export const FOCUS_LOOK_GAP_MS = 5_000;
+
+interface WatchDeps {
+  items: () => Promise<InboxItem[]>;
+  settler: Pick<Settler, "seen" | "report" | "cleared">;
+  visible: () => boolean;
+  now: () => number;
+  /** Runs `fn` after the current task; returns a cancel. */
+  defer: (fn: () => void) => () => void;
+}
+
+/** When an open tmux session is looked at (useTmuxSeen): opening it, coming back to the window, leaving it; each only
+ *  while the page is visible. A failure is marked on leaving only (seenMoves). Leaving waits a task, so React's
+ *  StrictMode unmount-and-remount of the first mount is not a leave and does not mark a failure seen. */
+export class SeenWatch {
+  private pendingLeave = new Map<string, () => void>();
+  private lastLook = new Map<string, number>();
+  private focusLook = new Map<string, Promise<void>>();
+
+  constructor(private d: WatchDeps) {}
+
+  open(id: string): Promise<void> {
+    const remount = this.pendingLeave.get(id);
+    if (remount) { remount(); this.pendingLeave.delete(id); return Promise.resolve(); }
+    return this.look(id, true);
+  }
+
+  focus(id: string): Promise<void> {
+    const running = this.focusLook.get(id);
+    if (running) return running;
+    if (this.d.now() - (this.lastLook.get(id) ?? -Infinity) < FOCUS_LOOK_GAP_MS) return Promise.resolve();
+    const p = this.look(id, true).finally(() => this.focusLook.delete(id));
+    this.focusLook.set(id, p);
+    return p;
+  }
+
+  leave(id: string) {
+    this.pendingLeave.set(id, this.d.defer(() => { this.pendingLeave.delete(id); void this.look(id, false); }));
+  }
+
+  private async look(id: string, open: boolean): Promise<void> {
+    if (!this.d.visible()) return;
+    this.lastLook.set(id, this.d.now());
+    const key = `${id}@inbox`;
+    let items: InboxItem[];
+    try { items = await this.d.items(); }
+    catch (e) { this.d.settler.report(`Couldn't mark this session seen: could not read the inbox (${failureText(e)})`, key); return; }
+    this.d.settler.cleared(key);
+    const item = items.find((i) => i.sessionId === id);
+    if (!wantsSeen(item) || (open && seenMoves(item))) return;
+    await this.d.settler.seen(item);
   }
 }

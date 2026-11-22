@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { AlarmClock, Check, CircleAlert, CircleCheck, Ellipsis, MessageCircleQuestion, Undo2 } from "lucide-react";
 import type { InboxItem } from "../../../shared/thread";
@@ -10,7 +10,7 @@ import { AgentLogo, logoForAgent } from "../components/agentLogos";
 import { AppPage, Chevron, Collapse, RowsSkeleton } from "../components/primitives";
 import { SettleProblem } from "../components/SettleProblem";
 import { agoLabel } from "../format";
-import { claimsUndo, focusOwnsUndo, settleShortcut } from "../inboxSettle";
+import { claimsUndo, focusOwnsUndo, settleKey, settleShortcut } from "../inboxSettle";
 import { groupInbox, inboxHref, inboxList, mixedAgents, reasonLabel, rowMark, rowTitle, secondLine, shelfBlock, shortAgo, snoozeTimes, upsertInbox, type MarkTone } from "../inboxView";
 import { cn } from "@/lib/utils";
 import { profileFor } from "../newSession";
@@ -23,22 +23,26 @@ const shortUntil = (ms: number) => new Date(ms).toLocaleTimeString(undefined, { 
 
 const MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 const MOD = MAC ? "⌘" : "Ctrl+";
-const SETTLE_KEYS = MAC ? "⌘⇧S" : "Ctrl+Shift+S";
-/** How long the undo notice stays; it stays longer while the pointer or the keyboard is on it. */
-const NOTICE_MS = 5_000;
+const SETTLE_CHORD = MAC ? "⌘⇧S" : "Ctrl+Shift+S";
 
 /** Whether rows show their agent's mark (mixedAgents over the whole inbox). True by default on purpose: a row outside
  *  the provider shows its agent rather than hide which one runs. */
 const ShowAgent = createContext(true);
-/** Settles a row from the list: its ✓, ⌘⇧S and the menu all go through the page, which moves the focus on. */
-const SettleRow = createContext<(item: InboxItem) => void>(() => {});
+/** Settles a row from the list: its ✓, E, ⌘⇧S and the menu all go through the page, which moves the focus on. */
+const SettleRow = createContext<((item: InboxItem) => void) | null>(null);
+
+function useSettleRow(): (item: InboxItem) => void {
+  const settle = useContext(SettleRow);
+  if (!settle) throw new Error("an inbox row is rendered outside the Inbox page's SettleRow provider");
+  return settle;
+}
 
 /** Settle, unsettle and snooze. "Until the limit resets" asks devd when the menu opens; it stays disabled with
  *  devd's reason when there is no active limit (or no meter for this agent). */
 function RowMenu({ item, label, onItem, setError, className }: {
   item: InboxItem; label: string; onItem: (i: InboxItem) => void; setError: (e: string | null) => void; className: string;
 }) {
-  const settle = useContext(SettleRow);
+  const settle = useSettleRow();
   const [reset, setReset] = useState<{ resetsAt: number } | { reason: string } | null>(null);
   const section = item.attention.section;
   const run = (p: Promise<InboxItem>) => {
@@ -64,7 +68,7 @@ function RowMenu({ item, label, onItem, setError, className }: {
           <>
             {blocked && <p className="px-2 py-1.5 text-xs text-muted-foreground">{blocked}</p>}
             <DropdownMenuItem disabled={blocked !== null} onSelect={() => settle(item)}>
-              Settle<span className="ml-auto text-xs tracking-wide text-muted-foreground">{SETTLE_KEYS}</span>
+              Settle<span className="ml-auto text-xs tracking-wide text-muted-foreground">E</span>
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuLabel className="text-xs text-muted-foreground">Snooze</DropdownMenuLabel>
@@ -143,7 +147,8 @@ const HIDE_ON_HOVER = "[@media(hover:hover)]:group-hover:invisible [@media(hover
  *  on the marked ones first. `settle`: the row offers the ✓ (not on the snoozed and settled shelves). */
 function Row({ item, now, onItem, quiet, settle }: { item: InboxItem; now: number; onItem: (i: InboxItem) => void; quiet: boolean; settle: boolean }) {
   const showAgent = useContext(ShowAgent);
-  const onSettle = useContext(SettleRow);
+  const onSettle = useSettleRow();
+  const blockId = useId();
   const title = rowTitle(item);
   const block = shelfBlock(item);
   const label = spoken(item, now, title, showAgent);
@@ -151,7 +156,8 @@ function Row({ item, now, onItem, quiet, settle }: { item: InboxItem; now: numbe
   return (
     <li data-inbox-row={item.sessionId} className="group relative flex min-w-0 flex-wrap rounded-lg transition-colors [@media(hover:hover)]:hover:bg-accent/60 has-[:focus-visible]:bg-accent/60 has-[[data-state=open]]:bg-accent/60">
       <Link
-        to={inboxHref(item)} aria-label={label} title={label}
+        to={inboxHref(item)} aria-label={label} title={settle && block === null ? `${label}\nE to settle` : label}
+        aria-keyshortcuts={settle && block === null ? "E" : undefined}
         className="flex min-w-0 flex-1 flex-col gap-0.5 rounded-lg py-2 pl-3 pr-3 outline-none focus-visible:ring-2 focus-visible:ring-ring/60 [@media(hover:none)]:pr-1"
       >
         <span className="flex min-w-0 items-center gap-2">
@@ -167,13 +173,15 @@ function Row({ item, now, onItem, quiet, settle }: { item: InboxItem; now: numbe
       </Link>
       {settle && (
         <button
-          type="button" aria-label={`Settle ${title}`} aria-disabled={block !== null || undefined}
-          title={block ?? `Settle (${SETTLE_KEYS})`}
+          type="button" aria-label={`Settle ${title} (E)`} aria-disabled={block !== null || undefined}
+          aria-describedby={block !== null ? blockId : undefined} aria-keyshortcuts={block === null ? "E" : undefined}
+          title={block ?? `Settle (E or ${SETTLE_CHORD})`}
           onClick={() => { if (block === null) onSettle(item); }}
           className={cn(ACTION, ON_HOVER, "absolute right-2.5 top-[7px] hidden h-[22px] w-6 [@media(hover:hover)]:grid",
             block !== null && "cursor-not-allowed text-muted-foreground/45 hover:bg-transparent hover:text-muted-foreground/45")}
         >
           <Check className="size-3.5" strokeWidth={2.5} aria-hidden="true" />
+          {block !== null && <span id={blockId} className="sr-only">{block}</span>}
         </button>
       )}
       <RowMenu item={item} label={title} onItem={onItem} setError={setError}
@@ -217,17 +225,12 @@ function Shelf({ label, items, now, onItem, settle }: { label: string; items: In
  *  The live region is always mounted so a screen reader hears each settle once. */
 function SettleNotice({ onUndo }: { onUndo: () => void }) {
   const { notice } = useSettleState();
-  const [held, setHeld] = useState(false);
-  useEffect(() => {
-    if (!notice || held) return;
-    const t = setTimeout(() => settler.expire(notice.id), NOTICE_MS);
-    return () => clearTimeout(t);
-  }, [notice, held]);
-  useEffect(() => { if (!notice) setHeld(false); }, [notice]);
+  // Leaving the page while holding the notice lets it go, or it would wait for a pointer that never leaves.
+  useEffect(() => () => settler.hold(false), []);
   return (
     <div role="status" aria-live="polite" aria-atomic="true"
-      onPointerEnter={() => setHeld(true)} onPointerLeave={() => setHeld(false)}
-      onFocus={() => setHeld(true)} onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setHeld(false); }}>
+      onPointerEnter={() => settler.hold(true)} onPointerLeave={() => settler.hold(false)}
+      onFocus={() => settler.hold(true)} onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) settler.hold(false); }}>
       {notice && (
         <div className="flex min-h-11 items-center gap-2 rounded-lg border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-lg">
           <Check className="size-3.5 flex-none text-emerald-600 dark:text-emerald-400" strokeWidth={2.5} aria-hidden="true" />
@@ -246,7 +249,7 @@ function SettleNotice({ onUndo }: { onUndo: () => void }) {
 
 /** The inbox as one list: what asks for the owner pinned on top, the longest wait first, then everything else that is
  *  not working, snoozed or settled, newest first (inboxList), and those three as collapsed shelves under it. A row
- *  settles in one gesture (its ✓, ⌘⇧S), undone with ⌘Z while the notice shows. Live over the SSE stream; polled
+ *  settles in one gesture (its ✓, E, ⌘⇧S), undone with ⌘Z while the notice shows. Live over the SSE stream; polled
  *  every 5 s while the stream is down. */
 export function Inbox() {
   const [items, setItems] = useState<InboxItem[] | null>(null);
@@ -264,18 +267,33 @@ export function Inbox() {
   const onItem = (item: InboxItem) => setItems((cur) => (cur === null ? cur : upsertInbox(cur, item)));
   const listRef = useRef<HTMLDivElement | null>(null);
 
+  const rowLink = (id: string) => listRef.current?.querySelector<HTMLElement>(`[data-inbox-row="${CSS.escape(id)}"] a`);
+  /** Once devd answered, the keyboard goes to row `id`, but only if it is still where the gesture left it (or lost
+   *  with the row that left): someone who moved on during a slow request keeps their focus. */
+  const focusAfter = (id: string | undefined, before: Element | null) => requestAnimationFrame(() => {
+    const now = document.activeElement;
+    if (id && (now === before || now === null || now === document.body)) rowLink(id)?.focus();
+  });
   // A settled row leaves: the keyboard moves on to the row that takes its place (or the one above the last).
   const settle = (item: InboxItem) => {
-    const li = listRef.current?.querySelector<HTMLElement>(`[data-inbox-row="${CSS.escape(item.sessionId)}"]`);
-    const hadFocus = !!li && li.contains(document.activeElement);
+    const before = document.activeElement;
+    const li = rowLink(item.sessionId)?.closest("li");
     const nextId = ((li?.nextElementSibling ?? li?.previousElementSibling) as HTMLElement | null)?.dataset.inboxRow;
     void settler.settle(item).then((next) => {
       if (!next) return;
       onItem(next);
-      if (hadFocus && nextId) requestAnimationFrame(() => listRef.current?.querySelector<HTMLElement>(`[data-inbox-row="${CSS.escape(nextId)}"] a`)?.focus());
+      focusAfter(nextId, before);
     });
   };
-  const undo = () => { void settler.undo().then((back) => { if (back) onItem(back); }); };
+  // An undone row comes back with the keyboard on it.
+  const undo = () => {
+    const before = document.activeElement;
+    void settler.undo().then((back) => {
+      if (!back) return;
+      onItem(back);
+      focusAfter(back.sessionId, before);
+    });
+  };
   const settleRef = useRef(settle);
   settleRef.current = settle;
   const itemsRef = useRef(items);
@@ -284,7 +302,8 @@ export function Inbox() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (settleShortcut(e, MAC)) {
+      const focused = document.activeElement as HTMLElement | null;
+      if (settleShortcut(e, MAC) || settleKey(e, focusOwnsUndo(focused as HTMLInputElement | null))) {
         const id = (document.activeElement?.closest("[data-inbox-row]") as HTMLElement | null)?.dataset.inboxRow;
         const item = id ? itemsRef.current?.find((i) => i.sessionId === id) : undefined;
         if (!item || item.attention.section === "settled" || item.attention.section === "snoozed") return;

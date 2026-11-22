@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Attention, InboxItem } from "../../shared/thread";
-import { claimsUndo, focusOwnsUndo, seenMoves, settleShortcut, Settler, wantsSeen } from "./inboxSettle";
+import { claimsUndo, failureText, FOCUS_LOOK_GAP_MS, focusOwnsUndo, SeenWatch, seenMoves, settleKey, settleShortcut, Settler, wantsSeen } from "./inboxSettle";
 
 const item = (sessionId: string, attention: Attention, runtime: InboxItem["runtime"] = "tmux"): InboxItem => ({
   sessionId, runtime, title: sessionId, project: "p", repo: "r", agent: "claude", attention, lastText: null,
@@ -37,6 +37,15 @@ test("settleShortcut: ⌘⇧S on a Mac, Ctrl+Shift+S elsewhere; nothing else", (
   expect(settleShortcut(key("s", { meta: true }), true)).toBe(false);
 });
 
+test("settleKey: a bare E on a focused row, not from a text field, not held down", () => {
+  expect(settleKey(key("e"), false)).toBe(true);
+  expect(settleKey(key("E"), false)).toBe(true);
+  expect(settleKey(key("e"), true)).toBe(false);
+  expect(settleKey({ ...key("e"), repeat: true }, false)).toBe(false);
+  expect(settleKey(key("e", { meta: true }), false)).toBe(false);
+  expect(settleKey(key("E", { shift: true }), false)).toBe(false);
+});
+
 test("claimsUndo: ⌘Z only while the notice shows and no text field has the keyboard", () => {
   expect(claimsUndo(key("z", { meta: true }), true, { noticeShown: true, focusOwnsUndo: false })).toBe(true);
   expect(claimsUndo(key("z", { ctrl: true }), false, { noticeShown: true, focusOwnsUndo: false })).toBe(true);
@@ -61,6 +70,10 @@ test("wantsSeen: only a tmux session's unseen finish or failure; seenMoves: a pi
   expect(wantsSeen(done())).toBe(true);
   expect(wantsSeen(item("f", { section: "needs_you", reason: "failed", since: 1 }))).toBe(true);
   expect(wantsSeen(item("q", { section: "needs_you", reason: "request", since: 1 }))).toBe(false);
+  // devd clears done and failed only: CI, a limit or a lost agent stay whatever seen says.
+  for (const reason of ["ci-failed", "rate-limited", "disconnected", "bridge-behind"] as const) {
+    expect(wantsSeen(item("x", { section: "needs_you", reason, since: 1 }))).toBe(false);
+  }
   expect(wantsSeen(item("c", { section: "needs_you", reason: "completed", since: 1 }, "chat"))).toBe(false);
   expect(wantsSeen(item("i", { section: "idle", reason: null, since: 1 }))).toBe(false);
   expect(wantsSeen(undefined)).toBe(false);
@@ -106,15 +119,55 @@ test("settle and undo failures are shown, never dropped", async () => {
   expect(s.state.problem).toBe("Couldn't undo the settle of “b”: HTTP 503");
 });
 
-test("expire drops only the notice it was armed for", async () => {
-  const s = new Settler(fakeApi().api);
+/** Timers the test runs by hand. */
+function fakeTimers() {
+  let n = 0;
+  const due = new Map<number, () => void>();
+  return {
+    timers: { set: (fn: () => void) => { due.set(++n, fn); return n; }, clear: (h: unknown) => { due.delete(h as number); } },
+    pending: () => due.size,
+    fire: () => { const all = [...due.values()]; due.clear(); for (const fn of all) fn(); },
+  };
+}
+
+test("the notice's timer lives in the settler: it ends the notice whatever page is open; a later settle's stays", async () => {
+  const t = fakeTimers();
+  const s = new Settler(fakeApi().api, 5_000, t.timers);
   await s.settle(done("a"));
-  const first = s.state.notice!.id;
   await s.settle(done("b"));
-  s.expire(first);
-  expect(s.state.notice?.sessionId).toBe("b");
-  s.expire(s.state.notice!.id);
+  expect(t.pending()).toBe(1);
+  t.fire();
   expect(s.state.notice).toBeNull();
+  expect(await s.undo()).toBeNull();
+});
+
+test("hold keeps the notice while the pointer or the keyboard is on it; letting go starts a full lifetime", async () => {
+  const t = fakeTimers();
+  const s = new Settler(fakeApi().api, 5_000, t.timers);
+  await s.settle(done("a"));
+  s.hold(true);
+  expect(t.pending()).toBe(0);
+  s.hold(false);
+  expect(t.pending()).toBe(1);
+  t.fire();
+  expect(s.state.notice).toBeNull();
+});
+
+test("an undo ends the notice's timer", async () => {
+  const t = fakeTimers();
+  const s = new Settler(fakeApi().api, 5_000, t.timers);
+  await s.settle(done("a"));
+  await s.undo();
+  expect(t.pending()).toBe(0);
+});
+
+test("failureText keeps the real error and its HTTP status", () => {
+  const withStatus = Object.assign(new Error("session-ending"), { status: 409 });
+  expect(failureText(withStatus)).toBe("session-ending (HTTP 409)");
+  expect(failureText(Object.assign(new Error("HTTP 503"), { status: 503 }))).toBe("HTTP 503");
+  expect(failureText(new TypeError("Failed to fetch"))).toBe("Failed to fetch");
+  expect(failureText(Object.assign(new Error(""), { name: "AbortError" }))).toBe("AbortError");
+  expect(failureText("offline")).toBe("offline");
 });
 
 test("subscribers hear every change", async () => {
@@ -170,4 +223,90 @@ test("seen: two looks at once (focus and visibility together) post once", async 
   const both = await Promise.all([s.seen(done("t")), s.seen(done("t"))]);
   expect(both).toEqual(["posted", "skipped"]);
   expect(f.calls).toEqual(["seen t"]);
+});
+
+test("seen failures are suppressed once dismissed, by key, until that key works again", async () => {
+  const s = new Settler(fakeApi().api);
+  s.report("Couldn't read the inbox", "t@inbox");
+  s.dismiss();
+  s.report("Couldn't read the inbox", "t@inbox");
+  expect(s.state.problem).toBeNull();
+  s.cleared("t@inbox");
+  s.report("Couldn't read the inbox again", "t@inbox");
+  expect(s.state.problem).toBe("Couldn't read the inbox again");
+  s.cleared("t@inbox");
+  expect(s.state.problem).toBeNull();
+});
+
+/** A SeenWatch over a fake inbox, a fake clock, visibility and deferred tasks run by hand. */
+function watch(items: InboxItem[]) {
+  const f = fakeApi();
+  const settler = new Settler(f.api);
+  const env = { visible: true, now: 0, reads: 0, failRead: null as Error | null, tasks: [] as (() => void)[] };
+  const w = new SeenWatch({
+    items: () => { env.reads++; return env.failRead ? Promise.reject(env.failRead) : Promise.resolve(items); },
+    settler, visible: () => env.visible, now: () => env.now,
+    defer: (fn) => { env.tasks.push(fn); return () => { env.tasks = env.tasks.filter((t) => t !== fn); }; },
+  });
+  const runTasks = async () => { const all = env.tasks; env.tasks = []; for (const t of all) t(); await new Promise((r) => setTimeout(r, 0)); };
+  return { w, f, settler, env, runTasks };
+}
+const failed = (id = "t", since = 10) => item(id, { section: "needs_you", reason: "failed", since });
+
+test("SeenWatch: opening marks a finish seen; a failure only on leaving", async () => {
+  const { w, f, runTasks } = watch([done("d"), failed("x")]);
+  await w.open("d");
+  await w.open("x");
+  expect(f.calls).toEqual(["seen d"]);
+  w.leave("x");
+  expect(f.calls).toEqual(["seen d"]);
+  await runTasks();
+  expect(f.calls).toEqual(["seen d", "seen x"]);
+});
+
+test("SeenWatch: StrictMode's unmount and remount is not a leave", async () => {
+  const { w, f, env, runTasks } = watch([failed("x")]);
+  await w.open("x");
+  w.leave("x");
+  await w.open("x");
+  await runTasks();
+  expect(f.calls).toEqual([]);
+  expect(env.reads).toBe(1);
+  w.leave("x");
+  await runTasks();
+  expect(f.calls).toEqual(["seen x"]);
+});
+
+test("SeenWatch: nothing while the page is hidden", async () => {
+  const { w, f, env, runTasks } = watch([done("d")]);
+  env.visible = false;
+  await w.open("d");
+  await w.focus("d");
+  w.leave("d");
+  await runTasks();
+  expect(env.reads).toBe(0);
+  expect(f.calls).toEqual([]);
+});
+
+test("SeenWatch: focus looks again after a gap, and focus with visibility together read once", async () => {
+  const { w, f, env } = watch([done("d", 10)]);
+  await w.open("d");
+  expect(env.reads).toBe(1);
+  await w.focus("d");
+  expect(env.reads).toBe(1);
+  env.now += FOCUS_LOOK_GAP_MS;
+  await Promise.all([w.focus("d"), w.focus("d")]);
+  expect(env.reads).toBe(2);
+  expect(f.calls).toEqual(["seen d"]);
+});
+
+test("SeenWatch: a failed inbox read is shown, under a key a dismissal holds", async () => {
+  const { w, env, settler } = watch([done("d")]);
+  env.failRead = Object.assign(new Error("HTTP 502"), { status: 502 });
+  await w.open("d");
+  expect(settler.state.problem).toBe("Couldn't mark this session seen: could not read the inbox (HTTP 502)");
+  settler.dismiss();
+  env.now += FOCUS_LOOK_GAP_MS;
+  await w.focus("d");
+  expect(settler.state.problem).toBeNull();
 });

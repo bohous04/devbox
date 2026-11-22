@@ -62,12 +62,12 @@ const REASON: Record<NonNullable<Attention["reason"]>, string> = {
 export const reasonLabel = (r: Attention["reason"]): string => (r === null ? "" : REASON[r]);
 
 /** "Needs you" holds two different asks: something to act on (an open request, a failure, a lost agent) and a run
- *  that merely finished and has not been seen. The page shows them as separate groups; `completed` is the only
- *  reason that means "finished". */
+ *  that merely finished and has not been seen; `completed` is the only reason that means "finished". inboxList pins
+ *  the first on top and mixes the second in with the idle rows. */
 export function splitNeedsYou(needsYou: InboxItem[]): { action: InboxItem[]; finished: InboxItem[] } {
   return {
     action: needsYou.filter((i) => i.attention.reason !== "completed"),
-    // devd sends needs-you oldest first (the longest wait on top); a list of finished runs reads newest first.
+    // devd sends needs-you oldest first (the longest wait on top); finished runs read newest first.
     // Re-sorted here only, so devd's order for other clients stays as it is.
     finished: needsYou.filter((i) => i.attention.reason === "completed").sort((a, b) => b.attention.since - a.attention.since),
   };
