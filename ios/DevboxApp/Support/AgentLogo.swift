@@ -41,6 +41,15 @@ struct AgentLogo: View {
             }
         }
 
+        /// The mark's own scale on top of the equal area (agentLogos.tsx `optical`): Mistral's open blocks still read
+        /// lighter than the rest at the same area.
+        var optical: Double {
+            switch self {
+            case .mistral: 1.09
+            case .claude, .openai, .grok, .antigravity, .generic: 1
+            }
+        }
+
         /// Per mark: draw it in its brand colour (`hex`) instead of the text's. Off for every mark.
         var showsBrand: Bool {
             switch self {
@@ -69,9 +78,9 @@ struct AgentLogo: View {
     var body: some View {
         // The slot's area in the mark's proportions (agentLogos.tsx markSize). The slot stays square, so what sits
         // beside it lines up; a wide mark reaches a little past its sides.
-        let r = mark.aspect.squareRoot()
+        let r = mark.aspect.squareRoot(), side = size * mark.optical
         let image = Image(mark.asset).renderingMode(.template).resizable().scaledToFit()
-            .frame(width: size * r, height: size / r).frame(width: size, height: size)
+            .frame(width: side * r, height: side / r).frame(width: size, height: size)
         // The agent's name is said by the row or chip it sits in, as the web's aria-hidden mark.
         Group { if let brand = mark.brand { image.foregroundStyle(brand) } else { image } }.accessibilityHidden(true)
     }
