@@ -9,9 +9,8 @@ struct ChatScreen: View {
     @StateObject private var store: ThreadStore
     @EnvironmentObject private var live: LiveStore
     @Environment(\.scenePhase) private var scenePhase
-    @State private var showTerminal = false
-    /// The iPhone's terminal was opened once by itself, Chat being unable to show the session (`chatUnavailable`).
-    @State private var fellBack = false
+    /// The iPhone's full-screen terminal; the user's open and close are remembered for a tmux session's inbox row.
+    @State private var terminalSheet = TerminalSheet()
     @State private var atEnd = true
     @State private var wentAway = false
     /// On screen (not under a pushed screen or another tab): only then does coming back reopen the stream.
@@ -138,19 +137,18 @@ struct ChatScreen: View {
                     ChangesChip(store: store, client: client) { ownReveal += 1 }
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    Button { showTerminal = true } label: { Label("Terminal", systemImage: "terminal") }
+                    Button { remember(terminalSheet.userOpens()) } label: { Label("Terminal", systemImage: "terminal") }
                 }
             }
         }
-        .fullScreenOrSheet(isPresented: $showTerminal) {
+        .fullScreenOrSheet(isPresented: Binding(get: { terminalSheet.shown },
+                                                set: { if !$0 { remember(terminalSheet.closed()) } })) {
             TerminalScreen(sessionId: sessionId, title: title, client: client, notice: chatUnavailable)
         }
         // A Chat that cannot be shown opens the terminal, once, saying why; closing it leaves the reason here with
         // Open terminal. The Mac switches its own tab instead (MacThreadDetail).
         .onChange(of: chatUnavailable) { _, reason in
-            guard openTerminal == nil, reason != nil, !fellBack else { return }
-            fellBack = true
-            showTerminal = true
+            if openTerminal == nil { terminalSheet.chatUnavailable(reason) }
         }
         .task { await store.start() }
         .onAppear { visible = true }
@@ -186,9 +184,13 @@ struct ChatScreen: View {
     /// Open terminal: the Mac's tab, else the full-screen terminal. A refused send's lock goes with it, as on the web.
     private func toTerminal() {
         store.sendLock = nil
-        // The iPhone's terminal is a sheet over this chat, which closing it returns to: not a switch of view, so the
-        // view remembered for the inbox row (TmuxTabMemory) stays as it is.
-        if let openTerminal { openTerminal() } else { showTerminal = true }
+        if let openTerminal { openTerminal() } else { remember(terminalSheet.userOpens()) }
+    }
+
+    /// The user's switch, for a tmux session's inbox row (InboxRoute.row); nil (an automatic one) stores nothing.
+    private func remember(_ tab: TmuxTabMemory.Tab?) {
+        guard let tab, store.isTmux, let s = live.live?.sessions.first(where: { $0.id == sessionId }) else { return }
+        TmuxTabMemory.shared.remember(tab, for: TmuxTabMemory.key(s.id, createdAt: s.created_at))
     }
 
     private func conversation(_ t: ThreadSnapshot) -> some View {
