@@ -40,9 +40,9 @@ enum InboxFixtures {
             item("dev-orchard-sync", "Add a retry queue to the offline sync", "orchard", "sync", branch: "sync-retry-queue", section: "needs_you",
                  reason: "completed", since: ago(3),
                  last: "I added src/sync/queue.ts and queue.test.ts with six bun tests; all pass. The typecheck command fails."),
-            item("dev-lumen-docs", "Write the 2.4 release notes", "lumen", "docs", section: "needs_you", reason: "completed",
+            item("dev-lumen-docs", "Write the 2.4 release notes", "lumen", "docs", agent: "antigravity", section: "needs_you", reason: "completed",
                  since: ago(320), last: "Drafted the notes in CHANGELOG.md: 6 features, 11 fixes."),
-            item("dev-lumen-onboarding", "Draft the onboarding emails", "lumen", "app", branch: "onboarding-emails", section: "idle", reason: nil,
+            item("dev-lumen-onboarding", "Draft the onboarding emails", "lumen", "app", agent: "vibe", branch: "onboarding-emails", section: "idle", reason: nil,
                  since: ago(2 * 1440 + 60), last: "Three emails drafted in docs/onboarding.md."),
             // devd names an unnamed session after its path; the row then shows "api #3".
             item("dev-orchard-api-3", "orchard/api", "orchard", "api", runtime: "tmux", section: "idle", reason: nil, since: ago(1500), last: nil),
