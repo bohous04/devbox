@@ -58,11 +58,11 @@ final class MacAppTests: XCTestCase {
 
     /// A sidebar row that needs you, or finished unseen, says so in one word; every other row shows its age.
     func testSidebarRowStateIsOneWordOrTheAge() throws {
-        XCTAssertEqual(MacInboxRow.word(try item("needs_you", reason: "request"))?.text, "Answer")
-        XCTAssertEqual(MacInboxRow.word(try item("needs_you", reason: "failed"))?.text, "Failed")
-        XCTAssertEqual(MacInboxRow.word(try item("needs_you", reason: "completed"))?.text, "Done", "a finished run not yet seen")
-        XCTAssertNil(MacInboxRow.word(try item("idle", reason: "failed")), "only Needs you rows get the word")
-        XCTAssertEqual(MacInboxRow.when(try item("idle", reason: nil, since: 1_000), now: 1_000 + 3 * 60_000), "3m")
+        XCTAssertEqual(InboxView.mark(try item("needs_you", reason: "request"))?.label, "Answer")
+        XCTAssertEqual(InboxView.mark(try item("needs_you", reason: "failed"))?.label, "Failed")
+        XCTAssertEqual(InboxView.mark(try item("needs_you", reason: "completed"))?.label, "Done", "a finished run not yet seen")
+        XCTAssertNil(InboxView.mark(try item("idle", reason: "failed")), "only Needs you rows get the word")
+        XCTAssertEqual(InboxView.when(try item("idle", reason: nil, since: 1_000), now: 1_000 + 3 * 60_000), "3m")
     }
 
     /// Columns that fit keep their width and the last takes the rest; a narrow column keeps its width when the
@@ -87,13 +87,13 @@ final class MacAppTests: XCTestCase {
 
     /// The second line: what a needs-you row asks; for the others the branch when devd recorded one, else the message.
     func testSidebarRowPlacePrefersTheBranch() throws {
-        XCTAssertEqual(MacInboxRow.secondLine(try item("idle", reason: nil, branch: "retry-queue"), detail: "msg"), "p/r  ·  retry-queue")
-        XCTAssertEqual(MacInboxRow.secondLine(try item("idle", reason: nil), detail: "msg"), "p/r  ·  msg")
-        XCTAssertEqual(MacInboxRow.secondLine(try item("idle", reason: nil), detail: ""), "p/r")
-        XCTAssertEqual(MacInboxRow.secondLine(try item("needs_you", reason: "request", branch: "b"), detail: "May I run it?"), "r  ·  May I run it?",
+        XCTAssertEqual(InboxView.secondLine(try item("idle", reason: nil, branch: "retry-queue"), detail: "msg"), "p/r  ·  retry-queue")
+        XCTAssertEqual(InboxView.secondLine(try item("idle", reason: nil), detail: "msg"), "p/r  ·  msg")
+        XCTAssertEqual(InboxView.secondLine(try item("idle", reason: nil), detail: ""), "p/r")
+        XCTAssertEqual(InboxView.secondLine(try item("needs_you", reason: "request", branch: "b"), detail: "May I run it?"), "r  ·  May I run it?",
                        "a row that needs you names its repo and says what it asks")
         // devd's own branch repeats the repo: only its number distinguishes the row.
-        XCTAssertEqual(MacInboxRow.secondLine(try item("idle", reason: nil, branch: "session/r-7"), detail: "msg"), "p/r  ·  #7")
+        XCTAssertEqual(InboxView.secondLine(try item("idle", reason: nil, branch: "session/r-7"), detail: "msg"), "p/r  ·  #7")
     }
 
     func testCutLinksNameTheFullAddress() {
@@ -143,12 +143,12 @@ final class MacAppTests: XCTestCase {
         let working = try item("working", reason: "running"), settled = try item("settled", reason: "completed")
         let idle = try item("idle", reason: nil), needs = try item("needs_you", reason: "request")
         let g = InboxView.Groups(needsYou: [needs], working: [working], idle: [idle], snoozed: [], settled: [settled])
-        let pinned = MacSidebarLayout.pinnedShelves(g)
+        let pinned = InboxView.shelves(g)
         XCTAssertEqual(pinned.map(\.label), ["Working", "Settled"])
         XCTAssertEqual(pinned.map(\.preview), [true, false])
         XCTAssertEqual(pinned.map(\.items.count), [1, 1])
         let none = InboxView.Groups(needsYou: [needs], working: [], idle: [idle], snoozed: [], settled: [])
-        XCTAssertTrue(MacSidebarLayout.pinnedShelves(none).isEmpty)
+        XCTAssertTrue(InboxView.shelves(none).isEmpty)
     }
 
     /// ↑/↓ cross the seam between the list and the pinned shelves; elsewhere each list moves on its own.

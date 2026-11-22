@@ -137,7 +137,7 @@ struct MacWindowContent: View {
     }
 }
 
-/// The inbox as the sidebar: one list of what is not on a shelf (MacSidebarLayout.list), each row with a mark only
+/// The inbox as the sidebar: one list of what is not on a shelf (InboxView.list), each row with a mark only
 /// when it has something to say, and the working, snoozed and settled shelves pinned to the bottom over the footer,
 /// collapsed until opened (each window remembers which). Rows are MacInboxRow, with the latest message only for a row
 /// that asks something and in Working and Snoozed, and their times tick every 15 s. A row settles in one gesture:
@@ -179,8 +179,8 @@ struct MacInboxSidebar: View {
             let now = InboxView.ms(context.date)
             let shown = store.items?.filter { InboxView.matches($0, query) }
             let g = shown.map(InboxView.group)
-            let list = g.map(MacSidebarLayout.list) ?? []
-            let pinned = g.map(MacSidebarLayout.pinnedShelves) ?? []
+            let list = g.map(InboxView.list) ?? []
+            let pinned = g.map(InboxView.shelves) ?? []
             let seam = (list: list.map(\.sessionId), shelves: pinned.flatMap(visibleRows).map(\.sessionId))
             ScrollViewReader { proxy in List(selection: $selection) {
                 if store.paused || store.badFrame != nil {
@@ -343,7 +343,7 @@ struct MacInboxSidebar: View {
     /// what was put aside. A list of their own, sharing the selection, as tall as its rows up to `shelfShare` of the
     /// sidebar and scrolling inside beyond that. Nothing, rule included, while every shelf is empty.
     @ViewBuilder
-    private func shelves(_ pinned: [MacSidebarLayout.Group], now: Int, seam: (list: [String], shelves: [String])) -> some View {
+    private func shelves(_ pinned: [InboxView.Shelf], now: Int, seam: (list: [String], shelves: [String])) -> some View {
         if !pinned.isEmpty {
             let estimate = MacSidebarLayout.estimatedContent(headers: pinned.count, rows: seam.shelves.count)
             ScrollViewReader { proxy in
@@ -384,12 +384,12 @@ struct MacInboxSidebar: View {
     }
 
     /// The rows a shelf shows: none while shut (it is open while searching, so every match shows).
-    private func visibleRows(_ group: MacSidebarLayout.Group) -> [InboxItem] {
+    private func visibleRows(_ group: InboxView.Shelf) -> [InboxItem] {
         isOpen(group.label) || !query.isEmpty ? group.items : []
     }
 
     /// A shelf as a disclosure group (MacSidebarLayout leaves out the empty ones); open while searching.
-    private func group(_ group: MacSidebarLayout.Group, now: Int) -> some View {
+    private func group(_ group: InboxView.Shelf, now: Int) -> some View {
         Section {
             rows(visibleRows(group), now: now, preview: group.preview)
         } header: {
@@ -416,7 +416,7 @@ struct MacInboxSidebar: View {
     /// `inList`: a row of the one list, which settles from its ✓ and says what it asks; `preview` for a shelf's rows.
     private func rows(_ items: [InboxItem], now: Int, preview: Bool = false, inList: Bool = false) -> some View {
         ForEach(items) { item in
-            MacInboxRow(item: item, now: now, preview: inList ? MacSidebarLayout.asks(item) : preview,
+            MacInboxRow(item: item, now: now, preview: inList ? InboxView.asks(item) : preview,
                         settle: inList ? { settle(item) } : nil)
                 .tag(item.sessionId as String?)
                 .contextMenu {
@@ -447,26 +447,8 @@ struct MacInboxSidebar: View {
 /// One list of what is not on a shelf scrolls; the shelves under it stay shut until opened and are pinned to the
 /// bottom of the sidebar, over the footer.
 enum MacSidebarLayout {
-    struct Group {
-        let label: String
-        let items: [InboxItem]
-        /// Whether the rows show the latest message.
-        let preview: Bool
-    }
-
     /// The sidebar's two lists.
     enum Part { case list, shelves }
-
-    /// The one list: what asks for action (a request or a failure) pinned on top, the longest wait first, as devd
-    /// orders it; then the finished and the idle rows together, newest first. The owner chose this over T3 Code's
-    /// pure recency, so a question never sinks under newer finishes.
-    static func list(_ g: InboxView.Groups) -> [InboxItem] {
-        let split = InboxView.splitNeedsYou(g.needsYou)
-        return split.action + (split.finished + g.idle).sorted { $0.attention.since > $1.attention.since }
-    }
-
-    /// A row that asks something (a request or a failure) says what in its second line; the others say where they run.
-    static func asks(_ i: InboxItem) -> Bool { i.attention.section == .needsYou && i.attention.reason != .completed }
 
     /// The share of the sidebar's height the pinned shelves may take before they scroll inside.
     static let shelfShare: CGFloat = 0.45
@@ -475,13 +457,6 @@ enum MacSidebarLayout {
     /// A sidebar list's group header, its two-line row and its own padding, as macOS draws them at the default
     /// sidebar size (measured on the screenshot test's render).
     static let headerHeight: CGFloat = 24, rowHeight: CGFloat = 50, listPadding: CGFloat = 36
-
-    /// The shelves pinned to the bottom, in order, the empty ones left out.
-    static func pinnedShelves(_ g: InboxView.Groups) -> [Group] {
-        [Group(label: "Working", items: g.working, preview: true),
-         Group(label: "Snoozed", items: g.snoozed, preview: true),
-         Group(label: "Settled", items: g.settled, preview: false)].filter { !$0.items.isEmpty }
-    }
 
     /// Where ↑/↓ goes across the seam between the lists' visible rows: from the last row of the list down to the first
     /// shelf row, and back up. Nil elsewhere, where the list itself moves the selection.
@@ -564,7 +539,7 @@ private struct MacGroupHead: View {
 }
 
 /// A sidebar row: the title with its state on the right (a coloured mark when the row has something to say, otherwise
-/// how long ago, after a live dot while it works) and one muted line (`secondLine`) ending in the agent's glyph while
+/// how long ago, after a live dot while it works) and one muted line (`InboxView.secondLine`) ending in the agent's glyph while
 /// the rows shown mix agents. Every title is regular: a row that needs you stands out by its mark. With `settle`, a ✓
 /// takes the state's place while the pointer is over the row, as in T3 Code; it is disabled, with the reason, while a
 /// request is open. "tmux", the message and (with mixed agents) the agent's name are also in the tooltip and the
@@ -576,32 +551,6 @@ struct MacInboxRow: View {
     var settle: (() -> Void)?
     @Environment(\.inboxShowsAgent) private var showAgent
     @State private var hovering = false
-
-    /// The mark of a row that needs you, by its reason (a run that finished unseen is Done); nil for every other row
-    /// (it shows its age).
-    static func word(_ i: InboxItem) -> (text: String, tone: InboxView.Tone)? {
-        guard i.attention.section == .needsYou else { return nil }
-        switch i.attention.reason {
-        case .request?: return ("Answer", .action)
-        case .completed?: return ("Done", .done)
-        case .failed?: return ("Failed", .danger)
-        case .rateLimited?: return ("Limit", .danger)
-        case .disconnected?: return ("Offline", .danger)
-        case .bridgeBehind?: return ("Behind", .danger)
-        case .ciFailed?: return ("CI failed", .danger)
-        default: return nil
-        }
-    }
-
-    /// The second line. A row that needs you says what it asks (the message, or the reason without one): that is
-    /// the point of the row. Any other row says where it runs: the repo and what distinguishes its branch
-    /// (InboxView.branchLabel), else the latest message on a row that shows it (`preview`). The tooltip has the full branch.
-    static func secondLine(_ i: InboxItem, detail: String) -> String {
-        if word(i) != nil, !detail.isEmpty { return "\(i.repo)  ·  \(detail)" }
-        let place = "\(i.project)/\(i.repo)"
-        if let branch = InboxView.branchLabel(i) { return "\(place)  ·  \(branch)" }
-        return detail.isEmpty ? place : "\(place)  ·  \(detail)"
-    }
 
     /// The text's hierarchical style. The offscreen screenshot test draws without the window server's vibrancy, which
     /// these styles need there, so it sets `flatStyles` for the flat colours they show unselected. The app never does.
@@ -625,19 +574,7 @@ struct MacInboxRow: View {
     }
 
     /// The title of a row with nothing to say: a step under the others, still well over AA on the sidebar.
-    static let quietTitle = Theme.C.foreground.opacity(0.66)
-
-    /// What VoiceOver and the tooltip say. A marked row says its mark first and not again as the state ("Answer, …",
-    /// not also "waiting for your answer"); the others say their state as the iPhone's rows do.
-    static func spoken(_ i: InboxItem, now: Int, title: String, detail: String, showAgent: Bool) -> String {
-        let branch = i.branch.map { $0.isEmpty ? "" : ", branch \($0)" } ?? ""
-        guard let mark = word(i) else { return InboxRow.spokenLabel(i, now: now, title: title, detail: detail, showAgent: showAgent) + branch }
-        let when = i.attention.since > 0 ? Format.agoLabel(Double(now - i.attention.since)) : ""
-        let agent = showAgent ? AgentProfiles.profile(for: AgentName(rawValue: i.agent)).short : ""
-        return [mark.text, title, when, "\(i.project)/\(i.repo)", agent, i.runtime == .tmux ? "tmux" : "",
-                detail == InboxView.reasonLabel(i.attention.reason) ? "" : detail]
-            .filter { !$0.isEmpty }.joined(separator: ", ") + branch
-    }
+    static let quietTitle = InboxTone.quietTitle
 
     #if DEBUG
     nonisolated(unsafe) static var flatStyles = false
@@ -664,18 +601,12 @@ struct MacInboxRow: View {
         return hovering
     }
 
-    /// Age, or for a snoozed row when it comes back.
-    static func when(_ i: InboxItem, now: Int) -> String {
-        if let until = i.attention.until { return InboxRow.untilLabel(until) }
-        return i.attention.since > 0 ? InboxView.shortAgo(now - i.attention.since) : ""
-    }
-
     var body: some View {
         let title = InboxView.rowTitle(item)
         let message = item.lastText.map(InboxView.plainPreview) ?? ""
         let detail = preview ? (message.isEmpty ? InboxView.reasonLabel(item.attention.reason) : message) : ""
-        let mark = Self.word(item)
-        let spoken = Self.spoken(item, now: now, title: title, detail: detail, showAgent: showAgent)
+        let mark = InboxView.mark(item)
+        let spoken = InboxRow.spoken(item, now: now, title: title, detail: detail, showAgent: showAgent)
         // A row of the list with nothing to say reads a step quieter, so the eye lands on the marked ones first.
         let quiet = settle != nil && mark == nil
         VStack(alignment: .leading, spacing: 2) {
@@ -693,25 +624,25 @@ struct MacInboxRow: View {
                     HStack(spacing: 3) {
                         Image(systemName: InboxTone.icon(.done)).font(.system(size: 10))
                             .modifier(MacSelectionTone(color: InboxTone.doneIcon, onSelection: Self.style(.primary)))
-                        Text(word.text).font(.system(size: 11))
+                        Text(word.label).font(.system(size: 11))
                             .modifier(MacSelectionTone(color: Theme.C.mutedForeground, onSelection: Self.style(.secondary)))
                     }
                 } else if let word = mark {
                     HStack(spacing: 3) {
                         Image(systemName: InboxTone.icon(word.tone)).font(.system(size: 10, weight: .semibold))
-                        Text(word.text).font(.system(size: 11, weight: .semibold))
+                        Text(word.label).font(.system(size: 11, weight: .semibold))
                     }
                     .modifier(MacSelectionTone(color: InboxTone.text(word.tone), onSelection: Self.style(.primary)))
                 } else {
                     HStack(spacing: 5) {
                         if item.attention.section == .working { LiveDot() }
-                        Text(Self.when(item, now: now)).font(.system(size: 11)).monospacedDigit()
+                        Text(InboxView.when(item, now: now)).font(.system(size: 11)).monospacedDigit()
                             .modifier(MacSelectionTone(color: item.attention.section == .working ? InboxTone.busy : nil, onSelection: Self.style(.secondary)))
                     }
                 }
             }
             HStack(spacing: 6) {
-                Text(Self.secondLine(item, detail: detail))
+                Text(InboxView.secondLine(item, detail: detail))
                     .font(.system(size: 11.5))
                     .modifier(MacSelectionTone(color: nil, onSelection: Self.style(.secondary)))
                     .lineLimit(1)

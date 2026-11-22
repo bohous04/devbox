@@ -6,6 +6,17 @@ enum InboxRoute: Hashable {
     case thread(String)
     case session(String)
 
+    var sessionId: String {
+        switch self {
+        case .thread(let id), .session(let id): return id
+        }
+    }
+
+    /// The session the owner is looking at on the Inbox tab: the top of its stack, and none while another tab shows.
+    static func opened(path: [InboxRoute], onInboxTab: Bool) -> String? {
+        onInboxTab ? path.last?.sessionId : nil
+    }
+
     /// A chat session opens its thread; a tmux one its detail, or its chat (the mirror) when that is the view last
     /// opened for it on this device (TmuxTabMemory). `createdAt`: the session's, from the live list; nil before it loads.
     @MainActor
@@ -16,10 +27,15 @@ enum InboxRoute: Hashable {
     }
 }
 
-/// Every session by what it needs (dashboard/src/pages/Inbox.tsx): needs you, working, idle, then the snoozed and
-/// settled shelves (collapsed). Live over devd's stream; polled every 5 s while the stream is down.
+/// Every session in one list (InboxView.list, as the Mac sidebar and the dashboard): what asks for action pinned on
+/// top, then the rest newest first, each row with a mark only when it has something to say; under it the Working,
+/// Snoozed and Settled shelves, collapsed. A row settles in one gesture: its trailing swipe (a full swipe settles),
+/// after which a notice offers Undo for a few seconds (InboxSettler). The leading swipe and the context menu snooze.
+/// A tmux session's finish clears when it is looked at (`markSeen`). Live over devd's stream; polled every 5 s while
+/// the stream is down.
 struct InboxScreen: View {
     @StateObject private var store: InboxStore
+    @StateObject private var settler = InboxSettler()
     /// For each session's created_at, which keys its remembered view (InboxRoute.row).
     @EnvironmentObject private var live: LiveStore
     /// Watched, so a row leads to the view chosen a moment ago in the session's detail.
@@ -27,12 +43,17 @@ struct InboxScreen: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var actionsFor: InboxItem?
     @State private var openShelves: Set<String> = []
+    /// Why a row cannot be settled now, after its "Answer first" swipe; goes on its own.
+    @State private var hint: String?
     /// On screen (not under a pushed chat or another tab): only then does coming back reopen the stream.
     @State private var visible = false
     private let client: DevdClient
+    /// The session on screen over the inbox (InboxRoute.opened), or nil.
+    private let opened: String?
 
-    init(client: DevdClient) {
+    init(client: DevdClient, opened: String? = nil) {
         self.client = client
+        self.opened = opened
         _store = StateObject(wrappedValue: InboxStore(client: client))
     }
 
@@ -56,9 +77,18 @@ struct InboxScreen: View {
             visible = false
             store.stop()
         }
-        // iOS drops the stream in the background; the inbox reloads when the stream reopens.
+        // iOS drops the stream in the background; the inbox reloads when the stream reopens. Back in the foreground
+        // with a session open, that session has been looked at again.
         .onChange(of: scenePhase) { _, phase in
             if phase == .active, visible { store.start() } else if phase == .background { store.stop() }
+            if phase == .active, let opened { Task { await markSeen(opened, .foreground, reload: true) } }
+        }
+        // Opening a session is a look at it; leaving it is another (the stream was stopped meanwhile, so the row is
+        // read fresh first: it may have finished again while open).
+        .onChange(of: opened, initial: true) { old, new in
+            settler.actionTaken()
+            if let old, old != new { Task { await markSeen(old, .left, reload: true) } }
+            if let new, new != old { Task { await markSeen(new, .opened, reload: false) } }
         }
         .sheet(item: $actionsFor) { item in
             InboxRowActions(item: item, store: store)
@@ -66,15 +96,20 @@ struct InboxScreen: View {
         }
     }
 
+    private func markSeen(_ id: String, _ moment: InboxSettler.Moment, reload: Bool) async {
+        if reload { await store.load() }
+        guard let item = store.items?.first(where: { $0.sessionId == id }), InboxSettler.marksSeen(item, on: moment) else { return }
+        await settler.seen(item, in: store)
+    }
+
     @ViewBuilder
     private func content(_ g: InboxView.Groups) -> some View {
-        let split = InboxView.splitNeedsYou(g.needsYou)
+        let list = InboxView.list(g)
         ScrollViewReader { proxy in
-        ScrollView {
             // Relative times tick every 15 s, as the dashboard's.
             TimelineView(.periodic(from: .now, by: 15)) { context in
                 let now = InboxView.ms(context.date)
-                LazyVStack(alignment: .leading, spacing: 0) {
+                List {
                     if store.paused || store.badFrame != nil {
                         Text(store.paused ? "Live updates paused — refreshing every 5 s\(store.loadError.map { " (last refresh failed: \($0))" } ?? "")"
                              : "Live update dropped: \(store.badFrame ?? "")")
@@ -83,43 +118,47 @@ struct InboxScreen: View {
                             .padding(10)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(Theme.C.warn.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.R.md))
-                            .padding(.horizontal, 4)
-                            .padding(.bottom, 12)
+                            .plainRow()
                     }
-                    if split.action.isEmpty {
+                    if list.isEmpty {
                         Label { Text("Nothing waiting for you") } icon: { Image(systemName: "checkmark.circle").foregroundStyle(InboxTone.doneIcon) }
                             .font(.subheadline)
                             .foregroundStyle(Theme.C.mutedForeground)
                             .frame(minHeight: 44)
-                            .padding(.horizontal, 12)
-                            .padding(.bottom, 12)
+                            .plainRow()
                     }
-                    group("Needs you", split.action, now: now, preview: true)
-                    group("Finished", split.finished, now: now, preview: false, cap: 5)
-                    group("Idle", g.idle, now: now, preview: false)
-                    if g.working.count + g.snoozed.count + g.settled.count > 0 {
-                        Divider().padding(.horizontal, 12).padding(.bottom, 4)
-                        shelf("Working", g.working, now: now, preview: true)
-                        shelf("Snoozed", g.snoozed, now: now, preview: true)
-                        shelf("Settled", g.settled, now: now, preview: false)
+                    rows(list, now: now, inList: true) { InboxView.asks($0) }
+                    let shelves = InboxView.shelves(g)
+                    if !shelves.isEmpty {
+                        Rectangle().fill(Theme.C.border).frame(height: 1).padding(.vertical, 8).plainRow().accessibilityHidden(true)
+                        ForEach(shelves, id: \.label) { shelf in
+                            shelfHead(shelf)
+                            if openShelves.contains(shelf.label) { rows(shelf.items, now: now, inList: false) { _ in shelf.preview } }
+                        }
                     }
+                    Color.clear.frame(height: 1).plainRow().id(Self.bottomId)
                 }
-                .padding(.horizontal, 4)
-                .padding(.vertical, 8)
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                // On the List itself, so its content scrolls clear of the notice as it does of the tab bar.
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    InboxSettleNotice(settler: settler, hint: hint) { Task { await settler.undo(in: store) } }
+                        .animation(.snappy(duration: 0.25), value: settler.notice)
+                        .animation(.snappy(duration: 0.25), value: settler.problem)
+                        .animation(.snappy(duration: 0.25), value: hint)
+                }
+                .environment(\.defaultMinListRowHeight, 1)
             }
-            Color.clear.frame(height: 1).id(Self.bottomId)
-        }
-        .background(Theme.C.background)
-        .refreshable { await store.load() }
-        #if DEBUG
-        .task {
-            // Screenshot mode only (Support/Fixtures): show the end of the list, once per launch.
-            guard FixtureMode.scrollToBottom, !Self.scrolledToBottom else { return }
-            Self.scrolledToBottom = true
-            try? await Task.sleep(for: .milliseconds(300))
-            proxy.scrollTo(Self.bottomId, anchor: .bottom)
-        }
-        #endif
+            .refreshable { await store.load() }
+            #if DEBUG
+            .task {
+                // Screenshot mode only (Support/Fixtures): show the end of the list, once per launch.
+                guard FixtureMode.scrollToBottom, !Self.scrolledToBottom else { return }
+                Self.scrolledToBottom = true
+                try? await Task.sleep(for: .milliseconds(300))
+                proxy.scrollTo(Self.bottomId, anchor: .bottom)
+            }
+            #endif
         }
     }
 
@@ -128,113 +167,194 @@ struct InboxScreen: View {
     @MainActor private static var scrolledToBottom = false
     #endif
 
-    /// An open group, not shown while empty. With `cap`, rows past it hide behind a counted "N more" toggle.
-    @ViewBuilder
-    private func group(_ label: String, _ items: [InboxItem], now: Int, preview: Bool, cap: Int? = nil) -> some View {
-        if !items.isEmpty {
-            let all = openShelves.contains(label)
-            let shown = cap.map { all ? items : Array(items.prefix($0)) } ?? items
-            VStack(alignment: .leading, spacing: 2) {
-                InboxGroupHead(label: label, count: items.count)
-                rows(shown, now: now, preview: preview)
-                if let cap, items.count > cap {
-                    Button { toggle(label) } label: {
-                        HStack(spacing: 4) {
-                            Text(all ? "Show fewer" : "\(items.count - cap) more")
-                            Image(systemName: "chevron.down").font(.caption2.weight(.semibold)).rotationEffect(.degrees(all ? 180 : 0))
-                        }
-                        .font(.subheadline)
-                        .foregroundStyle(Theme.C.mutedForeground)
-                        .frame(minHeight: 44)
-                        .padding(.horizontal, 12)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityValue(all ? "expanded" : "collapsed")
-                }
+    /// A shelf's head: its name, count and a chevron; the whole row toggles it.
+    private func shelfHead(_ shelf: InboxView.Shelf) -> some View {
+        let open = openShelves.contains(shelf.label)
+        return Button {
+            if open { openShelves.remove(shelf.label) } else { openShelves.insert(shelf.label) }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(Theme.C.mutedForeground)
+                    .rotationEffect(.degrees(open ? 90 : 0))
+                Text(shelf.label).font(.subheadline.weight(.semibold)).foregroundStyle(Theme.C.mutedForeground)
+                Spacer()
+                Text("\(shelf.items.count)").font(.subheadline.monospacedDigit()).foregroundStyle(Theme.C.mutedForeground)
             }
-            .padding(.bottom, 16)
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .plainRow()
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isHeader)
+        .accessibilityLabel("\(shelf.label), \(shelf.items.count)")
+        .accessibilityValue(open ? "expanded" : "collapsed")
+        .accessibilityHint(open ? "Hides these sessions" : "Shows these sessions")
     }
 
-    /// A group that starts collapsed (Working, Snoozed, Settled); not shown while empty.
     @ViewBuilder
-    private func shelf(_ label: String, _ items: [InboxItem], now: Int, preview: Bool) -> some View {
-        if !items.isEmpty {
-            let open = openShelves.contains(label)
-            VStack(alignment: .leading, spacing: 2) {
-                Button { toggle(label) } label: {
-                    InboxGroupHead(label: label, count: items.count, open: open)
-                }
-                .buttonStyle(InboxPressStyle())
-                .accessibilityAddTraits(.isHeader)
-                .accessibilityLabel("\(label), \(items.count)")
-                .accessibilityValue(open ? "expanded" : "collapsed")
-                .accessibilityHint(open ? "Hides these sessions" : "Shows these sessions")
-                if open { rows(items, now: now, preview: preview).padding(.bottom, 8) }
-            }
-        }
-    }
-
-    private func toggle(_ label: String) {
-        if openShelves.contains(label) { openShelves.remove(label) } else { openShelves.insert(label) }
-    }
-
-    private func rows(_ items: [InboxItem], now: Int, preview: Bool) -> some View {
+    /// `inList`: a full swipe settles only in the list; on a shelf it would act on rows read less closely.
+    private func rows(_ items: [InboxItem], now: Int, inList: Bool, preview: @escaping (InboxItem) -> Bool) -> some View {
         let createdAt = Dictionary((live.live?.sessions ?? []).map { ($0.id, $0.created_at) }, uniquingKeysWith: { _, last in last })
-        return VStack(spacing: 2) {
-            ForEach(items) { item in
-                HStack(alignment: .top, spacing: 0) {
+        ForEach(items) { item in
+            InboxRow(item: item, now: now, preview: preview(item))
+                // The link fills the row without its disclosure chevron: rows read as T3 Code's, not as a settings list.
+                .background {
                     NavigationLink(value: InboxRoute.row(sessionId: item.sessionId, runtime: item.runtime, createdAt: createdAt[item.sessionId], memory: tabs)) {
-                        InboxRow(item: item, now: now, preview: preview)
+                        EmptyView()
                     }
-                    .buttonStyle(InboxPressStyle())
-                    Button { actionsFor = item } label: {
-                        Image(systemName: "ellipsis")
-                            .frame(width: 44, height: 44)
-                            .foregroundStyle(Theme.C.mutedForeground)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Actions for \(InboxView.rowTitle(item))")
+                    .opacity(0)
                 }
+                .plainRow()
+                .swipeActions(edge: .trailing, allowsFullSwipe: inList && InboxSettler.canSettle(item) && InboxSettler.block(item) == nil) {
+                    trailingAction(item)
+                }
+                .swipeActions(edge: .leading) {
+                    if InboxSettler.canSettle(item) && InboxSettler.block(item) == nil {
+                        Button { actionsFor = item } label: { Label("Snooze", systemImage: "alarm") }
+                            .tint(InboxTone.snoozeSwipe)
+                    }
+                }
+                .contextMenu { menu(item) }
+        }
+    }
+
+    /// Settle, or for a row with an open request the reason it cannot be (devd refuses it); on a shelf, back to the inbox.
+    @ViewBuilder
+    private func trailingAction(_ item: InboxItem) -> some View {
+        if !InboxSettler.canSettle(item) {
+            Button { unsettle(item) } label: { Label("Back", systemImage: "arrow.uturn.backward") }
+                .tint(InboxTone.backSwipe)
+        } else if let block = InboxSettler.block(item) {
+            // A swipe action has no disabled look: a grey "Answer first" that says why for a moment when tapped.
+            Button { explain(block) } label: { Label("Answer first", systemImage: "questionmark.bubble") }
+                .tint(InboxTone.blockedSwipe)
+                .accessibilityLabel("Settle: answer the open request first")
+        } else {
+            Button { Task { await settler.settle(item, in: store) } } label: { Label("Settle", systemImage: "checkmark") }
+                .tint(InboxTone.settleSwipe)
+        }
+    }
+
+    @ViewBuilder
+    private func menu(_ item: InboxItem) -> some View {
+        if InboxSettler.canSettle(item) {
+            let block = InboxSettler.block(item)
+            Button { Task { await settler.settle(item, in: store) } } label: {
+                Label("Settle", systemImage: "checkmark")
+                if let block { Text(block) }
+            }
+            .disabled(block != nil)
+            Button { actionsFor = item } label: { Label("Snooze…", systemImage: "alarm") }
+                .disabled(block != nil)
+        } else {
+            Button { unsettle(item) } label: { Label("Back to the inbox", systemImage: "arrow.uturn.backward") }
+        }
+    }
+
+    private func explain(_ why: String) {
+        hint = why
+        AccessibilityNotification.Announcement(why).post()
+        Task {
+            try? await Task.sleep(for: .seconds(3))
+            if hint == why { hint = nil }
+        }
+    }
+
+    private func unsettle(_ item: InboxItem) {
+        Task {
+            do { try await store.unsettle(item.sessionId) } catch {
+                settler.report("Couldn't bring back “\(InboxView.rowTitle(item))”: \(chatErrorText(error))")
             }
         }
     }
 }
 
-/// A quiet group heading: name, count, and for the shelves a chevron.
-private struct InboxGroupHead: View {
-    let label: String
-    let count: Int
-    var open: Bool?
+private extension View {
+    /// A list row without the plain list's separator, inset or background: the inbox draws its own.
+    func plainRow() -> some View {
+        listRowSeparator(.hidden)
+            .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
+            .listRowBackground(Theme.C.background)
+    }
+}
+
+/// Over the tab bar: "Settled · Undo" after a settle, and the last failure with a way to dismiss it.
+struct InboxSettleNotice: View {
+    @ObservedObject var settler: InboxSettler
+    /// A short, neutral explanation (a blocked settle), shown while set.
+    var hint: String?
+    let undo: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
-            Text(label).font(.subheadline.weight(.semibold)).foregroundStyle(Theme.C.foreground.opacity(0.9))
-            Text("\(count)").font(.subheadline.monospacedDigit()).foregroundStyle(Theme.C.mutedForeground)
-            if let open {
-                Spacer()
-                Image(systemName: "chevron.down")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Theme.C.mutedForeground)
-                    .rotationEffect(.degrees(open ? 180 : 0))
+        if settler.problem != nil || settler.notice != nil || hint != nil {
+            VStack(spacing: 8) {
+                if let hint {
+                    card {
+                        Image(systemName: "questionmark.bubble").foregroundStyle(InboxTone.action).accessibilityHidden(true)
+                        Text(hint).font(.subheadline).foregroundStyle(Theme.C.foreground).padding(.vertical, 10)
+                        Spacer(minLength: 0)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+                if let problem = settler.problem { failure(problem) }
+                if let notice = settler.notice { settled(notice) }
             }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
         }
-        // A shelf's head is its toggle: a full touch target.
-        .frame(minHeight: open == nil ? 36 : 44)
-        .padding(.horizontal, 12)
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isHeader)
     }
-}
 
-/// A pressed row tints like the dashboard's hovered row.
-private struct InboxPressStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .background(Theme.C.muted.opacity(configuration.isPressed ? 0.9 : 0), in: RoundedRectangle(cornerRadius: Theme.R.lg, style: .continuous))
+    private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        HStack(spacing: 10) { content() }
+            .padding(.leading, 16).padding(.trailing, 8)
+            .frame(minHeight: 52)
+            .background(Theme.C.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.C.border))
+            .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+    }
+
+    private func failure(_ problem: String) -> some View {
+        card {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(InboxTone.danger).accessibilityHidden(true)
+            Text(problem).font(.subheadline).foregroundStyle(Theme.C.foreground)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.vertical, 10)
+            Spacer(minLength: 4)
+            Button { settler.dismissProblem() } label: {
+                Image(systemName: "xmark").font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.C.mutedForeground)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss")
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func settled(_ notice: InboxSettler.Notice) -> some View {
+        card {
+            Image(systemName: "checkmark").font(.subheadline.weight(.semibold)).foregroundStyle(InboxTone.doneIcon)
+                .accessibilityHidden(true)
+            Text("Settled").font(.subheadline.weight(.semibold)).foregroundStyle(Theme.C.foreground)
+            Text(notice.title).font(.subheadline).foregroundStyle(Theme.C.mutedForeground).lineLimit(1)
+            Spacer(minLength: 4)
+            Button(action: undo) {
+                Text("Undo").font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.C.link)
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Undo settle")
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Settled \(notice.title)")
     }
 }
 
@@ -244,6 +364,14 @@ enum InboxTone {
     static let danger = Color(light: 0xDC2626, dark: 0xF87171)
     static let doneIcon = Color(light: 0x059669, dark: 0x34D399)
     static let busy = Color(light: 0x0369A1, dark: 0x7DD3FC)
+    /// The title of a row with nothing to say: a step under the others, still well over AA (about 6.5:1 light,
+    /// 8:1 dark on the background).
+    static let quietTitle = Theme.C.foreground.opacity(0.66)
+    /// The swipe actions' fills, under white labels (AA for the label in both modes).
+    static let settleSwipe = Color(light: 0x047857, dark: 0x047857)
+    static let snoozeSwipe = Color(light: 0x4F46E5, dark: 0x4F46E5)
+    static let backSwipe = Color(light: 0x0369A1, dark: 0x0369A1)
+    static let blockedSwipe = Color(light: 0x71717A, dark: 0x52525B)
 
     static func text(_ t: InboxView.Tone) -> Color {
         switch t {
@@ -275,8 +403,6 @@ enum InboxTone {
     ]
 }
 
-/// One row, the dashboard's shape: a meta line (project badge and path, state, time, agent), the title, and in
-/// groups where the latest message is the point (Needs you, Working, Snoozed) a dimmer preview line.
 /// Whether inbox rows name their agent (InboxView.mixedAgents: the inbox mixes agents), set where the list is built.
 /// True by default on purpose: a row outside such a list names its agent rather than hide which one runs.
 private struct InboxShowsAgentKey: EnvironmentKey { static let defaultValue = true }
@@ -288,89 +414,80 @@ extension EnvironmentValues {
     }
 }
 
+/// One row, the Mac sidebar's shape: the title with its state on the right (a coloured mark when the row has something
+/// to say, otherwise how long ago) and one muted line (InboxView.secondLine) ending in the agent's glyph while the inbox
+/// mixes agents. A row with nothing to say has a quieter title, so the eye lands on the marked ones; Done is the quiet
+/// mark (a green check, a regular muted word), under the asks.
 struct InboxRow: View {
     let item: InboxItem
     let now: Int
     let preview: Bool
     @Environment(\.inboxShowsAgent) private var showAgent
-    /// The project badge's letters: small, but they grow with Dynamic Type.
-    @ScaledMetric(relativeTo: .caption2) private var badgeText: CGFloat = 9
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     static func untilLabel(_ ms: Int) -> String {
         Date(timeIntervalSince1970: Double(ms) / 1000).formatted(.dateTime.weekday(.abbreviated).hour().minute())
     }
 
     var body: some View {
-        let a = item.attention
         let title = InboxView.rowTitle(item)
         let message = item.lastText.map(InboxView.plainPreview) ?? ""
-        let detail = message.isEmpty ? InboxView.reasonLabel(a.reason) : message
-        let parts = InboxView.statusParts(item, now: now, compact: !preview)
-        let badge = InboxView.projectBadge(item.project)
+        let detail = preview ? (message.isEmpty ? InboxView.reasonLabel(item.attention.reason) : message) : ""
+        let mark = InboxView.mark(item)
+        // The largest accessibility sizes leave a word or two per line: two lines keep a title readable.
+        let lines = typeSize > .accessibility1 ? 2 : 1
         VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 5) {
-                Text(badge.letters)
-                    .font(.system(size: badgeText, weight: .bold))
-                    .tracking(0.3)
-                    .foregroundStyle(InboxTone.badge[badge.slot].text)
-                    .frame(minWidth: badgeText * 2.2, minHeight: badgeText * 1.8)
-                    .padding(.horizontal, 2)
-                    .background(InboxTone.badge[badge.slot].fill.opacity(0.15), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-                (Text(item.project) + Text(" / ").foregroundColor(Theme.C.mutedForeground.opacity(0.6)) + Text(item.repo))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .layoutPriority(-1)
-                dot
-                if let parts {
-                    status(parts)
-                    dot
-                }
-                ForEach(Array(InboxView.metaTail(item, showAgent: showAgent).enumerated()), id: \.offset) { n, part in
-                    if n > 0 { dot }
-                    Text(part).fixedSize()
-                }
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(title)
+                    .font(.body)
+                    .foregroundStyle(mark == nil ? InboxTone.quietTitle : Theme.C.foreground)
+                    .lineLimit(lines)
+                Spacer(minLength: 0)
+                state(mark)
             }
-            .font(.caption)
-            .foregroundStyle(Theme.C.mutedForeground)
-            Text(title)
-                .font(.subheadline.weight(preview ? .medium : .regular))
-                .foregroundStyle(preview ? Theme.C.foreground : Theme.C.foreground.opacity(0.85))
-                .lineLimit(1)
-            if preview && !detail.isEmpty {
-                Text(detail)
-                    .font(.footnote)
-                    .foregroundStyle(Theme.C.mutedForeground.opacity(0.8))
-                    .lineLimit(1)
+            HStack(spacing: 6) {
+                Text(InboxView.secondLine(item, detail: detail))
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.C.mutedForeground)
+                    .lineLimit(lines)
+                Spacer(minLength: 0)
+                if showAgent {
+                    AgentLogo(mark: AgentLogo.Mark(agent: item.agent), size: 13)
+                        .foregroundStyle(Theme.C.mutedForeground.opacity(0.8))
+                        .accessibilityHidden(true)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 9)
-        .padding(.leading, 12)
+        .padding(.vertical, 10)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Self.spokenLabel(item, now: now, title: title, detail: preview ? detail : "", showAgent: showAgent))
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(Self.spoken(item, now: now, title: title, detail: detail, showAgent: showAgent))
     }
 
-    private var dot: some View { Text("·").opacity(0.5).accessibilityHidden(true) }
-
     @ViewBuilder
-    private func status(_ parts: InboxView.StatusParts) -> some View {
-        let when = parts.until.map { "until \(Self.untilLabel($0))" } ?? parts.ago
-        HStack(spacing: 3) {
-            if let mark = parts.mark {
+    private func state(_ mark: InboxView.Mark?) -> some View {
+        if let mark, mark.tone == .done {
+            HStack(spacing: 4) {
+                Image(systemName: InboxTone.icon(.done)).font(.footnote).foregroundStyle(InboxTone.doneIcon)
+                Text(mark.label).font(.footnote).foregroundStyle(Theme.C.mutedForeground)
+            }
+            .fixedSize()
+        } else if let mark {
+            HStack(spacing: 4) {
                 Image(systemName: InboxTone.icon(mark.tone))
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(mark.tone == .done ? InboxTone.doneIcon : InboxTone.text(mark.tone))
-                if parts.showLabel {
-                    Text(mark.label).fontWeight(.medium).foregroundStyle(InboxTone.text(mark.tone))
-                }
+                Text(mark.label)
             }
-            if !when.isEmpty {
-                Text(when).monospacedDigit()
-                    .foregroundStyle(parts.mark.map { InboxTone.text($0.tone).opacity(0.75) } ?? Theme.C.mutedForeground)
-            }
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(InboxTone.text(mark.tone))
+            .fixedSize()
+        } else {
+            Text(InboxView.when(item, now: now))
+                .font(.footnote).monospacedDigit()
+                .foregroundStyle(item.attention.section == .working ? InboxTone.busy : Theme.C.mutedForeground)
+                .fixedSize()
         }
-        .fixedSize()
     }
 
     /// One spoken line per row: title, state in words, when, where, which agent. The Mac's sidebar row also shows it
@@ -382,6 +499,18 @@ struct InboxRow: View {
         let agent = showAgent ? AgentProfiles.profile(for: AgentName(rawValue: item.agent)).short : ""
         return [title, state, when, "\(item.project)/\(item.repo)", agent, item.runtime == .tmux ? "tmux" : "", detail == state ? "" : detail]
             .filter { !$0.isEmpty }.joined(separator: ", ")
+    }
+
+    /// What VoiceOver (and the Mac's tooltip) says. A marked row says its mark first and not again as the state
+    /// ("Answer, …", not also "waiting for your answer"); the others say their state.
+    static func spoken(_ i: InboxItem, now: Int, title: String, detail: String, showAgent: Bool) -> String {
+        let branch = i.branch.map { $0.isEmpty ? "" : ", branch \($0)" } ?? ""
+        guard let mark = InboxView.mark(i) else { return spokenLabel(i, now: now, title: title, detail: detail, showAgent: showAgent) + branch }
+        let when = i.attention.since > 0 ? Format.agoLabel(Double(now - i.attention.since)) : ""
+        let agent = showAgent ? AgentProfiles.profile(for: AgentName(rawValue: i.agent)).short : ""
+        return [mark.label, title, when, "\(i.project)/\(i.repo)", agent, i.runtime == .tmux ? "tmux" : "",
+                detail == InboxView.reasonLabel(i.attention.reason) ? "" : detail]
+            .filter { !$0.isEmpty }.joined(separator: ", ") + branch
     }
 }
 
