@@ -104,7 +104,7 @@ struct ToolCallView: View {
 
     private func code(_ text: String, error: Bool = false) -> some View {
         ScrollView {
-            Text(text).font(.system(size: ChatType.s(12), design: .monospaced)).textSelection(.enabled)
+            Text(LinkDetector.attributed(text)).font(.system(size: ChatType.s(12), design: .monospaced)).textSelection(.enabled)
                 .foregroundStyle(error ? Theme.C.dangerText : Theme.C.foreground.opacity(0.85))
                 .frame(maxWidth: .infinity, alignment: .leading)
         }

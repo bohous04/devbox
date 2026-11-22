@@ -119,12 +119,12 @@ struct ClampedText: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(text).font(.system(size: ChatLayout.bubbleText)).lineSpacing(3).textSelection(.enabled)
+            Text(LinkDetector.attributed(text)).font(.system(size: ChatLayout.bubbleText)).lineSpacing(3).textSelection(.enabled)
                 .lineLimit(open ? nil : ChatLayout.bubbleLines)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { if !open { clamped = $0 } }
                 .background(alignment: .topLeading) {
                     // The same text unclamped, invisible, for its real height.
-                    Text(text).font(.system(size: ChatLayout.bubbleText)).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                    Text(LinkDetector.attributed(text)).font(.system(size: ChatLayout.bubbleText)).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
                         .hidden()
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { full = $0 }
                 }
@@ -143,11 +143,7 @@ struct ChatText: View {
     init(_ text: String) { self.text = text }
 
     var body: some View {
-        // Unparseable markdown (a stray bracket mid-stream) is shown as typed rather than not at all.
-        var attributed = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-            ?? AttributedString(text)
-        ChatInline.dropNonWebLinks(&attributed)
-        return Text(attributed).font(Theme.F.body).textSelection(.enabled)
+        Text(ChatInline.attributed(text)).font(Theme.F.body).textSelection(.enabled)
     }
 }
 

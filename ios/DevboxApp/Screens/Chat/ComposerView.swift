@@ -40,6 +40,9 @@ struct ComposerView: View {
     #endif
 
     @State private var text = ""
+    #if os(macOS)
+    @State private var links = ComposerLinks()
+    #endif
     @State private var images: [Attached] = []
     @State private var picks: [PhotosPickerItem] = []
     @State private var choosingFiles = false
@@ -217,6 +220,16 @@ struct ComposerView: View {
                 if !twoTier, oneLine > 0, h > oneLine + 4 { withAnimation(.snappy) { twoTier = true } }
             }
             .onChange(of: text) { _, t in if t.isEmpty, twoTier, !ChatLayout.composerTwoRows { withAnimation(.snappy) { twoTier = false } } }
+            #if os(macOS)
+            .onAppear { links.text = text; links.install() }
+            .onDisappear { links.remove() }
+            .onChange(of: text) { _, t in
+                links.text = t
+                // After the field has taken the new text.
+                DispatchQueue.main.async { links.decorateFocused() }
+            }
+            .onChange(of: focused) { _, _ in DispatchQueue.main.async { links.decorateFocused() } }
+            #endif
     }
 
     /// The keys of the open menu (ComposerTriggers.keyAction, the web's). Return keeps its own behaviour here when no
