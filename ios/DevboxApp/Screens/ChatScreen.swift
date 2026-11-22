@@ -173,6 +173,8 @@ struct ChatScreen: View {
     /// Open terminal: the Mac's tab, else the full-screen terminal. A refused send's lock goes with it, as on the web.
     private func toTerminal() {
         store.sendLock = nil
+        // The iPhone's terminal is a sheet over this chat, which closing it returns to: not a switch of view, so the
+        // view remembered for the inbox row (TmuxTabMemory) stays as it is.
         if let openTerminal { openTerminal() } else { showTerminal = true }
     }
 

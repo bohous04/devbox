@@ -1,3 +1,4 @@
+import { browserStorage, pruneTabs, tabKey } from "./tmuxTab";
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { api, type DevdConfig, type DiskStats, type LiveStats, type ProjectStat, type Totals } from "./api";
@@ -37,7 +38,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     try {
       const [l, t, p, d, w] = await Promise.allSettled([api.live(), api.totals(), api.projects(), api.disk(), api.prodWriteCount()]);
       if (w.status === "fulfilled") setPendingWrites(w.value.count);
-      if (l.status === "fulfilled") setLive(l.value);
+      if (l.status === "fulfilled") {
+        setLive(l.value);
+        // The list holds every session devd has: a remembered tab of any other is for a session that ended.
+        pruneTabs(browserStorage, new Set(l.value.sessions.map((s) => tabKey(s.id, s.created_at))));
+      }
       if (t.status === "fulfilled") setTotals(t.value);
       if (p.status === "fulfilled") setProjects(p.value);
       if (d.status === "fulfilled") setDisk(d.value);

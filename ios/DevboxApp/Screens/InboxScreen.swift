@@ -5,12 +5,25 @@ import SwiftUI
 enum InboxRoute: Hashable {
     case thread(String)
     case session(String)
+
+    /// A chat session opens its thread; a tmux one its detail, or its chat (the mirror) when that is the view last
+    /// opened for it on this device (TmuxTabMemory). `createdAt`: the session's, from the live list; nil before it loads.
+    @MainActor
+    static func row(sessionId: String, runtime: InboxItem.Runtime, createdAt: Int?, memory: TmuxTabMemory = .shared) -> InboxRoute {
+        guard runtime != .chat else { return .thread(sessionId) }
+        let remembered = createdAt.flatMap { memory.tab(for: TmuxTabMemory.key(sessionId, createdAt: $0)) }
+        return remembered == .chat ? .thread(sessionId) : .session(sessionId)
+    }
 }
 
 /// Every session by what it needs (dashboard/src/pages/Inbox.tsx): needs you, working, idle, then the snoozed and
 /// settled shelves (collapsed). Live over devd's stream; polled every 5 s while the stream is down.
 struct InboxScreen: View {
     @StateObject private var store: InboxStore
+    /// For each session's created_at, which keys its remembered view (InboxRoute.row).
+    @EnvironmentObject private var live: LiveStore
+    /// Watched, so a row leads to the view chosen a moment ago in the session's detail.
+    @ObservedObject private var tabs = TmuxTabMemory.shared
     @Environment(\.scenePhase) private var scenePhase
     @State private var actionsFor: InboxItem?
     @State private var openShelves: Set<String> = []
@@ -168,10 +181,11 @@ struct InboxScreen: View {
     }
 
     private func rows(_ items: [InboxItem], now: Int, preview: Bool) -> some View {
-        VStack(spacing: 2) {
+        let createdAt = Dictionary((live.live?.sessions ?? []).map { ($0.id, $0.created_at) }, uniquingKeysWith: { _, last in last })
+        return VStack(spacing: 2) {
             ForEach(items) { item in
                 HStack(alignment: .top, spacing: 0) {
-                    NavigationLink(value: item.runtime == .chat ? InboxRoute.thread(item.sessionId) : InboxRoute.session(item.sessionId)) {
+                    NavigationLink(value: InboxRoute.row(sessionId: item.sessionId, runtime: item.runtime, createdAt: createdAt[item.sessionId], memory: tabs)) {
                         InboxRow(item: item, now: now, preview: preview)
                     }
                     .buttonStyle(InboxPressStyle())

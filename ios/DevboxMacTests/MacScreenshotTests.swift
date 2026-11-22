@@ -161,6 +161,17 @@ final class MacScreenshotTests: XCTestCase {
         try shoot(name: "mirror-codex-window-light", look: "light", thread: MirrorFixtures.codexId)
     }
 
+    /// A tmux window opens on Terminal, and on Chat once Chat was the last view chosen for it (TmuxTabMemory).
+    func testRememberedTab() throws {
+        let id = MirrorFixtures.claudeId
+        let key = TmuxTabMemory.key(id, createdAt: MirrorFixtures.createdAt)
+        TmuxTabMemory.shared.remember(.terminal, for: key)
+        try shoot(name: "remembered-terminal-light", look: "light", thread: id)
+        TmuxTabMemory.shared.remember(.chat, for: key)
+        try shoot(name: "remembered-chat-light", look: "light", thread: id)
+        TmuxTabMemory.shared.remember(.terminal, for: key)
+    }
+
     /// The thread's heading (title and place) at a normal and a narrow width. On macOS 26 it is a plain title: a
     /// Liquid Glass capsule (drawn plain here, so checked in the view tree) was too short for its two lines.
     func testThreadHeadingWidths() throws {

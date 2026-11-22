@@ -46,6 +46,9 @@ enum InboxFixtures {
                  since: ago(2 * 1440 + 60), last: "Three emails drafted in docs/onboarding.md."),
             // devd names an unnamed session after its path; the row then shows "api #3".
             item("dev-orchard-api-3", "orchard/api", "orchard", "api", runtime: "tmux", section: "idle", reason: nil, since: ago(1500), last: nil),
+            // Grok in tmux: the mirror cannot read it (MirrorFixtures).
+            item("dev-lumen-sketch", "lumen/sketch", "lumen", "sketch", agent: "grok", runtime: "tmux", section: "idle", reason: nil,
+                 since: ago(1700), last: nil),
             item("dev-lumen-deps", "Bump the build dependencies", "lumen", "app", branch: "bump-build-deps", section: "snoozed", reason: "rate-limited",
                  since: ago(50), until: ms + 3 * 3_600_000, last: "Usage limit reached; resumes after the reset."),
             item("dev-acme-logo", "Swap the logo in the footer", "acme", "web", branch: "footer-logo", section: "settled", reason: "completed",

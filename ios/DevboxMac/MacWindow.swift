@@ -691,14 +691,17 @@ private struct WindowConfigurator: NSViewRepresentable {
     }
 }
 
-/// The thread as chat or terminal. A tmux session has no chat, so it starts on its terminal.
+/// The thread as chat or terminal. A tmux session starts on the one last chosen for it (TmuxTabMemory), else its
+/// terminal.
 struct MacThreadDetail: View {
-    private enum Tab { case chat, terminal }
+    private typealias Tab = TmuxTabMemory.Tab
 
     let threadId: String
     let client: DevdClient
     @ObservedObject var inbox: InboxStore
     @EnvironmentObject private var state: MacAppState
+    /// The session's created_at, which keys its remembered tab (TmuxTabMemory).
+    @EnvironmentObject private var live: LiveStore
     @Environment(\.dismissWindow) private var dismissWindow
     @State private var tab: Tab?
     @State private var revealChanges = 0
@@ -706,16 +709,20 @@ struct MacThreadDetail: View {
     private var item: InboxItem? { inbox.items?.first { $0.sessionId == threadId } }
 
     var body: some View {
-        let shown = tab ?? (item?.runtime == .tmux ? .terminal : .chat)
+        let shown = tab ?? opening
         Group {
             switch shown {
             case .chat:
                 let store = state.windows.store(for: threadId, client: client)
-                ChatScreen(store: store, client: client, openTerminal: { tab = .terminal },
+                ChatScreen(store: store, client: client, openTerminal: { choose(.terminal) },
                            closeWindow: { dismissWindow(id: MacWindow.sceneId, value: threadId) },
                            revealChanges: revealChanges)
                     .id(ObjectIdentifier(store))
                     .onReceive(store.$ended) { if $0 { state.windows.ended(threadId) } }
+                    // A remembered Chat for an agent the mirror cannot read opens Terminal, the reason still on the
+                    // Chat tab; the choice is kept for when it can. A session no longer on tmux stays on Chat: its
+                    // "reopen it" is the one useful thing to show.
+                    .onReceive(store.$mirror) { m in if tab == nil, m.flatMap(MirrorView.unsupported) != nil { tab = .terminal } }
             case .terminal:
                 TerminalScreen(sessionId: threadId, title: item?.title ?? threadId, client: client, closable: false)
             }
@@ -733,12 +740,12 @@ struct MacThreadDetail: View {
             if #available(macOS 26, *) { ToolbarSpacer(.flexible, placement: .primaryAction) }
             ToolbarItem(placement: .primaryAction) {
                 ChangesChip(store: state.windows.store(for: threadId, client: client), client: client) {
-                    tab = .chat
+                    choose(.chat)
                     revealChanges += 1
                 }
             }
             ToolbarItem(placement: .primaryAction) {
-                Picker("View", selection: Binding(get: { shown }, set: { tab = $0 })) {
+                Picker("View", selection: Binding(get: { shown }, set: { choose($0) })) {
                     Text("Chat").tag(Tab.chat)
                     Text("Terminal").tag(Tab.terminal)
                 }
@@ -746,6 +753,29 @@ struct MacThreadDetail: View {
                 .labelsHidden()
             }
         }
+    }
+
+    /// A tmux session's entry in the remembered tabs; nil for a chat session or before the inbox and live list load.
+    private var memoryKey: String? {
+        guard item?.runtime == .tmux, let s = live.live?.sessions.first(where: { $0.id == threadId }) else { return nil }
+        return TmuxTabMemory.key(s.id, createdAt: s.created_at)
+    }
+
+    /// Before the user picks one in this window. A chat session has no Terminal default to remember against.
+    private var opening: Tab {
+        guard item?.runtime == .tmux else { return .chat }
+        return memoryKey.flatMap(TmuxTabMemory.shared.tab(for:)) ?? .terminal
+    }
+
+    private func choose(_ next: Tab) {
+        tab = Self.chosen(next, memoryKey: memoryKey)
+    }
+
+    /// The user's own switch, remembered for a tmux session (`memoryKey`). The automatic switch to Terminal above
+    /// sets `tab` itself and never comes here: it must not change the stored choice.
+    static func chosen(_ next: TmuxTabMemory.Tab, memoryKey: String?, memory: TmuxTabMemory = .shared) -> TmuxTabMemory.Tab {
+        if let memoryKey { memory.remember(next, for: memoryKey) }
+        return next
     }
 }
 
