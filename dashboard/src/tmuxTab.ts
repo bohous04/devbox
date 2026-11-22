@@ -60,11 +60,11 @@ export function pruneTabs(s: TabStorage, live: Set<string>): void {
   if (kept.length !== entries.length) write(s, kept);
 }
 
-/** The tab a tmux session opens on: the remembered one, else Chat (the web's default for every session). A remembered
- *  Chat that cannot show the conversation (`readable` false: an agent the mirror cannot read) opens Terminal; the
- *  stored choice stays, so Chat comes back once it can. */
+/** The tab a tmux session opens on: the remembered one, else Chat (the default for every session). A Chat that cannot
+ *  show the conversation (`readable` false: an agent the mirror cannot read, or the mirror failed to load) opens
+ *  Terminal, which says why; the stored choice stays, so Chat comes back once it can. */
 export function openTab(remembered: TmuxTab | null, readable: boolean): TmuxTab {
-  if (remembered === "chat" && !readable) return "terminal";
+  if (!readable) return "terminal";
   return remembered ?? "chat";
 }
 

@@ -118,13 +118,14 @@ export function NewSession() {
     setAgent(defaultAgentFor(tree ?? [], f, p, r));
   }
 
-  // A terminal session opens in the Sessions list (its row expanded), a chat session on its own page.
-  // The list reads the live store, so it is refreshed first: the new row is there to expand.
+  // Every session opens on its own page, a terminal session on Chat (SessionPage). Its tab is remembered by its row in
+  // the live store, so that is refreshed first.
   async function opened(id: string, rt: SessionRuntime, message: string | null) {
     // `replace`: Back from the opened session returns to where New session was opened from, not to this form.
-    if (rt === "chat") { navigate(`/s/${encodeURIComponent(id)}`, { replace: true, state: { notice: message } }); return; }
+    const to = `/s/${encodeURIComponent(id)}`;
+    if (rt === "chat") { navigate(to, { replace: true, state: { notice: message } }); return; }
     await refresh();
-    if (aliveRef.current) navigate(`/sessions?open=${encodeURIComponent(id)}`, { replace: true, state: { notice: message } });
+    if (aliveRef.current) navigate(to, { replace: true, state: { notice: message } });
   }
 
   // `prompt`: the composer's text, trimmed; empty starts the session without one, as before. A failure is thrown to the

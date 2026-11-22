@@ -33,12 +33,22 @@ test("a session reopened under the same id does not inherit the old one's tab", 
   expect(rememberedTab(s, tabKey("dev-a", 1000))).toBeNull();
 });
 
-test("the tab it opens on: the remembered one, else Chat; a remembered Chat it cannot read opens Terminal", () => {
+test("the tab it opens on: the remembered one, else Chat; a Chat it cannot show opens Terminal", () => {
   expect(openTab(null, true)).toBe("chat");
   expect(openTab("chat", true)).toBe("chat");
   expect(openTab("terminal", true)).toBe("terminal");
   expect(openTab("chat", false)).toBe("terminal");
-  expect(openTab(null, false)).toBe("chat");
+  expect(openTab(null, false)).toBe("terminal");
+  expect(openTab("terminal", false)).toBe("terminal");
+});
+
+test("a session never switched opens on Chat; switching to Terminal sticks until switched back", () => {
+  const s = storage();
+  expect(autoOpen(UNSETTLED, s, "a@1", true).tab).toBe("chat");
+  userChoose(s, "a@1", "terminal");
+  expect(autoOpen(UNSETTLED, s, "a@1", true).tab).toBe("terminal");
+  userChoose(s, "a@1", "chat");
+  expect(autoOpen(UNSETTLED, s, "a@1", true).tab).toBe("chat");
 });
 
 test("only the user's switch is stored; the automatic opening, Terminal for an unreadable agent included, is not", () => {

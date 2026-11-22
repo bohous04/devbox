@@ -127,18 +127,21 @@ function ChatPage({ id }: { id: string }) {
     return () => ro.disconnect();
   }, [loaded]);
 
-  // A tmux session's entry in this browser's remembered tabs (tmuxTab.ts), once both its mirror and its row are here.
-  const memoryKey = mirrored && session ? tabKey(id, session.created_at) : null;
-  // It opens on the tab last chosen for it; Chat for an agent the mirror cannot read opens Terminal, its reason still
-  // on the Chat tab. Once: the stream's later mirror states, or a tab the user already picked, are left alone.
-  const readable = mirror?.state !== "unsupported";
+  // A tmux session's entry in this browser's remembered tabs (tmuxTab.ts), once its mirror (or the mirror's failure)
+  // and its row are here.
+  const memoryKey = (mirrored || mirrorFailed) && session ? tabKey(id, session.created_at) : null;
+  const unsupported = mirror ? mirrorUnsupported(mirror) : null;
+  // Why Chat cannot show this tmux session; the terminal it opens on instead says so in its header.
+  const chatUnavailable = unsupported ?? (mirrorFailed && loadErr ? `Could not load the terminal's conversation: ${loadErr.message}` : null);
+  // It opens on the tab last chosen for it, else Chat; a Chat that cannot be shown opens Terminal. Once: the stream's
+  // later mirror states, or a tab the user already picked, are left alone.
+  const readable = chatUnavailable === null;
   useEffect(() => {
     if (memoryKey !== null) setTabState((st) => autoOpen(st, browserStorage, memoryKey, readable));
   }, [memoryKey, readable]);
-  // The user's own switch; a tmux session remembers it for next time (a chat session has no Terminal default to beat).
+  // The user's own switch; a tmux session remembers it for next time (a chat session has no Terminal to remember).
   const choose = (next: TmuxTab) => setTabState(userChoose(browserStorage, memoryKey, next));
   const running = mirror ? mirror.activity === "busy" : thread ? activeRun(thread) !== undefined : false;
-  const unsupported = mirror ? mirrorUnsupported(mirror) : null;
   const mirrorLine = mirror ? mirrorNotice(mirror, sendLock) : null;
   const openTerminal = (
     <Button type="button" variant="outline" size="sm" className="flex-none" onClick={() => { setSendLock(null); choose("terminal"); }}>Open terminal</Button>
@@ -200,7 +203,8 @@ function ChatPage({ id }: { id: string }) {
 
       {tab === "terminal" && (
         <Suspense fallback={null}>
-          <Terminal id={id} tmux="main" title={title} onClose={() => choose("chat")} />
+          <Terminal id={id} tmux="main" title={title} onClose={() => choose("chat")}
+            headerExtra={chatUnavailable && <span role="status" className="min-w-0 truncate text-xs text-amber-300" title={chatUnavailable}>{chatUnavailable}</span>} />
         </Suspense>
       )}
 
