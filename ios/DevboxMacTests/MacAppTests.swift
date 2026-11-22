@@ -20,6 +20,29 @@ final class MacAppTests: XCTestCase {
         XCTAssertEqual(state.windows.restorePlan(current: nil).open, [], "a fixture run restores no threads of the real app")
     }
 
+    /// A selected sidebar row's text turns light on the selection colour, which AppKit derives from the app's accent
+    /// when the list has the keyboard. The shared brand accent (near-white in dark mode) made that light on near-white,
+    /// so the Mac app declares no accent and keeps the system's; the plain selection colour (no keyboard) carries the
+    /// normal label colour. The contrast holds for the default (blue) accent; a user's own accent is the system's call.
+    func testSidebarSelectionTextIsReadable() throws {
+        XCTAssertNil(Bundle.main.object(forInfoDictionaryKey: "NSAccentColorName"), "the Mac app keeps the system accent")
+        func luminance(_ c: NSColor) -> CGFloat {
+            let s = c.usingColorSpace(.sRGB)!
+            func channel(_ v: CGFloat) -> CGFloat { v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+            return 0.2126 * channel(s.redComponent) + 0.7152 * channel(s.greenComponent) + 0.0722 * channel(s.blueComponent)
+        }
+        func contrast(_ a: NSColor, _ b: NSColor) -> CGFloat {
+            let (x, y) = (luminance(a), luminance(b))
+            return (max(x, y) + 0.05) / (min(x, y) + 0.05)
+        }
+        for name in [NSAppearance.Name.aqua, .darkAqua] {
+            try XCTUnwrap(NSAppearance(named: name)).performAsCurrentDrawingAppearance {
+                XCTAssertGreaterThanOrEqual(contrast(.white, .selectedContentBackgroundColor), 4.5, "\(name.rawValue): focused selection")
+                XCTAssertGreaterThanOrEqual(contrast(.labelColor, .unemphasizedSelectedContentBackgroundColor), 4.5, "\(name.rawValue): unfocused selection")
+            }
+        }
+    }
+
     private func item(_ section: String, reason: String?, since: Int = 0, branch: String? = nil) throws -> InboxItem {
         var json: [String: Any] = ["sessionId": "dev-p-r-7", "runtime": "chat", "title": "t", "project": "p", "repo": "r", "agent": "claude",
                                    "attention": ["section": section, "since": since, "reason": reason.map { $0 as Any } ?? NSNull()],

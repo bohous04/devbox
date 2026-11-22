@@ -186,7 +186,9 @@ targets:
         CODE_SIGN_ENTITLEMENTS: DevboxMac/DevboxMac.entitlements
         SWIFT_VERSION: "5.0"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        # No app accent: the Mac keeps the system's (selections, prominent and default buttons, toggles, progress bars),
+        # in both modes. AppKit fills a focused list selection with the accent and draws its text light, and the shared
+        # brand accent is near-white in dark mode (light on near-white in the sidebar). The iOS target keeps AccentColor.
         MARKETING_VERSION: "0.3.0"
         CURRENT_PROJECT_VERSION: "24"
     info:

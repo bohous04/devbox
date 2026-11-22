@@ -618,12 +618,13 @@ struct MacInboxRow: View {
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 if let word = Self.word(item) {
-                    Text(word.text).font(.system(size: 11, weight: .semibold)).foregroundStyle(InboxTone.text(word.tone))
+                    Text(word.text).font(.system(size: 11, weight: .semibold))
+                        .modifier(RowStatusTone(color: InboxTone.text(word.tone), onSelection: Self.style(.primary)))
                 } else {
                     HStack(spacing: 5) {
                         if item.attention.section == .working { LiveDot() }
                         Text(Self.when(item, now: now)).font(.system(size: 11)).monospacedDigit()
-                            .foregroundStyle(item.attention.section == .working ? AnyShapeStyle(InboxTone.busy) : Self.style(.secondary))
+                            .modifier(RowStatusTone(color: item.attention.section == .working ? InboxTone.busy : nil, onSelection: Self.style(.secondary)))
                     }
                 }
             }
@@ -648,13 +649,26 @@ struct MacInboxRow: View {
     }
 }
 
+/// A status colour, except on the focused list's accent selection, where the row's light text style takes over (a
+/// fixed colour there, red or blue on blue, would not read). Read where it is drawn: the row's own body does not see
+/// the selection's prominence change.
+private struct RowStatusTone: ViewModifier {
+    let color: Color?
+    let onSelection: AnyShapeStyle
+    @Environment(\.backgroundProminence) private var prominence
+
+    func body(content: Content) -> some View {
+        content.foregroundStyle(prominence == .increased || color == nil ? onSelection : AnyShapeStyle(color!))
+    }
+}
+
 /// A working row's mark: a dot that breathes while the agent runs; still with Reduce Motion.
 private struct LiveDot: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dim = false
 
     var body: some View {
-        Circle().fill(InboxTone.busy).frame(width: 6, height: 6)
+        Circle().frame(width: 6, height: 6).modifier(RowStatusTone(color: InboxTone.busy, onSelection: AnyShapeStyle(.primary)))
             .opacity(dim ? 0.35 : 1)
             .onAppear {
                 guard !reduceMotion else { return }
