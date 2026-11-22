@@ -128,6 +128,14 @@ final class InboxSettleTests: XCTestCase {
         XCTAssertTrue(InboxSettler.marksSeen(failed, on: .left))
     }
 
+    /// Seen goes only to the session on screen: the top of the Inbox stack, and nothing while another tab shows.
+    func testOpenedIsTheTopOfTheInboxStackOnTheInboxTab() {
+        let path: [InboxRoute] = [.thread("dev-a"), .session("dev-b")]
+        XCTAssertEqual(InboxRoute.opened(path: path, onInboxTab: true), "dev-b", "a deep link pushes several: the last shows")
+        XCTAssertNil(InboxRoute.opened(path: path, onInboxTab: false), "another tab is selected")
+        XCTAssertNil(InboxRoute.opened(path: [], onInboxTab: true))
+    }
+
     // MARK: - Against the fixture devd
 
     private func fixtureStore() async throws -> InboxStore {

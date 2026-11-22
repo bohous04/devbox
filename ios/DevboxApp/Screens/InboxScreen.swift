@@ -12,6 +12,11 @@ enum InboxRoute: Hashable {
         }
     }
 
+    /// The session the owner is looking at on the Inbox tab: the top of its stack, and none while another tab shows.
+    static func opened(path: [InboxRoute], onInboxTab: Bool) -> String? {
+        onInboxTab ? path.last?.sessionId : nil
+    }
+
     /// A chat session opens its thread; a tmux one its detail, or its chat (the mirror) when that is the view last
     /// opened for it on this device (TmuxTabMemory). `createdAt`: the session's, from the live list; nil before it loads.
     @MainActor
@@ -38,10 +43,12 @@ struct InboxScreen: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var actionsFor: InboxItem?
     @State private var openShelves: Set<String> = []
+    /// Why a row cannot be settled now, after its "Answer first" swipe; goes on its own.
+    @State private var hint: String?
     /// On screen (not under a pushed chat or another tab): only then does coming back reopen the stream.
     @State private var visible = false
     private let client: DevdClient
-    /// The session open over the inbox (the stack's first route), or nil.
+    /// The session on screen over the inbox (InboxRoute.opened), or nil.
     private let opened: String?
 
     init(client: DevdClient, opened: String? = nil) {
@@ -63,11 +70,6 @@ struct InboxScreen: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.C.background)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            InboxSettleNotice(settler: settler) { Task { await settler.undo(in: store) } }
-                .animation(.snappy(duration: 0.25), value: settler.notice)
-                .animation(.snappy(duration: 0.25), value: settler.problem)
-        }
         .navigationTitle("Inbox")
         .task { store.start() }
         .onAppear { visible = true }
@@ -125,19 +127,26 @@ struct InboxScreen: View {
                             .frame(minHeight: 44)
                             .plainRow()
                     }
-                    rows(list, now: now) { InboxView.asks($0) }
+                    rows(list, now: now, inList: true) { InboxView.asks($0) }
                     let shelves = InboxView.shelves(g)
                     if !shelves.isEmpty {
                         Rectangle().fill(Theme.C.border).frame(height: 1).padding(.vertical, 8).plainRow().accessibilityHidden(true)
                         ForEach(shelves, id: \.label) { shelf in
                             shelfHead(shelf)
-                            if openShelves.contains(shelf.label) { rows(shelf.items, now: now) { _ in shelf.preview } }
+                            if openShelves.contains(shelf.label) { rows(shelf.items, now: now, inList: false) { _ in shelf.preview } }
                         }
                     }
                     Color.clear.frame(height: 1).plainRow().id(Self.bottomId)
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
+                // On the List itself, so its content scrolls clear of the notice as it does of the tab bar.
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    InboxSettleNotice(settler: settler, hint: hint) { Task { await settler.undo(in: store) } }
+                        .animation(.snappy(duration: 0.25), value: settler.notice)
+                        .animation(.snappy(duration: 0.25), value: settler.problem)
+                        .animation(.snappy(duration: 0.25), value: hint)
+                }
                 .environment(\.defaultMinListRowHeight, 1)
             }
             .refreshable { await store.load() }
@@ -186,7 +195,8 @@ struct InboxScreen: View {
     }
 
     @ViewBuilder
-    private func rows(_ items: [InboxItem], now: Int, preview: @escaping (InboxItem) -> Bool) -> some View {
+    /// `inList`: a full swipe settles only in the list; on a shelf it would act on rows read less closely.
+    private func rows(_ items: [InboxItem], now: Int, inList: Bool, preview: @escaping (InboxItem) -> Bool) -> some View {
         let createdAt = Dictionary((live.live?.sessions ?? []).map { ($0.id, $0.created_at) }, uniquingKeysWith: { _, last in last })
         ForEach(items) { item in
             InboxRow(item: item, now: now, preview: preview(item))
@@ -198,7 +208,7 @@ struct InboxScreen: View {
                     .opacity(0)
                 }
                 .plainRow()
-                .swipeActions(edge: .trailing, allowsFullSwipe: InboxSettler.canSettle(item) && InboxSettler.block(item) == nil) {
+                .swipeActions(edge: .trailing, allowsFullSwipe: inList && InboxSettler.canSettle(item) && InboxSettler.block(item) == nil) {
                     trailingAction(item)
                 }
                 .swipeActions(edge: .leading) {
@@ -218,10 +228,10 @@ struct InboxScreen: View {
             Button { unsettle(item) } label: { Label("Back", systemImage: "arrow.uturn.backward") }
                 .tint(InboxTone.backSwipe)
         } else if let block = InboxSettler.block(item) {
-            // A swipe action has no disabled look: a grey "Answer first" that says why when tapped.
-            Button { Task { await settler.settle(item, in: store) } } label: { Label("Answer first", systemImage: "questionmark.bubble") }
+            // A swipe action has no disabled look: a grey "Answer first" that says why for a moment when tapped.
+            Button { explain(block) } label: { Label("Answer first", systemImage: "questionmark.bubble") }
                 .tint(InboxTone.blockedSwipe)
-                .accessibilityHint(block)
+                .accessibilityLabel("Settle: answer the open request first")
         } else {
             Button { Task { await settler.settle(item, in: store) } } label: { Label("Settle", systemImage: "checkmark") }
                 .tint(InboxTone.settleSwipe)
@@ -241,6 +251,15 @@ struct InboxScreen: View {
                 .disabled(block != nil)
         } else {
             Button { unsettle(item) } label: { Label("Back to the inbox", systemImage: "arrow.uturn.backward") }
+        }
+    }
+
+    private func explain(_ why: String) {
+        hint = why
+        AccessibilityNotification.Announcement(why).post()
+        Task {
+            try? await Task.sleep(for: .seconds(3))
+            if hint == why { hint = nil }
         }
     }
 
@@ -265,11 +284,21 @@ private extension View {
 /// Over the tab bar: "Settled · Undo" after a settle, and the last failure with a way to dismiss it.
 struct InboxSettleNotice: View {
     @ObservedObject var settler: InboxSettler
+    /// A short, neutral explanation (a blocked settle), shown while set.
+    var hint: String?
     let undo: () -> Void
 
     var body: some View {
-        if settler.problem != nil || settler.notice != nil {
+        if settler.problem != nil || settler.notice != nil || hint != nil {
             VStack(spacing: 8) {
+                if let hint {
+                    card {
+                        Image(systemName: "questionmark.bubble").foregroundStyle(InboxTone.action).accessibilityHidden(true)
+                        Text(hint).font(.subheadline).foregroundStyle(Theme.C.foreground).padding(.vertical, 10)
+                        Spacer(minLength: 0)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
                 if let problem = settler.problem { failure(problem) }
                 if let notice = settler.notice { settled(notice) }
             }
@@ -394,6 +423,7 @@ struct InboxRow: View {
     let now: Int
     let preview: Bool
     @Environment(\.inboxShowsAgent) private var showAgent
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     static func untilLabel(_ ms: Int) -> String {
         Date(timeIntervalSince1970: Double(ms) / 1000).formatted(.dateTime.weekday(.abbreviated).hour().minute())
@@ -404,12 +434,14 @@ struct InboxRow: View {
         let message = item.lastText.map(InboxView.plainPreview) ?? ""
         let detail = preview ? (message.isEmpty ? InboxView.reasonLabel(item.attention.reason) : message) : ""
         let mark = InboxView.mark(item)
+        // The largest accessibility sizes leave a word or two per line: two lines keep a title readable.
+        let lines = typeSize > .accessibility1 ? 2 : 1
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(title)
                     .font(.body)
                     .foregroundStyle(mark == nil ? InboxTone.quietTitle : Theme.C.foreground)
-                    .lineLimit(1)
+                    .lineLimit(lines)
                 Spacer(minLength: 0)
                 state(mark)
             }
@@ -417,7 +449,7 @@ struct InboxRow: View {
                 Text(InboxView.secondLine(item, detail: detail))
                     .font(.subheadline)
                     .foregroundStyle(Theme.C.mutedForeground)
-                    .lineLimit(1)
+                    .lineLimit(lines)
                 Spacer(minLength: 0)
                 if showAgent {
                     AgentLogo(mark: AgentLogo.Mark(agent: item.agent), size: 13)
@@ -430,6 +462,7 @@ struct InboxRow: View {
         .padding(.vertical, 10)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
         .accessibilityLabel(Self.spoken(item, now: now, title: title, detail: detail, showAgent: showAgent))
     }
 

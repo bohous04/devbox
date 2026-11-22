@@ -88,7 +88,8 @@ class InboxSettler: ObservableObject {
 
     private let lifetime: Duration
     private let voiceOver: @MainActor () -> Bool
-    private let undoHint: String
+    /// How the announcement says to undo (the Mac names ⌘Z).
+    let undoHint: String
     /// Seen posts per finish ("id@since"): one at a time (several triggers fire together), a done one never again,
     /// a failed one tried once more.
     private var seenInFlight: Set<String> = []

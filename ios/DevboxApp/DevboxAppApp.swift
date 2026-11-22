@@ -270,7 +270,7 @@ private struct SessionsContainer: View {
     var body: some View {
         TabView(selection: $selectedTab) {
             NavigationStack(path: $inboxPath) {
-                withVaultBanner(InboxScreen(client: client, opened: inboxPath.first?.sessionId).id(appModel.clientIdentity))
+                withVaultBanner(InboxScreen(client: client, opened: InboxRoute.opened(path: inboxPath, onInboxTab: selectedTab == .inbox)).id(appModel.clientIdentity))
                     .navigationDestination(for: InboxRoute.self) { route in
                         switch route {
                         case .thread(let id): ChatScreen(sessionId: id, client: client).id(appModel.clientIdentity)

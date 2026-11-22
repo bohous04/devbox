@@ -16,4 +16,7 @@ final class MacSidebarTests: XCTestCase {
         XCTAssertFalse(MacSettler.claimsUndo(flags: [.command], key: "x", noticeShown: true, focusOwnsUndo: false))
         XCTAssertTrue(MacSettler.claimsUndo(flags: [.command, .capsLock], key: "Z", noticeShown: true, focusOwnsUndo: false), "caps lock")
     }
+
+    /// The Mac's settle announcement names ⌘Z.
+    func testMacAnnouncesCommandZ() { XCTAssertEqual(MacSettler(voiceOver: { false }).undoHint, "⌘Z to undo") }
 }
