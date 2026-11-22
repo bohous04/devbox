@@ -249,10 +249,29 @@ enum InboxView {
         }
     }
 
-    /// The transcript's one button: it says what continuing will do.
+    /// The transcript's one button: it says what continuing will do; a mode from a later devd promises neither.
     static func continueLabel(_ mode: EndedSession.ContinueMode) -> String {
-        mode == .resume ? "Continue in a new session (resume)" : "Start a new session with this chat (handoff)"
+        switch mode {
+        case .resume: return "Continue in a new session (resume)"
+        case .handoff: return "Start a new session with this chat (handoff)"
+        case .unknown: return "Start a new session"
+        }
     }
+
+    /// What the transcript says about itself when it is not whole; nil when it is.
+    static func transcriptNote(_ t: EndedSession.TranscriptState) -> String? {
+        switch t {
+        case .truncated: return "The end of this conversation may be missing: the last read before the session ended stopped short."
+        case .missing: return "This session ended without a transcript."
+        case .complete, .unknown: return nil
+        }
+    }
+
+    /// A handoff needs the transcript; a resume does not.
+    static func canContinue(_ e: EndedSession) -> Bool { e.transcript != .missing || e.continueMode == .resume }
+
+    /// A request the conversation still had open: in an ended session's transcript it will never be answered.
+    static func openRequestLabel(inTranscript: Bool) -> String { inTranscript ? "No answer, session ended" : "waiting for an answer" }
 
     static func endedTitle(_ e: EndedSession) -> String {
         sessionTitle(sessionId: e.sessionId, name: e.title == "\(e.project)/\(e.repo)" ? nil : e.title, project: e.project, repo: e.repo, topic: e.topic)
@@ -285,6 +304,9 @@ final class InboxStore: ObservableObject {
     @Published var items: [InboxItem]?
     /// Ended sessions' transcripts, on the Settled shelf; empty until loaded (they never ask for anything).
     @Published private(set) var ended: [EndedSession] = []
+    /// Why the ended transcripts did not load (shown on the Settled shelf); nil once they did.
+    @Published private(set) var endedError: String?
+
     /// The last list load failed, with why.
     @Published private(set) var loadError: String?
     /// The stream is down; the list is polled meanwhile.
@@ -328,13 +350,14 @@ final class InboxStore: ObservableObject {
             loadError = errorText(error)
             return
         }
-        // After the sessions, so a failure here says what failed: the inbox itself loaded.
+        // After the sessions, with its own error: the inbox itself loaded, and a live stream would hide loadError.
         let endedMark = endedFramesDuringLoad.count
         do {
             let list: EndedList = try await client.get("/api/ended")
             ended = endedFramesDuringLoad[endedMark...].reduce(list.items, InboxView.upsertEnded)
+            endedError = nil
         } catch {
-            loadError = "ended sessions: \(errorText(error))"
+            endedError = errorText(error)
         }
     }
 

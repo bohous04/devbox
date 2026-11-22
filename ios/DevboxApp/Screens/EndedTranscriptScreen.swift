@@ -7,11 +7,13 @@ struct EndedTranscriptScreen: View {
     let client: DevdClient
     /// Opens the new session once devd started it (the iPhone's stack, the Mac window's selection).
     let onContinued: (String) -> Void
+    @ObservedObject private var continues = EndedContinues.shared
     @State private var ended: EndedSession?
     @State private var thread: ThreadSnapshot?
     @State private var loadError: String?
-    @State private var starting = false
     @State private var startError: String?
+
+    private var starting: Bool { continues.running.contains(endedId) }
 
     var body: some View {
         Group {
@@ -29,16 +31,33 @@ struct EndedTranscriptScreen: View {
         .inlineNavigationTitle()
         .solidNavigationBar()
         .hidesTabBar()
-        .task(id: endedId) { await load() }
+        .task(id: endedId) {
+            // A continue started before this screen (re)opened: wait for it and open its session.
+            if starting { await startContinue() }
+            await load()
+        }
     }
 
     private func load() async {
         do {
-            async let e: EndedSession = client.get("/api/ended/\(pathSegment(endedId))")
-            async let t: ThreadSnapshot = client.get("/api/ended/\(pathSegment(endedId))/transcript")
-            (ended, thread) = try await (e, t)
+            let e: EndedSession = try await client.get("/api/ended/\(pathSegment(endedId))")
+            // A session that ended without a transcript has nothing to fetch (devd answers 410).
+            if e.transcript == .missing { thread = .empty } else {
+                thread = try await client.get("/api/ended/\(pathSegment(endedId))/transcript") as ThreadSnapshot
+            }
+            ended = e
         } catch {
             loadError = errorText(error)
+        }
+    }
+
+    private func startContinue() async {
+        startError = nil
+        do {
+            let r = try await continues.start(endedId, client: client)
+            onContinued(r.sessionId)
+        } catch {
+            startError = chatErrorText(error)
         }
     }
 
@@ -50,7 +69,13 @@ struct EndedTranscriptScreen: View {
         let turnStarts = WorkGroups.turnStarts(rows)
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
-                if rows.isEmpty { EmptyState("No messages — the session ended before anything was said.", systemImage: "bubble.left") }
+                if let note = InboxView.transcriptNote(e.transcript) {
+                    Text(note).font(.subheadline).foregroundStyle(Theme.C.mutedForeground)
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Theme.C.muted.opacity(0.5), in: RoundedRectangle(cornerRadius: Theme.R.md))
+                }
+                if rows.isEmpty, e.transcript != .missing { EmptyState("No messages — the session ended before anything was said.", systemImage: "bubble.left") }
                 ForEach(rows) { row in
                     switch row {
                     case .work(let w): WorkGroupView(work: w).equatable()
@@ -70,9 +95,13 @@ struct EndedTranscriptScreen: View {
         .defaultScrollAnchor(.bottom)
         .safeAreaInset(edge: .bottom) {
             VStack(alignment: .leading, spacing: 6) {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 12) { line; Spacer(minLength: 0); button(e) }
-                    VStack(alignment: .leading, spacing: 10) { line; button(e).frame(maxWidth: .infinity) }
+                if InboxView.canContinue(e) {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 12) { line; Spacer(minLength: 0); button(e) }
+                        VStack(alignment: .leading, spacing: 10) { line; button(e).frame(maxWidth: .infinity) }
+                    }
+                } else {
+                    line.frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(.horizontal, 14).padding(.vertical, 12)
                 .background(Theme.C.card, in: RoundedRectangle(cornerRadius: Theme.R.md))
@@ -96,17 +125,7 @@ struct EndedTranscriptScreen: View {
 
     private func button(_ e: EndedSession) -> some View {
         Button {
-            starting = true
-            startError = nil
-            Task {
-                do {
-                    let r: ContinueResult = try await client.post("/api/ended/\(pathSegment(e.id))/continue", body: nil, timeout: 300)
-                    onContinued(r.sessionId)
-                } catch {
-                    startError = chatErrorText(error)
-                }
-                starting = false
-            }
+            Task { await startContinue() }
         } label: {
             Text(starting ? "Starting…" : InboxView.continueLabel(e.continueMode))
         }

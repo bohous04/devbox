@@ -101,7 +101,7 @@ struct MessageRow: View, Equatable {
                     switch item.status {
                     case .answered: Text("answered: ").foregroundStyle(Theme.C.mutedForeground) + Text(item.output ?? "—")
                     case .expired: Text("expired without an answer").foregroundStyle(Theme.C.mutedForeground)
-                    default: Text("waiting for an answer").foregroundStyle(Theme.C.mutedForeground)
+                    default: Text(InboxView.openRequestLabel(inTranscript: endedId != nil)).foregroundStyle(Theme.C.mutedForeground)
                     }
                 }
                 .font(Theme.F.meta)

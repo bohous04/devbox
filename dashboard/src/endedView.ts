@@ -1,4 +1,4 @@
-import type { ContinueMode, EndedRemoved, EndedSession } from "../../shared/ended";
+import type { ContinueMode, ContinueResult, EndedRemoved, EndedSession } from "../../shared/ended";
 import type { InboxItem } from "../../shared/thread";
 import { sessionTitle } from "./inboxView";
 
@@ -21,10 +21,43 @@ export function settledShelf(settled: InboxItem[], ended: EndedSession[]): Settl
     .sort((a, b) => at(b) - at(a));
 }
 
-/** The transcript page's one button: it says what POST /api/ended/:id/continue will do. */
-export function continueLabel(mode: ContinueMode): string {
-  return mode === "resume" ? "Continue in a new session (resume)" : "Start a new session with this chat (handoff)";
+/** The transcript page's one button: it says what POST /api/ended/:id/continue will do. A mode this dashboard does not
+ *  know (a later devd) gets a label that promises neither. */
+export function continueLabel(mode: ContinueMode | (string & {})): string {
+  if (mode === "resume") return "Continue in a new session (resume)";
+  if (mode === "handoff") return "Start a new session with this chat (handoff)";
+  return "Start a new session";
 }
+
+/** A request the conversation still had open: in a live thread it waits, in an ended session's transcript it never
+ *  will be answered. */
+export function openRequestLabel(inTranscript: boolean): string {
+  return inTranscript ? "No answer, session ended" : "waiting for an answer";
+}
+
+/** What the transcript page says about a transcript that is not whole (EndedSession.transcript); null when it is. */
+export function transcriptNote(t: EndedSession["transcript"]): string | null {
+  if (t === "truncated") return "The end of this conversation may be missing: the last read before the session ended stopped short.";
+  if (t === "missing") return "This session ended without a transcript.";
+  return null;
+}
+
+/** Continue on the transcript page: a handoff needs the transcript; a resume does not. */
+export function canContinue(e: Pick<EndedSession, "transcript" | "continueMode">): boolean {
+  return e.transcript !== "missing" || e.continueMode === "resume";
+}
+
+const continuing = new Map<string, Promise<ContinueResult>>();
+/** One continue per transcript at a time, across page visits: a second press (or the page opened again) joins the
+ *  one in flight instead of starting another session. devd refuses a second one too (409). */
+export function continueOnce(id: string, start: (id: string) => Promise<ContinueResult>): Promise<ContinueResult> {
+  const cur = continuing.get(id);
+  if (cur) return cur;
+  const p = start(id).finally(() => continuing.delete(id));
+  continuing.set(id, p);
+  return p;
+}
+export const continueInFlight = (id: string) => continuing.has(id);
 
 export function endedTitle(e: EndedSession): string {
   return sessionTitle({ sessionId: e.sessionId, name: e.title === `${e.project}/${e.repo}` ? null : e.title, project: e.project, repo: e.repo, topic: e.topic });

@@ -46,6 +46,9 @@ export interface EventStreamOptions {
   onEnded?: (e: EndedSession | EndedRemoved) => void;
   /** All ended transcripts: fetched like the inbox list. */
   onEndedList?: (items: EndedSession[]) => void;
+  /** Why the last fetch of the ended transcripts failed, null once one succeeded. Separate from `pollError`: the stream
+   *  may be up while that list did not load. */
+  onEndedError?: (error: string | null) => void;
 }
 
 /** devd's SSE stream (`GET /api/stream`, devd/src/threadApi.ts). `paused` is true while it is down; then the inbox
@@ -71,8 +74,8 @@ export function useEventStream(opts: EventStreamOptions): { paused: boolean; pol
     const loadInbox = () => {
       if (h.current.onEndedList) {
         api.ended().then(
-          (r) => { if (!disposed) h.current.onEndedList?.(r.items); },
-          (e) => { if (!disposed) setPollError((e as Error).message); },
+          (r) => { if (!disposed) { h.current.onEndedError?.(null); h.current.onEndedList?.(r.items); } },
+          (e) => { if (!disposed) h.current.onEndedError?.((e as Error).message); },
         );
       }
       if (!h.current.onInboxList) return;

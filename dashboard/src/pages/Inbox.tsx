@@ -283,10 +283,11 @@ function EndedRow({ ended, now, onHidden }: { ended: EndedSession; now: number; 
 }
 
 /** A collapsed shelf under the list (Working, Snoozed, Settled); not shown while empty. */
-function Shelf({ label, count, children }: { label: string; count: number; children: React.ReactNode }) {
+/** `note`: shown under the heading whether the shelf is open or not, even when it is empty (a load error). */
+function Shelf({ label, count, children, note = null }: { label: string; count: number; children: React.ReactNode; note?: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   const id = `inbox-${label.toLowerCase()}`;
-  if (count === 0) return null;
+  if (count === 0) return note;
   return (
     <section aria-labelledby={id}>
       <h2>
@@ -299,6 +300,7 @@ function Shelf({ label, count, children }: { label: string; count: number; child
           <span className="ml-auto tabular-nums">{count}</span>
         </button>
       </h2>
+      {note}
       <Collapse open={open}><div className="pb-2">{children}</div></Collapse>
     </section>
   );
@@ -338,6 +340,7 @@ export function Inbox() {
   const [items, setItems] = useState<InboxItem[] | null>(null);
   // Ended sessions' transcripts, on the Settled shelf; [] until loaded (they never ask for anything).
   const [ended, setEnded] = useState<EndedSession[]>([]);
+  const [endedError, setEndedError] = useState<string | null>(null);
   const now = useNow(15_000);
   const { notice } = useSettleState();
   const { paused, pollError, badFrame } = useEventStream({
@@ -346,6 +349,7 @@ export function Inbox() {
     // Until the first full list arrives a single item would read as the whole inbox.
     onInbox: (item) => setItems((cur) => (cur === null ? cur : upsertInbox(cur, item))),
     onEndedList: setEnded,
+    onEndedError: setEndedError,
     onEnded: (e) => setEnded((cur) => upsertEnded(cur, e)),
   });
   // The badge colours come from devd's project list, loaded once per visit; the badges stay neutral until it answers.
@@ -432,11 +436,12 @@ export function Inbox() {
             ) : (
               <section aria-label="Inbox" className="mb-3"><Rows items={list} now={now} onItem={onItem} quiet settle /></section>
             )}
-            {g.working.length + g.snoozed.length + g.settled.length + ended.length > 0 && (
+            {g.working.length + g.snoozed.length + g.settled.length + ended.length > 0 || endedError !== null ? (
               <div className="border-t pt-1.5">
                 <Shelf label="Working" count={g.working.length}><Rows items={g.working} now={now} onItem={onItem} settle /></Shelf>
                 <Shelf label="Snoozed" count={g.snoozed.length}><Rows items={g.snoozed} now={now} onItem={onItem} settle={false} /></Shelf>
-                <Shelf label="Settled" count={g.settled.length + ended.length}>
+                <Shelf label="Settled" count={g.settled.length + ended.length}
+                  note={endedError === null ? null : <p role="alert" className="px-3 pb-1 text-xs text-destructive">Ended sessions could not be loaded: {endedError}</p>}>
                   <ul className="flex flex-col gap-px">
                     {settledShelf(g.settled, ended).map((r) => (r.kind === "session"
                       ? <Row key={r.item.sessionId} item={r.item} now={now} onItem={onItem} quiet={false} settle={false} />
@@ -444,7 +449,7 @@ export function Inbox() {
                   </ul>
                 </Shelf>
               </div>
-            )}
+            ) : null}
             <div className="sticky bottom-20 z-10 mt-3 flex flex-col gap-2 px-3 lg:bottom-4">
               <SettleProblem />
               <SettleNotice onUndo={undo} />

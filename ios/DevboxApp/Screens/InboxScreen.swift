@@ -135,11 +135,14 @@ struct InboxScreen: View {
                             .plainRow()
                     }
                     rows(list, now: now, inList: true) { InboxView.asks($0) }
-                    let shelves = InboxView.shelves(g, ended: store.ended)
+                    let shelves = InboxView.shelves(g, ended: store.ended, endedError: store.endedError)
                     if !shelves.isEmpty {
                         Rectangle().fill(Theme.C.border).frame(height: 1).padding(.vertical, 8).plainRow().accessibilityHidden(true)
                         ForEach(shelves, id: \.label) { shelf in
-                            shelfHead(shelf)
+                            if shelf.count > 0 { shelfHead(shelf) }
+                            if let note = shelf.note {
+                                Text(note).font(Theme.F.meta).foregroundStyle(Theme.C.dangerText).plainRow()
+                            }
                             if openShelves.contains(shelf.label) {
                                 ForEach(shelf.rows) { r in
                                     switch r {

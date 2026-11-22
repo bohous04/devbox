@@ -1,11 +1,14 @@
 import { expect, test } from "bun:test";
 import type { EndedSession } from "../../shared/ended";
 import type { InboxItem } from "../../shared/thread";
-import { continueLabel, endedAttachmentUrl, endedHref, endedSecondLine, endedTitle, settledShelf, upsertEnded } from "./endedView";
+import {
+  canContinue, continueInFlight, continueLabel, continueOnce, endedAttachmentUrl, endedHref, endedSecondLine, endedTitle, openRequestLabel,
+  settledShelf, transcriptNote, upsertEnded,
+} from "./endedView";
 
 const ended = (id: string, endedAt: number, over: Partial<EndedSession> = {}): EndedSession => ({
   id, sessionId: "dev-acme-app", runtime: "chat", title: "acme/app", folder: "acme", project: "acme", repo: "app", agent: "claude",
-  branch: null, topic: null, lastText: null, endedAt, continueMode: "handoff", ...over,
+  branch: null, topic: null, lastText: null, endedAt, continueMode: "handoff", transcript: "complete", ...over,
 });
 const settled = (sessionId: string, since: number): InboxItem => ({
   sessionId, runtime: "chat", title: sessionId, project: "acme", repo: "app", agent: "claude",
@@ -27,6 +30,32 @@ test("the Settled shelf mixes settled sessions and ended transcripts, newest fir
 test("the button says what continue will do", () => {
   expect(continueLabel("resume")).toBe("Continue in a new session (resume)");
   expect(continueLabel("handoff")).toBe("Start a new session with this chat (handoff)");
+  // A mode from a later devd promises neither.
+  expect(continueLabel("fork")).toBe("Start a new session");
+});
+
+test("an open request in a transcript will never be answered; a transcript that is not whole says so", () => {
+  expect(openRequestLabel(true)).toBe("No answer, session ended");
+  expect(openRequestLabel(false)).toBe("waiting for an answer");
+  expect(transcriptNote("complete")).toBeNull();
+  expect(transcriptNote("truncated")).toContain("may be missing");
+  expect(transcriptNote("missing")).toBe("This session ended without a transcript.");
+  expect(canContinue(ended("e", 1, { transcript: "missing" }))).toBe(false);
+  expect(canContinue(ended("e", 1, { transcript: "missing", continueMode: "resume" }))).toBe(true);
+});
+
+test("a second continue of the same transcript joins the one in flight", async () => {
+  let calls = 0;
+  let finish!: () => void;
+  const start = (id: string) => { calls++; return new Promise<{ mode: "handoff"; sessionId: string; runtime: "chat"; reason: null }>((r) => { finish = () => r({ mode: "handoff", sessionId: `${id}-new`, runtime: "chat", reason: null }); }); };
+  const a = continueOnce("e1", start);
+  const b = continueOnce("e1", start);
+  expect(calls).toBe(1);
+  expect(continueInFlight("e1")).toBe(true);
+  finish();
+  expect((await a).sessionId).toBe("e1-new");
+  expect(await b).toBe(await a);
+  expect(continueInFlight("e1")).toBe(false);
 });
 
 test("an ended row is titled like a session row and says where it ran", () => {

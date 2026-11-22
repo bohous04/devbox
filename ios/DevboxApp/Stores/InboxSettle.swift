@@ -15,6 +15,8 @@ extension InboxView {
         let preview: Bool
         /// Settled only: ended sessions' transcripts, among the settled sessions.
         var ended: [EndedSession] = []
+        /// Settled only: why the transcripts did not load. The shelf shows it, empty or shut.
+        var note: String? = nil
 
         var count: Int { items.count + ended.count }
 
@@ -53,10 +55,11 @@ extension InboxView {
     }
 
     /// The shelves under the list, in order, the empty ones left out.
-    static func shelves(_ g: Groups, ended: [EndedSession] = []) -> [Shelf] {
+    static func shelves(_ g: Groups, ended: [EndedSession] = [], endedError: String? = nil) -> [Shelf] {
         [Shelf(label: "Working", items: g.working, preview: true),
          Shelf(label: "Snoozed", items: g.snoozed, preview: true),
-         Shelf(label: "Settled", items: g.settled, preview: false, ended: ended)].filter { $0.count > 0 }
+         Shelf(label: "Settled", items: g.settled, preview: false, ended: ended,
+               note: endedError.map { "Ended sessions could not be loaded: \($0)" })].filter { $0.count > 0 || $0.note != nil }
     }
 
     /// A row that asks something (a request or a failure) says what in its second line; the others say where they run.

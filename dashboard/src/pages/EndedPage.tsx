@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { api } from "../api";
 import { MessageList } from "../components/chat/MessageList";
 import { EmptyState, RowsSkeleton } from "../components/primitives";
-import { continueLabel, endedTitle } from "../endedView";
+import { canContinue, continueInFlight, continueLabel, continueOnce, endedTitle, transcriptNote } from "../endedView";
 import { criticRunIds } from "../threadView";
 
 const NOTHING_QUEUED = new Set<string>();
@@ -20,17 +20,30 @@ function Transcript({ id }: { id: string }) {
   const [ended, setEnded] = useState<EndedSession | null>(null);
   const [thread, setThread] = useState<ThreadSnapshot | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
-  const [starting, setStarting] = useState(false);
+  // A continue started before this page was (re)opened is still running: the button waits for it.
+  const [starting, setStarting] = useState(() => continueInFlight(id));
   const [startErr, setStartErr] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
-    Promise.all([api.endedSession(id), api.endedTranscript(id)]).then(
-      ([e, t]) => { if (alive) { setEnded(e); setThread(t); } },
-      (e) => { if (alive) setLoadErr((e as Error).message); },
-    );
+    api.endedSession(id).then(
+      // A transcript the session ended without has nothing to fetch (devd answers 410).
+      (e) => (e.transcript === "missing" ? Promise.resolve(null) : api.endedTranscript(id)).then((t) => {
+        if (alive) { setEnded(e); setThread(t ?? { lastSeq: 0, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: null, effort: null }); }
+      }),
+    ).catch((e) => { if (alive) setLoadErr((e as Error).message); });
     return () => { alive = false; };
   }, [id]);
+  // Joins a continue still running from an earlier visit, then opens its session.
+  useEffect(() => {
+    if (!continueInFlight(id)) return;
+    let alive = true;
+    continueOnce(id, api.continueEnded).then(
+      (r) => { if (alive) navigate(`/s/${encodeURIComponent(r.sessionId)}`); },
+      (e) => { if (alive) { setStarting(false); setStartErr((e as Error).message); } },
+    );
+    return () => { alive = false; };
+  }, [id, navigate]);
 
   const title = ended ? endedTitle(ended) : null;
   useEffect(() => { document.title = `devbox · ${title ?? id}`; }, [id, title]);
@@ -38,7 +51,7 @@ function Transcript({ id }: { id: string }) {
   const start = () => {
     setStarting(true);
     setStartErr(null);
-    api.continueEnded(id).then(
+    continueOnce(id, api.continueEnded).then(
       (r) => navigate(`/s/${encodeURIComponent(r.sessionId)}`),
       (e) => { setStarting(false); setStartErr((e as Error).message); },
     );
@@ -70,7 +83,10 @@ function Transcript({ id }: { id: string }) {
       ) : (
         <>
           <div className="mx-auto w-full max-w-[42rem] flex-1">
-            {thread.items.length === 0
+            {transcriptNote(ended.transcript) !== null && (
+              <p className="mb-4 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">{transcriptNote(ended.transcript)}</p>
+            )}
+            {ended.transcript === "missing" ? null : thread.items.length === 0
               ? <EmptyState title="No messages" hint="The session ended before anything was said." />
               : <MessageList sessionId={ended.sessionId} endedId={ended.id} items={thread.items} runs={thread.runs} pending={[]}
                   queued={NOTHING_QUEUED} critic={criticRunIds(thread)} onAnswer={noAnswer} />}
@@ -78,9 +94,11 @@ function Transcript({ id }: { id: string }) {
           <div className="sticky bottom-16 z-10 -mx-4 -mb-8 mt-8 bg-[var(--dock)] px-4 pb-3 pt-3 [--dock:var(--background)] before:pointer-events-none before:absolute before:inset-x-0 before:-top-8 before:h-8 before:bg-gradient-to-t before:from-[var(--dock)] before:to-transparent sm:-mx-6 sm:px-6 lg:bottom-0 lg:-mx-10 lg:-mb-10 lg:px-10 lg:pb-5 dark:[--dock:color-mix(in_oklab,var(--muted)_35%,var(--background))]">
             <div className="mx-auto flex w-full max-w-[42rem] flex-col gap-2 rounded-xl border border-border bg-card/60 px-4 py-3 sm:flex-row sm:items-center">
               <p className="min-w-0 flex-1 text-sm text-muted-foreground">This is only a transcript.</p>
-              <Button type="button" className="flex-none" disabled={starting} onClick={start}>
-                {starting ? "Starting…" : continueLabel(ended.continueMode)}
-              </Button>
+              {canContinue(ended) && (
+                <Button type="button" className="flex-none" disabled={starting} onClick={start}>
+                  {starting ? "Starting…" : continueLabel(ended.continueMode)}
+                </Button>
+              )}
             </div>
             {startErr && <p role="alert" className="mx-auto mt-2 w-full max-w-[42rem] text-sm text-destructive">Could not start the new session: {startErr}</p>}
           </div>

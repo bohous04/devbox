@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { changesAnchor } from "../../changesView";
 import { attachmentUrl } from "../../imageView";
-import { endedAttachmentUrl } from "../../endedView";
+import { endedAttachmentUrl, openRequestLabel } from "../../endedView";
 import { opensTurn, threadRows, workLabel, workSummary, type ThreadRow } from "../../workGroups";
 import { Collapse } from "../primitives";
 import { Markdown } from "./Markdown";
@@ -13,7 +13,12 @@ import { RequestForm } from "./RequestForm";
 import { ChangesCard } from "./ChangesCard";
 import { ToolCall } from "./ToolCall";
 
+/** An ended session's transcript (endedView.ts) shows its images from the archive, has no changes card, and its open
+ *  requests will never be answered. */
+const Transcript = createContext<string | null>(null);
+
 function RequestItem({ item, pending, onAnswer }: { item: ThreadItem; pending: PendingRequest | undefined; onAnswer: (requestId: string, answer: string) => Promise<void> }) {
+  const inTranscript = useContext(Transcript) !== null;
   if (item.status === "open" && pending) return <RequestForm request={pending} onAnswer={(a) => onAnswer(pending.requestId, a)} />;
   return (
     <div className="rounded-xl border bg-card/40 px-4 py-3 text-sm">
@@ -21,14 +26,11 @@ function RequestItem({ item, pending, onAnswer }: { item: ThreadItem; pending: P
       <p className="mt-2 text-xs text-muted-foreground">
         {item.status === "answered" ? <>answered: <span className="text-foreground">{item.output ?? "—"}</span></>
           : item.status === "expired" ? "expired without an answer"
-            : "waiting for an answer"}
+            : openRequestLabel(inTranscript)}
       </p>
     </div>
   );
 }
-
-/** An ended session's transcript (endedView.ts) shows its images from the archive and has no changes card. */
-const Transcript = createContext<string | null>(null);
 
 function Images({ sessionId, paths }: { sessionId: string; paths: string[] }) {
   const endedId = useContext(Transcript);

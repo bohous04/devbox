@@ -93,8 +93,9 @@ struct MacWindowContent: View {
                         self.page = nil
                     })
                 } else if let id = thread, let endedId = InboxView.endedId(fromTag: id) {
-                    // An ended session's transcript; continuing it selects the new session in this window.
-                    EndedTranscriptScreen(endedId: endedId, client: client) { thread = $0 }
+                    // An ended session's transcript; continuing it selects the new session in this window, while the
+                    // transcript is still what it shows.
+                    EndedTranscriptScreen(endedId: endedId, client: client) { if thread == id { thread = $0 } }
                         .id("\(id)|\(appModel.clientIdentity)")
                 } else if let id = thread {
                     MacThreadDetail(threadId: id, client: client, inbox: inbox)
@@ -184,8 +185,9 @@ struct MacInboxSidebar: View {
             let shown = store.items?.filter { InboxView.matches($0, query) }
             let g = shown.map(InboxView.group)
             let list = g.map(InboxView.list) ?? []
-            let pinned = g.map { InboxView.shelves($0, ended: store.ended.filter { InboxView.matches($0, query) }) } ?? []
-            let seam = (list: list.map(\.sessionId), shelves: pinned.flatMap(visibleRows).map(\.sessionId))
+            let pinned = g.map { InboxView.shelves($0, ended: store.ended.filter { InboxView.matches($0, query) }, endedError: store.endedError) } ?? []
+            // Selection ids: a transcript row's is its tag (InboxView.endedTag), so ↑/↓ and the height count it too.
+            let seam = (list: list.map(\.sessionId), shelves: pinned.flatMap(visibleRows).map(\.id))
             ScrollViewReader { proxy in List(selection: $selection) {
                 if store.paused || store.badFrame != nil {
                     Text(store.paused ? "Live updates paused — refreshing every 5 s\(store.loadError.map { " (last refresh failed: \($0))" } ?? "")"
@@ -397,13 +399,16 @@ struct MacInboxSidebar: View {
     }
 
     /// The rows a shelf shows: none while shut (it is open while searching, so every match shows).
-    private func visibleRows(_ group: InboxView.Shelf) -> [InboxItem] {
-        isOpen(group.label) || !query.isEmpty ? group.items : []
+    private func visibleRows(_ group: InboxView.Shelf) -> [InboxView.ShelfRow] {
+        isOpen(group.label) || !query.isEmpty ? group.rows : []
     }
 
     /// A shelf as a disclosure group (MacSidebarLayout leaves out the empty ones); open while searching.
     private func group(_ group: InboxView.Shelf, now: Int) -> some View {
         Section {
+            if let note = group.note {
+                Text(note).font(Theme.F.meta).foregroundStyle(Theme.C.dangerText).selectionDisabled()
+            }
             if isOpen(group.label) || !query.isEmpty {
                 ForEach(group.rows) { r in
                     switch r {
