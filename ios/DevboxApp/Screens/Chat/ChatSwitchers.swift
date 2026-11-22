@@ -58,7 +58,10 @@ struct ChatSwitchers<Content: View>: View {
                  blocked: blocked ?? ChatSwitch.accountMenuBlocked(target), options: accounts, loadError: accountsError)
         } label: {
             HStack(spacing: 4) {
-                if busy != nil { ProgressView().controlSize(.mini) }
+                // The agent's mark, as on the web's chip: which agent runs, without spelling it out.
+                if busy != nil { ProgressView().controlSize(.mini) } else {
+                    AgentLogo(mark: AgentLogo.Mark(agent: target.agent), size: ChatType.s(14)).foregroundStyle(Theme.C.mutedForeground)
+                }
                 // The model's name gives way first: the level and the chevron always show whole. Compact, the family
                 // alone ("Opus"), so the field keeps the row; the menu names the full model. The level is secondary
                 // to the model: regular weight, muted.

@@ -550,18 +550,6 @@ struct MacInboxRow: View {
         }
     }
 
-    /// The agent's glyph, the dashboard's shapes (Switchers.tsx AgentGlyph) as SF Symbols: Claude's asterisk,
-    /// Codex's hexagon, Grok's bolt, Antigravity's orbit, Vibe's wind. Drawn monochrome: metadata, not status.
-    static func agentGlyph(_ agent: String) -> String {
-        switch AgentName(rawValue: agent) ?? .unknown {
-        case .claude, .claudeGemini, .claudeOpenrouter: return "asterisk"
-        case .codex: return "hexagon"
-        case .grok: return "bolt"
-        case .antigravity: return "atom"
-        case .vibe, .unknown: return "wind"
-        }
-    }
-
     /// The second line. A row that needs you says what it asks (the message, or the reason without one): that is
     /// the point of the row. Any other row says where it runs: the repo and what distinguishes its branch
     /// (InboxView.branchLabel), else the latest message in the groups about it. The tooltip has the full branch.
@@ -635,7 +623,7 @@ struct MacInboxRow: View {
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 if showAgent {
-                    Image(systemName: Self.agentGlyph(item.agent)).font(.system(size: 11, weight: .medium))
+                    AgentLogo(mark: AgentLogo.Mark(agent: item.agent), size: 11)
                         .foregroundStyle(Self.style(.tertiary))
                         .accessibilityHidden(true)
                 }

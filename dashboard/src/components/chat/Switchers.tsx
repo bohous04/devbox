@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Asterisk, Check, ChevronDown, Hexagon, LoaderCircle, Orbit, Wind, Zap } from "lucide-react";
+import { Check, ChevronDown, LoaderCircle } from "lucide-react";
 import type { ThreadSnapshot } from "../../../../shared/thread";
 import { Button } from "@/components/ui/button";
 import {
@@ -7,6 +7,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { api, ApiError, type ChatSwitchResult, type ChatTarget } from "../../api";
 import { profileFor } from "../../newSession";
+import { AgentLogo, logoForAgent } from "../agentLogos";
 import {
   accountMenuBlocked, awaitingTargetText, bridgeOutdatedText, switchNoticeCount, claudeAccountOptions, codexAccountOptions, effortChipLabel, effortFooter, effortMenuBlocked, effortOptions, harnessOptions,
   modelLabel, modelMenuBlocked, modelOptions, switchBlocked, switchErrorText, switchResultText, type SwitchOption,
@@ -201,13 +202,8 @@ function Section({ title, options, loadErr, blocked, current, render, onPick, na
   );
 }
 
-/** A small tinted mark per agent runtime, so the chip says which agent runs without spelling it out. */
+/** The agent runtime's mark (agentLogos.tsx), so the chip says which agent runs without spelling it out. In the text's
+ *  muted colour: colour here means status. */
 export function AgentGlyph({ agent }: { agent: ChatTarget["agent"] }) {
-  const runtime = profileFor(agent).runtime;
-  const [Icon, tint] = runtime === "claude" ? [Asterisk, "text-orange-600 dark:text-orange-400"]
-    : runtime === "codex" ? [Hexagon, "text-sky-600 dark:text-sky-400"]
-    : runtime === "grok" ? [Zap, "text-foreground"]
-    : runtime === "agy" ? [Orbit, "text-violet-600 dark:text-violet-400"]
-    : [Wind, "text-amber-600 dark:text-amber-400"];
-  return <Icon className={`size-4 shrink-0 ${tint}`} strokeWidth={2.5} aria-hidden="true" />;
+  return <AgentLogo name={logoForAgent(agent)} className="size-4 text-muted-foreground" />;
 }

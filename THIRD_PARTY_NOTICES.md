@@ -9,6 +9,15 @@ following third-party code, which keeps its own license.
 (Apache License 2.0). It is applied when building a custom `codex app-server`; see
 `infra/codex-remote/native-build.md`. The patched files remain under the Apache License 2.0.
 
+## Simple Icons — CC0-1.0
+
+The agents' marks (`dashboard/src/components/agentLogos.tsx`, `ios/DevboxApp/Assets.xcassets/AgentLogos`) are the SVG
+paths of [Simple Icons](https://simpleicons.org) 16.37.0 (npm `simple-icons@16.37.0`): `claude`, `googlegemini` and
+`mistralai`. Simple Icons is released under CC0 1.0; its data lists no separate licence for these three icons. The
+marks themselves are trademarks of Anthropic, Google and Mistral AI and imply no endorsement. They mark which agent runs
+a session; Google Gemini's sparkle stands in for Google's Antigravity, which has no mark there. The ring shown for an
+agent without a mark is devbox's own.
+
 ## Dependencies
 
 npm dependencies (`bun.lock`) are installed at build time, not vendored. They are under

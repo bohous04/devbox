@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import XCTest
 @testable import DevboxApp
@@ -102,11 +103,18 @@ final class MacAppTests: XCTestCase {
         XCTAssertNil(ChatInline.cutLinks("No links here."))
     }
 
-    func testSidebarAgentGlyphAndConnection() {
-        XCTAssertEqual(MacInboxRow.agentGlyph("claude"), "asterisk")
-        XCTAssertEqual(MacInboxRow.agentGlyph("codex"), "hexagon")
-        XCTAssertEqual(MacInboxRow.agentGlyph("grok"), "bolt")
-        XCTAssertEqual(MacInboxRow.agentGlyph("something-new"), "wind")
+    func testSidebarAgentLogoAndConnection() {
+        XCTAssertEqual(AgentLogo.Mark(agent: "claude"), .claude)
+        XCTAssertEqual(AgentLogo.Mark(agent: "claude-openrouter"), .claude)
+        XCTAssertEqual(AgentLogo.Mark(agent: "antigravity"), .gemini)
+        XCTAssertEqual(AgentLogo.Mark(agent: "vibe"), .mistral)
+        XCTAssertEqual(AgentLogo.Mark(agent: "codex"), .generic)
+        XCTAssertEqual(AgentLogo.Mark(agent: "something-new"), .generic)
+        // Every mark is in the asset catalog, as a template (it takes the text's colour), and no brand colour is on.
+        for mark in AgentLogo.Mark.allCases {
+            XCTAssertNotNil(NSImage(named: mark.asset), mark.asset)
+            XCTAssertNil(mark.brand, mark.asset)
+        }
         XCTAssertEqual(MacInboxSidebar.connection(paused: false, loadError: nil, loaded: true).text, "Connected")
         XCTAssertEqual(MacInboxSidebar.connection(paused: true, loadError: "x", loaded: true).text, "Reconnecting — refreshing every 5 s")
         XCTAssertEqual(MacInboxSidebar.connection(paused: false, loadError: "x", loaded: false).text, "Can't reach devd")
