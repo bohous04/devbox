@@ -252,19 +252,22 @@ final class MacNewSessionTests: XCTestCase {
         XCTAssertEqual(h.opened, ["dev-shop-web"], "opened once")
     }
 
-    /// Any key, or a click, opens it right away; the hold then opens nothing more.
-    func testAnyKeyOrClickOpensTheSessionAtOnce() throws {
+    /// Any key opens it right away; the hold then opens nothing more.
+    func testAnyKeyOpensTheSessionAtOnce() throws {
         let h = try Host(tree: tree, phase: .created(finishedTracker(), sessionId: "dev-shop-web"))
         defer { h.close() }
         try h.press("x", 7, throughApp: true, wait: 0.1)
         XCTAssertEqual(h.opened, ["dev-shop-web"])
         Host.spin(1.4)
         XCTAssertEqual(h.opened, ["dev-shop-web"], "the hold does not open it again")
+    }
 
-        let c = try Host(tree: tree, phase: .created(finishedTracker(), sessionId: "dev-shop-web"))
-        defer { c.close() }
-        try c.click(wait: 0.1)
-        XCTAssertEqual(c.opened, ["dev-shop-web"])
+    /// A click anywhere opens it right away too.
+    func testAClickOpensTheSessionAtOnce() throws {
+        let h = try Host(tree: tree, phase: .created(finishedTracker(), sessionId: "dev-shop-web"))
+        defer { h.close() }
+        try h.click(wait: 0.1)
+        XCTAssertEqual(h.opened, ["dev-shop-web"])
     }
 
     /// ↓ and Return walk the pages (skipping a flat folder's Project page), Esc goes back the same way.
