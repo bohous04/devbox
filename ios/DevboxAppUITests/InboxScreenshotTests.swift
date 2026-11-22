@@ -28,9 +28,9 @@ final class InboxScreenshotTests: XCTestCase {
         try shot("list")
         app.swipeUp()
         app.swipeUp()
-        let working = app.buttons["Working, 2"]
+        let working = app.buttons["Working, 3"]
         XCTAssertTrue(working.waitForExistence(timeout: 5))
-        XCTAssertLessThanOrEqual(app.buttons["Settled, 1"].frame.maxY, app.tabBars.firstMatch.frame.minY + 1,
+        XCTAssertLessThanOrEqual(app.buttons["Settled, 2"].frame.maxY, app.tabBars.firstMatch.frame.minY + 1,
                                  "scrolled to the end, the last shelf clears the tab bar")
         try shot("shelves")
         app.swipeDown()
@@ -58,7 +58,7 @@ final class InboxScreenshotTests: XCTestCase {
         settle.tap()
         XCTAssertTrue(undo.waitForExistence(timeout: 5))
         app.swipeUp()
-        let settled = app.buttons["Settled, 2"]
+        let settled = app.buttons["Settled, 3"]
         XCTAssertTrue(settled.waitForExistence(timeout: 5))
         let notice = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", "Settled Add a retry")).firstMatch
         XCTAssertTrue(notice.exists)

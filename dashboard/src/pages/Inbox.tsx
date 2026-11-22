@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { AlarmClock, Check, CircleAlert, CircleCheck, Ellipsis, MessageCircleQuestion, Undo2 } from "lucide-react";
+import { AlarmClock, Check, CircleAlert, CircleCheck, CircleDashed, Ellipsis, MessageCircleQuestion, Undo2 } from "lucide-react";
 import type { InboxItem } from "../../../shared/thread";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
@@ -11,15 +11,13 @@ import { AppPage, Chevron, Collapse, RowsSkeleton } from "../components/primitiv
 import { SettleProblem } from "../components/SettleProblem";
 import { agoLabel } from "../format";
 import { claimsUndo, failureText, focusOwnsUndo, settleKey, settleShortcut } from "../inboxSettle";
-import { groupInbox, inboxHref, inboxList, mixedAgents, reasonLabel, rowMark, rowTitle, secondLine, shelfBlock, shortAgo, snoozeTimes, upsertInbox, type MarkTone } from "../inboxView";
+import { badgeSlots, groupInbox, inboxHref, inboxList, metaTail, mixedAgents, projectBadge, reasonLabel, rowStatus, rowTitle, secondLine, shelfBlock, snoozeEnd, snoozeTimes, statusParts, upsertInbox, type StatusTone } from "../inboxView";
 import { cn } from "@/lib/utils";
-import { profileFor } from "../newSession";
 import { useNow } from "../store";
 import { useEventStream } from "../useEventStream";
 import { settler, useSettleState } from "../useSettler";
 
 const untilLabel = (ms: number) => new Date(ms).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" });
-const shortUntil = (ms: number) => new Date(ms).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 
 const MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 const MOD = MAC ? "⌘" : "Ctrl+";
@@ -93,46 +91,81 @@ function RowMenu({ item, label, onItem, setError, className }: {
   );
 }
 
-const MARK_TONE: Record<MarkTone, string> = {
+const MARK_TONE: Record<StatusTone, string> = {
   action: "font-semibold text-amber-700 dark:text-amber-300",
   danger: "font-semibold text-red-600 dark:text-red-400",
   // A finished run is news, not a block: a green check and a regular muted word, under the asks.
   done: "text-muted-foreground [&>svg]:text-emerald-600 dark:[&>svg]:text-emerald-400",
+  // Work that waits on something, and a snooze: information, said quietly.
+  busy: "text-muted-foreground",
+  quiet: "text-muted-foreground",
 };
 
-const MARK_ICON: Record<MarkTone, typeof CircleAlert> = { action: MessageCircleQuestion, danger: CircleAlert, done: CircleCheck };
+const MARK_ICON: Record<StatusTone, typeof CircleAlert> = {
+  action: MessageCircleQuestion, danger: CircleAlert, done: CircleCheck, busy: CircleDashed, quiet: AlarmClock,
+};
 
-/** The title line's right end: the mark when the row has something to say, else how long ago (after a live dot while
- *  it works), or when a snooze ends. Under the pointer or the keyboard it gives way to the ✓ (hover devices). */
+/** The title line's right end (statusParts): the chip when the row has something to say (a snooze with the time it
+ *  ends), else how long ago, after a live dot while it works. Under the pointer or the keyboard it gives way to the ✓
+ *  (hover devices). */
 function State({ item, now }: { item: InboxItem; now: number }) {
-  const a = item.attention;
-  const mark = rowMark(item);
+  const parts = statusParts(item, now);
+  if (!parts) return null;
+  const { mark, until, ago } = parts;
   if (mark) {
     const Icon = MARK_ICON[mark.tone];
     return (
-      <span className={cn("flex flex-none items-center gap-1 text-xs", MARK_TONE[mark.tone])}>
-        <Icon className="size-3.5 flex-none" aria-hidden="true" />{mark.label}
+      <span className={cn("flex flex-none items-center gap-1 text-xs", until !== null && "tabular-nums", MARK_TONE[mark.tone])}>
+        <Icon className="size-3.5 flex-none" aria-hidden="true" />{until !== null ? `${mark.label} until ${snoozeEnd(until, now)}` : mark.label}
       </span>
     );
   }
-  if (a.until) {
-    return <span className="flex flex-none items-center gap-1 text-xs tabular-nums text-muted-foreground"><AlarmClock className="size-3.5" aria-hidden="true" />{shortUntil(a.until)}</span>;
-  }
   return (
     <span className="flex flex-none items-center gap-1.5 text-xs tabular-nums text-muted-foreground">
-      {a.section === "working" && <span className="size-1.5 animate-pulse rounded-full bg-sky-500 motion-reduce:animate-none" aria-hidden="true" />}
-      {a.since > 0 ? shortAgo(now - a.since) : ""}
+      {item.attention.section === "working" && <span className="size-1.5 animate-pulse rounded-full bg-sky-500 motion-reduce:animate-none" aria-hidden="true" />}
+      {ago}
     </span>
   );
 }
 
-/** What the row says to a screen reader and in its tooltip: the mark first and not again as the state. */
+/** Badge colours by badgeSlots' slot: sky, violet, emerald, teal, indigo, fuchsia, lime, cyan (500 at 15% behind 800 /
+ *  300 text); the Apple apps' InboxTone.badge. No rose or amber: they would read as the danger and Answer chips. */
+const BADGE = [
+  "bg-sky-500/15 text-sky-800 dark:text-sky-300",
+  "bg-violet-500/15 text-violet-800 dark:text-violet-300",
+  "bg-emerald-500/15 text-emerald-800 dark:text-emerald-300",
+  "bg-teal-500/15 text-teal-800 dark:text-teal-300",
+  "bg-indigo-500/15 text-indigo-800 dark:text-indigo-300",
+  "bg-fuchsia-500/15 text-fuchsia-800 dark:text-fuchsia-300",
+  "bg-lime-500/15 text-lime-800 dark:text-lime-300",
+  "bg-cyan-500/15 text-cyan-800 dark:text-cyan-300",
+];
+
+/** Each project's badge colour (badgeSlots over devd's project list); null until /api/tree has answered. */
+const BadgeSlots = createContext<Map<string, number> | null>(null);
+
+/** A badge without its colour yet: the project list has not arrived (or failed, logged), or the project is not in it. */
+const BADGE_NEUTRAL = "bg-muted text-muted-foreground";
+
+/** The project as two letters on its colour, in front of the second line; the name itself is in the row's label. */
+function ProjectBadge({ project }: { project: string }) {
+  const slot = useContext(BadgeSlots)?.get(project);
+  return (
+    <span aria-hidden="true" title={project}
+      className={cn("grid h-3.5 min-w-[18px] flex-none place-items-center rounded px-0.5 text-[9px] font-semibold leading-none tracking-wide", slot === undefined ? BADGE_NEUTRAL : BADGE[slot])}>
+      {projectBadge(project)}
+    </span>
+  );
+}
+
+/** What the row says to a screen reader and in its tooltip: the chip first and not again as the state. */
 function spoken(item: InboxItem, now: number, title: string, showAgent: boolean): string {
   const a = item.attention;
-  const mark = rowMark(item);
+  const mark = rowStatus(item);
   const when = a.until ? `until ${untilLabel(a.until)}` : a.since > 0 ? agoLabel(now - a.since) : "";
   const state = mark ? mark.label : a.section === "idle" || a.section === "settled" ? "" : reasonLabel(a.reason) || a.section;
-  return [mark?.label, title, mark ? "" : state, when, secondLine(item), showAgent ? profileFor(item.agent).short : "", item.runtime === "tmux" ? "tmux" : ""]
+  return [mark?.label, title, mark ? "" : state, when, // secondLine starts with the repo; the badge stands for the project, which the label names in full.
+    `${item.project}/${secondLine(item)}`, ...metaTail(item, showAgent)]
     .filter(Boolean).join(", ");
 }
 
@@ -152,6 +185,7 @@ function Row({ item, now, onItem, quiet, settle }: { item: InboxItem; now: numbe
   const title = rowTitle(item);
   const block = shelfBlock(item);
   const label = spoken(item, now, title, showAgent);
+  const tail = metaTail(item, showAgent);
   const [error, setError] = useState<string | null>(null);
   return (
     <li data-inbox-row={item.sessionId} className="group relative flex min-w-0 flex-wrap rounded-lg transition-colors [@media(hover:hover)]:hover:bg-accent/60 has-[:focus-visible]:bg-accent/60 has-[[data-state=open]]:bg-accent/60">
@@ -164,11 +198,18 @@ function Row({ item, now, onItem, quiet, settle }: { item: InboxItem; now: numbe
           <span className={cn("min-w-0 flex-1 truncate text-sm", quiet ? "text-foreground/70" : "text-foreground")}>{title}</span>
           <span className={cn("flex min-w-6 flex-none justify-end", settle && HIDE_ON_HOVER)}><State item={item} now={now} /></span>
         </span>
-        <span className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+        <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+          <ProjectBadge project={item.project} />
           <span className="min-w-0 flex-1 truncate">{secondLine(item)}</span>
-          {item.runtime === "tmux" && <span className="flex-none text-[11px] opacity-80">tmux</span>}
-          {showAgent && <AgentLogo name={logoForAgent(item.agent)} size={12} className="w-6 opacity-70 [@media(hover:hover)]:group-hover:invisible [@media(hover:hover)]:group-has-[:focus-visible]:invisible [@media(hover:hover)]:group-has-[[data-state=open]]:invisible" />}
-          {!showAgent && <span className="hidden w-6 flex-none [@media(hover:hover)]:block" aria-hidden="true" />}
+          {/* The agent's mark and name, as on the Apple apps; under the pointer the menu takes the tail's place. */}
+          {tail.length > 0 && (
+            <span className={cn("flex flex-none items-center gap-1 text-[11px] opacity-80", HIDE_ON_HOVER)}>
+              {showAgent && <AgentLogo name={logoForAgent(item.agent)} size={12} />}
+              {tail.join(" · ")}
+            </span>
+          )}
+          {/* Room for the menu under the pointer when there is no tail to give way. */}
+          {tail.length === 0 && <span className="hidden w-6 flex-none [@media(hover:hover)]:block" aria-hidden="true" />}
         </span>
       </Link>
       {settle && (
@@ -194,7 +235,7 @@ function Row({ item, now, onItem, quiet, settle }: { item: InboxItem; now: numbe
 function Rows({ items, now, onItem, quiet, settle }: { items: InboxItem[]; now: number; onItem: (i: InboxItem) => void; quiet?: boolean; settle: boolean }) {
   return (
     <ul className="flex flex-col gap-px">
-      {items.map((i) => <Row key={i.sessionId} item={i} now={now} onItem={onItem} quiet={!!quiet && rowMark(i) === null} settle={settle} />)}
+      {items.map((i) => <Row key={i.sessionId} item={i} now={now} onItem={onItem} quiet={!!quiet && rowStatus(i) === null} settle={settle} />)}
     </ul>
   );
 }
@@ -261,6 +302,12 @@ export function Inbox() {
     // Until the first full list arrives a single item would read as the whole inbox.
     onInbox: (item) => setItems((cur) => (cur === null ? cur : upsertInbox(cur, item))),
   });
+  // The badge colours come from devd's project list, loaded once per visit; the badges stay neutral until it answers.
+  const [slots, setSlots] = useState<Map<string, number> | null>(null);
+  useEffect(() => {
+    api.tree().then((t) => setSlots(badgeSlots(t.map((p) => p.project))),
+      (e: unknown) => console.error(`inbox: project list for the badge colours failed: ${failureText(e)}`));
+  }, []);
   const g = items ? groupInbox(items) : null;
   const list = g ? inboxList(g) : [];
   // A row action answers the session's new item: shown at once, the SSE event that follows is the same.
@@ -328,6 +375,7 @@ export function Inbox() {
       )}
       {!g ? (pollError ? <p role="alert" className="text-sm text-destructive">{pollError}</p> : <RowsSkeleton rows={4} />) : (
         <ShowAgent.Provider value={mixedAgents(items!)}>
+        <BadgeSlots.Provider value={slots}>
         <SettleRow.Provider value={settle}>
           <div ref={listRef} className="-mx-3 max-w-[720px]" data-inbox-column>
             {list.length === 0 ? (
@@ -350,6 +398,7 @@ export function Inbox() {
             </div>
           </div>
         </SettleRow.Provider>
+        </BadgeSlots.Provider>
         </ShowAgent.Provider>
       )}
     </AppPage>

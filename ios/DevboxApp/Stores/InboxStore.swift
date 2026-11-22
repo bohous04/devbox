@@ -83,7 +83,7 @@ enum InboxView {
 
     static func ms(_ d: Date) -> Int { Int((d.timeIntervalSince1970 * 1000).rounded()) }
 
-    // MARK: - Row presentation (inboxView.ts: splitNeedsYou, rowStatus, statusParts, projectBadge, rowTitle)
+    // MARK: - Row presentation (inboxView.ts: splitNeedsYou, rowStatus, statusParts, projectBadge, badgeSlots, rowTitle)
 
     /// "Needs you" holds two asks: something to act on, and a run that merely finished unseen (`completed`). The
     /// screen shows them as separate groups; finished reads newest first, the rest keeps devd's order.
@@ -107,7 +107,7 @@ enum InboxView {
     static func reasonStatus(_ r: AttentionReason?) -> Mark? {
         switch r {
         case nil, .unknown?: return nil
-        case .request?: return Mark(label: "Needs answer", tone: .action)
+        case .request?: return Mark(label: "Answer", tone: .action)
         case .failed?: return Mark(label: "Failed", tone: .danger)
         case .rateLimited?: return Mark(label: "Rate limited", tone: .danger)
         case .disconnected?: return Mark(label: "Disconnected", tone: .danger)
@@ -121,28 +121,31 @@ enum InboxView {
         }
     }
 
-    /// A row's chip: snoozed rows say so, settled and reasonless rows have none.
+    /// A row's chip, only when it has something to say (T3 Code's rule): what asks or failed, a finish not yet seen,
+    /// work that waits on something (queued, background, CI), a snooze. A running row says it with its live dot and
+    /// time, an idle one (a seen run, whatever its reason) with its time. A settled row is out of the way: only a
+    /// danger chip still shows there.
     static func rowStatus(_ i: InboxItem) -> Mark? {
         if i.attention.section == .snoozed { return Mark(label: "Snoozed", tone: .quiet) }
-        if i.attention.section == .settled { return nil }
-        return reasonStatus(i.attention.reason)
+        let chip = reasonStatus(i.attention.reason)
+        if i.attention.section == .settled { return chip?.tone == .danger ? chip : nil }
+        return i.attention.section == .idle || i.attention.reason == .running ? nil : chip
     }
 
     struct StatusParts: Equatable {
         let mark: Mark?
-        let showLabel: Bool
         let until: Int?
         let ago: String
     }
 
-    /// What a row's meta line says about its state, or nil when there is nothing to say. `compact` rows (groups
-    /// whose heading names the state) show only the mark, except a danger mark keeps its label: touch has no tooltip.
-    static func statusParts(_ i: InboxItem, now: Int, compact: Bool) -> StatusParts? {
+    /// What the right end of a row's title line says: its chip, when a snooze ends, and how long ago; nil when there is
+    /// nothing to say (no chip, no time).
+    static func statusParts(_ i: InboxItem, now: Int) -> StatusParts? {
         let a = i.attention
-        let mark = compact ? reasonStatus(a.reason) : rowStatus(i)
+        let mark = rowStatus(i)
         let ago = a.since > 0 ? shortAgo(now - a.since) : ""
         if mark == nil && ago.isEmpty && a.until == nil { return nil }
-        return StatusParts(mark: mark, showLabel: mark != nil && (!compact || mark?.tone == .danger), until: a.until, ago: ago)
+        return StatusParts(mark: mark, until: a.until, ago: ago)
     }
 
     /// The meta line's trailing parts after the state, each set off by a "·": the agent, and "tmux" for a terminal.
@@ -176,14 +179,21 @@ enum InboxView {
         return h < 24 ? "\(h)h" : "\(h / 24)d"
     }
 
-    /// A project's badge: up to two letters from its name's words and a stable colour slot (0-5), the same slot as
-    /// the dashboard's for the same name.
-    static func projectBadge(_ project: String) -> (letters: String, slot: Int) {
+    /// A project's badge letters: up to two from its name's words.
+    static func projectBadge(_ project: String) -> String {
         let words = project.split(whereSeparator: { !($0.isLetter || $0.isNumber) }).map(String.init)
-        let letters = words.count > 1 ? String(words[0].prefix(1)) + String(words[1].prefix(1)) : String((words.first ?? "?").prefix(2))
-        var h: UInt32 = 0
-        for c in project.unicodeScalars { h = h &* 31 &+ c.value }
-        return (letters.uppercased(), Int(h % 6))
+        return (words.count > 1 ? String(words[0].prefix(1)) + String(words[1].prefix(1)) : String((words.first ?? "?").prefix(2))).uppercased()
+    }
+
+    /// The badge colours there are (InboxTone.badge, the dashboard's Inbox.tsx BADGE).
+    static let badgeSlotCount = 8
+
+    /// Each project's badge colour: its place in devd's project list (/api/tree's project names) in code-point order
+    /// (as the dashboard sorts them), mod badgeSlotCount, so up to eight projects never share a colour. Projects are
+    /// added rarely, so the colours stay put; a session coming or going moves none (the inbox's own projects would).
+    static func badgeSlots(_ projects: [String]) -> [String: Int] {
+        let sorted = Set(projects).sorted { $0.unicodeScalars.lexicographicallyPrecedes($1.unicodeScalars) }
+        return Dictionary(uniqueKeysWithValues: sorted.enumerated().map { ($1, $0 % badgeSlotCount) })
     }
 
     private static let previewRules: [(NSRegularExpression, String)] = [
@@ -240,6 +250,9 @@ final class InboxStore: ObservableObject {
     @Published private(set) var paused = false
     /// The last frame that could not be read (also logged); the view may miss that update until the next load.
     @Published private(set) var badFrame: String?
+    /// Each project's badge colour (InboxView.badgeSlots over devd's project list); nil until /api/tree has answered,
+    /// and the badges are neutral meanwhile.
+    @Published private(set) var badgeSlots: [String: Int]?
 
     private static let logger = Logger(subsystem: "com.example.devbox", category: "Inbox")
     private let client: DevdClient
@@ -271,6 +284,17 @@ final class InboxStore: ObservableObject {
             loadError = nil
         } catch {
             loadError = errorText(error)
+        }
+    }
+
+    /// Loads the badge colours once; a failure is logged, the badges stay neutral and the next call tries again.
+    func loadBadgeSlots() async {
+        guard badgeSlots == nil else { return }
+        do {
+            let tree: [TreeProject] = try await client.get("/api/tree")
+            badgeSlots = InboxView.badgeSlots(tree.map(\.project))
+        } catch {
+            Self.logger.error("project list for the badge colours failed: \(errorText(error), privacy: .public)")
         }
     }
 

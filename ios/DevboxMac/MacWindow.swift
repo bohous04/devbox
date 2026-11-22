@@ -236,6 +236,8 @@ struct MacInboxSidebar: View {
                 }
             }
             .environment(\.inboxShowsAgent, store.items.map(InboxView.mixedAgents) ?? false)
+            .environment(\.inboxBadgeSlots, store.badgeSlots)
+            .task { await store.loadBadgeSlots() }
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { sidebarHeight = $0 }
         .navigationTitle("Inbox")
@@ -545,12 +547,12 @@ private struct MacGroupHead: View {
     }
 }
 
-/// A sidebar row: the title with its state on the right (a coloured mark when the row has something to say, otherwise
-/// how long ago, after a live dot while it works) and one muted line (`InboxView.secondLine`) ending in the agent's glyph while
-/// the rows shown mix agents. Every title is regular: a row that needs you stands out by its mark. With `settle`, a ✓
-/// takes the state's place while the pointer is over the row, as in T3 Code; it is disabled, with the reason, while a
-/// request is open. "tmux", the message and (with mixed agents) the agent's name are also in the tooltip and the
-/// spoken label, which starts with the mark.
+/// A sidebar row: the title with its state on the right (a chip when the row has something to say, InboxView.statusParts,
+/// otherwise how long ago, after a live dot while it works) and one muted line: the project's badge, `InboxView.secondLine`,
+/// the agent's glyph (while the rows shown mix agents) and "tmux". Every title is regular: a row that needs you stands
+/// out by its chip; danger and asks are loud, the rest quiet. With `settle`, a ✓ takes the state's place while the
+/// pointer is over the row, as in T3 Code; it is disabled, with the reason, while a request is open. The message, the
+/// agent's name and the full project name are also in the tooltip and the spoken label, which starts with the chip.
 struct MacInboxRow: View {
     let item: InboxItem
     let now: Int
@@ -612,7 +614,11 @@ struct MacInboxRow: View {
         let title = InboxView.rowTitle(item)
         let message = item.lastText.map(InboxView.plainPreview) ?? ""
         let detail = preview ? (message.isEmpty ? InboxView.reasonLabel(item.attention.reason) : message) : ""
-        let mark = InboxView.mark(item)
+        let parts = InboxView.statusParts(item, now: now)
+        let mark = parts?.mark
+        // The sidebar is narrow: the agent shows as its glyph only (its name is in the tooltip and the spoken label), so
+        // the line gives way from its end, the message, then the branch, the repo last.
+        let tail = InboxView.metaTail(item, showAgent: false)
         let spoken = InboxRow.spoken(item, now: now, title: title, detail: detail, showAgent: showAgent)
         // A row of the list with nothing to say reads a step quieter, so the eye lands on the marked ones first.
         let quiet = settle != nil && mark == nil
@@ -626,29 +632,33 @@ struct MacInboxRow: View {
                 Spacer(minLength: 0)
                 if showsSettle, let settle {
                     settleButton(settle)
-                } else if let word = mark, word.tone == .done {
-                    // A finished run is news, not a block: a green check and a regular muted word, under the asks.
+                } else if let mark, mark.tone == .action || mark.tone == .danger {
                     HStack(spacing: 3) {
-                        Image(systemName: InboxTone.icon(.done)).font(.system(size: 10))
-                            .modifier(MacSelectionTone(color: InboxTone.doneIcon, onSelection: Self.style(.primary)))
-                        Text(word.label).font(.system(size: 11))
+                        Image(systemName: InboxTone.icon(mark.tone)).font(.system(size: 10, weight: .semibold))
+                        Text(mark.label).font(.system(size: 11, weight: .semibold))
+                    }
+                    .modifier(MacSelectionTone(color: InboxTone.text(mark.tone), onSelection: Self.style(.primary)))
+                } else if let mark {
+                    // A finish, work that waits on something, a snooze: news, not a block. A regular muted word; Done
+                    // keeps its green check.
+                    HStack(spacing: 3) {
+                        Image(systemName: InboxTone.icon(mark.tone)).font(.system(size: 10))
+                            .modifier(MacSelectionTone(color: mark.tone == .done ? InboxTone.doneIcon : Theme.C.mutedForeground,
+                                                       onSelection: Self.style(.primary)))
+                        Text(InboxRow.chipLabel(mark, until: parts?.until, now: now)).font(.system(size: 11)).monospacedDigit()
                             .modifier(MacSelectionTone(color: Theme.C.mutedForeground, onSelection: Self.style(.secondary)))
                     }
-                } else if let word = mark {
-                    HStack(spacing: 3) {
-                        Image(systemName: InboxTone.icon(word.tone)).font(.system(size: 10, weight: .semibold))
-                        Text(word.label).font(.system(size: 11, weight: .semibold))
-                    }
-                    .modifier(MacSelectionTone(color: InboxTone.text(word.tone), onSelection: Self.style(.primary)))
                 } else {
                     HStack(spacing: 5) {
                         if item.attention.section == .working { LiveDot() }
-                        Text(InboxView.when(item, now: now)).font(.system(size: 11)).monospacedDigit()
+                        Text(parts?.ago ?? "").font(.system(size: 11)).monospacedDigit()
                             .modifier(MacSelectionTone(color: item.attention.section == .working ? InboxTone.busy : nil, onSelection: Self.style(.secondary)))
                     }
                 }
             }
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
+                ProjectBadge(project: item.project, size: 8.5)
+                    .help(item.project)
                 Text(InboxView.secondLine(item, detail: detail))
                     .font(.system(size: 11.5))
                     .modifier(MacSelectionTone(color: nil, onSelection: Self.style(.secondary)))
@@ -658,6 +668,10 @@ struct MacInboxRow: View {
                     AgentLogo(mark: AgentLogo.Mark(agent: item.agent), size: 11)
                         .modifier(MacSelectionTone(color: nil, onSelection: Self.style(.tertiary)))
                         .accessibilityHidden(true)
+                }
+                if !tail.isEmpty {
+                    Text(tail.joined(separator: " · ")).font(.system(size: 10.5)).lineLimit(1).fixedSize()
+                        .modifier(MacSelectionTone(color: nil, onSelection: Self.style(.tertiary)))
                 }
             }
         }
