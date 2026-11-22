@@ -235,3 +235,10 @@ export function composerErrorText(status: number, body: unknown): string {
   if ((b.error === "command-failed" || b.error === "bridge-too-old") && typeof b.message === "string") return b.message;
   return typeof b.error === "string" ? b.error : `HTTP ${status}`;
 }
+
+/** The seq to POST to /thread/seen, or null for none. A look (opening the thread, coming back to it) always posts,
+ *  even when nothing new arrived: devd restarts the inbox's auto-settle clock on it. A run ending while the thread is
+ *  open posts only when it is not seen yet. */
+export function seenToPost(t: ThreadSnapshot, look: boolean): number | null {
+  return look || t.lastSeq > t.seenSeq ? t.lastSeq : null;
+}

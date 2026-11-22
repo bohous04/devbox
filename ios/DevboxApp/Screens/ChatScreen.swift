@@ -167,6 +167,10 @@ struct ChatScreen: View {
             } else if phase == .active, wentAway, visible {
                 wentAway = false
                 Task { await store.resume() }
+            } else if phase == .active, visible {
+                // Back to the app or window without it going to the background (Mac: another app was in front):
+                // a look, which restarts devd's auto-settle clock. resume() above looks on its own.
+                store.markSeen(look: true)
             }
         }
     }

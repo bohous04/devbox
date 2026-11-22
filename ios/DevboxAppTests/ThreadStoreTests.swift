@@ -180,6 +180,32 @@ final class ThreadStoreLiveTests: XCTestCase {
         }
     }
 
+    /// Opening the thread and coming back to it are looks: they post /thread/seen even when nothing new arrived (devd
+    /// restarts the inbox's auto-settle clock on them), once each. A run ending posts only when not seen yet.
+    func testOpeningAndComingBackPostSeenEvenWhenNothingIsNew() async throws {
+        MockURLProtocol.handler = { req in
+            switch req.url?.path {
+            case "/api/sessions/s1/thread": return .init(statusCode: 200, data: self.snapshot(lastSeq: 5, seenSeq: 5))
+            default: return .init(statusCode: 204)
+            }
+        }
+        let seenPosts = { self.requests.filter { $0 == "POST /api/sessions/s1/thread/seen" }.count }
+        var feed: AsyncThrowingStream<String, Error>.Continuation?
+        let store = ThreadStore(sessionId: "s1", client: client(), connect: { _, _ in AsyncThrowingStream { feed = $0 } })
+        await store.start()
+        try await waitUntil { feed != nil && seenPosts() == 1 }
+        store.markSeen(look: false)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(seenPosts(), 1, "nothing new and not a look: no post")
+        store.stop()
+        await store.resume()
+        try await waitUntil { seenPosts() == 2 }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(seenPosts(), 2, "one post per return")
+        XCTAssertEqual(ThreadView.seenToPost(ThreadSnapshot(lastSeq: 5, seenSeq: 3, runs: [], items: [], pending: [], background: [], native: nil), look: false), 5)
+        store.stop()
+    }
+
     func testLoadThenStreamFromItsSeqAndApplyFrames() async throws {
         MockURLProtocol.handler = { req in
             if req.url?.path == "/api/sessions/s1/thread" { return .init(statusCode: 200, data: self.snapshot(lastSeq: 5, seenSeq: 5)) }
@@ -328,8 +354,10 @@ final class ThreadStoreLiveTests: XCTestCase {
         XCTAssertEqual(store.thread?.items.map(\.text), ["done while away"])
         XCTAssertEqual(store.thread?.lastSeq, 7)
         XCTAssertEqual(paths, ["/api/stream?session=s1&afterSeq=5", "/api/stream?session=s1&afterSeq=7"])
-        try await waitUntil { self.requests.contains("POST /api/sessions/s1/thread/seen") }
-        XCTAssertEqual(Array(requests.prefix(2)), ["GET /api/sessions/s1/thread", "GET /api/sessions/s1/thread?afterSeq=5"])
+        // Opening and coming back each post seen (a look), the second after the catch-up fetch.
+        try await waitUntil { self.requests.filter { $0 == "POST /api/sessions/s1/thread/seen" }.count == 2 }
+        XCTAssertEqual(requests.filter { $0.hasPrefix("GET") }, ["GET /api/sessions/s1/thread", "GET /api/sessions/s1/thread?afterSeq=5"])
+        XCTAssertEqual(requests.last, "POST /api/sessions/s1/thread/seen")
         store.stop()
     }
 
@@ -438,7 +466,7 @@ final class ThreadStoreLiveTests: XCTestCase {
         for l in ["event: mirror", "data: \(codex)", ""] { feed?.yield(l) }
         try await waitUntil { store.mirror?.agent == "Codex" }
         XCTAssertEqual(store.mirror?.sendBlock?.code, "codex-send-unsupported")
-        store.markSeenIfNeeded()
+        store.markSeen(look: true)
         try await Task.sleep(for: .milliseconds(50))
         XCTAssertFalse(requests.contains { $0.contains("/seen") }, "a mirror has no seen marker")
         store.stop()

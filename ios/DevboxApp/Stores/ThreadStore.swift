@@ -121,6 +121,13 @@ enum ThreadView {
     /// The newest seq at which a run ended: reaching it while the thread is open counts as seen.
     static func lastEndedSeq(_ t: ThreadSnapshot) -> Int { t.runs.compactMap(\.endedSeq).max() ?? 0 }
 
+    /// The seq to post to /thread/seen, or nil for none. A look (opening the thread, coming back to it) always posts,
+    /// even when nothing new arrived: devd restarts the inbox's auto-settle clock on it. A run ending while the thread
+    /// is open posts only when it is not seen yet. As the dashboard's `seenToPost`.
+    static func seenToPost(_ t: ThreadSnapshot, look: Bool) -> Int? {
+        look || t.lastSeq > t.seenSeq ? t.lastSeq : nil
+    }
+
     // MARK: - Private
 
     private static func isTerminal(_ s: RunRow.Status) -> Bool { s == .completed || s == .interrupted || s == .failed }
@@ -375,7 +382,7 @@ final class ThreadStore: ObservableObject {
         if thread == nil { await load() }
         guard thread != nil, wantsStream else { return }
         openStream()
-        markSeenIfNeeded()
+        markSeen(look: true)
     }
 
     func stop() {
@@ -407,7 +414,7 @@ final class ThreadStore: ObservableObject {
         }
         guard wantsStream else { return }
         openStream()
-        markSeenIfNeeded()
+        markSeen(look: true)
     }
 
     private func load() async {
@@ -515,7 +522,7 @@ final class ThreadStore: ObservableObject {
         let endedBefore = thread.map(ThreadView.lastEndedSeq) ?? 0
         setThread(next)
         // A run ending while the thread is open counts as seen.
-        if ThreadView.lastEndedSeq(next) != endedBefore { markSeenIfNeeded() }
+        if ThreadView.lastEndedSeq(next) != endedBefore { markSeen(look: false) }
     }
 
     private func setThread(_ t: ThreadSnapshot) {
@@ -540,12 +547,12 @@ final class ThreadStore: ObservableObject {
         thread = t
     }
 
-    /// Opening the thread, a run ending while it is open and coming back to it mark it seen.
-    func markSeenIfNeeded() {
+    /// Opening the thread and coming back to it (`look`), and a run ending while it is open, mark it seen
+    /// (ThreadView.seenToPost). A run ending posts a seq once, until the snapshot says it is seen.
+    func markSeen(look: Bool) {
         // A mirror has no seen marker (the inbox shows tmux sessions by their hooks).
-        guard !isTmux, let t = thread, t.lastSeq > t.seenSeq, t.lastSeq > postedSeen else { return }
-        let seq = t.lastSeq
-        postedSeen = seq
+        guard !isTmux, let t = thread, let seq = ThreadView.seenToPost(t, look: look), look || seq > postedSeen else { return }
+        postedSeen = max(postedSeen, seq)
         Task {
             do {
                 try await client.postVoid("\(base)/thread/seen", body: SeenBody(seq: seq))

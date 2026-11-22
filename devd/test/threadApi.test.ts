@@ -284,6 +284,18 @@ test("POST seen marks the seq seen (204); out of range or non-integer is 400", a
   expect(getSeenAt(t.db, CHAT.id)).toBe(1_000_000); // the look, for the auto-settle clock
 });
 
+test("POST seen with a seq that did not move is a look: seen_at is stamped, seenSeq never goes back", async () => {
+  const t = setup();
+  t.feed(CHAT.id, [started("r1"), completed("r1")]);
+  expect((await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/seen`, { seq: 2 }))).status).toBe(204);
+  t.db.run("DELETE FROM tmux_seen WHERE session_id=?", [CHAT.id]);
+  for (const seq of [2, 0]) {
+    expect((await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/seen`, { seq }))).status).toBe(204);
+    expect(getSeenAt(t.db, CHAT.id)).toBe(1_000_000);
+    expect(t.threads(CHAT.id).snapshot({ limit: 0 }).seenSeq).toBe(2);
+  }
+});
+
 test("POST seen publishes the session's new inbox state", async () => {
   const t = setup();
   t.feed(CHAT.id, [started("r1"), completed("r1")]);
