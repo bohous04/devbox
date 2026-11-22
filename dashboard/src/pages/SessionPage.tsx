@@ -10,10 +10,12 @@ import { Composer } from "../components/chat/Composer";
 import { MessageList } from "../components/chat/MessageList";
 import { Switchers } from "../components/chat/Switchers";
 import { EmptyState, RowsSkeleton } from "../components/primitives";
+import { SettleProblem } from "../components/SettleProblem";
 import { threadHeading } from "../inboxView";
 import { useStore } from "../store";
 import { activeRun, applyCommands, applyEffort, applyNotice, applyThreadEvent, criticRunIds, mergeSnapshot, queuedRunIds } from "../threadView";
 import { useEventStream } from "../useEventStream";
+import { useTmuxSeen } from "../useSettler";
 import { autoOpen, browserStorage, tabKey, type TabState, type TmuxTab, UNSETTLED, userChoose } from "../tmuxTab";
 import { mirrorComposerProps, mirrorNotice, mirrorUnsupported, sendToMirror, type MirrorLock } from "../mirrorView";
 
@@ -96,6 +98,9 @@ function ChatPage({ id }: { id: string }) {
     document.addEventListener("visibilitychange", markSeen);
     return () => document.removeEventListener("visibilitychange", markSeen);
   }, [id, loaded, ended, mirrored]);
+
+  // A tmux session has no thread seen marker: looking at it clears its finish in the inbox (POST /seen).
+  useTmuxSeen(id, mirrored || mirrorFailed);
 
   // Follow the conversation while the user is at its end (any change: text, tool output, a resolved request);
   // leave them alone when they scrolled up.
@@ -205,6 +210,7 @@ function ChatPage({ id }: { id: string }) {
         </p>
       )}
       {notice && <p role="status" className="mx-auto mb-3 w-full max-w-[42rem] text-sm text-muted-foreground">{notice}</p>}
+      <SettleProblem className="mx-auto mb-3 w-full max-w-[42rem]" />
       {seenErr && <p role="alert" className="mx-auto mb-3 w-full max-w-[42rem] text-sm text-destructive">could not mark the thread as seen: {seenErr}</p>}
 
       {loadErr ? (
