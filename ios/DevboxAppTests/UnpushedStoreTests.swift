@@ -5,10 +5,18 @@ import XCTest
 /// `DevdClientTests.swift`).
 @MainActor
 final class UnpushedStoreTests: XCTestCase {
+    // The capture is shared: a thread store of an earlier test may still post its look (thread/seen) after it ended,
+    // so each test looks for its own POST, not the first one.
     override func setUp() {
         super.setUp()
         MockURLProtocol.capturedRequests = []
-        MockURLProtocol.handler = nil
+        MockURLProtocol.handler = { _ in .init(statusCode: 204) }
+    }
+
+    // 204, not nil: a store's late thread/seen arriving with no handler makes URLSession trap in the next test.
+    override func tearDown() {
+        MockURLProtocol.handler = { _ in .init(statusCode: 204) }
+        super.tearDown()
     }
 
     private func makeStore(handler: @escaping (URLRequest) -> MockURLProtocol.Stub) -> UnpushedStore {
@@ -69,7 +77,7 @@ final class UnpushedStoreTests: XCTestCase {
         let r = repo("/srv/web", branches: [branch("feat", count: 1)])
         try await store.push(r, r.branches[0])
         store.stop()
-        let post = MockURLProtocol.capturedRequests.first { $0.httpMethod == "POST" }!
+        let post = MockURLProtocol.capturedRequests.first { $0.httpMethod == "POST" && $0.url?.path.hasPrefix("/api/unpushed/") == true }!
         XCTAssertEqual(post.url?.path, "/api/unpushed/push")
         XCTAssertEqual(bodyJSON(post) as? [String: String], ["path": "/srv/web", "branch": "feat"])
         XCTAssertEqual(store.notice?.text, "Pushed feat to origin (acme/web).")
@@ -85,7 +93,7 @@ final class UnpushedStoreTests: XCTestCase {
         let b = branch("feat", count: 2, commits: [commit("second"), commit("first")])
         let r = repo("/srv/web", branches: [b])
         try await store.createPr(r, b, title: "Ship it")
-        let post = MockURLProtocol.capturedRequests.first { $0.httpMethod == "POST" }!
+        let post = MockURLProtocol.capturedRequests.first { $0.httpMethod == "POST" && $0.url?.path.hasPrefix("/api/unpushed/") == true }!
         XCTAssertEqual(post.url?.path, "/api/unpushed/pr")
         XCTAssertEqual(bodyJSON(post) as? [String: String], ["path": "/srv/web", "branch": "feat", "title": "Ship it", "body": "- first\n- second"])
         XCTAssertEqual(store.notice, .init(text: "Pull request #7 created for feat (acme/web).", url: URL(string: "https://git.example.com/pr/7")))

@@ -240,14 +240,15 @@ export function openDb(path: string): Database {
   if (!pendingCols.includes("tag")) db.run(`ALTER TABLE pending_first_turns ADD COLUMN tag TEXT`);
   // effort: the level /new asked for, set right before the message (null = the agent's default).
   if (!pendingCols.includes("effort")) db.run(`ALTER TABLE pending_first_turns ADD COLUMN effort TEXT`);
-  // The inbox shelves of a session (sessionAttention.ts): settled (by hand or after 7 days idle) and snoozed. One row
+  // The inbox shelves of a session (sessionAttention.ts): settled (by hand or after a quiet day or week) and snoozed. One row
   // per session, deleted with it (deleteSession).
   db.run(`CREATE TABLE IF NOT EXISTS session_attention (
     session_id TEXT PRIMARY KEY, settled_at INTEGER, settled_reason TEXT,
     snooze_until INTEGER, snooze_kind TEXT, updated_at INTEGER NOT NULL)`);
-  // When the owner last looked at a tmux session (POST /api/sessions/:id/seen): a done or failed state that began at
-  // or before it is seen (tmuxAttention). Chat sessions keep theirs in the thread store (seenSeq). Deleted with the
-  // session (deleteSession).
+  // When the owner last looked at a session, despite the table's name for chat sessions too (POST /api/sessions/:id/seen
+  // for tmux, /thread/seen for chat). The auto-settle clock counts it (autoSettleDue). For tmux it is also the seen
+  // marker: a done or failed state that began at or before it is seen (tmuxAttention); chat's marker is the thread
+  // store's seenSeq. Deleted with the session (deleteSession).
   db.run(`CREATE TABLE IF NOT EXISTS tmux_seen (session_id TEXT PRIMARY KEY, seen_at INTEGER NOT NULL)`);
   // The PR of a session's pushed branch as the PR watch last saw it (prWatch.ts). Kept across devd restarts so a
   // CI failure is notified once and a merge settles once. One row per session, deleted with it (deleteSession).
@@ -1183,11 +1184,11 @@ export function putSessionAttention(db: Database, r: SessionAttentionRow): void 
     VALUES (?,?,?,?,?,?)`).run(r.session_id, r.settled_at, r.settled_reason, r.snooze_until, r.snooze_kind, r.updated_at);
 }
 
-/** When the owner last looked at the tmux session; null = never. */
-export function getTmuxSeenAt(db: Database, sessionId: string): number | null {
+/** When the owner last looked at the session (tmux_seen); null = never. */
+export function getSeenAt(db: Database, sessionId: string): number | null {
   return (db.query(`SELECT seen_at FROM tmux_seen WHERE session_id=?`).get(sessionId) as { seen_at: number } | null)?.seen_at ?? null;
 }
-export function setTmuxSeenAt(db: Database, sessionId: string, at: number): void {
+export function setSeenAt(db: Database, sessionId: string, at: number): void {
   db.query(`INSERT OR REPLACE INTO tmux_seen (session_id,seen_at) VALUES (?,?)`).run(sessionId, at);
 }
 

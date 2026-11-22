@@ -1361,7 +1361,7 @@ setInterval(() => {
       .catch((e) => console.error("auto-end failed:", e));
   }
 }, 5_000);
-// Snoozes a previous devd set still end with an inbox update; then settle sessions idle for 7 days (sessionAttention.ts).
+// Snoozes a previous devd set still end with an inbox update; then settle quiet sessions (24 h once seen, else 7 days; sessionAttention.ts).
 try { inbox.armSnoozes(); } catch (e) { console.error("inbox: snooze timers not armed:", e); }
 setInterval(guardedTick("auto-settle", async () => { inbox.autoSettle(); }), AUTO_SETTLE_TICK_MS);
 setInterval(guardedTick("pr watch", () => prWatch.tick()), PR_WATCH_TICK_MS);

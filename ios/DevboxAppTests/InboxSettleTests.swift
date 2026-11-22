@@ -128,6 +128,20 @@ final class InboxSettleTests: XCTestCase {
         XCTAssertTrue(InboxSettler.marksSeen(failed, on: .left))
     }
 
+    /// Opening an idle tmux session or coming back to it is a look devd records (it restarts the auto-settle clock);
+    /// leaving is not, and a finish, a failure or a chat session goes its own way.
+    func testALookAtAnIdleTmuxSession() throws {
+        let idle = try item("a", "idle", reason: nil, runtime: "tmux")
+        XCTAssertTrue(InboxSettler.looks(idle, on: .opened))
+        XCTAssertTrue(InboxSettler.looks(idle, on: .foreground))
+        XCTAssertFalse(InboxSettler.looks(idle, on: .left))
+        for other in [try item("a", "idle", reason: nil), try item("a", "needs_you", reason: "completed", runtime: "tmux"),
+                      try item("a", "needs_you", reason: "failed", runtime: "tmux"), try item("a", "working", reason: "running", runtime: "tmux")] {
+            XCTAssertFalse(InboxSettler.looks(other, on: .foreground), "\(other.attention)")
+        }
+        XCTAssertFalse(InboxSettler.looks(nil, on: .opened))
+    }
+
     /// Seen goes only to the session on screen: the top of the Inbox stack, and nothing while another tab shows.
     func testOpenedIsTheTopOfTheInboxStackOnTheInboxTab() {
         let path: [InboxRoute] = [.thread("dev-a"), .session("dev-b")]
@@ -249,6 +263,25 @@ final class InboxSettleTests: XCTestCase {
         XCTAssertNil(settler.problem, "a dismissed failure is not raised again")
         let third = await settler.seen(unknown, in: store)
         XCTAssertEqual(third, .skipped, "no third try for the same finish")
+    }
+
+    /// Each look posts once: triggers firing together are one look, a later look posts again; a failed one is shown.
+    func testLookPostsSeenForAnIdleTmuxSessionOncePerLook() async throws {
+        let store = try await fixtureStore()
+        let idle = try item("dev-orchard-api-3", "idle", reason: nil, since: 7, runtime: "tmux")
+        let together = InboxSettler()
+        let first = await together.look(idle, in: store)
+        let same = await together.look(idle, in: store)
+        XCTAssertEqual([first, same], [.posted, .skipped], "two triggers of one look post once")
+        let settler = InboxSettler(lookGap: .zero)
+        let a = await settler.look(idle, in: store)
+        let b = await settler.look(idle, in: store)
+        XCTAssertEqual([a, b], [.posted, .posted], "a later look posts again")
+        let chat = await settler.look(try item("dev-orchard-sync", "idle", reason: nil), in: store)
+        XCTAssertEqual(chat, .skipped)
+        let gone = await settler.look(try item("dev-gone", "idle", reason: nil, runtime: "tmux"), in: store)
+        XCTAssertEqual(gone, .failed)
+        XCTAssertEqual(settler.problem?.hasPrefix("Couldn't mark “Title of dev-gone” seen"), true, settler.problem ?? "nil")
     }
 
     /// Two triggers firing together post once; a skipped call does not use up the retry.

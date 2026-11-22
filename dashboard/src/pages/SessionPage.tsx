@@ -13,7 +13,8 @@ import { EmptyState, RowsSkeleton } from "../components/primitives";
 import { SettleProblem } from "../components/SettleProblem";
 import { threadHeading } from "../inboxView";
 import { useStore } from "../store";
-import { activeRun, applyCommands, applyEffort, applyNotice, applyThreadEvent, criticRunIds, mergeSnapshot, queuedRunIds } from "../threadView";
+import { activeRun, applyCommands, applyEffort, applyNotice, applyThreadEvent, criticRunIds, mergeSnapshot, queuedRunIds, seenToPost } from "../threadView";
+import { FOCUS_LOOK_GAP_MS } from "../inboxSettle";
 import { useEventStream } from "../useEventStream";
 import { useTmuxSeen } from "../useSettler";
 import { autoOpen, browserStorage, tabKey, type TabState, type TmuxTab, UNSETTLED, userChoose } from "../tmuxTab";
@@ -83,20 +84,37 @@ function ChatPage({ id }: { id: string }) {
   });
 
   // Opening the page marks the thread seen; so does a run ending while the user looks at it, and coming back to
-  // the tab.
+  // the tab or window. Opening and coming back are looks: they post even when nothing new arrived, since devd
+  // restarts the inbox's auto-settle clock on them (seenToPost). One post per open (`openedId`, which also keeps
+  // StrictMode's second effect run quiet) and per return (focus and visibilitychange arrive together: FOCUS_LOOK_GAP_MS).
   const loaded = thread !== null;
   const ended = thread ? lastEndedSeq(thread) : 0;
+  const openedId = useRef<string | null>(null);
+  const lastReturn = useRef(-Infinity);
   useEffect(() => {
     // A mirror has no seen marker (the inbox shows tmux sessions by their hooks).
     if (mirrored) return;
-    const markSeen = () => {
+    const markSeen = (look: boolean) => {
       const t = threadRef.current;
-      if (!t || t.lastSeq <= t.seenSeq || document.visibilityState !== "visible") return;
-      api.markSeen(id, t.lastSeq).then(() => setSeenErr(null), (e) => setSeenErr((e as Error).message));
+      if (!t || document.visibilityState !== "visible") return;
+      const seq = seenToPost(t, look);
+      if (seq === null) return;
+      api.markSeen(id, seq).then(() => setSeenErr(null), (e) => setSeenErr((e as Error).message));
     };
-    markSeen();
-    document.addEventListener("visibilitychange", markSeen);
-    return () => document.removeEventListener("visibilitychange", markSeen);
+    const opening = loaded && openedId.current !== id;
+    if (opening) openedId.current = id;
+    markSeen(opening);
+    const onReturn = () => {
+      if (document.visibilityState !== "visible" || Date.now() - lastReturn.current < FOCUS_LOOK_GAP_MS) return;
+      lastReturn.current = Date.now();
+      markSeen(true);
+    };
+    window.addEventListener("focus", onReturn);
+    document.addEventListener("visibilitychange", onReturn);
+    return () => {
+      window.removeEventListener("focus", onReturn);
+      document.removeEventListener("visibilitychange", onReturn);
+    };
   }, [id, loaded, ended, mirrored]);
 
   // A tmux session has no thread seen marker: looking at it clears its finish in the inbox (POST /seen).

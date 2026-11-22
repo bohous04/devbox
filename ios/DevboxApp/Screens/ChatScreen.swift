@@ -13,6 +13,14 @@ struct ChatScreen: View {
     @State private var terminalSheet = TerminalSheet()
     /// The user's switch made before the mirror and the live list said which tmux session this is; stored once they do.
     @State private var pendingTab: TmuxTabMemory.Tab?
+    #if os(macOS)
+    /// macOS does not move `scenePhase` when the owner switches to another app or window and back; the window becomes
+    /// key again. That is the look, but only after he really left (`away`): the window also becomes key again when a
+    /// sheet, alert or popover of its own closes, and on its opening (which start() marks).
+    @State private var hostWindow: NSWindow?
+    /// Another app came to the front, or another window (not one of this window's own) became key.
+    @State private var away = false
+    #endif
     @State private var atEnd = true
     @State private var wentAway = false
     /// On screen (not under a pushed screen or another tab): only then does coming back reopen the stream.
@@ -166,9 +174,35 @@ struct ChatScreen: View {
                 store.stop()
             } else if phase == .active, wentAway, visible {
                 wentAway = false
+                // On the Mac the window becoming key is the look (below), once.
+                #if os(macOS)
+                Task { await store.resume(look: false) }
+                #else
                 Task { await store.resume() }
+                #endif
+            } else if phase == .active, visible {
+                // Back to the app without it going to the background (Control Center, a call): a look, which restarts
+                // devd's auto-settle clock. resume() above looks on its own.
+                #if os(iOS)
+                store.markSeen(look: true)
+                #endif
             }
         }
+        #if os(macOS)
+        .background(WindowConfigurator { w in
+            DispatchQueue.main.async { hostWindow = w }
+        })
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { n in
+            guard let w = n.object as? NSWindow, let host = hostWindow else { return }
+            if w === host {
+                if away, visible { store.markSeen(look: true) }
+                away = false
+            } else if w.sheetParent !== host, w.parent !== host {
+                away = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in away = true }
+        #endif
     }
 
     /// The header's state. A tmux session's comes from devd's look at the pane, as the web's: its transcript has no

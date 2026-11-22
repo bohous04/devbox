@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import type { BridgeEvent, LoggedEvent, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 import fixture from "../../shared/fixtures/thread-events.json";
-import { activeRun, applyCommands, applyEffort, applyNotice, applyThreadEvent, composerErrorText, criticRunIds, emptyThread, mergeSnapshot, queuedRunIds } from "./threadView";
+import { activeRun, applyCommands, applyEffort, applyNotice, applyThreadEvent, composerErrorText, criticRunIds, emptyThread, mergeSnapshot, queuedRunIds, seenToPost } from "./threadView";
 
 /** The shared cases (also run by ios/DevboxAppTests/ThreadStoreTests.swift): each starts from an empty thread. */
 type Step = { event: LoggedEvent } | { snapshot: { afterSeq: number; snapshot: ThreadSnapshot } } | { notice: ThreadItem };
@@ -81,4 +81,11 @@ test("commands: thread-commands replaces the list (null = none: no / menu); a re
   expect(mergeSnapshot(emptyThread(), { afterSeq: 0, snapshot: { ...emptyThread(), commands: list } }).commands).toEqual(list);
   // A snapshot without commands (the harness sent none, e.g. after a switch to Codex) drops the old list.
   expect("commands" in mergeSnapshot(t, { afterSeq: 0, snapshot: emptyThread() })).toBe(false);
+});
+
+test("seenToPost: a look always posts (it restarts the inbox's auto-settle clock); a run ending only when unseen", () => {
+  const t = { ...emptyThread(), lastSeq: 5, seenSeq: 5 };
+  expect(seenToPost(t, true)).toBe(5);
+  expect(seenToPost(t, false)).toBeNull();
+  expect(seenToPost({ ...t, seenSeq: 3 }, false)).toBe(5);
 });
