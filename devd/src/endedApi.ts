@@ -1,7 +1,7 @@
 import type { Context, Hono } from "hono";
 import type { Database } from "bun:sqlite";
 import type { EndedRemoved } from "../../shared/ended";
-import { endedImagesDir, getEnded, hideEnded, listEnded, openTranscript, type EndedRow } from "./endedSessions";
+import { endedImagesDir, getEnded, hideEnded, listEnded, openTranscript, toEnded, type EndedRow } from "./endedSessions";
 import type { EventBus } from "./eventBus";
 import { imageInDir } from "./threadImages";
 
@@ -20,6 +20,12 @@ export function registerEndedRoutes(app: Hono, d: EndedApiDeps): void {
   const row = (c: Context): EndedRow | Response => getEnded(d.db, c.req.param("id")!) ?? c.json({ error: "unknown ended session" }, 404);
 
   app.get("/api/ended", (c) => c.json({ items: listEnded(d.db) }));
+
+  /** One transcript's EndedSession, a hidden one too (the transcript page opened from a link). */
+  app.get("/api/ended/:id", (c) => {
+    const r = row(c);
+    return r instanceof Response ? r : c.json(toEnded(r));
+  });
 
   /** The same ThreadSnapshot as GET /api/sessions/:id/thread, with the same paging. */
   app.get("/api/ended/:id/transcript", (c) => {

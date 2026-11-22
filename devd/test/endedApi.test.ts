@@ -65,6 +65,14 @@ test("GET /api/ended lists the ended session with the mode continue will use", a
   expect(items.map((e) => [e.id, e.topic, e.continueMode])).toEqual([[ID, "Make the header sticky", "handoff"]]);
 });
 
+test("GET /api/ended/:id is the one transcript's entry, a hidden one too", async () => {
+  const t = setup();
+  await t.a.fetch(post(`/api/ended/${ID}/hide`));
+  const r = await t.a.fetch(new Request(`http://x/api/ended/${ID}`));
+  expect(((await r.json()) as EndedSession).id).toBe(ID);
+  expect((await t.a.fetch(new Request("http://x/api/ended/nope"))).status).toBe(404);
+});
+
 test("GET transcript is the thread snapshot shape, with paging; an unknown id is 404", async () => {
   const t = setup();
   const snap = (await (await t.a.fetch(new Request(`http://x/api/ended/${ID}/transcript`))).json()) as ThreadSnapshot;

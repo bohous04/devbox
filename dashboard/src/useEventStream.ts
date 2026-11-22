@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { MirrorInfo } from "../../shared/mirror";
 import type { AgentCommand, InboxItem, InboxRemoved, LoggedEvent, ThreadEffort, ThreadItem, ThreadSnapshot } from "../../shared/thread";
+import type { EndedRemoved, EndedSession } from "../../shared/ended";
 import { api } from "./api";
 
 export const STREAM_POLL_MS = 5000;
@@ -41,6 +42,10 @@ export interface EventStreamOptions {
   onInbox?: (item: InboxItem | InboxRemoved) => void;
   /** The whole inbox: fetched when the stream (re)opens and every 5 s while it is down. */
   onInboxList?: (items: InboxItem[]) => void;
+  /** An ended session's transcript that was just kept, or one hidden or purged (SSE `inbox-ended`). */
+  onEnded?: (e: EndedSession | EndedRemoved) => void;
+  /** All ended transcripts: fetched like the inbox list. */
+  onEndedList?: (items: EndedSession[]) => void;
 }
 
 /** devd's SSE stream (`GET /api/stream`, devd/src/threadApi.ts). `paused` is true while it is down; then the inbox
@@ -64,6 +69,12 @@ export function useEventStream(opts: EventStreamOptions): { paused: boolean; pol
     let poll: ReturnType<typeof setInterval> | undefined;
 
     const loadInbox = () => {
+      if (h.current.onEndedList) {
+        api.ended().then(
+          (r) => { if (!disposed) h.current.onEndedList?.(r.items); },
+          (e) => { if (!disposed) setPollError((e as Error).message); },
+        );
+      }
       if (!h.current.onInboxList) return;
       api.inbox().then(
         (r) => { if (!disposed) { setPollError(null); h.current.onInboxList?.(r.items); } },
@@ -97,6 +108,7 @@ export function useEventStream(opts: EventStreamOptions): { paused: boolean; pol
       on<ThreadEffort | null>("thread-effort", (d) => h.current.onEffort?.(d));
       on<AgentCommand[] | null>("thread-commands", (d) => h.current.onCommands?.(d));
       on<InboxItem | InboxRemoved>("inbox", (d) => h.current.onInbox?.(d));
+      on<EndedSession | EndedRemoved>("inbox-ended", (d) => h.current.onEnded?.(d));
       on<MirrorInfo>("mirror", (d) => h.current.onMirror?.(d));
       src.onerror = () => {
         if (disposed) return;

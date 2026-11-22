@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { AlarmClock, Check, CircleAlert, CircleCheck, CircleDashed, Ellipsis, MessageCircleQuestion, Undo2 } from "lucide-react";
+import type { EndedSession } from "../../../shared/ended";
 import type { InboxItem } from "../../../shared/thread";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
@@ -10,6 +11,7 @@ import { AgentLogo, logoForAgent } from "../components/agentLogos";
 import { AppPage, Chevron, Collapse, RowsSkeleton } from "../components/primitives";
 import { SettleProblem } from "../components/SettleProblem";
 import { agoLabel } from "../format";
+import { endedHref, endedSecondLine, endedTitle, settledShelf, upsertEnded } from "../endedView";
 import { claimsUndo, failureText, focusOwnsUndo, settleKey, settleShortcut } from "../inboxSettle";
 import { badgeSlots, groupInbox, inboxHref, inboxList, metaTail, mixedAgents, projectBadge, reasonLabel, rowStatus, rowTitle, secondLine, shelfBlock, snoozeEnd, snoozeTimes, statusParts, upsertInbox, type StatusTone } from "../inboxView";
 import { cn } from "@/lib/utils";
@@ -240,11 +242,51 @@ function Rows({ items, now, onItem, quiet, settle }: { items: InboxItem[]; now: 
   );
 }
 
+/** An ended session's transcript on the Settled shelf: read-only, opened on its own page, never back in the inbox
+ *  (its menu only hides it). */
+function EndedRow({ ended, now, onHidden }: { ended: EndedSession; now: number; onHidden: (id: string) => void }) {
+  const showAgent = useContext(ShowAgent);
+  const [error, setError] = useState<string | null>(null);
+  const title = endedTitle(ended);
+  const label = [title, "ended", agoLabel(now - ended.endedAt), endedSecondLine(ended), showAgent ? profileFor(ended.agent).short : ""].filter(Boolean).join(", ");
+  return (
+    <li data-inbox-ended={ended.id} className="group relative flex min-w-0 flex-wrap rounded-lg transition-colors [@media(hover:hover)]:hover:bg-accent/60 has-[:focus-visible]:bg-accent/60 has-[[data-state=open]]:bg-accent/60">
+      <Link to={endedHref(ended)} aria-label={label} title={label}
+        className="flex min-w-0 flex-1 flex-col gap-0.5 rounded-lg py-2 pl-3 pr-3 outline-none focus-visible:ring-2 focus-visible:ring-ring/60 [@media(hover:none)]:pr-1">
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="min-w-0 flex-1 truncate text-sm text-foreground/70">{title}</span>
+          <span className="flex flex-none items-center gap-1.5 text-xs tabular-nums text-muted-foreground">
+            <span className="rounded bg-muted px-1.5 text-[11px]">Ended</span>{shortAgo(now - ended.endedAt)}
+          </span>
+        </span>
+        <span className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+          <span className="min-w-0 flex-1 truncate">{endedSecondLine(ended)}</span>
+          {showAgent && <AgentLogo name={logoForAgent(ended.agent)} size={12} className="w-6 opacity-70 [@media(hover:hover)]:group-hover:invisible [@media(hover:hover)]:group-has-[:focus-visible]:invisible [@media(hover:hover)]:group-has-[[data-state=open]]:invisible" />}
+          {!showAgent && <span className="hidden w-6 flex-none [@media(hover:hover)]:block" aria-hidden="true" />}
+        </span>
+      </Link>
+      <DropdownMenu>
+        <DropdownMenuTrigger aria-label={`Actions for ${title}`} title="More actions"
+          className={cn(ACTION, ON_HOVER, "size-9 flex-none self-center [@media(hover:hover)]:absolute [@media(hover:hover)]:bottom-[7px] [@media(hover:hover)]:right-2.5 [@media(hover:hover)]:size-auto [@media(hover:hover)]:h-[18px] [@media(hover:hover)]:w-6")}>
+          <Ellipsis className="size-4" aria-hidden="true" />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" collisionPadding={16} className="w-64 max-w-[calc(100vw-2rem)]">
+          <DropdownMenuItem onSelect={() => {
+            setError(null);
+            api.hideEnded(ended.id).then(() => onHidden(ended.id), (e: unknown) => setError(failureText(e)));
+          }}>Hide</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {error && <p role="alert" className="basis-full px-3 pb-2 text-xs text-destructive">{error}</p>}
+    </li>
+  );
+}
+
 /** A collapsed shelf under the list (Working, Snoozed, Settled); not shown while empty. */
-function Shelf({ label, items, now, onItem, settle }: { label: string; items: InboxItem[]; now: number; onItem: (i: InboxItem) => void; settle: boolean }) {
+function Shelf({ label, count, children }: { label: string; count: number; children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   const id = `inbox-${label.toLowerCase()}`;
-  if (items.length === 0) return null;
+  if (count === 0) return null;
   return (
     <section aria-labelledby={id}>
       <h2>
@@ -254,10 +296,10 @@ function Shelf({ label, items, now, onItem, settle }: { label: string; items: In
         >
           <Chevron open={open} />
           <span className="font-medium">{label}</span>
-          <span className="ml-auto tabular-nums">{items.length}</span>
+          <span className="ml-auto tabular-nums">{count}</span>
         </button>
       </h2>
-      <Collapse open={open}><div className="pb-2"><Rows items={items} now={now} onItem={onItem} settle={settle} /></div></Collapse>
+      <Collapse open={open}><div className="pb-2">{children}</div></Collapse>
     </section>
   );
 }
@@ -294,6 +336,8 @@ function SettleNotice({ onUndo }: { onUndo: () => void }) {
  *  every 5 s while the stream is down. */
 export function Inbox() {
   const [items, setItems] = useState<InboxItem[] | null>(null);
+  // Ended sessions' transcripts, on the Settled shelf; [] until loaded (they never ask for anything).
+  const [ended, setEnded] = useState<EndedSession[]>([]);
   const now = useNow(15_000);
   const { notice } = useSettleState();
   const { paused, pollError, badFrame } = useEventStream({
@@ -301,6 +345,8 @@ export function Inbox() {
     onInboxList: setItems,
     // Until the first full list arrives a single item would read as the whole inbox.
     onInbox: (item) => setItems((cur) => (cur === null ? cur : upsertInbox(cur, item))),
+    onEndedList: setEnded,
+    onEnded: (e) => setEnded((cur) => upsertEnded(cur, e)),
   });
   // The badge colours come from devd's project list, loaded once per visit; the badges stay neutral until it answers.
   const [slots, setSlots] = useState<Map<string, number> | null>(null);
@@ -308,6 +354,7 @@ export function Inbox() {
     api.tree().then((t) => setSlots(badgeSlots(t.map((p) => p.project))),
       (e: unknown) => console.error(`inbox: project list for the badge colours failed: ${failureText(e)}`));
   }, []);
+  const onHidden = (id: string) => setEnded((cur) => upsertEnded(cur, { id, removed: true }));
   const g = items ? groupInbox(items) : null;
   const list = g ? inboxList(g) : [];
   // A row action answers the session's new item: shown at once, the SSE event that follows is the same.
@@ -385,11 +432,17 @@ export function Inbox() {
             ) : (
               <section aria-label="Inbox" className="mb-3"><Rows items={list} now={now} onItem={onItem} quiet settle /></section>
             )}
-            {g.working.length + g.snoozed.length + g.settled.length > 0 && (
+            {g.working.length + g.snoozed.length + g.settled.length + ended.length > 0 && (
               <div className="border-t pt-1.5">
-                <Shelf label="Working" items={g.working} now={now} onItem={onItem} settle />
-                <Shelf label="Snoozed" items={g.snoozed} now={now} onItem={onItem} settle={false} />
-                <Shelf label="Settled" items={g.settled} now={now} onItem={onItem} settle={false} />
+                <Shelf label="Working" count={g.working.length}><Rows items={g.working} now={now} onItem={onItem} settle /></Shelf>
+                <Shelf label="Snoozed" count={g.snoozed.length}><Rows items={g.snoozed} now={now} onItem={onItem} settle={false} /></Shelf>
+                <Shelf label="Settled" count={g.settled.length + ended.length}>
+                  <ul className="flex flex-col gap-px">
+                    {settledShelf(g.settled, ended).map((r) => (r.kind === "session"
+                      ? <Row key={r.item.sessionId} item={r.item} now={now} onItem={onItem} quiet={false} settle={false} />
+                      : <EndedRow key={r.ended.id} ended={r.ended} now={now} onHidden={onHidden} />))}
+                  </ul>
+                </Shelf>
               </div>
             )}
             <div className="sticky bottom-20 z-10 mt-3 flex flex-col gap-2 px-3 lg:bottom-4">
