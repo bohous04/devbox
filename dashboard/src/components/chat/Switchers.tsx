@@ -205,5 +205,5 @@ function Section({ title, options, loadErr, blocked, current, render, onPick, na
 /** The agent runtime's mark (agentLogos.tsx), so the chip says which agent runs without spelling it out. In the text's
  *  muted colour: colour here means status. */
 export function AgentGlyph({ agent }: { agent: ChatTarget["agent"] }) {
-  return <AgentLogo name={logoForAgent(agent)} className="size-4 text-muted-foreground" />;
+  return <AgentLogo name={logoForAgent(agent)} className="text-muted-foreground" />;
 }

@@ -29,6 +29,18 @@ struct AgentLogo: View {
 
         var asset: String { "agent-\(rawValue)" }
 
+        /// The path's width over its height: each SVG's viewBox is its path's bounds (agentLogos.tsx `box`; its test
+        /// checks this table against them), so a wide, short mark (Mistral's) takes the same area as a square one.
+        var aspect: Double {
+            switch self {
+            case .claude, .generic: 1
+            case .openai: 24 / 23.79
+            case .grok: 24 / 23.05
+            case .antigravity: 24 / 22.11
+            case .mistral: 24 / 17.15
+            }
+        }
+
         /// Per mark: draw it in its brand colour (`hex`) instead of the text's. Off for every mark.
         var showsBrand: Bool {
             switch self {
@@ -55,7 +67,11 @@ struct AgentLogo: View {
     var size: CGFloat = 12
 
     var body: some View {
-        let image = Image(mark.asset).renderingMode(.template).resizable().scaledToFit().frame(width: size, height: size)
+        // The slot's area in the mark's proportions (agentLogos.tsx markSize). The slot stays square, so what sits
+        // beside it lines up; a wide mark reaches a little past its sides.
+        let r = mark.aspect.squareRoot()
+        let image = Image(mark.asset).renderingMode(.template).resizable().scaledToFit()
+            .frame(width: size * r, height: size / r).frame(width: size, height: size)
         // The agent's name is said by the row or chip it sits in, as the web's aria-hidden mark.
         Group { if let brand = mark.brand { image.foregroundStyle(brand) } else { image } }.accessibilityHidden(true)
     }

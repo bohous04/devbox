@@ -113,7 +113,11 @@ final class MacAppTests: XCTestCase {
         XCTAssertEqual(AgentLogo.Mark(agent: "something-new"), .generic)
         // Every mark is in the asset catalog, as a template (it takes the text's colour), and no brand colour is on.
         for mark in AgentLogo.Mark.allCases {
-            XCTAssertNotNil(NSImage(named: mark.asset), mark.asset)
+            let image = NSImage(named: mark.asset)
+            XCTAssertNotNil(image, mark.asset)
+            // The asset's proportions (its viewBox, the path's bounds) are the ones the view sizes it by. AppKit rounds
+            // the SVG's size to whole points, hence the point of slack.
+            if let size = image?.size { XCTAssertEqual(size.height, size.width / mark.aspect, accuracy: 1, mark.asset) }
             XCTAssertNil(mark.brand, mark.asset)
         }
         XCTAssertEqual(MacInboxSidebar.connection(paused: false, loadError: nil, loaded: true).text, "Connected")
