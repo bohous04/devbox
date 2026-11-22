@@ -50,7 +50,7 @@ function fakeTimers(clock: () => number) {
 }
 
 /** A hub, a chat hub and an inbox over one clock, wired like index.ts. Chat events are stamped with that clock. */
-function setup(opts: { snoozedThrows?: boolean; activityThrows?: boolean } = {}) {
+function setup(opts: { snoozedThrows?: boolean; activityThrows?: boolean; quietMs?: number } = {}) {
   let now = T0;
   const clock = () => now;
   const timers = fakeTimers(clock);
@@ -72,7 +72,7 @@ function setup(opts: { snoozedThrows?: boolean; activityThrows?: boolean } = {})
     snoozed: (id) => { if (opts.snoozedThrows) throw new Error("db locked"); return inbox.snoozed(id); },
   }, (m) => logs.push(m));
   const hub = new AgentEventHub({
-    db, notify: (title, message) => notified.push(`${title}: ${message}`), now: () => now, quietMs: 1000, ...shelf,
+    db, notify: (title, message) => notified.push(`${title}: ${message}`), now: () => now, quietMs: opts.quietMs ?? 1000, ...shelf,
   });
   const chatHub = new ChatHub({ hub, session: (id) => getSession(db, id), now: () => now });
   inbox = new Inbox({
@@ -348,11 +348,24 @@ test("a tmux failure stays needs-you until seen", () => {
   expect(t.section(TMUX.id)).toBe("idle");
 });
 
-test("a reused session id does not inherit the seen marker", () => {
-  const t = setup();
+test("a reused session id does not inherit the seen marker: the new session's done is needs-you", () => {
+  // No quiet window and a frozen clock: the new session's done begins at the very ms of the old look, so an
+  // inherited marker would cover it (seen_at >= statusSince).
+  const t = setup({ quietMs: 0 });
+  const finish = () => {
+    const tmux = getSession(t.db, TMUX.id)!;
+    t.hub.handle(tmux, "user_prompt_submit");
+    t.hub.handle(tmux, "stop");
+    t.hub.sweep();
+  };
+  finish();
   t.inbox.seen(TMUX.id);
+  expect(t.section(TMUX.id)).toBe("idle");
   deleteSession(t.db, TMUX.id);
   expect(getTmuxSeenAt(t.db, TMUX.id)).toBeNull();
+  insertSession(t.db, { ...TMUX, created_at: t.now(), last_active_at: t.now() });
+  finish();
+  expect(t.inbox.item(getSession(t.db, TMUX.id)!).attention).toMatchObject({ section: "needs_you", reason: "completed", since: t.now() });
 });
 
 // --- until reset ---

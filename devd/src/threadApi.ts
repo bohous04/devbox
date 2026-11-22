@@ -62,7 +62,7 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
   if (!d) {
     const off = (c: Context) => c.json({ error: "chat runtime is not configured" }, 503);
     for (const path of ["/api/sessions/:id/thread", "/api/sessions/:id/thread/*", "/api/inbox", "/api/stream",
-      "/api/sessions/:id/settle", "/api/sessions/:id/unsettle", "/api/sessions/:id/snooze", "/api/sessions/:id/snooze-reset"]) app.all(path, off);
+      "/api/sessions/:id/seen", "/api/sessions/:id/settle", "/api/sessions/:id/unsettle", "/api/sessions/:id/snooze", "/api/sessions/:id/snooze-reset"]) app.all(path, off);
     return;
   }
   /** The chat session's row and store, or the error response: 404 unknown, 409 tmux or ending. */

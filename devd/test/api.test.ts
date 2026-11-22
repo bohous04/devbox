@@ -1412,3 +1412,11 @@ test("chat image upload (?for=thread): png, jpeg, webp, gif land in the session'
   expect(((await heavy.json()) as { error: string }).error).toBe("The image is 5.0 MB; chat images may be at most 5 MB");
   expect((await upload(png(8001, 10))).status).toBe(413);
 });
+
+test("without the chat runtime, the inbox routes answer 503, tmux seen too", async () => {
+  const { a } = app();
+  for (const path of ["/api/sessions/dev-x/seen", "/api/sessions/dev-x/settle", "/api/inbox"]) {
+    const r = await a.request(path, { method: path === "/api/inbox" ? "GET" : "POST" });
+    expect(r.status).toBe(503);
+  }
+});
