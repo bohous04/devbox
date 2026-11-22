@@ -8,7 +8,7 @@ import type { CodexView } from "../src/codexPoller";
 import { ChatHub } from "../src/chatHub";
 import {
   deleteSession, getSession, getSessionAttention, insertLease, insertSession, listNotifyLog, listSessions, openDb, upsertAccountUsage,
-  getTmuxSeenAt, putSessionAttention, type SessionRow,
+  getSeenAt, putSessionAttention, type SessionRow,
 } from "../src/db";
 import { EventBus } from "../src/eventBus";
 import { AUTO_SETTLE_IDLE_MS, AUTO_SETTLE_SEEN_IDLE_MS, autoSettleDue, hubShelfDeps, resetDeps, untilReset, type ResetDeps } from "../src/sessionAttention";
@@ -267,13 +267,13 @@ test("auto-settle: idle (seen, nothing to say) after 24 h; needs-you (unseen don
   const s: SessionRow = { ...TMUX, created_at: 0, last_active_at: 0 };
   const idle = { section: "idle", reason: null, since: 0 } as const;
   expect(AUTO_SETTLE_SEEN_IDLE_MS).toBe(DAY);
-  expect(autoSettleDue(idle, s, null, DAY - 60_000)).toBe(false); // 23:59
-  expect(autoSettleDue(idle, s, null, DAY)).toBe(true);
+  expect(autoSettleDue(idle, s, null, null, DAY - 60_000)).toBe(false); // 23:59
+  expect(autoSettleDue(idle, s, null, null, DAY)).toBe(true);
   for (const reason of ["completed", "failed", "ci-failed"] as const) {
     const needsYou = { section: "needs_you", reason, since: 0 } as const;
-    expect(autoSettleDue(needsYou, s, null, DAY)).toBe(false);
-    expect(autoSettleDue(needsYou, s, null, AUTO_SETTLE_IDLE_MS - 1)).toBe(false);
-    expect(autoSettleDue(needsYou, s, null, AUTO_SETTLE_IDLE_MS)).toBe(true);
+    expect(autoSettleDue(needsYou, s, null, null, DAY)).toBe(false);
+    expect(autoSettleDue(needsYou, s, null, null, AUTO_SETTLE_IDLE_MS - 1)).toBe(false);
+    expect(autoSettleDue(needsYou, s, null, null, AUTO_SETTLE_IDLE_MS)).toBe(true);
   }
 });
 
@@ -292,6 +292,45 @@ test("auto-settle: a quiet seen session after 24 h, an unseen completion after 7
   expect(t.section(CHAT.id)).toBe("settled");
   expect(getSessionAttention(t.db, CHAT.id)?.settled_reason).toBe("idle");
   expect(t.inbox.autoSettle()).toEqual([]); // already settled
+});
+
+test("auto-settle counts a look as activity: idle at the look + 24 h, not before", () => {
+  const s: SessionRow = { ...TMUX, created_at: 0, last_active_at: 0 };
+  const idle = { section: "idle", reason: null, since: 0 } as const;
+  expect(autoSettleDue(idle, s, null, 3 * DAY, 3 * DAY + AUTO_SETTLE_SEEN_IDLE_MS - 1)).toBe(false);
+  expect(autoSettleDue(idle, s, null, 3 * DAY, 3 * DAY + AUTO_SETTLE_SEEN_IDLE_MS)).toBe(true);
+});
+
+test("a chat Done last active 3 days ago and seen now settles at now + 24 h, not minutes after the look", () => {
+  const t = setup();
+  t.feed(CHAT.id, [started("r1"), completed("r1")]);
+  t.tick(3 * DAY);
+  expect(t.section(CHAT.id)).toBe("needs_you");
+  const store = t.threads(CHAT.id);
+  store.markSeen(store.lastSeq()); // what POST /thread/seen does
+  t.inbox.seen(CHAT.id);
+  expect(t.section(CHAT.id)).toBe("idle");
+  t.tick(AUTO_SETTLE_SEEN_IDLE_MS - 1);
+  expect(t.inbox.autoSettle()).not.toContain(CHAT.id);
+  t.tick(1);
+  expect(t.inbox.autoSettle()).toContain(CHAT.id);
+});
+
+test("a tmux Done last active 3 days ago and seen now settles at now + 24 h, not minutes after the look", () => {
+  const t = setup();
+  const tmux = getSession(t.db, TMUX.id)!;
+  t.hub.handle(tmux, "user_prompt_submit");
+  t.hub.handle(tmux, "stop");
+  t.tick(2000);
+  t.hub.sweep();
+  t.tick(3 * DAY);
+  expect(t.section(TMUX.id)).toBe("needs_you");
+  t.inbox.seen(TMUX.id);
+  expect(t.section(TMUX.id)).toBe("idle");
+  t.tick(AUTO_SETTLE_SEEN_IDLE_MS - 1);
+  expect(t.inbox.autoSettle()).not.toContain(TMUX.id);
+  t.tick(1);
+  expect(t.inbox.autoSettle()).toContain(TMUX.id);
 });
 
 test("auto-settle counts idle time from the last activity of the session, not from an old attention", () => {
@@ -348,7 +387,7 @@ test("a finished tmux session is Done until seen; the next finish is Done again"
   t.tick(1000);
   t.inbox.seen(TMUX.id);
   expect(t.published.at(-1)).toMatchObject({ sessionId: TMUX.id, attention: { section: "idle", reason: null } });
-  expect(getTmuxSeenAt(t.db, TMUX.id)).toBe(t.now());
+  expect(getSeenAt(t.db, TMUX.id)).toBe(t.now());
   t.tick(1000);
   t.hub.handle(tmux, "user_prompt_submit");
   t.tick(1000);
@@ -383,7 +422,7 @@ test("a reused session id does not inherit the seen marker: the new session's do
   t.inbox.seen(TMUX.id);
   expect(t.section(TMUX.id)).toBe("idle");
   deleteSession(t.db, TMUX.id);
-  expect(getTmuxSeenAt(t.db, TMUX.id)).toBeNull();
+  expect(getSeenAt(t.db, TMUX.id)).toBeNull();
   insertSession(t.db, { ...TMUX, created_at: t.now(), last_active_at: t.now() });
   finish();
   expect(t.inbox.item(getSession(t.db, TMUX.id)!).attention).toMatchObject({ section: "needs_you", reason: "completed", since: t.now() });

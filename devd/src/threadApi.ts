@@ -228,7 +228,7 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
       return c.json({ error: "seq must be an integer between 0 and the thread's lastSeq" }, 400);
     }
     r.store.markSeen(seq);
-    d.inbox.changedSafe(id);
+    d.inbox.seen(id);
     return c.body(null, 204);
   });
 

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createApp } from "../src/api";
 import { AgentEventHub } from "../src/agentEvents";
 import { AgentDisconnected, CommandFailed, CommandTimeout } from "../src/bridgeLink";
-import { getSession, getTmuxSeenAt, insertSession, listSessions, openDb, type SessionRow } from "../src/db";
+import { getSession, getSeenAt, insertSession, listSessions, openDb, type SessionRow } from "../src/db";
 import { EventBus } from "../src/eventBus";
 import { Inbox } from "../src/sessionInbox";
 import type { ResetTarget } from "../src/sessionAttention";
@@ -281,6 +281,7 @@ test("POST seen marks the seq seen (204); out of range or non-integer is 400", a
   const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/thread/seen`, { seq: 2 }));
   expect(r.status).toBe(204);
   expect(t.threads(CHAT.id).snapshot({ limit: 0 }).seenSeq).toBe(2);
+  expect(getSeenAt(t.db, CHAT.id)).toBe(1_000_000); // the look, for the auto-settle clock
 });
 
 test("POST seen publishes the session's new inbox state", async () => {
@@ -298,7 +299,7 @@ test("POST tmux seen (204) records the look and publishes the new inbox state; u
   t.bus.subscribe(["inbox"], (_t, d) => got.push(d));
   const r = await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/seen`));
   expect(r.status).toBe(204);
-  expect(getTmuxSeenAt(t.db, TMUX.id)).toBe(1_000_000);
+  expect(getSeenAt(t.db, TMUX.id)).toBe(1_000_000);
   expect(got).toMatchObject([{ sessionId: TMUX.id }]);
   expect((await t.a.fetch(req("POST", "/api/sessions/nope/seen"))).status).toBe(404);
   const chat = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/seen`));
