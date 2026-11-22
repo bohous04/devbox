@@ -34,9 +34,12 @@ struct DevboxMacApp: App {
 }
 
 /// ⌘N opens New session, ⌘⇧N a new window (the default ⌘N), ⌘F the sidebar's search, ⌘D switches the sidebar
-/// between the sessions and the dashboard, all in the key window.
+/// between the sessions and the dashboard, ⌘⇧S settles the selected session and Undo Settle takes it back while the
+/// notice shows (⌘Z, through MacAppState's monitor), all in the key window.
 struct MacWindowCommands: Commands {
     @FocusedValue(\.macWindowActions) private var actions
+    @FocusedValue(\.macSettle) private var settle
+    @FocusedValue(\.macUndoSettle) private var undoSettle
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
@@ -51,6 +54,15 @@ struct MacWindowCommands: Commands {
             Button("Find Session…") { actions?.find() }
                 .keyboardShortcut("f")
                 .disabled(actions == nil)
+        }
+        CommandMenu("Session") {
+            Button("Settle") { settle?.settle() }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(settle == nil || settle?.block != nil)
+            // Listed for discovery and VoiceOver. ⌘Z is only in the title: as a key equivalent it would fire from a
+            // text field or the terminal too; MacAppState's monitor owns the key and leaves those their own ⌘Z.
+            Button("Undo Settle (⌘Z)") { undoSettle?.undo() }
+                .disabled(undoSettle == nil)
         }
         CommandGroup(after: .sidebar) {
             Button(actions?.inDashboard == true ? "Sessions" : "Dashboard") { actions?.toggleDashboard() }

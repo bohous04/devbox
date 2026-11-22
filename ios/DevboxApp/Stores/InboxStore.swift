@@ -345,6 +345,9 @@ final class InboxStore: ObservableObject {
     func snoozeUntilReset(_ id: String) async throws {
         apply(try await client.post("/api/sessions/\(pathSegment(id))/snooze", body: SnoozeUntilReset()))
     }
+    /// A tmux session was looked at now: devd clears its finish or failure (204; 409 for a chat session, whose
+    /// thread has its own seen marker).
+    func seen(_ id: String) async throws { try await client.postVoid("/api/sessions/\(pathSegment(id))/seen", body: Empty()) }
     /// For the snooze menu: when the active limit resets, or devd's reason why "until reset" is not possible.
     func snoozeReset(_ id: String) async throws -> SnoozeReset {
         try await client.get("/api/sessions/\(pathSegment(id))/snooze-reset")

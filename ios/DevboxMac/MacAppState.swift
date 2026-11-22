@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import SwiftTerm
 import SwiftUI
 import os
 
@@ -16,6 +17,8 @@ final class MacAppState: ObservableObject {
     @Published private(set) var live: LiveStore?
     /// Each thread asked to come forward (openThread): the window showing it leaves its dashboard.
     let focusedThread = PassthroughSubject<String, Never>()
+    /// Settle with undo and the tmux seen marker, for every window's sidebar.
+    let settler = MacSettler()
     /// A one-time notice from restoring the last run's windows (the window list was unreadable).
     @Published var restoreNotice: String?
     /// The test bundle runs inside this app: then nothing of the real app's startup runs (no devd connection, no login
@@ -33,6 +36,7 @@ final class MacAppState: ObservableObject {
     private var openWindow: OpenWindowAction?
     /// Threads asked for (a `devbox://` link) before any view could open a window.
     private var pending: [String] = []
+    private var undoKey: Any?
 
     init(isTestRun: Bool = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil,
          isFixtureRun: Bool = MacAppState.fixtureArgument) {
@@ -50,12 +54,31 @@ final class MacAppState: ObservableObject {
             windows = ThreadWindows(defaults: defaults, directory: FileManager.default.temporaryDirectory.appending(path: scratch))
             if isTestRun { return }
             clientWatch = appModel.$client.sink { [weak self] in self?.use($0) }
+            watchUndoKey()
             return
         }
         windows = ThreadWindows(defaults: .standard,
                                 directory: URL.applicationSupportDirectory.appending(path: "Devbox/threads", directoryHint: .isDirectory))
         restoreNotice = windows.restoreProblem
         clientWatch = appModel.$client.sink { [weak self] in self?.use($0) }
+        watchUndoKey()
+    }
+
+    /// ⌘Z undoes the last settle while the key window's sidebar shows its notice (MacSettler.claimsUndo). Seen
+    /// before the menus, so Edit > Undo keeps ⌘Z otherwise; a text field being edited and the terminal keep theirs.
+    private func watchUndoKey() {
+        undoKey = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            MainActor.assumeIsolated {
+                let responder = event.window?.firstResponder
+                guard let self, let inbox = self.inbox, let window = event.window,
+                      MacSettler.claimsUndo(flags: event.modifierFlags, key: event.charactersIgnoringModifiers ?? "",
+                                            noticeShown: self.settler.notice != nil && self.settler.sidebarWindows.contains(ObjectIdentifier(window)),
+                                            focusOwnsUndo: responder is NSText || responder is TerminalView)
+                else { return event }
+                Task { await self.settler.undo(in: inbox) }
+                return nil
+            }
+        }
     }
 
     nonisolated static var fixtureArgument: Bool {

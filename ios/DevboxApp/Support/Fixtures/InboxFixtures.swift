@@ -1,14 +1,43 @@
 #if DEBUG
 import Foundation
 
-/// The inbox of the `demo` set: two sessions waiting on an answer, a failed run, two finished runs not yet seen,
-/// one running, idle ones (one tmux) and the shelves, as devd groups them. Times are relative to launch, so the labels read the same on every run.
+/// The inbox of the `demo` set: two sessions waiting on an answer, a failed run, three finished runs not yet seen,
+/// two running, idle ones (two tmux) and the shelves, as devd groups them. Times are relative to launch, so the labels read the same on every run.
 /// Every name here is invented. The release notes session has no branch recorded (a row from an older devd).
+/// Settle, unsettle and seen answer as devd does: settle refuses a row with an open request, unsettle brings back
+/// the row as listed, and seen takes tmux sessions only.
 enum InboxFixtures {
-    static let routes: [String: FixtureMode.Responder] = [
-        "GET /api/inbox": { _ in .json(["items": items(now: Date())]) },
-        "GET /api/stream": { _ in .openStream },
-    ]
+    static let routes: [String: FixtureMode.Responder] = {
+        var routes: [String: FixtureMode.Responder] = [
+            "GET /api/inbox": { _ in .json(["items": items(now: Date())]) },
+            "GET /api/stream": { _ in .openStream },
+        ]
+        for row in items(now: Date()) {
+            let id = row["sessionId"] as! String
+            let base = "POST /api/sessions/\(id)"
+            routes["\(base)/settle"] = { _ in settle(id) }
+            routes["\(base)/unsettle"] = { _ in .json(listed(id)) }
+            routes["\(base)/seen"] = { _ in
+                listed(id)["runtime"] as? String == "tmux" ? FixtureResponse(status: 204)
+                    : FixtureResponse(status: 409, body: Data(#"{"error":"not-a-tmux-session"}"#.utf8))
+            }
+        }
+        return routes
+    }()
+
+    private static func listed(_ id: String) -> [String: Any] { items(now: Date()).first { $0["sessionId"] as? String == id }! }
+
+    private static func settle(_ id: String) -> FixtureResponse {
+        var row = listed(id)
+        var attention = row["attention"] as! [String: Any]
+        if attention["reason"] as? String == "request" {
+            return FixtureResponse(status: 409, body: Data(#"{"error":"request-open","message":"Answer the open request first."}"#.utf8))
+        }
+        attention["section"] = "settled"
+        attention["since"] = Int(Date().timeIntervalSince1970 * 1000)
+        row["attention"] = attention
+        return .json(row)
+    }
 
     static func items(now: Date) -> [[String: Any]] {
         let ms = Int(now.timeIntervalSince1970 * 1000)
@@ -34,6 +63,8 @@ enum InboxFixtures {
                  since: ago(31), last: "2 of 148 tests failed: upload retries after a timeout."),
             item("dev-lumen-app", "Dark mode for the settings page", "lumen", "app", branch: "settings-dark-mode", section: "working", reason: "running",
                  since: ago(2), last: "Updating the colour tokens in theme.css and the two settings forms."),
+            item("dev-orchard-search", "Cache the search results", "orchard", "web", agent: "codex", branch: "search-cache", section: "working",
+                 reason: "running", since: ago(9), last: "Measuring the cache hit rate on the staging logs."),
             item("dev-acme-rename", "Rename the billing module", "acme", "billing", agent: "codex", branch: "rename-billing", section: "needs_you",
                  reason: "completed", since: ago(95), last: "Done. Renamed 14 files and updated the imports; tests pass."),
             // The session ThreadFixtures has a thread for, so a screenshot can show a row selected with its thread open.

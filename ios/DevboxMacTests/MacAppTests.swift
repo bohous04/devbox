@@ -56,11 +56,11 @@ final class MacAppTests: XCTestCase {
         return try JSONDecoder().decode(InboxItem.self, from: JSONSerialization.data(withJSONObject: json))
     }
 
-    /// A sidebar row that needs you says why in one word; every other row shows its age.
+    /// A sidebar row that needs you, or finished unseen, says so in one word; every other row shows its age.
     func testSidebarRowStateIsOneWordOrTheAge() throws {
         XCTAssertEqual(MacInboxRow.word(try item("needs_you", reason: "request"))?.text, "Answer")
         XCTAssertEqual(MacInboxRow.word(try item("needs_you", reason: "failed"))?.text, "Failed")
-        XCTAssertNil(MacInboxRow.word(try item("needs_you", reason: "completed")), "a finished run shows its age")
+        XCTAssertEqual(MacInboxRow.word(try item("needs_you", reason: "completed"))?.text, "Done", "a finished run not yet seen")
         XCTAssertNil(MacInboxRow.word(try item("idle", reason: "failed")), "only Needs you rows get the word")
         XCTAssertEqual(MacInboxRow.when(try item("idle", reason: nil, since: 1_000), now: 1_000 + 3 * 60_000), "3m")
     }
@@ -137,7 +137,7 @@ final class MacAppTests: XCTestCase {
         for shelf in ["Working", "Snoozed", "Settled"] { XCTAssertFalse(MacSidebarLayout.startsOpen(shelf), shelf) }
     }
 
-    /// The shelves pinned under the scrolling groups: Working, Snoozed, Settled in that order, the empty ones left out;
+    /// The shelves pinned under the list: Working, Snoozed, Settled in that order, the empty ones left out;
     /// none at all (so no block and no rule) when every shelf is empty.
     func testPinnedShelvesAreTheNonEmptyShelvesInOrder() throws {
         let working = try item("working", reason: "running"), settled = try item("settled", reason: "completed")
@@ -149,25 +149,19 @@ final class MacAppTests: XCTestCase {
         XCTAssertEqual(pinned.map(\.items.count), [1, 1])
         let none = InboxView.Groups(needsYou: [needs], working: [], idle: [idle], snoozed: [], settled: [])
         XCTAssertTrue(MacSidebarLayout.pinnedShelves(none).isEmpty)
-        // What scrolls above them: needs you split from the merely finished runs (capped at five), then idle.
-        let finished = try item("needs_you", reason: "completed")
-        let all = InboxView.Groups(needsYou: [needs, finished], working: [working], idle: [idle], snoozed: [], settled: [settled])
-        XCTAssertEqual(MacSidebarLayout.scrollingGroups(all).map(\.label), ["Needs you", "Finished", "Idle"])
-        XCTAssertEqual(MacSidebarLayout.scrollingGroups(all).map(\.cap), [nil, 5, nil])
-        XCTAssertEqual(MacSidebarLayout.scrollingGroups(none).map(\.label), ["Needs you", "Idle"])
     }
 
-    /// ↑/↓ cross the seam between the scrolling groups and the pinned shelves; elsewhere each list moves on its own.
+    /// ↑/↓ cross the seam between the list and the pinned shelves; elsewhere each list moves on its own.
     func testArrowsCrossBetweenTheGroupsAndTheShelves() {
         let groups = ["a", "b"], shelves = ["w", "s"]
-        XCTAssertEqual(MacSidebarLayout.crossing(from: "b", down: true, groups: groups, shelves: shelves), "w")
-        XCTAssertEqual(MacSidebarLayout.crossing(from: "w", down: false, groups: groups, shelves: shelves), "b")
-        XCTAssertNil(MacSidebarLayout.crossing(from: "a", down: true, groups: groups, shelves: shelves))
-        XCTAssertNil(MacSidebarLayout.crossing(from: "s", down: false, groups: groups, shelves: shelves))
-        XCTAssertNil(MacSidebarLayout.crossing(from: "w", down: true, groups: groups, shelves: shelves))
-        XCTAssertNil(MacSidebarLayout.crossing(from: "b", down: true, groups: groups, shelves: []), "every shelf shut: nowhere to go")
-        XCTAssertNil(MacSidebarLayout.crossing(from: "w", down: false, groups: [], shelves: shelves))
-        XCTAssertNil(MacSidebarLayout.crossing(from: nil, down: true, groups: groups, shelves: shelves))
+        XCTAssertEqual(MacSidebarLayout.crossing(from: "b", down: true, list: groups, shelves: shelves), "w")
+        XCTAssertEqual(MacSidebarLayout.crossing(from: "w", down: false, list: groups, shelves: shelves), "b")
+        XCTAssertNil(MacSidebarLayout.crossing(from: "a", down: true, list: groups, shelves: shelves))
+        XCTAssertNil(MacSidebarLayout.crossing(from: "s", down: false, list: groups, shelves: shelves))
+        XCTAssertNil(MacSidebarLayout.crossing(from: "w", down: true, list: groups, shelves: shelves))
+        XCTAssertNil(MacSidebarLayout.crossing(from: "b", down: true, list: groups, shelves: []), "every shelf shut: nowhere to go")
+        XCTAssertNil(MacSidebarLayout.crossing(from: "w", down: false, list: [], shelves: shelves))
+        XCTAssertNil(MacSidebarLayout.crossing(from: nil, down: true, list: groups, shelves: shelves))
     }
 
     /// The pinned block is as tall as its content, up to 45 % of the sidebar; it scrolls inside beyond that.
@@ -177,7 +171,7 @@ final class MacAppTests: XCTestCase {
         XCTAssertEqual(MacSidebarLayout.shelfHeight(content: 360, sidebar: 800, chrome: 90), 360)
     }
 
-    /// In a short window the scrolling groups keep 120 pt between the tools and the footer, so Needs you stays in reach.
+    /// In a short window the list keeps 120 pt between the tools and the footer, so what needs you stays in reach.
     func testPinnedBlockLeavesTheGroupsRoomInAShortWindow() {
         // 350 − 90 (tools and footer) − 120 = 140, under 45 % (157.5).
         XCTAssertEqual(MacSidebarLayout.shelfHeight(content: 400, sidebar: 350, chrome: 90), 140)
