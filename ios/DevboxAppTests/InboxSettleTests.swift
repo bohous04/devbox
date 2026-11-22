@@ -78,8 +78,8 @@ final class InboxSettleTests: XCTestCase {
         let queued = try item("dev-p-r-3", "working", reason: "queued")
         XCTAssertEqual(InboxRow.spoken(queued, now: 0, title: "Index", detail: "", showAgent: false), "Queued, Index, p/r")
         let snoozed = try item("dev-p-r-4", "snoozed", reason: "completed", until: 60_000)
-        let label = InboxRow.spoken(snoozed, now: 0, title: "Bump", detail: "", showAgent: false)
-        XCTAssertTrue(label.hasPrefix("Snoozed, Bump, until "), label)
+        let later = InboxRow.spoken(snoozed, now: 0, title: "Bump", detail: "", showAgent: false)
+        XCTAssertTrue(later.hasPrefix("Snoozed, Bump, until "), later)
     }
 
     /// Settle: every row in the list and in Working, except one waiting on an answer, which says why.
