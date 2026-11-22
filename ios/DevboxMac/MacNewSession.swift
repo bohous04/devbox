@@ -4,25 +4,173 @@ import SwiftUI
 /// `GET /api/open-progress`, polled while `POST /api/sessions` runs, exactly as the CLI's spinner does
 /// (cli/src/main.ts, cli/src/format.ts `openProgressPercent`/`formatOpenProgress`). Nothing advances on a timer.
 enum MacNewSession {
-    enum Mode: Hashable {
-        /// devd starts or rejoins the repo's existing session (`fresh` unset).
-        case openExisting
-        /// Another session beside the existing ones (`fresh: true`).
-        case create
+    /// The sheet's pages, one choice each. Project is skipped when the folder has one (a flat folder is one project
+    /// named after it): `NewSessionLogic.soleProject`, the rule the web and the iPhone use to fill it in.
+    enum Page: Int, Comparable {
+        case folder, project, repo, agent
+        static func < (a: Page, b: Page) -> Bool { a.rawValue < b.rawValue }
     }
 
-    struct Action: Equatable {
-        let label: String
-        let fresh: Bool?
-        /// Whether a session is made (for the progress title); Open Existing may only rejoin one.
-        let creates: Bool
+    /// What has been picked so far and the page showing. Back keeps the picks, so the page shows its row highlighted
+    /// again; another folder or project forgets what was picked under the old one.
+    struct Picks: Equatable {
+        private(set) var page: Page = .folder
+        private(set) var folder = ""
+        private(set) var project = ""
+        private(set) var repo = ""
+        var agent: AgentName = .claude
+
+        init() {}
+
+        /// A sheet already on `page` (the screenshot test).
+        init(folder: String, project: String, repo: String = "", agent: AgentName = .claude, page: Page) {
+            (self.folder, self.project, self.repo, self.agent, self.page) = (folder, project, repo, agent, page)
+        }
+
+        /// Picks `value` on a Folder, Project or Repo page and goes on to the next page. The agent is picked in place.
+        mutating func pick(_ value: String, tree: [TreeProject]) {
+            switch page {
+            case .folder:
+                if value != folder { (project, repo) = ("", "") }
+                folder = value
+                if let sole = NewSessionLogic.soleProject(tree, folder: value) {
+                    project = sole
+                    page = .repo
+                } else {
+                    page = .project
+                }
+            case .project:
+                if value != project { repo = "" }
+                project = value
+                page = .repo
+            case .repo:
+                if value != repo { agent = NewSessionLogic.defaultAgentFor(tree, folder: folder, project: project, repo: value) }
+                repo = value
+                page = .agent
+            case .agent:
+                return
+            }
+        }
+
+        /// One page back, skipping a Project page the folder did not need. false on the first page.
+        mutating func back(tree: [TreeProject]) -> Bool {
+            switch page {
+            case .folder: return false
+            case .project: page = .folder
+            case .repo: page = NewSessionLogic.soleProject(tree, folder: folder) == nil ? .project : .folder
+            case .agent: page = .repo
+            }
+            return true
+        }
+
+        /// The value picked on `p`, highlighted when the page shows again.
+        func value(on p: Page) -> String {
+            switch p {
+            case .folder: return folder
+            case .project: return project
+            case .repo: return repo
+            case .agent: return agent.rawValue
+            }
+        }
     }
 
-    /// Without a session on the repo there is nothing to open: devd creates one either way.
-    static func action(hasExisting: Bool, mode: Mode) -> Action {
-        guard hasExisting else { return Action(label: "Create", fresh: nil, creates: true) }
-        return mode == .create ? Action(label: "Create", fresh: true, creates: true)
-            : Action(label: "Open Existing", fresh: nil, creates: false)
+    /// One row of a page: the value it picks, its name, and a line of context.
+    struct Choice: Equatable, Identifiable {
+        let value: String
+        let title: String
+        let detail: String?
+        var id: String { value }
+    }
+
+    private static func count(_ n: Int, _ noun: String) -> String { n == 0 ? "No \(noun)s" : n == 1 ? "1 \(noun)" : "\(n) \(noun)s" }
+
+    static func choices<T: RepoKeyed>(_ p: Picks, tree: [TreeProject], sessions: [T]) -> [Choice] {
+        func repoCount(_ folder: String, _ project: String) -> Int {
+            tree.first { $0.folder == folder && $0.project == project }?.repos.count ?? 0
+        }
+        switch p.page {
+        case .folder:
+            return NewSessionLogic.folderChoices(tree).map { f in
+                let detail = NewSessionLogic.soleProject(tree, folder: f).map { count(repoCount(f, $0), "repo") }
+                    ?? count(NewSessionLogic.projectChoices(tree, folder: f).count, "project")
+                return Choice(value: f, title: f, detail: detail)
+            }
+        case .project:
+            return NewSessionLogic.projectChoices(tree, folder: p.folder).map {
+                Choice(value: $0, title: $0, detail: count(repoCount(p.folder, $0), "repo"))
+            }
+        case .repo:
+            return NewSessionLogic.repoChoices(tree, folder: p.folder, project: p.project).map { r in
+                guard r.value != NewSessionLogic.SOLO else {
+                    return Choice(value: r.value, title: "Scratch workspace", detail: "No repo, an empty workspace")
+                }
+                let n = NewSessionLogic.sessionsFor(sessions, project: p.project, repo: r.value).count
+                var parts = [r.cloned ? "Cloned" : "Not cloned yet: devd clones it first"]
+                if n > 0 { parts.append(count(n, "session")) }
+                // The old layout (one working directory, no bare clone) gives another session its own container only.
+                if n > 0, r.cloned, r.bare != true { parts.append("shares its working directory") }
+                return Choice(value: r.value, title: r.value, detail: parts.joined(separator: " · "))
+            }
+        case .agent:
+            // Only an agent the tree remembers is "last used"; without one Claude is preselected as the default.
+            let proj = tree.first { $0.folder == p.folder && $0.project == p.project }
+            let remembered = p.repo == NewSessionLogic.SOLO ? proj?.soloAgent : proj?.repos.first { $0.name == p.repo }?.agent
+            return AgentProfiles.ids.map { id in
+                Choice(value: id.rawValue, title: AgentProfiles.profile(for: id).label,
+                       detail: id == remembered ? "Last used here" : nil)
+            }
+        }
+    }
+
+    /// Lists this long take typed text as a filter.
+    static func filters(_ choices: [Choice]) -> Bool { choices.count >= 8 }
+
+    /// The highlighted row and the typed filter of the page showing.
+    struct Cursor: Equatable {
+        var filter = ""
+        var highlight: String?
+
+        func visible(_ choices: [Choice]) -> [Choice] {
+            filter.isEmpty ? choices : choices.filter { $0.title.localizedCaseInsensitiveContains(filter) }
+        }
+
+        /// The highlighted row if it is showing, else the first that is.
+        func current(_ choices: [Choice]) -> Choice? {
+            let v = visible(choices)
+            return v.first { $0.value == highlight } ?? v.first
+        }
+
+        mutating func move(_ by: Int, in choices: [Choice]) {
+            let v = visible(choices)
+            guard !v.isEmpty else { return }
+            let i = v.firstIndex { $0.value == current(choices)?.value } ?? 0
+            highlight = v[min(max(i + by, 0), v.count - 1)].value
+        }
+    }
+
+    /// What Create sends.
+    struct Request: Equatable {
+        let folder: String
+        let project: String
+        let repo: String
+        let cloneUrl: String?
+        let agent: AgentName
+    }
+
+    /// nil until the Agent page.
+    static func request(_ p: Picks, tree: [TreeProject]) -> Request? {
+        guard p.page == .agent, !p.folder.isEmpty, !p.project.isEmpty, !p.repo.isEmpty else { return nil }
+        let cloneUrl = NewSessionLogic.repoChoices(tree, folder: p.folder, project: p.project).first { $0.value == p.repo }?.cloneUrl
+        return Request(folder: p.folder, project: p.project, repo: p.repo, cloneUrl: cloneUrl, agent: p.agent)
+    }
+
+    /// New Session always makes a new session: `fresh: true`, as devd otherwise rejoins the repo's existing one. A
+    /// scratch workspace takes no `fresh` (devd does not know it for solo).
+    static func create(_ r: Request, actions: SessionActions, requestId: String) async throws -> OpenResult {
+        guard r.repo != NewSessionLogic.SOLO else { return try await actions.openSolo(folder: r.folder, project: r.project, agent: r.agent) }
+        // The first clone of a large repo runs for minutes before devd answers.
+        return try await actions.openSession(folder: r.folder, project: r.project, repo: r.repo, cloneUrl: r.cloneUrl, agent: r.agent,
+                                             fresh: true, requestId: requestId, timeout: 900)
     }
 
     /// The stages devd reports (devd/src/sessions.ts `OpenProgress.step`), then Ready when its answer comes.
@@ -125,9 +273,10 @@ enum MacNewSession {
 
     enum Phase {
         case form
-        case working(Tracker, creates: Bool)
-        /// devd's message; the form stays editable. `retry`: false when devd may have got the request and still be
-        /// creating the session (a second one could make another): both Retry and the primary button stay off.
+        case working(Tracker)
+        /// devd's message, on the Agent page. `retry`: false when devd may have got the request and still be creating
+        /// the session (a second one could make another): Create stays off until another folder, project or repo is
+        /// picked.
         case failed(String, retry: Bool)
         /// devd answered with something to read first (a runtime notice, a pull conflict).
         case done(String, sessionId: String)
@@ -144,80 +293,66 @@ enum MacNewSession {
     }
 }
 
-/// New Session on the Mac: a header, the Folder/Project/Repo/Agent form in aligned rows, and a footer with Cancel and
-/// one default button (Return). Once started, the form gives way to devd's progress, stage by stage, and the session
-/// opens when devd answers. The iPhone keeps its own sheet (NewSessionSheet); the cascade rules are shared
-/// (NewSessionLogic).
+
+/// New Session on the Mac as pages, one choice each: Folder, Project (only when the folder has several), Repo, Agent;
+/// then devd's progress, stage by stage, in the same sheet, and the session opens when devd answers. A click or Return
+/// on a row picks it and goes on; on the Agent page a click picks the agent and Create (Return, or a double click)
+/// starts. Arrows move the highlight, a long list filters as you type, Esc goes back (Cancel on the first page).
+/// The iPhone keeps its own sheet (NewSessionSheet); the cascade rules are shared (NewSessionLogic).
 struct MacNewSessionSheet: View {
     @EnvironmentObject private var live: LiveStore
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let actions: SessionActions
     let onStarted: () async -> Void
     /// Opens the session in this window; the sheet has closed first.
     let onOpen: (String) -> Void
+    /// Sees every change of the picks (the key test); the app passes none.
+    let onPicks: ((MacNewSession.Picks) -> Void)?
 
     @State private var tree: [TreeProject]?
     @State private var treeError: String?
-    @State private var folder = ""
-    @State private var project = ""
-    @State private var repo = ""
-    @State private var agent: AgentName = .claude
-    @State private var mode: MacNewSession.Mode = .openExisting
+    @State private var picks: MacNewSession.Picks
+    @State private var cursor: MacNewSession.Cursor
+    /// The last page change went forward: the side the next page slides in from.
+    @State private var forward = true
     @State private var phase: MacNewSession.Phase
     @State private var work: Task<Void, Never>?
     @State private var confirmClose = false
+    @FocusState private var listFocused: Bool
 
-    /// `tree`, `selection` and `phase` preset the sheet for the screenshot test; the app passes none.
+    /// `tree`, `picks` and `phase` preset the sheet for the screenshot test; the app passes none.
     init(actions: SessionActions, onStarted: @escaping () async -> Void, onOpen: @escaping (String) -> Void,
-         tree: [TreeProject]? = nil, selection: (folder: String, project: String, repo: String, agent: AgentName)? = nil,
-         phase: MacNewSession.Phase = .form) {
+         tree: [TreeProject]? = nil, picks: MacNewSession.Picks = .init(), phase: MacNewSession.Phase = .form,
+         onPicks: ((MacNewSession.Picks) -> Void)? = nil) {
         self.actions = actions
         self.onStarted = onStarted
         self.onOpen = onOpen
+        self.onPicks = onPicks
         _tree = State(initialValue: tree)
-        if let selection {
-            _folder = State(initialValue: selection.folder)
-            _project = State(initialValue: selection.project)
-            _repo = State(initialValue: selection.repo)
-            _agent = State(initialValue: selection.agent)
-        }
+        _picks = State(initialValue: picks)
+        _cursor = State(initialValue: .init(highlight: picks.value(on: picks.page)))
         _phase = State(initialValue: phase)
     }
 
-    private var repos: [NewSessionLogic.RepoChoice] {
-        guard let tree, !folder.isEmpty, !project.isEmpty else { return [] }
-        return NewSessionLogic.repoChoices(tree, folder: folder, project: project)
+    private var choices: [MacNewSession.Choice] {
+        tree.map { MacNewSession.choices(picks, tree: $0, sessions: live.live?.sessions ?? []) } ?? []
     }
 
-    /// Solo has no repo of its own and devd takes no `fresh` for it, so it never offers Open Existing.
-    private var existing: [SessionLive] {
-        guard !repo.isEmpty, repo != NewSessionLogic.SOLO else { return [] }
-        return NewSessionLogic.sessionsFor(live.live?.sessions ?? [], project: project, repo: repo)
-    }
-
-    private var action: MacNewSession.Action { MacNewSession.action(hasExisting: !existing.isEmpty, mode: mode) }
-
-    private var working: Bool { workingCreates != nil }
-
-    /// While devd works: whether the request makes a session, fixed when it started (the labels must not follow the
-    /// form behind them).
-    private var workingCreates: Bool? {
-        if case .working(_, let creates) = phase { return creates }
-        return nil
+    private var working: Bool {
+        if case .working = phase { return true }
+        return false
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
-            Group {
-                switch phase {
-                case .working(let tracker, let creates): progress(tracker, creates: creates)
-                case .done(let message, let id): done(message, id: id)
-                case .form, .failed: form
-                }
+            switch phase {
+            case .working(let tracker): progress(tracker).padding(20)
+            case .done(let message, let id): done(message, id: id).padding(20)
+            case .form, .failed: pages
             }
-            .padding(20)
             Divider()
             footer
         }
@@ -225,6 +360,10 @@ struct MacNewSessionSheet: View {
         .background(Theme.C.background)
         .task { await loadTree() }
         .onDisappear { work?.cancel() }
+        .onChange(of: picks) { old, new in
+            if old.page != new.page { cursor = .init(highlight: new.value(on: new.page)) }
+            onPicks?(new)
+        }
         .confirmationDialog("Stop waiting for this session?", isPresented: $confirmClose) {
             Button("Close") { work?.cancel(); dismiss() }
             Button("Keep Waiting", role: .cancel) {}
@@ -233,115 +372,158 @@ struct MacNewSessionSheet: View {
         }
     }
 
+    private var repoName: String { picks.repo == NewSessionLogic.SOLO ? "Scratch workspace" : picks.repo }
+
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(workingCreates.map { $0 ? "Creating Session" : "Opening Session" } ?? "New Session").font(.title3.weight(.semibold))
-            Text(working ? "\(project)/\(repo == NewSessionLogic.SOLO ? "scratch workspace" : repo) · \(AgentProfiles.profile(for: agent).label)"
-                 : "Pick a repo and an agent. devd clones the repo if needed and starts the session in its own container.")
-                .font(.callout)
-                .foregroundStyle(Theme.C.mutedForeground)
-                .fixedSize(horizontal: false, vertical: true)
+            Text(working ? "Creating Session" : "New Session").font(.title3.weight(.semibold))
+            Group {
+                switch phase {
+                case .working, .done:
+                    Text("\(picks.project)/\(repoName) · \(AgentProfiles.profile(for: picks.agent).label)")
+                case .form, .failed:
+                    Text(breadcrumb ?? "Pick a folder, a repo and an agent. devd clones the repo if needed and starts a new session in its own container.")
+                }
+            }
+            .font(.callout)
+            .foregroundStyle(Theme.C.mutedForeground)
+            .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 16)
     }
 
-    // MARK: - Form
+    /// What the earlier pages picked; a flat folder's project is the folder itself, so it shows once.
+    private var breadcrumb: String? {
+        var parts: [String] = []
+        if picks.page > .folder { parts.append(picks.folder) }
+        if picks.page > .project, picks.project != picks.folder { parts.append(picks.project) }
+        if picks.page > .repo { parts.append(repoName) }
+        return parts.isEmpty ? nil : parts.joined(separator: "  ›  ")
+    }
 
-    private var form: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 10) {
-                row("Folder") {
-                    Picker("Folder", selection: $folder) {
-                        if folder.isEmpty { Text("Choose…").tag("") }
-                        ForEach(tree.map(NewSessionLogic.folderChoices) ?? [], id: \.self) { Text($0).tag($0) }
-                    }
-                    .disabled(tree == nil)
-                    .onChange(of: folder) { _, newFolder in
-                        project = tree.flatMap { NewSessionLogic.soleProject($0, folder: newFolder) } ?? ""
-                        repo = ""
-                        phase = .form
-                    }
-                }
-                row("Project") {
-                    Picker("Project", selection: $project) {
-                        if project.isEmpty { Text("Choose…").tag("") }
-                        ForEach(tree.map { NewSessionLogic.projectChoices($0, folder: folder) } ?? [], id: \.self) { Text($0).tag($0) }
-                    }
-                    .disabled(folder.isEmpty)
-                    .onChange(of: project) { _, _ in
-                        repo = ""
-                        phase = .form
-                    }
-                }
-                row("Repo") {
-                    Picker("Repo", selection: $repo) {
-                        if repo.isEmpty { Text("Choose…").tag("") }
-                        ForEach(repos, id: \.value) { choice in
-                            Text(choice.value == NewSessionLogic.SOLO ? "Scratch workspace (no repo)" : choice.label).tag(choice.value)
-                        }
-                    }
-                    .disabled(project.isEmpty)
-                    .onChange(of: repo) { _, newRepo in
-                        agent = NewSessionLogic.defaultAgentFor(tree ?? [], folder: folder, project: project, repo: newRepo)
-                        mode = .openExisting
-                        // An error or a "may still be creating" belongs to the repo it was about.
-                        phase = .form
-                    }
-                }
-                row("Agent") {
-                    Picker("Agent", selection: $agent) {
-                        ForEach(AgentProfiles.ids, id: \.self) { id in
-                            let profile = AgentProfiles.profile(for: id)
-                            Text(profile.label + (profile.yolo ? " (yolo)" : "")).tag(id)
-                        }
-                    }
-                    .disabled(repo.isEmpty)
-                }
-                if !existing.isEmpty {
-                    row("Session") {
-                        Picker("Session", selection: $mode) {
-                            Text("Open the existing session").tag(MacNewSession.Mode.openExisting)
-                            Text("Create another session").tag(MacNewSession.Mode.create)
-                        }
-                        .pickerStyle(.radioGroup)
-                    }
-                }
-            }
-            if let note = modeNote {
-                Text(note).font(.callout).foregroundStyle(Theme.C.mutedForeground).fixedSize(horizontal: false, vertical: true)
-            }
-            if let message = treeError ?? failure {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.C.dangerText)
-                    Text(message).foregroundStyle(Theme.C.dangerText).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 0)
-                    // A failed open is retried with the primary button; the tree has no other.
-                    if treeError != nil {
-                        Button("Retry") { treeError = nil; Task { await loadTree() } }
-                    }
-                }
-                .font(.callout)
-            }
+    // MARK: - Pages
+
+    private var prompt: String {
+        switch picks.page {
+        case .folder: return "Choose a folder"
+        case .project: return "Choose a project"
+        case .repo: return "Choose a repo"
+        case .agent: return "Choose an agent"
         }
     }
 
-    private func row(_ label: String, @ViewBuilder _ control: () -> some View) -> some View {
-        GridRow {
-            Text("\(label):").foregroundStyle(Theme.C.foreground).frame(width: 64, alignment: .trailing)
-            control().labelsHidden().modifier(FlexibleControl()).frame(width: 320, alignment: .leading)
-        }
+    private var transition: AnyTransition {
+        guard !reduceMotion else { return .opacity }
+        return .asymmetric(insertion: .move(edge: forward ? .trailing : .leading).combined(with: .opacity),
+                           removal: .move(edge: forward ? .leading : .trailing).combined(with: .opacity))
     }
 
-    /// One width for every picker: macOS 26 sizes a pop-up to its title unless told to fill.
-    private struct FlexibleControl: ViewModifier {
-        func body(content: Content) -> some View {
-            if #available(macOS 26, *) {
-                content.buttonSizing(.flexible).frame(maxWidth: .infinity, alignment: .leading)
+    /// One page at a time, sliding in the way it was reached. Keys go to this stable container, not to a page that is
+    /// sliding out.
+    private var pages: some View {
+        ZStack(alignment: .topLeading) {
+            page.id(picks.page).transition(transition)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(height: 380)
+        .clipped()
+        .focusable()
+        .focusEffectDisabled()
+        .focused($listFocused)
+        .onKeyPress(phases: .down, action: key)
+        .onAppear { listFocused = true }
+    }
+
+    private var page: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(prompt).font(.headline)
+            if let treeError {
+                problem(treeError) { self.treeError = nil; Task { await loadTree() } }
+            } else if tree == nil {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Loading folders and repos…").foregroundStyle(Theme.C.mutedForeground)
+                }
             } else {
-                content.frame(maxWidth: .infinity, alignment: .leading)
+                let all = choices
+                if MacNewSession.filters(all) { filterLine }
+                list(all)
+                if picks.page == .agent, let failure { problem(failure, retry: nil) }
             }
         }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var filterLine: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+            Text(cursor.filter.isEmpty ? "Type to filter" : cursor.filter)
+                .foregroundStyle(cursor.filter.isEmpty ? Theme.C.mutedForeground : Theme.C.foreground)
+            Spacer(minLength: 0)
+        }
+        .font(.callout)
+        .foregroundStyle(Theme.C.mutedForeground)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.C.mutedForeground.opacity(0.35)))
+    }
+
+    private func list(_ all: [MacNewSession.Choice]) -> some View {
+        let visible = cursor.visible(all)
+        let current = cursor.current(all)?.value
+        return ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 2) {
+                    ForEach(visible) { c in row(c, highlighted: c.value == current).id(c.value) }
+                }
+            }
+            .overlay {
+                if visible.isEmpty {
+                    Text(all.isEmpty ? "devd has no folders configured." : "Nothing matches “\(cursor.filter)”.")
+                        .foregroundStyle(Theme.C.mutedForeground)
+                }
+            }
+            .onChange(of: current) { _, id in if let id { proxy.scrollTo(id) } }
+        }
+    }
+
+    private func row(_ c: MacNewSession.Choice, highlighted: Bool) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(c.title).foregroundStyle(highlighted ? Color.white : Theme.C.foreground)
+                if let detail = c.detail {
+                    Text(detail).font(.caption).foregroundStyle(highlighted ? Color.white.opacity(0.85) : Theme.C.mutedForeground)
+                }
+            }
+            Spacer(minLength: 0)
+            if picks.page != .agent {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(highlighted ? Color.white.opacity(0.85) : Theme.C.mutedForeground.opacity(0.6))
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 6).fill(highlighted ? Color.accentColor : Color.clear))
+        .contentShape(Rectangle())
+        .onTapGesture { activate(c) }
+        // On the Agent page a click picks the agent; a double click also creates.
+        .simultaneousGesture(TapGesture(count: 2).onEnded { if picks.page == .agent { start() } })
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(highlighted ? [.isButton, .isSelected] : .isButton)
+    }
+
+    private func problem(_ message: String, retry: (() -> Void)?) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.C.dangerText)
+            Text(message).foregroundStyle(Theme.C.dangerText).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            if let retry { Button("Retry", action: retry) }
+        }
+        .font(.callout)
     }
 
     private var isUnsure: Bool {
@@ -354,20 +536,68 @@ struct MacNewSessionSheet: View {
         return nil
     }
 
-    private var modeNote: String? {
-        guard !existing.isEmpty else { return nil }
-        let count = existing.count == 1 ? "This repo has a session (\(existing[0].id))." : "This repo has \(existing.count) sessions."
-        if mode == .openExisting { return "\(count) Open Existing starts or rejoins it as it is; it keeps its own agent." }
-        // A repo in the old layout (shared working directory) gives another session its own container only.
-        if let choice = repos.first(where: { $0.value == repo }), choice.cloned, choice.bare != true {
-            return "\(count) Another session shares this repo's working directory and branch (own container, same files)."
+    // MARK: - Moving between pages
+
+    private func key(_ press: KeyPress) -> KeyPress.Result {
+        guard tree != nil, !working else { return .ignored }
+        let all = choices
+        switch press.key {
+        case .upArrow, .downArrow:
+            cursor.move(press.key == .upArrow ? -1 : 1, in: all)
+            if picks.page == .agent, let c = cursor.current(all), let a = AgentName(rawValue: c.value) { picks.agent = a }
+            return .handled
+        case .return:
+            // The Agent page's Return is its Create button.
+            guard picks.page != .agent else { return .ignored }
+            if let c = cursor.current(all) { activate(c) }
+            return .handled
+        case .delete:
+            guard !cursor.filter.isEmpty else { return .ignored }
+            cursor.filter.removeLast()
+            return .handled
+        default:
+            let typed = press.characters.unicodeScalars
+            guard MacNewSession.filters(all), press.modifiers.subtracting(.shift).isEmpty, !typed.isEmpty,
+                  typed.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) else { return .ignored }
+            cursor.filter += press.characters
+            return .handled
         }
-        return "\(count) Create starts another one beside it, with its own worktree and branch."
+    }
+
+    private func activate(_ c: MacNewSession.Choice) {
+        guard let tree, !working else { return }
+        if picks.page == .agent {
+            guard let a = AgentName(rawValue: c.value) else { return }
+            picks.agent = a
+            cursor.highlight = c.value
+            return
+        }
+        go { $0.pick(c.value, tree: tree) }
+    }
+
+    private func goBack() {
+        guard let tree else { return dismiss() }
+        var next = picks
+        guard next.back(tree: tree) else { return dismiss() }
+        go { $0 = next }
+    }
+
+    /// Two steps, so the page sliding out already knows the direction: SwiftUI takes a removed view's transition from
+    /// its last render.
+    private func go(_ change: (inout MacNewSession.Picks) -> Void) {
+        var next = picks
+        change(&next)
+        // An error, or a "may still be creating", belongs to the repo it was about.
+        if (next.folder, next.project, next.repo) != (picks.folder, picks.project, picks.repo) { phase = .form }
+        forward = next.page > picks.page
+        DispatchQueue.main.async {
+            withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { picks = next }
+        }
     }
 
     // MARK: - Progress
 
-    private func progress(_ t: MacNewSession.Tracker, creates: Bool) -> some View {
+    private func progress(_ t: MacNewSession.Tracker) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             if t.stage == nil {
                 ProgressView().progressViewStyle(.linear)
@@ -402,7 +632,7 @@ struct MacNewSessionSheet: View {
                     .accessibilityLabel("\(t.title(s)), \(done ? "Done" : state == 1 ? "In progress" : "Pending")")
                 }
             }
-            Text(creates ? "devd skips the steps a session does not need." : "A session that is already running skips straight to Ready.")
+            Text("devd skips the steps a session does not need.")
                 .font(.caption)
                 .foregroundStyle(Theme.C.mutedForeground)
         }
@@ -420,20 +650,29 @@ struct MacNewSessionSheet: View {
 
     private var footer: some View {
         HStack {
-            Spacer()
             switch phase {
-            case .working(_, let creates):
+            case .working:
+                Spacer()
                 Button("Cancel") { confirmClose = true }.keyboardShortcut(.cancelAction)
-                Button(creates ? "Creating…" : "Opening…") {}.disabled(true)
+                Button("Creating…") {}.disabled(true)
             case .done(_, let id):
+                Spacer()
                 Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Open Session") { open(id) }.keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
             case .form, .failed:
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button(action.label, action: start)
-                    .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(folder.isEmpty || project.isEmpty || repo.isEmpty || isUnsure)
+                let first = picks.page == .folder
+                if !first {
+                    Button(action: goBack) { Label("Back", systemImage: "chevron.left") }.keyboardShortcut(.cancelAction)
+                }
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(first ? .cancelAction : nil)
+                if picks.page == .agent {
+                    // A failed create is retried here.
+                    Button("Create", action: start)
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isUnsure)
+                }
             }
         }
         .padding(.horizontal, 20)
@@ -444,7 +683,7 @@ struct MacNewSessionSheet: View {
 
     private func loadTree() async {
         guard tree == nil else { return }
-        do { tree = try await actions.tree() } catch { treeError = "Can't load the repos: \(errorText(error))" }
+        do { tree = try await actions.tree() } catch { treeError = "Can't load the folders and repos: \(errorText(error))" }
     }
 
     private func open(_ id: String) {
@@ -453,36 +692,31 @@ struct MacNewSessionSheet: View {
     }
 
     private func start() {
-        guard !folder.isEmpty, !project.isEmpty, !repo.isEmpty, !working else { return }
-        let f = folder, p = project, r = repo, a = agent, act = action
+        guard let tree, let request = MacNewSession.request(picks, tree: tree), !working, !isUnsure else { return }
         // Marks this open's progress, so another open of the same repo (the CLI, another window) is not shown as ours.
         let requestId = UUID().uuidString
-        let choice = repos.first { $0.value == r }
-        phase = .working(MacNewSession.Tracker(), creates: act.creates)
+        phase = .working(MacNewSession.Tracker())
         work = Task {
             // devd reports the repo's open while the request runs; solo clones nothing and has no progress key.
-            let poll = r == NewSessionLogic.SOLO ? nil : Task {
+            let poll = request.repo == NewSessionLogic.SOLO ? nil : Task {
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .milliseconds(500))
-                    guard !Task.isCancelled, case .working(var t, let creates) = phase else { return }
+                    guard !Task.isCancelled, case .working(var t) = phase else { return }
                     // A failed poll leaves the last stage showing; the request's own answer still decides.
-                    guard let report = try? await actions.openProgress(folder: f, project: p, repo: r) else { continue }
+                    guard let report = try? await actions.openProgress(folder: request.folder, project: request.project, repo: request.repo)
+                    else { continue }
                     guard !Task.isCancelled, case .working = phase else { return }
                     t.observe(report, requestId: requestId)
-                    phase = .working(t, creates: creates)
+                    phase = .working(t)
                 }
             }
             defer { poll?.cancel() }
             do {
-                let result = r == NewSessionLogic.SOLO
-                    ? try await actions.openSolo(folder: f, project: p, agent: a)
-                    // The first clone of a large repo runs for minutes before devd answers.
-                    : try await actions.openSession(folder: f, project: p, repo: r, cloneUrl: choice?.cloneUrl, agent: a,
-                                                    fresh: act.fresh, requestId: requestId, timeout: 900)
+                let result = try await MacNewSession.create(request, actions: actions, requestId: requestId)
                 poll?.cancel()
-                if case .working(var t, let creates) = phase {
+                if case .working(var t) = phase {
                     t.finish()
-                    phase = .working(t, creates: creates)
+                    phase = .working(t)
                 }
                 await onStarted()
                 // Closed meanwhile: the session is in the sidebar; the window stays where the user left it.

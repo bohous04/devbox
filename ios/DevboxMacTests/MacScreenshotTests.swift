@@ -242,8 +242,8 @@ final class MacScreenshotTests: XCTestCase {
         }
     }
 
-    /// New Session (MacNewSession.swift) on synthetic data: the form for a repo that already has a session, devd's
-    /// progress mid-checkout and mid-clone, and a refusal from devd.
+    /// New Session (MacNewSession.swift) on synthetic data: each page (a flat folder skips Project), devd's progress
+    /// mid-checkout and mid-clone, a refusal from devd on the Agent page, and the folders failing to load.
     func testNewSessionSheet() throws {
         let state = MacAppState(isTestRun: false, isFixtureRun: true)
         state.appModel.reloadConfiguration()
@@ -252,14 +252,18 @@ final class MacScreenshotTests: XCTestCase {
         let live = try XCTUnwrap(state.live, "the fixture live list did not load")
         defer { state.inbox?.stop(); live.stop() }
         let tree = try JSONDecoder().decode([TreeProject].self, from: Data(#"""
-            [{"folder":"orchard","project":"orchard","soloAgent":null,"repos":[
-              {"name":"sync","cloneUrl":"https://git.example/orchard/sync.git","provider":"github","cloned":true,"bare":true,"agent":"claude"},
-              {"name":"web","cloneUrl":"https://git.example/orchard/web.git","provider":"github","cloned":false,"bare":null,"agent":null}]}]
+            [{"folder":"acme","project":"shop","soloAgent":null,"repos":[
+              {"name":"storefront","cloneUrl":"https://git.example/acme/storefront.git","provider":"github","cloned":true,"bare":true,"agent":null}]},
+             {"folder":"acme","project":"tools","soloAgent":null,"repos":[]},
+             {"folder":"orchard","project":"orchard","soloAgent":null,"repos":[
+              {"name":"sync","cloneUrl":"https://git.example/orchard/sync.git","provider":"github","cloned":true,"bare":true,"agent":"codex"},
+              {"name":"api","cloneUrl":"https://git.example/orchard/api.git","provider":"github","cloned":true,"bare":true,"agent":null},
+              {"name":"web","cloneUrl":"https://git.example/orchard/web.git","provider":"github","cloned":false,"bare":null,"agent":null}]},
+             {"folder":"lumen","project":"lumen","soloAgent":null,"repos":[]}]
             """#.utf8))
         let actions = SessionActions(client: try XCTUnwrap(state.appModel.client))
-        func sheet(_ repo: String, _ phase: MacNewSession.Phase) -> some View {
-            MacNewSessionSheet(actions: actions, onStarted: {}, onOpen: { _ in }, tree: tree,
-                               selection: ("orchard", "orchard", repo, .claude), phase: phase)
+        func sheet(_ picks: MacNewSession.Picks, _ phase: MacNewSession.Phase = .form) -> some View {
+            MacNewSessionSheet(actions: actions, onStarted: {}, onOpen: { _ in }, tree: tree, picks: picks, phase: phase)
                 .environmentObject(live)
         }
         var checkout = MacNewSession.Tracker()
@@ -267,18 +271,41 @@ final class MacScreenshotTests: XCTestCase {
         checkout.apply(OpenProgress(step: "worktree", git: .init(phase: "Updating files", percent: 62)))
         var clone = MacNewSession.Tracker()
         clone.apply(OpenProgress(step: "clone", clone: .init(phase: "Receiving objects", percent: 48, detail: "212.40 MiB | 18.02 MiB/s")))
+        let agent = MacNewSession.Picks(folder: "orchard", project: "orchard", repo: "sync", agent: .codex, page: .agent)
+        // The fixture devd refuses every request: the folders fail to load and show Retry.
+        let failing = SessionActions(client: DevdClient(endpoints: DevdEndpoints(cfBase: nil, cfId: nil, cfSecret: nil,
+                                                                                 tailnetBase: URL(string: "http://127.0.0.1:9")!)))
         for look in ["light", "dark"] {
-            try shootView(sheet("sync", .form), name: "new-session-form-\(look)", look: look)
-            try shootView(sheet("sync", .working(checkout, creates: true)), name: "new-session-progress-\(look)", look: look)
-            try shootView(sheet("web", .working(clone, creates: true)), name: "new-session-clone-\(look)", look: look)
+            try shootView(sheet(.init()), name: "new-session-folder-\(look)", look: look)
+            try shootView(sheet(.init(folder: "acme", project: "", page: .project)), name: "new-session-project-\(look)", look: look)
+            try shootView(sheet(.init(folder: "orchard", project: "orchard", page: .repo)), name: "new-session-repo-\(look)", look: look)
+            try shootView(sheet(agent), name: "new-session-agent-\(look)", look: look)
+            try shootView(sheet(agent, .working(checkout)), name: "new-session-progress-\(look)", look: look)
+            try shootView(sheet(.init(folder: "orchard", project: "orchard", repo: "web", page: .agent), .working(clone)),
+                          name: "new-session-clone-\(look)", look: look)
+            try shootView(sheet(.init(folder: "orchard", project: "orchard", repo: "web", page: .agent),
+                                .failed("folder orchard is not configured on devd", retry: true)), name: "new-session-error-\(look)", look: look)
+            try shootView(MacNewSessionSheet(actions: failing, onStarted: {}, onOpen: { _ in }).environmentObject(live),
+                          name: "new-session-load-failed-\(look)", look: look, settle: 3)
         }
-        try shootView(sheet("web", .failed("folder orchard is not configured on devd", retry: true)), name: "new-session-error-light", look: "light")
     }
 
-    private func shootView(_ view: some View, name: String, look: String) throws {
+    /// `settle`: seconds the view runs in an offscreen window first, so its `.task` work (a load) shows.
+    private func shootView(_ view: some View, name: String, look: String, settle: TimeInterval = 0) throws {
         let host = NSHostingView(rootView: view.background(Color(nsColor: .windowBackgroundColor)))
         host.appearance = NSAppearance(named: look == "dark" ? .darkAqua : .aqua)
         host.frame = NSRect(origin: .zero, size: host.fittingSize)
+        var window: NSWindow?
+        if settle > 0 {
+            let w = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            w.isReleasedWhenClosed = false
+            w.contentView = host
+            w.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+            w.orderFront(nil)
+            RunLoop.main.run(until: Date().addingTimeInterval(settle))
+            window = w
+        }
+        defer { window?.close() }
         host.layoutSubtreeIfNeeded()
         let rep = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
         host.cacheDisplay(in: host.bounds, to: rep)

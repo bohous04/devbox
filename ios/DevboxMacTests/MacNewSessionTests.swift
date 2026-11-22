@@ -1,18 +1,226 @@
+import AppKit
+import SwiftUI
 import XCTest
 @testable import DevboxApp
 
-/// The Mac New Session sheet's rules (MacNewSession.swift): what the primary button does, and how devd's open progress
+/// The Mac New Session sheet's rules (MacNewSession.swift): the pages and what is sent, and how devd's open progress
 /// (`GET /api/open-progress`) becomes the stepped bar. The progress numbers port cli/src/format.ts.
 @MainActor
 final class MacNewSessionTests: XCTestCase {
     private typealias N = MacNewSession
 
-    /// No session on the repo: Create (devd starts one). With one: Open Existing reuses it, Create makes another.
-    func testPrimaryActionSaysWhatItDoes() {
-        XCTAssertEqual(N.action(hasExisting: false, mode: .openExisting), .init(label: "Create", fresh: nil, creates: true))
-        XCTAssertEqual(N.action(hasExisting: false, mode: .create), .init(label: "Create", fresh: nil, creates: true))
-        XCTAssertEqual(N.action(hasExisting: true, mode: .openExisting), .init(label: "Open Existing", fresh: nil, creates: false))
-        XCTAssertEqual(N.action(hasExisting: true, mode: .create), .init(label: "Create", fresh: true, creates: true))
+    /// acme has two projects; orchard is a flat folder (one project named after it); solo has one project of its own name
+    /// and no repos.
+    private let tree: [TreeProject] = try! JSONDecoder().decode([TreeProject].self, from: Data(#"""
+        [{"folder":"acme","project":"shop","soloAgent":"codex","repos":[
+           {"name":"web","cloneUrl":"https://git.example/acme/web.git","provider":"github","cloned":true,"bare":true,"agent":"grok"},
+           {"name":"api","cloneUrl":"https://git.example/acme/api.git","provider":"github","cloned":false,"bare":null,"agent":null}]},
+         {"folder":"acme","project":"tools","soloAgent":null,"repos":[]},
+         {"folder":"orchard","project":"orchard","soloAgent":null,"repos":[
+           {"name":"sync","cloneUrl":"https://git.example/orchard/sync.git","provider":"github","cloned":true,"bare":false,"agent":null}]}]
+        """#.utf8))
+
+    private struct Live: RepoKeyed { let id: String; let project: String; let repo: String }
+
+    /// A folder with projects: Folder → Project → Repo → Agent, and Back retraces each page.
+    func testPagesWithAProjectStep() {
+        var p = N.Picks()
+        XCTAssertEqual(p.page, .folder)
+        XCTAssertFalse(p.back(tree: tree), "Back on the first page is the sheet's Cancel")
+        p.pick("acme", tree: tree)
+        XCTAssertEqual(p.page, .project)
+        XCTAssertEqual(p.project, "")
+        p.pick("shop", tree: tree)
+        XCTAssertEqual(p.page, .repo)
+        p.pick("web", tree: tree)
+        XCTAssertEqual(p.page, .agent)
+        XCTAssertEqual(p.agent, .grok, "the repo's remembered agent comes preselected")
+        XCTAssertTrue(p.back(tree: tree))
+        XCTAssertEqual(p.page, .repo)
+        XCTAssertTrue(p.back(tree: tree))
+        XCTAssertEqual(p.page, .project)
+        XCTAssertTrue(p.back(tree: tree))
+        XCTAssertEqual(p.page, .folder)
+        XCTAssertEqual(p.folder, "acme", "Back keeps what was picked, so its row is highlighted again")
+    }
+
+    /// A folder whose only project is itself (a flat folder) skips the Project page, forward and back.
+    func testFlatFolderSkipsTheProjectPage() {
+        var p = N.Picks()
+        p.pick("orchard", tree: tree)
+        XCTAssertEqual(p.page, .repo)
+        XCTAssertEqual(p.project, "orchard")
+        p.pick("sync", tree: tree)
+        XCTAssertEqual(p.page, .agent)
+        XCTAssertTrue(p.back(tree: tree))
+        XCTAssertEqual(p.page, .repo)
+        XCTAssertTrue(p.back(tree: tree))
+        XCTAssertEqual(p.page, .folder, "Back from Repo skips the Project page too")
+    }
+
+    /// Picking another folder forgets the project and repo picked under the old one.
+    func testAnotherFolderStartsOver() {
+        var p = N.Picks()
+        p.pick("acme", tree: tree)
+        p.pick("shop", tree: tree)
+        p.pick("web", tree: tree)
+        XCTAssertTrue(p.back(tree: tree))
+        XCTAssertTrue(p.back(tree: tree))
+        XCTAssertTrue(p.back(tree: tree))
+        p.pick("orchard", tree: tree)
+        XCTAssertEqual(p.project, "orchard")
+        XCTAssertEqual(p.repo, "")
+        XCTAssertEqual(p.page, .repo)
+    }
+
+    /// Each repo says whether it is cloned and how many sessions it has; the old layout says sessions share its files.
+    func testRepoRowsCarryTheirContext() {
+        var p = N.Picks()
+        p.pick("acme", tree: tree)
+        p.pick("shop", tree: tree)
+        let sessions = [Live(id: "dev-shop-web", project: "shop", repo: "web"), Live(id: "dev-shop-web-2", project: "shop", repo: "web")]
+        XCTAssertEqual(N.choices(p, tree: tree, sessions: sessions), [
+            .init(value: "api", title: "api", detail: "Not cloned yet: devd clones it first"),
+            .init(value: "web", title: "web", detail: "Cloned · 2 sessions"),
+            .init(value: NewSessionLogic.SOLO, title: "Scratch workspace", detail: "No repo, an empty workspace"),
+        ])
+        var o = N.Picks()
+        o.pick("orchard", tree: tree)
+        XCTAssertEqual(N.choices(o, tree: tree, sessions: [Live(id: "dev-orchard-sync", project: "orchard", repo: "sync")]).first,
+                       .init(value: "sync", title: "sync", detail: "Cloned · 1 session · shares its working directory"))
+        XCTAssertEqual(N.choices(N.Picks(), tree: tree, sessions: [Live]()).map(\.detail), ["2 projects", "1 repo"])
+        var a = N.Picks()
+        a.pick("orchard", tree: tree)
+        a.pick("sync", tree: tree)
+        XCTAssertEqual(N.choices(a, tree: tree, sessions: [Live]()).compactMap(\.detail), [], "nothing remembered: Claude is only the default")
+        p.pick("web", tree: tree)
+        XCTAssertEqual(N.choices(p, tree: tree, sessions: [Live]()).filter { $0.detail != nil },
+                       [.init(value: "grok", title: "Grok Build", detail: "Last used here")])
+    }
+
+    /// The values picked on the pages are the ones sent, and a session is always created: `fresh: true`, never the
+    /// unset `fresh` with which devd rejoins the repo's existing session.
+    func testCreateSendsThePicksAndAlwaysCreates() async throws {
+        var p = N.Picks()
+        p.pick("acme", tree: tree)
+        p.pick("shop", tree: tree)
+        p.pick("api", tree: tree)
+        p.agent = .codex
+        let request = try XCTUnwrap(N.request(p, tree: tree))
+        XCTAssertEqual(request, .init(folder: "acme", project: "shop", repo: "api", cloneUrl: "https://git.example/acme/api.git", agent: .codex))
+
+        MockURLProtocol.capturedRequests = []
+        MockURLProtocol.handler = { _ in .init(statusCode: 200, data: Data(#"""
+            {"session":{"id":"dev-shop-api","folder":"acme","project":"shop","repo":"api","container":"c1","status":"running","solo":0},"created":true}
+            """#.utf8)) }
+        _ = try await N.create(request, actions: mockActions(), requestId: "r1")
+        let sent = try XCTUnwrap(MockURLProtocol.capturedRequests.first)
+        XCTAssertEqual(sent.url?.path, "/api/sessions")
+        XCTAssertEqual(Self.body(sent) as NSDictionary, ["folder": "acme", "project": "shop", "repo": "api", "agent": "codex",
+                                                          "cloneUrl": "https://git.example/acme/api.git", "fresh": true,
+                                                          "requestId": "r1"] as NSDictionary)
+
+        var s = N.Picks()
+        s.pick("acme", tree: tree)
+        s.pick("tools", tree: tree)
+        s.pick(NewSessionLogic.SOLO, tree: tree)
+        MockURLProtocol.capturedRequests = []
+        _ = try await N.create(try XCTUnwrap(N.request(s, tree: tree)), actions: mockActions(), requestId: "r2")
+        XCTAssertEqual(Self.body(try XCTUnwrap(MockURLProtocol.capturedRequests.first)) as NSDictionary,
+                       ["folder": "acme", "project": "tools", "agent": "claude", "solo": true] as NSDictionary,
+                       "a scratch workspace is always a new one; devd takes no fresh for it")
+        XCTAssertNil(N.request(N.Picks(), tree: tree), "nothing to send before the Agent page")
+    }
+
+    /// Arrows move the highlight among the visible rows and stop at the ends; the filter keeps the rows that match.
+    func testCursorMovesAndFilters() {
+        let rows = ["alpha", "beta", "gamma", "delta"].map { N.Choice(value: $0, title: $0, detail: nil) }
+        var c = N.Cursor(highlight: "beta")
+        XCTAssertEqual(c.current(rows)?.value, "beta")
+        c.move(1, in: rows)
+        XCTAssertEqual(c.current(rows)?.value, "gamma")
+        c.move(5, in: rows)
+        XCTAssertEqual(c.current(rows)?.value, "delta")
+        c.filter = "ta"
+        XCTAssertEqual(c.visible(rows).map(\.value), ["beta", "delta"])
+        XCTAssertEqual(c.current(rows)?.value, "delta")
+        c.filter = "AL"
+        XCTAssertEqual(c.current(rows)?.value, "alpha", "a hidden highlight falls to the first match")
+        c.move(-1, in: rows)
+        XCTAssertEqual(c.current(rows)?.value, "alpha")
+        c.filter = "zzz"
+        XCTAssertNil(c.current(rows))
+    }
+
+    /// The real sheet in an offscreen window, driven by key events: ↓ and Return walk the pages (skipping a flat
+    /// folder's Project page), Esc goes back the same way, and Esc on the first page closes nothing but the page.
+    func testKeysWalkThePages() throws {
+        FixtureMode.requested = "demo"
+        defer { FixtureMode.requested = nil }
+        let state = MacAppState(isTestRun: false, isFixtureRun: true)
+        state.appModel.reloadConfiguration()
+        let live = try XCTUnwrap(state.live)
+        defer { state.inbox?.stop(); live.stop() }
+        var seen = N.Picks()
+        let sheet = MacNewSessionSheet(actions: SessionActions(client: try XCTUnwrap(state.appModel.client)), onStarted: {}, onOpen: { _ in },
+                                       tree: tree, onPicks: { seen = $0 })
+            .environmentObject(live)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 520), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = NSHostingView(rootView: sheet)
+        window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        spin(0.5)
+        func press(_ chars: String, _ keyCode: UInt16, flags: NSEvent.ModifierFlags = []) throws {
+            let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
+                                                       windowNumber: window.windowNumber, context: nil, characters: chars,
+                                                       charactersIgnoringModifiers: chars, isARepeat: false, keyCode: keyCode))
+            window.sendEvent(event)
+            spin(0.4)
+        }
+        let down = String(UnicodeScalar(NSDownArrowFunctionKey)!)
+        // Folders sort acme, orchard: ↓ highlights orchard, the flat folder.
+        try press(down, 125, flags: [.numericPad, .function])
+        try press("\r", 36)
+        XCTAssertEqual(seen.page, .repo, "a flat folder goes straight to Repo")
+        XCTAssertEqual(seen.folder, "orchard")
+        try press("\r", 36)
+        XCTAssertEqual(seen.page, .agent)
+        XCTAssertEqual(seen.repo, "sync")
+        try press(down, 125, flags: [.numericPad, .function])
+        XCTAssertEqual(seen.agent, AgentProfiles.ids[1], "↓ on the Agent page picks the next agent")
+        try press("\u{1b}", 53)
+        XCTAssertEqual(seen.page, .repo)
+        try press("\u{1b}", 53)
+        XCTAssertEqual(seen.page, .folder, "Esc from Repo skips the Project page too")
+        try press("\r", 36)
+        XCTAssertEqual(seen.page, .repo, "the folder picked before is highlighted again")
+    }
+
+    private func spin(_ seconds: TimeInterval) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
+
+    private func mockActions() -> SessionActions {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        return SessionActions(client: DevdClient(endpoints: DevdEndpoints(cfBase: nil, cfId: nil, cfSecret: nil, tailnetBase: URL(string: "http://devd.test:4300")!),
+                                                 session: URLSession(configuration: config)))
+    }
+
+    private static func body(_ request: URLRequest) -> [String: Any] {
+        var data = request.httpBody ?? Data()
+        if data.isEmpty, let stream = request.httpBodyStream {
+            stream.open()
+            defer { stream.close() }
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let read = stream.read(&buffer, maxLength: buffer.count)
+                if read <= 0 { break }
+                data.append(buffer, count: read)
+            }
+        }
+        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
     }
 
     func testStepsMapToStages() {
