@@ -35,8 +35,9 @@ final class MacChatLookTests: XCTestCase {
         }
     }
 
+    // 204, not nil: a store's late thread/seen arriving with no handler makes URLSession trap in the next test.
     override func tearDown() {
-        MockURLProtocol.handler = nil
+        MockURLProtocol.handler = { _ in .init(statusCode: 204) }
         super.tearDown()
     }
 
@@ -59,17 +60,41 @@ final class MacChatLookTests: XCTestCase {
         XCTAssertEqual(seenPosts, 1, "opening posts the look")
 
         let becameKey = { (w: NSWindow) in NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: w) }
-        becameKey(chat) // its opening
-        spin(0.5)
-        XCTAssertEqual(seenPosts, 1, "becoming key on opening is not a second look")
-        becameKey(other)
-        spin(0.5)
-        XCTAssertEqual(seenPosts, 1, "another window becoming key is no look here")
-        for expected in [2, 3] {
-            becameKey(chat)
-            spin(5) { seenPosts == expected }
-            spin(0.3)
-            XCTAssertEqual(seenPosts, expected, "each return posts once")
+        let settle = { (expected: Int, why: String) in
+            self.spin(2) { self.seenPosts == expected }
+            self.spin(0.3)
+            XCTAssertEqual(self.seenPosts, expected, why)
         }
+        becameKey(chat) // its opening
+        settle(1, "becoming key on opening is not a second look")
+
+        // Its own sheet and a child window (a popover) take key and give it back: he never left.
+        let sheet = window()
+        chat.beginSheet(sheet)
+        spin(0.3)
+        XCTAssertTrue(sheet.sheetParent === chat, "the sheet is attached")
+        becameKey(sheet)
+        chat.endSheet(sheet)
+        becameKey(chat)
+        settle(1, "a sheet closing is no return")
+        let popover = window()
+        chat.addChildWindow(popover, ordered: .above)
+        becameKey(popover)
+        becameKey(chat)
+        chat.removeChildWindow(popover)
+        settle(1, "a child window closing is no return")
+
+        // Another window of the app, then back: one look; becoming key again without leaving is none.
+        becameKey(other)
+        becameKey(chat)
+        settle(2, "coming back from another window posts once")
+        becameKey(chat)
+        settle(2, "key again without leaving is no look")
+
+        // Another app in front, then back.
+        NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp)
+        becameKey(chat)
+        settle(3, "coming back to the app posts once")
+        sheet.close(); popover.close()
     }
 }

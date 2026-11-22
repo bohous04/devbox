@@ -15,10 +15,11 @@ struct ChatScreen: View {
     @State private var pendingTab: TmuxTabMemory.Tab?
     #if os(macOS)
     /// macOS does not move `scenePhase` when the owner switches to another app or window and back; the window becomes
-    /// key again (also when the app is activated: its key window resigns on deactivation). That is the look.
+    /// key again. That is the look, but only after he really left (`away`): the window also becomes key again when a
+    /// sheet, alert or popover of its own closes, and on its opening (which start() marks).
     @State private var hostWindow: NSWindow?
-    /// The window was key before: becoming key again is a return. The first time is its opening, which start() marks.
-    @State private var wasKey = false
+    /// Another app came to the front, or another window (not one of this window's own) became key.
+    @State private var away = false
     #endif
     @State private var atEnd = true
     @State private var wentAway = false
@@ -189,16 +190,18 @@ struct ChatScreen: View {
         }
         #if os(macOS)
         .background(WindowConfigurator { w in
-            DispatchQueue.main.async {
-                hostWindow = w
-                if w.isKeyWindow { wasKey = true }
-            }
+            DispatchQueue.main.async { hostWindow = w }
         })
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { n in
-            guard let w = n.object as? NSWindow, w === hostWindow else { return }
-            if wasKey, visible { store.markSeen(look: true) }
-            wasKey = true
+            guard let w = n.object as? NSWindow, let host = hostWindow else { return }
+            if w === host {
+                if away, visible { store.markSeen(look: true) }
+                away = false
+            } else if w.sheetParent !== host, w.parent !== host {
+                away = true
+            }
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in away = true }
         #endif
     }
 

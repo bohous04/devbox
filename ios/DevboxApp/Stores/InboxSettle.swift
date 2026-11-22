@@ -98,11 +98,17 @@ class InboxSettler: ObservableObject {
     /// The finish whose failure `problem` shows, and the finishes whose failure the owner dismissed (not raised again).
     private var problemSeenKey: String?
     private var dismissedSeen: Set<String> = []
+    /// When each session's last look was posted: triggers that fire together (the Mac window appearing and becoming
+    /// key at launch) post one look.
+    private var lastLook: [String: ContinuousClock.Instant] = [:]
+    private let lookGap: Duration
 
     /// `voiceOver`: whether VoiceOver runs; the notice then stays until the next action, as a spoken notice cannot
     /// be timed to be acted on. `undoHint`: how the announcement says to undo.
-    init(lifetime: Duration = .seconds(5), voiceOver: @escaping @MainActor () -> Bool = InboxSettler.voiceOverRuns, undoHint: String = "Undo available") {
+    init(lifetime: Duration = .seconds(5), voiceOver: @escaping @MainActor () -> Bool = InboxSettler.voiceOverRuns, undoHint: String = "Undo available",
+         lookGap: Duration = .seconds(1)) {
         self.lifetime = lifetime
+        self.lookGap = lookGap
         self.voiceOver = voiceOver
         self.undoHint = undoHint
     }
@@ -209,11 +215,14 @@ class InboxSettler: ObservableObject {
         }
     }
 
-    /// Records a look at an idle tmux session (`looks`): one post per look, so nothing is kept per session; a failed
-    /// one is shown.
+    /// Records a look at an idle tmux session (`looks`): one post per look, a second within `lookGap` is the same look;
+    /// a failed one is shown.
     @discardableResult
     func look(_ item: InboxItem, in store: InboxStore) async -> Seen {
         guard Self.looks(item, on: .foreground) else { return .skipped }
+        let now = ContinuousClock.now
+        if let last = lastLook[item.sessionId], now - last < lookGap { return .skipped }
+        lastLook[item.sessionId] = now
         do {
             try await store.seen(item.sessionId)
             return .posted

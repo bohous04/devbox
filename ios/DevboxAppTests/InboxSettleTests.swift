@@ -265,14 +265,18 @@ final class InboxSettleTests: XCTestCase {
         XCTAssertEqual(third, .skipped, "no third try for the same finish")
     }
 
-    /// Every look posts (one call per look, nothing to dedupe across looks); a failed one is shown.
-    func testLookPostsSeenForAnIdleTmuxSessionEachTime() async throws {
+    /// Each look posts once: triggers firing together are one look, a later look posts again; a failed one is shown.
+    func testLookPostsSeenForAnIdleTmuxSessionOncePerLook() async throws {
         let store = try await fixtureStore()
-        let settler = InboxSettler()
         let idle = try item("dev-orchard-api-3", "idle", reason: nil, since: 7, runtime: "tmux")
-        let first = await settler.look(idle, in: store)
-        let again = await settler.look(idle, in: store)
-        XCTAssertEqual([first, again], [.posted, .posted])
+        let together = InboxSettler()
+        let first = await together.look(idle, in: store)
+        let same = await together.look(idle, in: store)
+        XCTAssertEqual([first, same], [.posted, .skipped], "two triggers of one look post once")
+        let settler = InboxSettler(lookGap: .zero)
+        let a = await settler.look(idle, in: store)
+        let b = await settler.look(idle, in: store)
+        XCTAssertEqual([a, b], [.posted, .posted], "a later look posts again")
         let chat = await settler.look(try item("dev-orchard-sync", "idle", reason: nil), in: store)
         XCTAssertEqual(chat, .skipped)
         let gone = await settler.look(try item("dev-gone", "idle", reason: nil, runtime: "tmux"), in: store)

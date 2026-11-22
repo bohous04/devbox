@@ -10,7 +10,13 @@ final class UnpushedStoreTests: XCTestCase {
     override func setUp() {
         super.setUp()
         MockURLProtocol.capturedRequests = []
-        MockURLProtocol.handler = nil
+        MockURLProtocol.handler = { _ in .init(statusCode: 204) }
+    }
+
+    // 204, not nil: a store's late thread/seen arriving with no handler makes URLSession trap in the next test.
+    override func tearDown() {
+        MockURLProtocol.handler = { _ in .init(statusCode: 204) }
+        super.tearDown()
     }
 
     private func makeStore(handler: @escaping (URLRequest) -> MockURLProtocol.Stub) -> UnpushedStore {
