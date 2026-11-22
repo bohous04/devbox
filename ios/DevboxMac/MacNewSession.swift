@@ -256,8 +256,11 @@ enum MacNewSession {
 
         mutating func apply(_ p: OpenProgress, at uptime: TimeInterval = ProcessInfo.processInfo.systemUptime) {
             if let ps = p.phases {
+                // The running count never goes back: a report that arrives late (devd's clock read before the last
+                // estimate) keeps the estimate already shown.
+                let shown = live(uptime)
                 phases = ps
-                devdNow = p.now
+                devdNow = p.now.map { max($0, shown ?? $0) }
                 receivedAt = uptime
             }
             percent = max(percent, MacNewSession.percent(p))
@@ -269,7 +272,7 @@ enum MacNewSession {
         /// `phases`: devd's answer, every step ended. Without them (an older devd, a rejoined session) a step still
         /// open in the last report shows no time rather than one this Mac made up.
         mutating func finish(phases final: [OpenProgress.Phase]? = nil) {
-            if let final { phases = final }
+            if let final, !final.isEmpty { phases = final }
             finished = true
             percent = 100
             stage = .ready
@@ -322,6 +325,11 @@ enum MacNewSession {
             case .ready: return "Ready"
             }
         }
+    }
+
+    /// A click this long after the page changed is its own, not the second click of a double click on the page before.
+    static func settled(now: TimeInterval, pageChangedAt: TimeInterval, doubleClick: TimeInterval) -> Bool {
+        now - pageChangedAt >= doubleClick
     }
 
     /// "0.4 s", "8.3 s" under ten seconds, then "12 s", "2 min 5 s". Rounded down, so a running count never runs ahead.
@@ -377,6 +385,8 @@ struct MacNewSessionSheet: View {
     @State private var cursor: MacNewSession.Cursor
     /// The last page change went forward: the side the next page slides in from.
     @State private var forward = true
+    /// This Mac's uptime at the last page change (see `settled`).
+    @State private var pageChangedAt: TimeInterval = 0
     @State private var phase: MacNewSession.Phase
     @State private var work: Task<Void, Never>?
     @State private var confirmClose = false
@@ -422,8 +432,14 @@ struct MacNewSessionSheet: View {
         .task { await loadTree() }
         .onDisappear { work?.cancel() }
         .onChange(of: picks) { old, new in
-            if old.page != new.page { cursor = .init(highlight: new.value(on: new.page)) }
+            if old.page != new.page {
+                cursor = .init(highlight: new.value(on: new.page))
+                announce(prompt)
+            }
             onPicks?(new)
+        }
+        .onChange(of: stage) { _, new in
+            if let new, case .working(let t) = phase { announce(t.title(new)) }
         }
         .confirmationDialog("Stop waiting for this session?", isPresented: $confirmClose) {
             Button("Close") { work?.cancel(); dismiss() }
@@ -570,9 +586,15 @@ struct MacNewSessionSheet: View {
         .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 6).fill(highlighted ? Color.accentColor : Color.clear))
         .contentShape(Rectangle())
-        .onTapGesture { activate(c) }
-        // On the Agent page a click picks the agent; a double click also creates.
-        .simultaneousGesture(TapGesture(count: 2).onEnded { if picks.page == .agent { start() } })
+        // A tap right after the page changed is the second click of a double click on the page before: ignored, or it
+        // would pick on this page too. On the Agent page a click picks the agent and a double click also creates; the
+        // click count is read from the event, as a double-tap gesture would hold every single click back by the
+        // double-click interval.
+        .onTapGesture {
+            guard settled() else { return }
+            activate(c)
+            if picks.page == .agent, (NSApp.currentEvent?.clickCount ?? 1) >= 2 { start() }
+        }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(highlighted ? [.isButton, .isSelected] : .isButton)
     }
@@ -612,6 +634,11 @@ struct MacNewSessionSheet: View {
             guard picks.page != .agent else { return .ignored }
             if let c = cursor.current(all) { activate(c) }
             return .handled
+        case .escape:
+            // A typed filter goes first; then Esc is Back or Cancel (their shortcut is off while a filter is typed).
+            guard !cursor.filter.isEmpty else { return .ignored }
+            cursor.filter = ""
+            return .handled
         case .delete:
             guard !cursor.filter.isEmpty else { return .ignored }
             cursor.filter.removeLast()
@@ -636,6 +663,20 @@ struct MacNewSessionSheet: View {
         go { $0.pick(c.value, tree: tree) }
     }
 
+    /// No double click is still under way from the last page change.
+    private func settled() -> Bool {
+        MacNewSession.settled(now: ProcessInfo.processInfo.systemUptime, pageChangedAt: pageChangedAt, doubleClick: NSEvent.doubleClickInterval)
+    }
+
+    private var stage: MacNewSession.Stage? {
+        if case .working(let t) = phase { return t.stage }
+        return nil
+    }
+
+    private func announce(_ text: String) {
+        AccessibilityNotification.Announcement(text).post()
+    }
+
     private func goBack() {
         guard let tree else { return dismiss() }
         var next = picks
@@ -651,6 +692,7 @@ struct MacNewSessionSheet: View {
         // An error, or a "may still be creating", belongs to the repo it was about.
         if (next.folder, next.project, next.repo) != (picks.folder, picks.project, picks.repo) { phase = .form }
         forward = next.page > picks.page
+        if next.page != picks.page { pageChangedAt = ProcessInfo.processInfo.systemUptime }
         DispatchQueue.main.async {
             withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { picks = next }
         }
@@ -703,8 +745,9 @@ struct MacNewSessionSheet: View {
                     }
                 }
                 .accessibilityElement(children: .ignore)
+                // The live count stays out: VoiceOver hears a step's time once it has ended.
                 .accessibilityLabel("\(t.title(s)), \(done ? "Done" : state == 1 ? "In progress" : "Pending")"
-                                    + (t.time(s, at: uptime).map { ", \($0.text)" } ?? ""))
+                                    + (t.time(s, at: uptime).flatMap { $0.running ? nil : ", \($0.text)" } ?? ""))
             }
             if let total = t.total(at: uptime) {
                 Divider()
@@ -714,7 +757,8 @@ struct MacNewSessionSheet: View {
                     Text(total.text).monospacedDigit()
                 }
                 .fontWeight(.medium)
-                .accessibilityElement(children: .combine)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(total.running ? "Total, still running" : "Total, \(total.text)")
             }
         }
     }
@@ -743,10 +787,11 @@ struct MacNewSessionSheet: View {
             case .form, .failed:
                 let first = picks.page == .folder
                 if !first {
-                    Button(action: goBack) { Label("Back", systemImage: "chevron.left") }.keyboardShortcut(.cancelAction)
+                    Button(action: goBack) { Label("Back", systemImage: "chevron.left") }
+                        .keyboardShortcut(cursor.filter.isEmpty ? .cancelAction : nil)
                 }
                 Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(first ? .cancelAction : nil)
+                Button("Cancel") { dismiss() }.keyboardShortcut(first && cursor.filter.isEmpty ? .cancelAction : nil)
                 if picks.page == .agent {
                     // A failed create is retried here.
                     Button("Create", action: start)

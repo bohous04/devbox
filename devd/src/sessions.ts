@@ -919,10 +919,12 @@ export class SessionManager {
         : (joinableSessionId(this.d.db, t.project, t.repo, joinable, t.prompt !== undefined || t.firstPrompt !== undefined) ?? nextSessionId(this.d.db, t.project, t.repo, leftover)));
       try {
         const r = await this.locked([id], "open", () => this.openWithEarlyDind(t, id));
-        // The steps' times, the last one ended now (an open that rejoined a running session has none).
-        const phases = this.openPhases.get(openKey(t));
-        phases?.finish();
-        return phases ? { ...r, phases: phases.snapshot() } : r;
+        // The steps' times, the last one ended now. An open that entered no step (it rejoined a running session) sends
+        // none rather than an empty list.
+        const timeline = this.openPhases.get(openKey(t));
+        timeline?.finish();
+        const phases = timeline?.snapshot() ?? [];
+        return phases.length > 0 ? { ...r, phases } : r;
       } finally {
         this.openProgress.delete(openKey(t));
         this.openPhases.delete(openKey(t));

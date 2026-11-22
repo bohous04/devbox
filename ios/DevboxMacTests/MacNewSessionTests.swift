@@ -152,54 +152,97 @@ final class MacNewSessionTests: XCTestCase {
         XCTAssertNil(c.current(rows))
     }
 
-    /// The real sheet in an offscreen window, driven by key events: ↓ and Return walk the pages (skipping a flat
-    /// folder's Project page), Esc goes back the same way, and Esc on the first page closes nothing but the page.
-    func testKeysWalkThePages() throws {
-        FixtureMode.requested = "demo"
-        defer { FixtureMode.requested = nil }
-        let state = MacAppState(isTestRun: false, isFixtureRun: true)
-        state.appModel.reloadConfiguration()
-        let live = try XCTUnwrap(state.live)
-        defer { state.inbox?.stop(); live.stop() }
-        var seen = N.Picks()
-        let sheet = MacNewSessionSheet(actions: SessionActions(client: try XCTUnwrap(state.appModel.client)), onStarted: {}, onOpen: { _ in },
-                                       tree: tree, onPicks: { seen = $0 })
-            .environmentObject(live)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 520), styleMask: [.titled], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        defer { window.close() }
-        window.contentView = NSHostingView(rootView: sheet)
-        window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
-        spin(0.5)
-        func press(_ chars: String, _ keyCode: UInt16, flags: NSEvent.ModifierFlags = []) throws {
+    /// The real sheet in an offscreen window, fed real events; `seen` follows its picks.
+    private final class Host {
+        let window: NSWindow
+        var seen = MacNewSession.Picks()
+        private let state: MacAppState
+
+        @MainActor init(tree: [TreeProject]) throws {
+            FixtureMode.requested = "demo"
+            state = MacAppState(isTestRun: false, isFixtureRun: true)
+            state.appModel.reloadConfiguration()
+            let live = try XCTUnwrap(state.live)
+            window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 520), styleMask: [.titled], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            let host = NSHostingView(rootView: MacNewSessionSheet(actions: SessionActions(client: try XCTUnwrap(state.appModel.client)),
+                                                                  onStarted: {}, onOpen: { _ in }, tree: tree,
+                                                                  onPicks: { [weak self] in self?.seen = $0 })
+                .environmentObject(live))
+            window.contentView = host
+            window.setContentSize(host.fittingSize)
+            window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            Self.spin(0.5)
+        }
+
+        @MainActor func close() {
+            window.close()
+            state.inbox?.stop()
+            state.live?.stop()
+            FixtureMode.requested = nil
+        }
+
+        static func spin(_ seconds: TimeInterval) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
+
+        @MainActor func press(_ chars: String, _ keyCode: UInt16, flags: NSEvent.ModifierFlags = []) throws {
             let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
                                                        windowNumber: window.windowNumber, context: nil, characters: chars,
                                                        charactersIgnoringModifiers: chars, isARepeat: false, keyCode: keyCode))
             window.sendEvent(event)
-            spin(0.4)
+            Self.spin(0.4)
         }
-        let down = String(UnicodeScalar(NSDownArrowFunctionKey)!)
-        // Folders sort acme, orchard: ↓ highlights orchard, the flat folder.
-        try press(down, 125, flags: [.numericPad, .function])
-        try press("\r", 36)
-        XCTAssertEqual(seen.page, .repo, "a flat folder goes straight to Repo")
-        XCTAssertEqual(seen.folder, "orchard")
-        try press("\r", 36)
-        XCTAssertEqual(seen.page, .agent)
-        XCTAssertEqual(seen.repo, "sync")
-        try press(down, 125, flags: [.numericPad, .function])
-        XCTAssertEqual(seen.agent, AgentProfiles.ids[1], "↓ on the Agent page picks the next agent")
-        try press("\u{1b}", 53)
-        XCTAssertEqual(seen.page, .repo)
-        try press("\u{1b}", 53)
-        XCTAssertEqual(seen.page, .folder, "Esc from Repo skips the Project page too")
-        try press("\r", 36)
-        XCTAssertEqual(seen.page, .repo, "the folder picked before is highlighted again")
+
+        @MainActor func down() throws { try press(String(UnicodeScalar(NSDownArrowFunctionKey)!), 125, flags: [.numericPad, .function]) }
     }
 
-    private func spin(_ seconds: TimeInterval) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
+    /// ↓ and Return walk the pages (skipping a flat folder's Project page), Esc goes back the same way.
+    func testKeysWalkThePages() throws {
+        let h = try Host(tree: tree)
+        defer { h.close() }
+        // Folders sort acme, orchard: ↓ highlights orchard, the flat folder.
+        try h.down()
+        try h.press("\r", 36)
+        XCTAssertEqual(h.seen.page, .repo, "a flat folder goes straight to Repo")
+        XCTAssertEqual(h.seen.folder, "orchard")
+        try h.press("\r", 36)
+        XCTAssertEqual(h.seen.page, .agent)
+        XCTAssertEqual(h.seen.repo, "sync")
+        try h.down()
+        XCTAssertEqual(h.seen.agent, AgentProfiles.ids[1], "↓ on the Agent page picks the next agent")
+        try h.press("\u{1b}", 53)
+        XCTAssertEqual(h.seen.page, .repo)
+        try h.press("\u{1b}", 53)
+        XCTAssertEqual(h.seen.page, .folder, "Esc from Repo skips the Project page too")
+        try h.press("\r", 36)
+        XCTAssertEqual(h.seen.page, .repo, "the folder picked before is highlighted again")
+    }
+
+    /// A double click on a row picks it once: a click within the double-click interval of a page change is the second
+    /// click of that double click, landing on the new page, and is not a pick there. (Synthetic clicks do not reach
+    /// SwiftUI's tap gesture in an offscreen window, so the rule is tested on its own.)
+    func testClickRightAfterAPageChangeIsIgnored() {
+        XCTAssertFalse(N.settled(now: 100.2, pageChangedAt: 100, doubleClick: 0.5))
+        XCTAssertTrue(N.settled(now: 100.5, pageChangedAt: 100, doubleClick: 0.5))
+        XCTAssertTrue(N.settled(now: 3, pageChangedAt: 0, doubleClick: 0.5), "before any page change")
+    }
+
+    /// Esc first clears a typed filter, then goes back.
+    func testEscClearsTheFilterFirst() throws {
+        let many = try JSONDecoder().decode([TreeProject].self, from: Data(("[" + (1...9).map {
+            #"{"folder":"acme","project":"p\#($0)","soloAgent":null,"repos":[]}"#
+        }.joined(separator: ",") + "]").utf8))
+        let h = try Host(tree: many)
+        defer { h.close() }
+        try h.press("\r", 36)
+        XCTAssertEqual(h.seen.page, .project)
+        try h.press("7", 26)
+        try h.press("\u{1b}", 53)
+        XCTAssertEqual(h.seen.page, .project, "the first Esc cleared the filter")
+        try h.press("\u{1b}", 53)
+        XCTAssertEqual(h.seen.page, .folder)
+    }
 
     private func mockActions() -> SessionActions {
         let config = URLSessionConfiguration.ephemeral
@@ -310,6 +353,19 @@ final class MacNewSessionTests: XCTestCase {
         XCTAssertNil(old.time(.container, at: 999), "no end from devd: no made-up time")
         XCTAssertEqual(old.time(.repo, at: 999)?.text, "1.2 s", "the steps devd ended keep theirs")
         XCTAssertNil(old.total(at: 999))
+
+        // A report read on devd before the last estimate (it arrived late) does not move the count back.
+        var late = t
+        XCTAssertEqual(late.time(.container, at: 101)?.text, "4.0 s…")
+        late.apply(OpenProgress(step: "container", phases: [P(step: "fetch", startedAt: 5_000, endedAt: 6_200),
+                                                            P(step: "worktree", startedAt: 6_200, endedAt: 9_000), P(step: "container", startedAt: 9_000)],
+                                now: 12_500), at: 101)
+        XCTAssertEqual(late.time(.container, at: 101)?.text, "4.0 s…")
+        XCTAssertEqual(late.time(.container, at: 101.5)?.text, "4.5 s…")
+        // An answer without steps (it rejoined a running session) keeps the times the reports gave.
+        var empty = t
+        empty.finish(phases: [])
+        XCTAssertEqual(empty.time(.repo, at: 999)?.text, "1.2 s")
 
         var older = N.Tracker()
         older.apply(OpenProgress(step: "worktree"), at: 100)
