@@ -266,11 +266,19 @@ final class MacScreenshotTests: XCTestCase {
             MacNewSessionSheet(actions: actions, onStarted: {}, onOpen: { _ in }, tree: tree, picks: picks, phase: phase)
                 .environmentObject(live)
         }
+        // devd's step times: the fetch took 1.2 s, the checkout has run 3.4 s; the clone 47.8 s so far.
         var checkout = MacNewSession.Tracker()
         checkout.apply(OpenProgress(step: "fetch"))
-        checkout.apply(OpenProgress(step: "worktree", git: .init(phase: "Updating files", percent: 62)))
+        checkout.apply(OpenProgress(step: "worktree", git: .init(phase: "Updating files", percent: 62),
+                                    phases: [.init(step: "fetch", startedAt: 0, endedAt: 1_200), .init(step: "worktree", startedAt: 1_200)],
+                                    now: 4_600))
         var clone = MacNewSession.Tracker()
-        clone.apply(OpenProgress(step: "clone", clone: .init(phase: "Receiving objects", percent: 48, detail: "212.40 MiB | 18.02 MiB/s")))
+        clone.apply(OpenProgress(step: "clone", clone: .init(phase: "Receiving objects", percent: 48, detail: "212.40 MiB | 18.02 MiB/s"),
+                                 phases: [.init(step: "clone", startedAt: 0)], now: 47_800))
+        // Finished with devd's answer: every step ended, and the total.
+        var finished = checkout
+        finished.finish(phases: [.init(step: "fetch", startedAt: 0, endedAt: 1_200), .init(step: "worktree", startedAt: 1_200, endedAt: 5_100),
+                                 .init(step: "pull", startedAt: 5_100, endedAt: 5_900), .init(step: "container", startedAt: 5_900, endedAt: 14_300)])
         let agent = MacNewSession.Picks(folder: "orchard", project: "orchard", repo: "sync", agent: .codex, page: .agent)
         // The fixture devd refuses every request: the folders fail to load and show Retry.
         let failing = SessionActions(client: DevdClient(endpoints: DevdEndpoints(cfBase: nil, cfId: nil, cfSecret: nil,
@@ -281,6 +289,7 @@ final class MacScreenshotTests: XCTestCase {
             try shootView(sheet(.init(folder: "orchard", project: "orchard", page: .repo)), name: "new-session-repo-\(look)", look: look)
             try shootView(sheet(agent), name: "new-session-agent-\(look)", look: look)
             try shootView(sheet(agent, .working(checkout)), name: "new-session-progress-\(look)", look: look)
+            try shootView(sheet(agent, .working(finished)), name: "new-session-finished-\(look)", look: look)
             try shootView(sheet(.init(folder: "orchard", project: "orchard", repo: "web", page: .agent), .working(clone)),
                           name: "new-session-clone-\(look)", look: look)
             try shootView(sheet(.init(folder: "orchard", project: "orchard", repo: "web", page: .agent),

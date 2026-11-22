@@ -270,6 +270,68 @@ final class MacNewSessionTests: XCTestCase {
         XCTAssertEqual(t.percent, 100)
     }
 
+    func testDurationFormatting() {
+        XCTAssertEqual(N.duration(0), "0.0 s")
+        XCTAssertEqual(N.duration(1.24), "1.2 s")
+        XCTAssertEqual(N.duration(9.99), "9.9 s", "rounded down: a running count never shows 10 early")
+        XCTAssertEqual(N.duration(10), "10 s")
+        XCTAssertEqual(N.duration(59.9), "59 s")
+        XCTAssertEqual(N.duration(125.4), "2 min 5 s")
+        XCTAssertEqual(N.duration(-0.3), "0.0 s")
+    }
+
+    /// Step times are devd's: each stage sums its steps' start and end (fetch and clone are both the repo stage), the
+    /// running one counts on from devd's clock at the report plus this Mac's monotonic time since, and a skipped step
+    /// has none. The answer's times close them all and give the total.
+    func testStageTimesComeFromDevdsClock() {
+        typealias P = OpenProgress.Phase
+        var t = N.Tracker()
+        t.apply(OpenProgress(step: "container", detail: "starting the container",
+                             phases: [P(step: "fetch", startedAt: 5_000, endedAt: 6_200), P(step: "worktree", startedAt: 6_200, endedAt: 9_000),
+                                      P(step: "container", startedAt: 9_000)],
+                             now: 12_000), at: 100)
+        XCTAssertEqual(t.time(.repo, at: 100), .init(seconds: 1.2, running: false))
+        XCTAssertEqual(t.time(.repo, at: 100)?.text, "1.2 s")
+        XCTAssertEqual(t.time(.checkout, at: 100)?.text, "2.8 s")
+        XCTAssertNil(t.time(.pull, at: 100), "devd skipped the pull: no time")
+        XCTAssertEqual(t.time(.container, at: 100)?.text, "3.0 s…")
+        XCTAssertEqual(t.time(.container, at: 105.5)?.text, "8.5 s…", "counts on by this Mac's clock since the report")
+        XCTAssertEqual(t.total(at: 105.5)?.text, "12 s…")
+        XCTAssertNil(t.time(.ready, at: 100))
+
+        var done = t
+        done.finish(phases: [P(step: "fetch", startedAt: 5_000, endedAt: 6_200), P(step: "worktree", startedAt: 6_200, endedAt: 9_000),
+                             P(step: "container", startedAt: 9_000, endedAt: 17_400)])
+        XCTAssertEqual(done.time(.container, at: 999)?.text, "8.4 s")
+        XCTAssertEqual(done.total(at: 999), .init(seconds: 12.4, running: false))
+
+        var old = t
+        old.finish()
+        XCTAssertNil(old.time(.container, at: 999), "no end from devd: no made-up time")
+        XCTAssertEqual(old.time(.repo, at: 999)?.text, "1.2 s", "the steps devd ended keep theirs")
+        XCTAssertNil(old.total(at: 999))
+
+        var older = N.Tracker()
+        older.apply(OpenProgress(step: "worktree"), at: 100)
+        XCTAssertNil(older.time(.checkout, at: 200), "a devd without times shows none")
+        XCTAssertNil(older.total(at: 200))
+    }
+
+    /// Both fields decode from devd's JSON and are absent from an older devd.
+    func testPhasesDecode() throws {
+        let p = try JSONDecoder().decode(OpenProgress.self, from: Data(#"""
+            {"step":"pull","phases":[{"step":"fetch","startedAt":10.5,"endedAt":900.25},{"step":"pull","startedAt":900.25}],"now":1000}
+            """#.utf8))
+        XCTAssertEqual(p.phases, [.init(step: "fetch", startedAt: 10.5, endedAt: 900.25), .init(step: "pull", startedAt: 900.25)])
+        XCTAssertEqual(p.now, 1000)
+        let r = try JSONDecoder().decode(OpenResult.self, from: Data(#"""
+            {"session":{"id":"dev-shop-web","folder":"acme","project":"shop","repo":"web","container":"c1","status":"running","solo":0},
+             "created":true,"phases":[{"step":"container","startedAt":1,"endedAt":2}]}
+            """#.utf8))
+        XCTAssertEqual(r.phases, [.init(step: "container", startedAt: 1, endedAt: 2)])
+        XCTAssertNil(try JSONDecoder().decode(OpenProgress.self, from: Data(#"{"step":"pull"}"#.utf8)).phases)
+    }
+
     /// A request that may have reached devd is not offered again (a second Create could make a duplicate).
     func testOutcomeUnknownWhenDevdMayHaveTheRequest() {
         XCTAssertTrue(N.outcomeUnknown(URLError(.timedOut)))

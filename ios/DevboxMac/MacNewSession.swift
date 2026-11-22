@@ -233,31 +233,84 @@ enum MacNewSession {
         private(set) var cloning = false
         /// devd has echoed this open's `requestId`, so it is new enough to send one.
         private(set) var seenOwn = false
+        /// devd's own times of the steps it entered (its monotonic clock), from the newest report, then from its answer.
+        private(set) var phases: [OpenProgress.Phase] = []
+        /// devd's clock at the newest report, and this Mac's uptime when it arrived: the running step counts on from
+        /// there. No step is ever timed by when a poll noticed it.
+        private var devdNow: Double?
+        private var receivedAt: TimeInterval = 0
+        private var finished = false
 
         /// Takes a progress report of the repo. One with another open's `requestId` (the CLI or another window opening the
         /// same repo) moves nothing. A report without one comes from a devd before `requestId` (then every report counts,
         /// as before) or from a client that sent none: once our own id has shown up, it is someone else's.
-        mutating func observe(_ p: OpenProgress, requestId: String) {
+        mutating func observe(_ p: OpenProgress, requestId: String, at uptime: TimeInterval = ProcessInfo.processInfo.systemUptime) {
             let own = p.requestId.map { $0 == requestId } ?? !seenOwn
             guard own else {
                 status = "Waiting for devd (another open of this repo is running)…"
                 return
             }
             if p.requestId != nil { seenOwn = true }
-            apply(p)
+            apply(p, at: uptime)
         }
 
-        mutating func apply(_ p: OpenProgress) {
+        mutating func apply(_ p: OpenProgress, at uptime: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+            if let ps = p.phases {
+                phases = ps
+                devdNow = p.now
+                receivedAt = uptime
+            }
             percent = max(percent, MacNewSession.percent(p))
             if let s = MacNewSession.stage(for: p.step) { stage = max(stage ?? s, s) }
             if p.step == "clone" { cloning = true }
             status = MacNewSession.status(p)
         }
 
-        mutating func finish() {
+        /// `phases`: devd's answer, every step ended. Without them (an older devd, a rejoined session) a step still
+        /// open in the last report shows no time rather than one this Mac made up.
+        mutating func finish(phases final: [OpenProgress.Phase]? = nil) {
+            if let final { phases = final }
+            finished = true
             percent = 100
             stage = .ready
             status = nil
+        }
+
+        struct Time: Equatable {
+            let seconds: Double
+            let running: Bool
+            var text: String { MacNewSession.duration(seconds) + (running ? "…" : "") }
+        }
+
+        /// How long devd spent on the stage, counting on while it runs; nil for a stage devd skipped or has not reached.
+        func time(_ s: Stage, at uptime: TimeInterval) -> Time? {
+            let mine = phases.filter { MacNewSession.stage(for: $0.step) == s }
+            guard s != .ready, !mine.isEmpty else { return nil }
+            var ms = 0.0, running = false
+            for p in mine {
+                if let end = p.endedAt {
+                    ms += end - p.startedAt
+                } else {
+                    guard let live = live(uptime) else { return nil }
+                    ms += max(0, live - p.startedAt)
+                    running = true
+                }
+            }
+            return Time(seconds: ms / 1000, running: running)
+        }
+
+        /// From devd's first step to its last step's end (or now, while it runs).
+        func total(at uptime: TimeInterval) -> Time? {
+            guard let first = phases.first, let last = phases.last else { return nil }
+            if let end = last.endedAt { return Time(seconds: (end - first.startedAt) / 1000, running: false) }
+            return live(uptime).map { Time(seconds: max(0, $0 - first.startedAt) / 1000, running: true) }
+        }
+
+        /// devd's clock now: its last reading plus this Mac's monotonic time since. nil once finished without devd's
+        /// own end times, or before a report with a clock.
+        private func live(_ uptime: TimeInterval) -> Double? {
+            guard !finished, let devdNow else { return nil }
+            return devdNow + max(0, uptime - receivedAt) * 1000
         }
 
         func title(_ s: Stage) -> String {
@@ -269,6 +322,14 @@ enum MacNewSession {
             case .ready: return "Ready"
             }
         }
+    }
+
+    /// "0.4 s", "8.3 s" under ten seconds, then "12 s", "2 min 5 s". Rounded down, so a running count never runs ahead.
+    static func duration(_ seconds: Double) -> String {
+        let s = max(0, seconds)
+        if s < 10 { return String(format: "%.1f s", (s * 10).rounded(.down) / 10) }
+        let whole = Int(s.rounded(.down))
+        return whole < 60 ? "\(whole) s" : "\(whole / 60) min \(whole % 60) s"
     }
 
     enum Phase {
@@ -611,30 +672,50 @@ struct MacNewSessionSheet: View {
             }
             .font(.callout.monospacedDigit())
             .foregroundStyle(Theme.C.mutedForeground)
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(MacNewSession.Stage.allCases, id: \.self) { s in
-                    let state: Int = t.stage.map { s < $0 ? 0 : s == $0 ? 1 : 2 } ?? 2
-                    let done = state == 0 || (state == 1 && s == .ready)
-                    HStack(spacing: 8) {
-                        Group {
-                            if done {
-                                Image(systemName: "checkmark.circle.fill").foregroundStyle(InboxTone.doneIcon)
-                            } else if state == 1 {
-                                ProgressView().controlSize(.small)
-                            } else {
-                                Image(systemName: "circle").foregroundStyle(Theme.C.mutedForeground.opacity(0.6))
-                            }
-                        }
-                        .frame(width: 18)
-                        Text(t.title(s)).foregroundStyle(state == 2 ? Theme.C.mutedForeground : Theme.C.foreground)
-                    }
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("\(t.title(s)), \(done ? "Done" : state == 1 ? "In progress" : "Pending")")
-                }
-            }
+            // Ticks only to count the running step on; every number is devd's.
+            TimelineView(.periodic(from: .now, by: 0.1)) { _ in stages(t, at: ProcessInfo.processInfo.systemUptime) }
             Text("devd skips the steps a session does not need.")
                 .font(.caption)
                 .foregroundStyle(Theme.C.mutedForeground)
+        }
+    }
+
+    private func stages(_ t: MacNewSession.Tracker, at uptime: TimeInterval) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(MacNewSession.Stage.allCases, id: \.self) { s in
+                let state: Int = t.stage.map { s < $0 ? 0 : s == $0 ? 1 : 2 } ?? 2
+                let done = state == 0 || (state == 1 && s == .ready)
+                HStack(spacing: 8) {
+                    Group {
+                        if done {
+                            Image(systemName: "checkmark.circle.fill").foregroundStyle(InboxTone.doneIcon)
+                        } else if state == 1 {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "circle").foregroundStyle(Theme.C.mutedForeground.opacity(0.6))
+                        }
+                    }
+                    .frame(width: 18)
+                    Text(t.title(s)).foregroundStyle(state == 2 ? Theme.C.mutedForeground : Theme.C.foreground)
+                    Spacer()
+                    if let time = t.time(s, at: uptime) {
+                        Text(time.text).monospacedDigit().foregroundStyle(Theme.C.mutedForeground)
+                    }
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(t.title(s)), \(done ? "Done" : state == 1 ? "In progress" : "Pending")"
+                                    + (t.time(s, at: uptime).map { ", \($0.text)" } ?? ""))
+            }
+            if let total = t.total(at: uptime) {
+                Divider()
+                HStack {
+                    Text("Total")
+                    Spacer()
+                    Text(total.text).monospacedDigit()
+                }
+                .fontWeight(.medium)
+                .accessibilityElement(children: .combine)
+            }
         }
     }
 
@@ -715,7 +796,7 @@ struct MacNewSessionSheet: View {
                 let result = try await MacNewSession.create(request, actions: actions, requestId: requestId)
                 poll?.cancel()
                 if case .working(var t) = phase {
-                    t.finish()
+                    t.finish(phases: result.phases)
                     phase = .working(t)
                 }
                 await onStarted()

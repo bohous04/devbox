@@ -302,6 +302,17 @@ struct OpenProgress: Decodable, Equatable {
     var detail: String? = nil
     /// The `requestId` its open was sent with; nil when it had none, or from a devd before the field.
     var requestId: String? = nil
+    /// When each step devd entered started and ended (devd/src/sessions.ts `OpenPhase`), in ms of devd's monotonic
+    /// clock: only differences mean anything. nil from a devd before the field.
+    var phases: [Phase]? = nil
+    /// devd's monotonic clock when the report was read.
+    var now: Double? = nil
+
+    struct Phase: Decodable, Equatable {
+        let step: String
+        let startedAt: Double
+        var endedAt: Double? = nil
+    }
 }
 
 /// `POST /api/sessions` (open/openSolo) response — mirrors `OpenResult` from `dashboard/src/api.ts`.
@@ -329,6 +340,8 @@ struct OpenResult: Decodable {
     let claudePrompt: String?
     /// Why devd started the session in the other runtime than its default (the default cannot run the agent).
     let runtimeNotice: String?
+    /// Every step of the open, all ended; nil when it rejoined a running session, or from a devd before the field.
+    var phases: [OpenProgress.Phase]? = nil
 }
 
 // MARK: - Auth
