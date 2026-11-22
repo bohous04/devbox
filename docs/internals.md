@@ -59,6 +59,14 @@ Running tmux sessions are never converted.
 The chat bridge is `image/agent-bridge/`; changing it needs an image rebuild like any
 `image/` change, and containers keep the bridge they were created with until recreated.
 
+### Names that say less than they hold
+
+- **`tmux_seen`** (devd's main DB) holds the owner's last look at a session of either
+  runtime, not only tmux: `POST /api/sessions/:id/seen` (tmux) and `/thread/seen` (chat) both
+  stamp it (`getSeenAt`/`setSeenAt`). The auto-settle clock counts it for both. Only for tmux
+  is it also the seen marker of a finish (`tmuxAttention`); a chat thread's marker is its
+  store's `seenSeq`.
+
 ## Warp integration
 
 `image/vendor/warp-hooks/warp-hook.sh` and `warp-title.py` send Warp `cli-agent` events
