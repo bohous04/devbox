@@ -25,8 +25,6 @@ struct ComposerView: View {
     var placeholder: String? = nil
     /// Why nothing can be sent now: the empty field is off and says it (text already typed stays editable).
     var fieldOff: String? = nil
-    /// Why images cannot go with a message: the attach button is off and says it, and a paste or drop says it.
-    var imagesOff: String? = nil
 
     private struct Attached: Identifiable {
         let id = UUID()
@@ -193,10 +191,9 @@ struct ComposerView: View {
                 .frame(width: 36, height: 36).contentShape(Rectangle())
         }
         .labelOnlyMenu()
-        .disabled(images.count >= ImagePrep.maxImagesPerMessage || imagesOff != nil)
-        .help(imagesOff ?? "Attach images, or paste or drop them here")
+        .disabled(images.count >= ImagePrep.maxImagesPerMessage)
+        .help("Attach images, or paste or drop them here")
         .accessibilityLabel("Attach images")
-        .accessibilityHint(imagesOff ?? "")
     }
 
     private var field: some View {
@@ -312,9 +309,8 @@ struct ComposerView: View {
         .accessibilityLabel("Send")
     }
 
-    /// Pasted or dropped items; while images are off, their reason is said instead.
+    /// Pasted or dropped items.
     private func attach(_ items: [NSItemProvider]) {
-        if let imagesOff { error = imagesOff; return }
         Task { await attach(items.count) { i in try await ImagePrep.loadImage(items[i]) } }
     }
 
