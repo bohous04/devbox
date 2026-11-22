@@ -5,10 +5,12 @@ import XCTest
 /// row shows, settling with undo, and when a tmux session is marked seen.
 @MainActor
 final class InboxSettleTests: XCTestCase {
-    private func item(_ id: String, _ section: String, reason: String?, since: Int = 0, runtime: String = "chat",
+    private func item(_ id: String, _ section: String, reason: String?, since: Int = 0, until: Int? = nil, runtime: String = "chat",
                       branch: String? = nil) throws -> InboxItem {
+        var attention: [String: Any] = ["section": section, "since": since, "reason": reason.map { $0 as Any } ?? NSNull()]
+        if let until { attention["until"] = until }
         var json: [String: Any] = ["sessionId": id, "runtime": runtime, "title": "Title of \(id)", "project": "p", "repo": "r",
-                                   "agent": "claude", "attention": ["section": section, "since": since, "reason": reason.map { $0 as Any } ?? NSNull()]]
+                                   "agent": "claude", "attention": attention]
         if let branch { json["branch"] = branch }
         return try JSONDecoder().decode(InboxItem.self, from: JSONSerialization.data(withJSONObject: json))
     }
@@ -45,29 +47,22 @@ final class InboxSettleTests: XCTestCase {
         XCTAssertTrue(InboxView.shelves(InboxView.group([try item("i", "idle", reason: nil)])).isEmpty)
     }
 
-    /// A row shows a mark only when it has something to say; an idle or seen row shows its time. Done is the quiet one.
-    func testMarkOnlyWhenThereIsSomethingToSay() throws {
-        let cases: [(String?, String?)] = [("request", "Answer"), ("failed", "Failed"), ("rate-limited", "Limit"),
-                                           ("disconnected", "Offline"), ("bridge-behind", "Behind"), ("ci-failed", "CI failed"),
-                                           ("completed", "Done")]
-        for (reason, word) in cases {
-            XCTAssertEqual(InboxView.mark(try item("a", "needs_you", reason: reason))?.label, word, reason ?? "nil")
-        }
-        XCTAssertEqual(InboxView.mark(try item("a", "needs_you", reason: "request"))?.tone, .action)
-        XCTAssertEqual(InboxView.mark(try item("a", "needs_you", reason: "failed"))?.tone, .danger)
-        XCTAssertEqual(InboxView.mark(try item("a", "needs_you", reason: "completed"))?.tone, .done)
-        XCTAssertNil(InboxView.mark(try item("a", "idle", reason: nil)), "idle: the time")
-        XCTAssertNil(InboxView.mark(try item("a", "idle", reason: "completed")), "a seen run: the time")
-        XCTAssertNil(InboxView.mark(try item("a", "settled", reason: "failed")), "the shelves keep their time")
-        XCTAssertNil(InboxView.mark(try item("a", "working", reason: "running")))
+    /// The list's rows show a chip only when they have something to say; an idle or seen row shows its time. Done is the
+    /// quiet one. (InboxRowTests holds every reason.)
+    func testChipOnlyWhenThereIsSomethingToSay() throws {
+        XCTAssertEqual(InboxView.rowStatus(try item("a", "needs_you", reason: "request"))?.tone, .action)
+        XCTAssertEqual(InboxView.rowStatus(try item("a", "needs_you", reason: "failed"))?.tone, .danger)
+        XCTAssertEqual(InboxView.rowStatus(try item("a", "needs_you", reason: "completed"))?.tone, .done)
+        XCTAssertNil(InboxView.rowStatus(try item("a", "idle", reason: nil)), "idle: the time")
+        XCTAssertNil(InboxView.rowStatus(try item("a", "idle", reason: "completed")), "a seen run: the time")
+        XCTAssertNil(InboxView.rowStatus(try item("a", "working", reason: "running")))
     }
 
-    /// The second line: what a marked row asks, else where the row runs; the time of an unmarked row.
-    func testSecondLineAndTime() throws {
-        XCTAssertEqual(InboxView.secondLine(try item("a", "idle", reason: nil, branch: "retry-queue"), detail: "msg"), "p/r  ·  retry-queue")
-        XCTAssertEqual(InboxView.secondLine(try item("a", "idle", reason: nil), detail: ""), "p/r")
+    /// The second line, after the project's badge: what a row that needs you asks, else where the row runs.
+    func testSecondLine() throws {
+        XCTAssertEqual(InboxView.secondLine(try item("a", "idle", reason: nil, branch: "retry-queue"), detail: "msg"), "r  ·  retry-queue")
+        XCTAssertEqual(InboxView.secondLine(try item("a", "idle", reason: nil), detail: ""), "r")
         XCTAssertEqual(InboxView.secondLine(try item("a", "needs_you", reason: "request", branch: "b"), detail: "May I run it?"), "r  ·  May I run it?")
-        XCTAssertEqual(InboxView.when(try item("a", "idle", reason: nil, since: 1_000), now: 1_000 + 3 * 60_000), "3m")
     }
 
     /// A marked row says its mark once: first, not again as the state.
@@ -80,6 +75,11 @@ final class InboxSettleTests: XCTestCase {
         let failed = try item("dev-p-r-2", "needs_you", reason: "failed")
         XCTAssertEqual(InboxRow.spoken(failed, now: 0, title: "Fix", detail: InboxView.reasonLabel(.failed), showAgent: false), "Failed, Fix, p/r")
         XCTAssertTrue(InboxRow.spoken(try item("a", "idle", reason: nil), now: 0, title: "Idle", detail: "", showAgent: false).hasPrefix("Idle"))
+        let queued = try item("dev-p-r-3", "working", reason: "queued")
+        XCTAssertEqual(InboxRow.spoken(queued, now: 0, title: "Index", detail: "", showAgent: false), "Queued, Index, p/r")
+        let snoozed = try item("dev-p-r-4", "snoozed", reason: "completed", until: 60_000)
+        let label = InboxRow.spoken(snoozed, now: 0, title: "Bump", detail: "", showAgent: false)
+        XCTAssertTrue(label.hasPrefix("Snoozed, Bump, until "), label)
     }
 
     /// Settle: every row in the list and in Working, except one waiting on an answer, which says why.

@@ -33,36 +33,14 @@ extension InboxView {
     /// A row that asks something (a request or a failure) says what in its second line; the others say where they run.
     static func asks(_ i: InboxItem) -> Bool { i.attention.section == .needsYou && i.attention.reason != .completed }
 
-    /// The mark of a row that needs you, by its reason (a run that finished unseen is Done); nil for every other row
-    /// (it shows its age).
-    static func mark(_ i: InboxItem) -> Mark? {
-        guard i.attention.section == .needsYou else { return nil }
-        switch i.attention.reason {
-        case .request?: return Mark(label: "Answer", tone: .action)
-        case .completed?: return Mark(label: "Done", tone: .done)
-        case .failed?: return Mark(label: "Failed", tone: .danger)
-        case .rateLimited?: return Mark(label: "Limit", tone: .danger)
-        case .disconnected?: return Mark(label: "Offline", tone: .danger)
-        case .bridgeBehind?: return Mark(label: "Behind", tone: .danger)
-        case .ciFailed?: return Mark(label: "CI failed", tone: .danger)
-        default: return nil
-        }
-    }
-
-    /// The second line. A row that needs you says what it asks (the message, or the reason without one): that is
-    /// the point of the row. Any other row says where it runs: the repo and what distinguishes its branch
-    /// (branchLabel), else the latest message on a row that shows it.
+    /// The second line, after the project's badge. A row that needs you says what it asks (the message, or the
+    /// reason without one): that is the point of the row. Any other row says where it runs: the repo and what
+    /// distinguishes its branch (branchLabel), else the latest message on a row that shows it.
     static func secondLine(_ i: InboxItem, detail: String) -> String {
-        if mark(i) != nil, !detail.isEmpty { return "\(i.repo)  ·  \(detail)" }
-        let place = "\(i.project)/\(i.repo)"
+        if i.attention.section == .needsYou, !detail.isEmpty { return "\(i.repo)  ·  \(detail)" }
+        let place = i.repo
         if let branch = branchLabel(i) { return "\(place)  ·  \(branch)" }
         return detail.isEmpty ? place : "\(place)  ·  \(detail)"
-    }
-
-    /// An unmarked row's age, or for a snoozed row when it comes back.
-    static func when(_ i: InboxItem, now: Int) -> String {
-        if let until = i.attention.until { return InboxRow.untilLabel(until) }
-        return i.attention.since > 0 ? shortAgo(now - i.attention.since) : ""
     }
 }
 

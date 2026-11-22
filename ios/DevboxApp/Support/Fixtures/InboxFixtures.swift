@@ -1,8 +1,9 @@
 #if DEBUG
 import Foundation
 
-/// The inbox of the `demo` set: two sessions waiting on an answer, a failed run, three finished runs not yet seen,
-/// two running, idle ones (two tmux) and the shelves, as devd groups them. Times are relative to launch, so the labels read the same on every run.
+/// The inbox of the `demo` set: two sessions waiting on an answer, a failed run and a failed CI, three finished runs not
+/// yet seen, one running, one waiting on CI and one queued, idle ones (two tmux) and the shelves (a settled failure
+/// among them), as devd groups them. Times are relative to launch, so the labels read the same on every run.
 /// Every name here is invented. The release notes session has no branch recorded (a row from an older devd).
 /// Settle, unsettle and seen answer as devd does: settle refuses a row with an open request, unsettle brings back
 /// the row as listed, and seen takes tmux sessions only.
@@ -63,8 +64,12 @@ enum InboxFixtures {
                  since: ago(31), last: "2 of 148 tests failed: upload retries after a timeout."),
             item("dev-lumen-app", "Dark mode for the settings page", "lumen", "app", branch: "settings-dark-mode", section: "working", reason: "running",
                  since: ago(2), last: "Updating the colour tokens in theme.css and the two settings forms."),
+            item("dev-orchard-lint", "Pin the test runner version", "orchard", "api", agent: "codex", branch: "pin-runner", section: "needs_you",
+                 reason: "ci-failed", since: ago(22), last: "CI failed on lint: two unused imports."),
             item("dev-orchard-search", "Cache the search results", "orchard", "web", agent: "codex", branch: "search-cache", section: "working",
-                 reason: "running", since: ago(9), last: "Measuring the cache hit rate on the staging logs."),
+                 reason: "pr-checks", since: ago(9), last: "PR opened; waiting for the checks."),
+            item("dev-acme-index", "Index the archive table", "acme", "billing", branch: "archive-index", section: "working",
+                 reason: "queued", since: ago(12), last: "Queued behind the running turn."),
             item("dev-acme-rename", "Rename the billing module", "acme", "billing", agent: "codex", branch: "rename-billing", section: "needs_you",
                  reason: "completed", since: ago(95), last: "Done. Renamed 14 files and updated the imports; tests pass."),
             // The session ThreadFixtures has a thread for, so a screenshot can show a row selected with its thread open.
@@ -84,6 +89,8 @@ enum InboxFixtures {
                  since: ago(50), until: ms + 3 * 3_600_000, last: "Usage limit reached; resumes after the reset."),
             item("dev-acme-logo", "Swap the logo in the footer", "acme", "web", branch: "footer-logo", section: "settled", reason: "completed",
                  since: ago(2900), last: "Replaced the footer logo with the new SVG."),
+            item("dev-orchard-v1", "Retire the v1 endpoints", "orchard", "api", branch: "retire-v1", section: "settled", reason: "failed",
+                 since: ago(3100), last: "The v1 contract tests fail: two clients still call /v1/sync."),
         ]
     }
 }

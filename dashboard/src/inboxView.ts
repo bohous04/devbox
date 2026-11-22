@@ -1,5 +1,6 @@
 import type { Attention, InboxItem, InboxRemoved, ThreadItem } from "../../shared/thread";
 import { threadTitle } from "../../shared/threadTitle";
+import { profileFor } from "./newSession";
 
 /** The inbox's sections and its two shelves. Ordering mirrors `sortInbox` in devd/src/sessionInbox.ts: needs-you
  *  oldest first (the longest wait on top), the rest newest first. */
@@ -76,7 +77,7 @@ export function splitNeedsYou(needsYou: InboxItem[]): { action: InboxItem[]; fin
 export type StatusTone = "action" | "danger" | "done" | "busy" | "quiet";
 
 const CHIP: Record<NonNullable<Attention["reason"]>, { label: string; tone: StatusTone }> = {
-  request: { label: "Needs answer", tone: "action" },
+  request: { label: "Answer", tone: "action" },
   failed: { label: "Failed", tone: "danger" },
   "rate-limited": { label: "Rate limited", tone: "danger" },
   disconnected: { label: "Disconnected", tone: "danger" },
@@ -89,29 +90,30 @@ const CHIP: Record<NonNullable<Attention["reason"]>, { label: string; tone: Stat
   "pr-checks": { label: "CI running", tone: "busy" },
 };
 
-/** The short status chip a row shows, or null for a row whose time alone says enough (idle, settled). Snoozed rows
- *  say so; the page adds the time the snooze ends. */
+/** A row's chip, only when it has something to say (T3 Code's rule): what asks or failed, a finish not yet seen, work
+ *  that waits on something (queued, background, CI), a snooze. A running row says it with its live dot and time, an
+ *  idle one with its time. A settled row is out of the way: only a danger chip still shows there. */
 export function rowStatus(i: InboxItem): { label: string; tone: StatusTone } | null {
   const { section, reason } = i.attention;
   if (section === "snoozed") return { label: "Snoozed", tone: "quiet" };
-  if (section === "settled" || reason === null) return null;
-  return CHIP[reason];
+  const chip = reasonStatus(reason);
+  if (section === "settled") return chip?.tone === "danger" ? chip : null;
+  return reason === "running" ? null : chip;
 }
 
-/** The chip for a reason whatever shelf the row is on: the outcome mark of a finished or settled run. */
+/** The chip for a reason whatever shelf the row is on. */
 export const reasonStatus = (r: Attention["reason"]): { label: string; tone: StatusTone } | null => (r === null ? null : CHIP[r]);
 
-/** What a row's meta line says about its state, or null when there is nothing to say (no mark, no time).
- *  `compact` rows (groups whose heading names the state) show only the mark, except a danger mark keeps its label:
- *  a tooltip is the only other place it would be, and touch has none. */
-export function statusParts(i: InboxItem, now: number, compact: boolean):
-  { mark: { label: string; tone: StatusTone } | null; showLabel: boolean; until: number | null; ago: string } | null {
+/** What the right end of a row's title line says: its chip, when a snooze ends, and how long ago; null when there is
+ *  nothing to say (no chip, no time). */
+export function statusParts(i: InboxItem, now: number):
+  { mark: { label: string; tone: StatusTone } | null; until: number | null; ago: string } | null {
   const a = i.attention;
-  const mark = compact ? reasonStatus(a.reason) : rowStatus(i);
+  const mark = rowStatus(i);
   const ago = a.since > 0 ? shortAgo(now - a.since) : "";
   const until = a.until ?? null;
   if (mark === null && ago === "" && until === null) return null;
-  return { mark, showLabel: mark !== null && (!compact || mark.tone === "danger"), until, ago };
+  return { mark, until, ago };
 }
 
 /** Compact elapsed time for a row: "now", "7m", "3h", "2d". */
@@ -167,6 +169,11 @@ export function sessionTitle(s: { sessionId: string; name: string | null; projec
  *  With one agent everywhere the label says nothing. */
 export const mixedAgents = (items: InboxItem[]): boolean => new Set(items.map((i) => i.agent)).size > 1;
 
+/** The second line's trailing parts (the Apple apps' InboxView.metaTail): the agent's name while the inbox mixes
+ *  agents, and "tmux" for a terminal session. */
+export const metaTail = (i: InboxItem, showAgent: boolean): string[] =>
+  [...(showAgent ? [profileFor(i.agent).short] : []), ...(i.runtime === "tmux" ? ["tmux"] : [])];
+
 /** A row that asks something of the owner (a request or a failure): pinned on top, and its second line says what. */
 export const asks = (i: InboxItem): boolean => i.attention.section === "needs_you" && i.attention.reason !== "completed";
 
@@ -176,25 +183,6 @@ export const asks = (i: InboxItem): boolean => i.attention.section === "needs_yo
 export function inboxList(g: ReturnType<typeof groupInbox>): InboxItem[] {
   const { action, finished } = splitNeedsYou(g.needsYou);
   return [...action, ...[...finished, ...g.idle].sort((a, b) => b.attention.since - a.attention.since)];
-}
-
-export type MarkTone = "action" | "danger" | "done";
-
-const MARK: Partial<Record<NonNullable<Attention["reason"]>, { label: string; tone: MarkTone }>> = {
-  request: { label: "Answer", tone: "action" },
-  completed: { label: "Done", tone: "done" },
-  failed: { label: "Failed", tone: "danger" },
-  "rate-limited": { label: "Limit", tone: "danger" },
-  disconnected: { label: "Offline", tone: "danger" },
-  "bridge-behind": { label: "Behind", tone: "danger" },
-  "ci-failed": { label: "CI failed", tone: "danger" },
-};
-
-/** The mark of a row that needs the owner, by its reason (a run that finished unseen is Done); null for every other
- *  row, which shows its age instead (MacInboxRow.word). */
-export function rowMark(i: InboxItem): { label: string; tone: MarkTone } | null {
-  const { section, reason } = i.attention;
-  return section === "needs_you" && reason !== null ? MARK[reason] ?? null : null;
 }
 
 /** What tells a session's branch apart, or null when that says nothing: a session's own numbered branch
@@ -208,13 +196,13 @@ export function branchLabel(i: InboxItem): string | null {
   return rowTitle(i) === `${i.repo} #${n}` ? null : `#${n}`;
 }
 
-/** A row's second line (MacInboxRow.secondLine). A row that asks says what (the message, or the reason without one).
- *  Any other row says where it runs: project/repo and what distinguishes its branch, and on the working and snoozed
- *  shelves, where the latest message is the point, that message. */
+/** A row's second line (MacInboxRow.secondLine), after the project's badge. A row that asks says what (the message,
+ *  or the reason without one). Any other row says where it runs: the repo and what distinguishes its branch, and on
+ *  the working and snoozed shelves, where the latest message is the point, that message. */
 export function secondLine(i: InboxItem): string {
   const message = i.lastText !== null ? plainPreview(i.lastText) : "";
   if (asks(i)) return `${i.repo} · ${message || reasonLabel(i.attention.reason)}`;
-  const parts = [`${i.project}/${i.repo}`, branchLabel(i)];
+  const parts = [i.repo, branchLabel(i)];
   if (i.attention.section === "working" || i.attention.section === "snoozed") parts.push(message);
   return parts.filter(Boolean).join(" · ");
 }

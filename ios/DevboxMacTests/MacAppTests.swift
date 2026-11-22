@@ -56,13 +56,14 @@ final class MacAppTests: XCTestCase {
         return try JSONDecoder().decode(InboxItem.self, from: JSONSerialization.data(withJSONObject: json))
     }
 
-    /// A sidebar row that needs you, or finished unseen, says so in one word; every other row shows its age.
-    func testSidebarRowStateIsOneWordOrTheAge() throws {
-        XCTAssertEqual(InboxView.mark(try item("needs_you", reason: "request"))?.label, "Answer")
-        XCTAssertEqual(InboxView.mark(try item("needs_you", reason: "failed"))?.label, "Failed")
-        XCTAssertEqual(InboxView.mark(try item("needs_you", reason: "completed"))?.label, "Done", "a finished run not yet seen")
-        XCTAssertNil(InboxView.mark(try item("idle", reason: "failed")), "only Needs you rows get the word")
-        XCTAssertEqual(InboxView.when(try item("idle", reason: nil, since: 1_000), now: 1_000 + 3 * 60_000), "3m")
+    /// A sidebar row with something to say shows its chip; every other row shows its age.
+    func testSidebarRowStateIsAChipOrTheAge() throws {
+        XCTAssertEqual(InboxView.rowStatus(try item("needs_you", reason: "request"))?.label, "Answer")
+        XCTAssertEqual(InboxView.rowStatus(try item("needs_you", reason: "failed"))?.label, "Failed")
+        XCTAssertEqual(InboxView.rowStatus(try item("needs_you", reason: "completed"))?.label, "Done", "a finished run not yet seen")
+        XCTAssertEqual(InboxView.rowStatus(try item("working", reason: "pr-checks"))?.label, "CI running")
+        XCTAssertNil(InboxView.rowStatus(try item("idle", reason: "failed")), "a seen failure: the time")
+        XCTAssertEqual(InboxView.statusParts(try item("idle", reason: nil, since: 1_000), now: 1_000 + 3 * 60_000)?.ago, "3m")
     }
 
     /// Columns that fit keep their width and the last takes the rest; a narrow column keeps its width when the
@@ -85,15 +86,16 @@ final class MacAppTests: XCTestCase {
         XCTAssertEqual(ThreadEdge.pad([row(60, 20, quiet: true), row(96, 300)], top: top), 28, "a notice first in view goes")
     }
 
-    /// The second line: what a needs-you row asks; for the others the branch when devd recorded one, else the message.
+    /// The second line, after the project's badge: what a needs-you row asks; for the others the branch when devd
+    /// recorded one, else the message.
     func testSidebarRowPlacePrefersTheBranch() throws {
-        XCTAssertEqual(InboxView.secondLine(try item("idle", reason: nil, branch: "retry-queue"), detail: "msg"), "p/r  ·  retry-queue")
-        XCTAssertEqual(InboxView.secondLine(try item("idle", reason: nil), detail: "msg"), "p/r  ·  msg")
-        XCTAssertEqual(InboxView.secondLine(try item("idle", reason: nil), detail: ""), "p/r")
+        XCTAssertEqual(InboxView.secondLine(try item("idle", reason: nil, branch: "retry-queue"), detail: "msg"), "r  ·  retry-queue")
+        XCTAssertEqual(InboxView.secondLine(try item("idle", reason: nil), detail: "msg"), "r  ·  msg")
+        XCTAssertEqual(InboxView.secondLine(try item("idle", reason: nil), detail: ""), "r")
         XCTAssertEqual(InboxView.secondLine(try item("needs_you", reason: "request", branch: "b"), detail: "May I run it?"), "r  ·  May I run it?",
                        "a row that needs you names its repo and says what it asks")
         // devd's own branch repeats the repo: only its number distinguishes the row.
-        XCTAssertEqual(InboxView.secondLine(try item("idle", reason: nil, branch: "session/r-7"), detail: "msg"), "p/r  ·  #7")
+        XCTAssertEqual(InboxView.secondLine(try item("idle", reason: nil, branch: "session/r-7"), detail: "msg"), "r  ·  #7")
     }
 
     func testCutLinksNameTheFullAddress() {

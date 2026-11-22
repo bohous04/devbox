@@ -378,8 +378,8 @@ enum InboxTone {
         switch t {
         case .action: return action
         case .danger: return danger
-        case .busy: return busy
-        case .done, .quiet: return Theme.C.mutedForeground
+        // Work that waits on something, a finish, a snooze: information, said quietly.
+        case .busy, .done, .quiet: return Theme.C.mutedForeground
         }
     }
 
@@ -393,7 +393,8 @@ enum InboxTone {
         }
     }
 
-    /// Badge slots: rose, amber, emerald, sky, violet, fuchsia (500 at 15% behind 800 / 300 text).
+    /// Badge slots (InboxView.projectBadge's slot), the dashboard's Inbox.tsx BADGE: rose, amber, emerald, sky,
+    /// violet, fuchsia (500 at 15% behind 800 / 300 text).
     static let badge: [(fill: Color, text: Color)] = [
         (Color(light: 0xF43F5E, dark: 0xF43F5E), Color(light: 0xBE123C, dark: 0xFDA4AF)),
         (Color(light: 0xF59E0B, dark: 0xF59E0B), Color(light: 0x92400E, dark: 0xFCD34D)),
@@ -402,6 +403,28 @@ enum InboxTone {
         (Color(light: 0x8B5CF6, dark: 0x8B5CF6), Color(light: 0x5B21B6, dark: 0xC4B5FD)),
         (Color(light: 0xD946EF, dark: 0xD946EF), Color(light: 0x86198F, dark: 0xF0ABFC)),
     ]
+}
+
+/// A project as two letters on its colour (InboxView.projectBadge), in front of a row's second line. The name itself is
+/// in the row's spoken label and tooltip.
+struct ProjectBadge: View {
+    let project: String
+    var size: CGFloat = 9
+
+    var body: some View {
+        let b = InboxView.projectBadge(project)
+        let tint = InboxTone.badge[b.slot]
+        Text(b.letters)
+            .font(.system(size: size, weight: .semibold))
+            .tracking(0.3)
+            .foregroundStyle(tint.text)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 3)
+            .frame(minWidth: size * 2, minHeight: size + 5)
+            .background(tint.fill.opacity(0.15), in: RoundedRectangle(cornerRadius: 3))
+            .accessibilityHidden(true)
+    }
 }
 
 /// Whether inbox rows name their agent (InboxView.mixedAgents: the inbox mixes agents), set where the list is built.
@@ -415,10 +438,10 @@ extension EnvironmentValues {
     }
 }
 
-/// One row, the Mac sidebar's shape: the title with its state on the right (a coloured mark when the row has something
-/// to say, otherwise how long ago) and one muted line (InboxView.secondLine) ending in the agent's glyph while the inbox
-/// mixes agents. A row with nothing to say has a quieter title, so the eye lands on the marked ones; Done is the quiet
-/// mark (a green check, a regular muted word), under the asks.
+/// One row, the Mac sidebar's shape: the title with its state on the right (a chip when the row has something to say,
+/// InboxView.statusParts, otherwise how long ago) and one muted line: the project's badge, InboxView.secondLine, and
+/// the agent and "tmux" (InboxView.metaTail) after the agent's glyph while the inbox mixes agents. A row with nothing
+/// to say has a quieter title, so the eye lands on the marked ones; danger and asks are loud, the rest quiet.
 struct InboxRow: View {
     let item: InboxItem
     let now: Int
@@ -430,23 +453,31 @@ struct InboxRow: View {
         Date(timeIntervalSince1970: Double(ms) / 1000).formatted(.dateTime.weekday(.abbreviated).hour().minute())
     }
 
+    /// A chip's words: a snooze says when it ends (the time; the spoken label has the day too).
+    static func chipLabel(_ mark: InboxView.Mark, until: Int?) -> String {
+        guard let until else { return mark.label }
+        return "\(mark.label) until \(Date(timeIntervalSince1970: Double(until) / 1000).formatted(.dateTime.hour().minute()))"
+    }
+
     var body: some View {
         let title = InboxView.rowTitle(item)
         let message = item.lastText.map(InboxView.plainPreview) ?? ""
         let detail = preview ? (message.isEmpty ? InboxView.reasonLabel(item.attention.reason) : message) : ""
-        let mark = InboxView.mark(item)
+        let parts = InboxView.statusParts(item, now: now)
+        let tail = InboxView.metaTail(item, showAgent: showAgent)
         // The largest accessibility sizes leave a word or two per line: two lines keep a title readable.
         let lines = typeSize > .accessibility1 ? 2 : 1
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(title)
                     .font(.body)
-                    .foregroundStyle(mark == nil ? InboxTone.quietTitle : Theme.C.foreground)
+                    .foregroundStyle(parts?.mark == nil ? InboxTone.quietTitle : Theme.C.foreground)
                     .lineLimit(lines)
                 Spacer(minLength: 0)
-                state(mark)
+                state(parts)
             }
             HStack(spacing: 6) {
+                ProjectBadge(project: item.project)
                 Text(InboxView.secondLine(item, detail: detail))
                     .font(.subheadline)
                     .foregroundStyle(Theme.C.mutedForeground)
@@ -456,6 +487,13 @@ struct InboxRow: View {
                     AgentLogo(mark: AgentLogo.Mark(agent: item.agent), size: 13)
                         .foregroundStyle(Theme.C.mutedForeground.opacity(0.8))
                         .accessibilityHidden(true)
+                }
+                if !tail.isEmpty {
+                    Text(tail.joined(separator: " · "))
+                        .font(.footnote)
+                        .foregroundStyle(Theme.C.mutedForeground)
+                        .lineLimit(1)
+                        .fixedSize()
                 }
             }
         }
@@ -468,23 +506,19 @@ struct InboxRow: View {
     }
 
     @ViewBuilder
-    private func state(_ mark: InboxView.Mark?) -> some View {
-        if let mark, mark.tone == .done {
-            HStack(spacing: 4) {
-                Image(systemName: InboxTone.icon(.done)).font(.footnote).foregroundStyle(InboxTone.doneIcon)
-                Text(mark.label).font(.footnote).foregroundStyle(Theme.C.mutedForeground)
-            }
-            .fixedSize()
-        } else if let mark {
+    private func state(_ parts: InboxView.StatusParts?) -> some View {
+        if let parts, let mark = parts.mark {
+            let loud = mark.tone == .action || mark.tone == .danger
             HStack(spacing: 4) {
                 Image(systemName: InboxTone.icon(mark.tone))
-                Text(mark.label)
+                    .foregroundStyle(mark.tone == .done ? InboxTone.doneIcon : InboxTone.text(mark.tone))
+                Text(Self.chipLabel(mark, until: parts.until)).monospacedDigit()
             }
-            .font(.footnote.weight(.semibold))
+            .font(loud ? .footnote.weight(.semibold) : .footnote)
             .foregroundStyle(InboxTone.text(mark.tone))
             .fixedSize()
-        } else {
-            Text(InboxView.when(item, now: now))
+        } else if let parts {
+            Text(parts.ago)
                 .font(.footnote).monospacedDigit()
                 .foregroundStyle(item.attention.section == .working ? InboxTone.busy : Theme.C.mutedForeground)
                 .fixedSize()
@@ -502,12 +536,12 @@ struct InboxRow: View {
             .filter { !$0.isEmpty }.joined(separator: ", ")
     }
 
-    /// What VoiceOver (and the Mac's tooltip) says. A marked row says its mark first and not again as the state
+    /// What VoiceOver (and the Mac's tooltip) says. A row with a chip says it first and not again as the state
     /// ("Answer, …", not also "waiting for your answer"); the others say their state.
     static func spoken(_ i: InboxItem, now: Int, title: String, detail: String, showAgent: Bool) -> String {
         let branch = i.branch.map { $0.isEmpty ? "" : ", branch \($0)" } ?? ""
-        guard let mark = InboxView.mark(i) else { return spokenLabel(i, now: now, title: title, detail: detail, showAgent: showAgent) + branch }
-        let when = i.attention.since > 0 ? Format.agoLabel(Double(now - i.attention.since)) : ""
+        guard let mark = InboxView.rowStatus(i) else { return spokenLabel(i, now: now, title: title, detail: detail, showAgent: showAgent) + branch }
+        let when = i.attention.until.map { "until \(Self.untilLabel($0))" } ?? (i.attention.since > 0 ? Format.agoLabel(Double(now - i.attention.since)) : "")
         let agent = showAgent ? AgentProfiles.profile(for: AgentName(rawValue: i.agent)).short : ""
         return [mark.label, title, when, "\(i.project)/\(i.repo)", agent, i.runtime == .tmux ? "tmux" : "",
                 detail == InboxView.reasonLabel(i.attention.reason) ? "" : detail]

@@ -107,7 +107,7 @@ enum InboxView {
     static func reasonStatus(_ r: AttentionReason?) -> Mark? {
         switch r {
         case nil, .unknown?: return nil
-        case .request?: return Mark(label: "Needs answer", tone: .action)
+        case .request?: return Mark(label: "Answer", tone: .action)
         case .failed?: return Mark(label: "Failed", tone: .danger)
         case .rateLimited?: return Mark(label: "Rate limited", tone: .danger)
         case .disconnected?: return Mark(label: "Disconnected", tone: .danger)
@@ -121,28 +121,30 @@ enum InboxView {
         }
     }
 
-    /// A row's chip: snoozed rows say so, settled and reasonless rows have none.
+    /// A row's chip, only when it has something to say (T3 Code's rule): what asks or failed, a finish not yet seen,
+    /// work that waits on something (queued, background, CI), a snooze. A running row says it with its live dot and
+    /// time, an idle one with its time. A settled row is out of the way: only a danger chip still shows there.
     static func rowStatus(_ i: InboxItem) -> Mark? {
         if i.attention.section == .snoozed { return Mark(label: "Snoozed", tone: .quiet) }
-        if i.attention.section == .settled { return nil }
-        return reasonStatus(i.attention.reason)
+        let chip = reasonStatus(i.attention.reason)
+        if i.attention.section == .settled { return chip?.tone == .danger ? chip : nil }
+        return i.attention.reason == .running ? nil : chip
     }
 
     struct StatusParts: Equatable {
         let mark: Mark?
-        let showLabel: Bool
         let until: Int?
         let ago: String
     }
 
-    /// What a row's meta line says about its state, or nil when there is nothing to say. `compact` rows (groups
-    /// whose heading names the state) show only the mark, except a danger mark keeps its label: touch has no tooltip.
-    static func statusParts(_ i: InboxItem, now: Int, compact: Bool) -> StatusParts? {
+    /// What the right end of a row's title line says: its chip, when a snooze ends, and how long ago; nil when there is
+    /// nothing to say (no chip, no time).
+    static func statusParts(_ i: InboxItem, now: Int) -> StatusParts? {
         let a = i.attention
-        let mark = compact ? reasonStatus(a.reason) : rowStatus(i)
+        let mark = rowStatus(i)
         let ago = a.since > 0 ? shortAgo(now - a.since) : ""
         if mark == nil && ago.isEmpty && a.until == nil { return nil }
-        return StatusParts(mark: mark, showLabel: mark != nil && (!compact || mark?.tone == .danger), until: a.until, ago: ago)
+        return StatusParts(mark: mark, until: a.until, ago: ago)
     }
 
     /// The meta line's trailing parts after the state, each set off by a "·": the agent, and "tmux" for a terminal.

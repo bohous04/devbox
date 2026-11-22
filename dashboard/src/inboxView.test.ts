@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Attention, InboxItem } from "../../shared/thread";
-import { asks, branchLabel, groupInbox, inboxHref, inboxList, rowMark, secondLine, mixedAgents, plainPreview, projectBadge, reasonLabel, reasonStatus, rowStatus, rowTitle, statusParts, shelfBlock, shortAgo, snoozeTimes, splitNeedsYou, threadHeading, upsertInbox } from "./inboxView";
+import { asks, branchLabel, groupInbox, inboxHref, inboxList, metaTail, secondLine, mixedAgents, plainPreview, projectBadge, reasonLabel, reasonStatus, rowStatus, rowTitle, statusParts, shelfBlock, shortAgo, snoozeTimes, splitNeedsYou, threadHeading, upsertInbox } from "./inboxView";
 
 const item = (sessionId: string, attention: Attention, runtime: InboxItem["runtime"] = "chat"): InboxItem => ({
   sessionId, runtime, title: sessionId, project: "p", repo: "r", agent: "claude", attention, lastText: null,
@@ -80,14 +80,27 @@ test("splitNeedsYou: finished runs are their own group, newest first; everything
   expect(splitNeedsYou([req, done, fail, doneNew])).toEqual({ action: [req, fail], finished: [doneNew, done] });
 });
 
-test("rowStatus: chips per reason; settled and idle rows have none; snoozed says so", () => {
-  expect(rowStatus(item("a", { section: "needs_you", reason: "request", since: 1 }))).toEqual({ label: "Needs answer", tone: "action" });
-  expect(rowStatus(item("a", { section: "needs_you", reason: "completed", since: 1 }))).toEqual({ label: "Done", tone: "done" });
-  expect(rowStatus(item("a", { section: "needs_you", reason: "ci-failed", since: 1 }))?.tone).toBe("danger");
-  expect(rowStatus(item("a", { section: "working", reason: "running", since: 1 }))).toEqual({ label: "Working", tone: "busy" });
-  expect(rowStatus(item("a", { section: "idle", reason: null, since: 1 }))).toBeNull();
-  expect(rowStatus(item("a", { section: "settled", reason: "completed", since: 1 }))).toBeNull();
-  expect(rowStatus(item("a", { section: "snoozed", reason: "completed", since: 1, until: 9 }))).toEqual({ label: "Snoozed", tone: "quiet" });
+test("rowStatus: a chip only when there is something to say; a settled row only for danger", () => {
+  const chip = (section: Attention["section"], reason: Attention["reason"]) => rowStatus(item("x", { section, reason, since: 1, ...(section === "snoozed" ? { until: 9 } : {}) }));
+  expect(chip("needs_you", "request")).toEqual({ label: "Answer", tone: "action" });
+  expect(chip("needs_you", "failed")).toEqual({ label: "Failed", tone: "danger" });
+  expect(chip("needs_you", "rate-limited")).toEqual({ label: "Rate limited", tone: "danger" });
+  expect(chip("needs_you", "disconnected")).toEqual({ label: "Disconnected", tone: "danger" });
+  expect(chip("needs_you", "bridge-behind")).toEqual({ label: "Bridge behind", tone: "danger" });
+  expect(chip("needs_you", "ci-failed")).toEqual({ label: "CI failed", tone: "danger" });
+  expect(chip("needs_you", "completed")).toEqual({ label: "Done", tone: "done" });
+  expect(chip("working", "queued")).toEqual({ label: "Queued", tone: "busy" });
+  expect(chip("working", "background")).toEqual({ label: "Background", tone: "busy" });
+  expect(chip("working", "pr-checks")).toEqual({ label: "CI running", tone: "busy" });
+  // A live dot and the time say it: nothing more to say.
+  expect(chip("working", "running")).toBeNull();
+  expect(chip("idle", null)).toBeNull();
+  expect(chip("snoozed", "failed")).toEqual({ label: "Snoozed", tone: "quiet" });
+  expect(chip("settled", "completed")).toBeNull();
+  expect(chip("settled", "queued")).toBeNull();
+  expect(chip("settled", null)).toBeNull();
+  expect(chip("settled", "ci-failed")).toEqual({ label: "CI failed", tone: "danger" });
+  expect(chip("settled", "failed")).toEqual({ label: "Failed", tone: "danger" });
 });
 
 test("shortAgo: now, minutes, hours, days", () => {
@@ -105,6 +118,9 @@ test("projectBadge: two initials from words, two letters from one word, a stable
   expect(projectBadge("").letters).toBe("?");
   expect(projectBadge("apps").slot).toBe(projectBadge("apps").slot);
   expect(projectBadge("apps").slot).toBeLessThan(6);
+  // The same slots as the Apple apps' InboxView.projectBadge (InboxRowTests), so a project has one colour everywhere.
+  expect(projectBadge("acme").slot).toBe(4);
+  expect(projectBadge("lumen").slot).toBe(5);
 });
 
 test("plainPreview drops markdown marks from a one-line preview", () => {
@@ -134,16 +150,26 @@ test("reasonStatus: the chip of any reason regardless of shelf; none for no reas
   expect(reasonStatus(null)).toBeNull();
 });
 
-test("statusParts: nothing for an untouched idle row; snooze end; compact keeps only danger labels", () => {
+test("statusParts: the chip, the snooze end and the age; nothing for an untouched idle row", () => {
   const now = 10 * 60_000;
-  expect(statusParts(item("a", { section: "idle", reason: null, since: 0 }), now, true)).toBeNull();
-  expect(statusParts(item("a", { section: "snoozed", reason: "completed", since: 0, until: 99 }), now, false))
-    .toEqual({ mark: { label: "Snoozed", tone: "quiet" }, showLabel: true, until: 99, ago: "" });
-  expect(statusParts(item("a", { section: "needs_you", reason: "completed", since: now - 3 * 60_000 }), now, true))
-    .toEqual({ mark: { label: "Done", tone: "done" }, showLabel: false, until: null, ago: "3m" });
-  expect(statusParts(item("a", { section: "settled", reason: "ci-failed", since: 1 }), now, true)?.showLabel).toBe(true);
-  expect(statusParts(item("a", { section: "idle", reason: null, since: now - 120_000 }), now, true))
-    .toEqual({ mark: null, showLabel: false, until: null, ago: "2m" });
+  expect(statusParts(item("a", { section: "idle", reason: null, since: 0 }), now)).toBeNull();
+  expect(statusParts(item("a", { section: "snoozed", reason: "completed", since: 0, until: 99 }), now))
+    .toEqual({ mark: { label: "Snoozed", tone: "quiet" }, until: 99, ago: "" });
+  expect(statusParts(item("a", { section: "needs_you", reason: "completed", since: now - 3 * 60_000 }), now))
+    .toEqual({ mark: { label: "Done", tone: "done" }, until: null, ago: "3m" });
+  expect(statusParts(item("a", { section: "settled", reason: "completed", since: now - 120_000 }), now))
+    .toEqual({ mark: null, until: null, ago: "2m" });
+  expect(statusParts(item("a", { section: "working", reason: "running", since: now - 120_000 }), now))
+    .toEqual({ mark: null, until: null, ago: "2m" });
+});
+
+test("metaTail: the agent's name while agents are mixed, and tmux for a terminal session", () => {
+  const chat = item("a", { section: "idle", reason: null, since: 1 });
+  const tmux = item("b", { section: "idle", reason: null, since: 1 }, "tmux");
+  expect(metaTail(tmux, true)).toEqual(["Claude", "tmux"]);
+  expect(metaTail({ ...chat, agent: "codex" }, true)).toEqual(["Codex"]);
+  expect(metaTail(tmux, false)).toEqual(["tmux"]);
+  expect(metaTail(chat, false)).toEqual([]);
 });
 
 test("rowTitle: a failed session's error stays in the preview, not the title", () => {
@@ -199,21 +225,6 @@ test("asks: a request or a failure in needs-you, not a finish", () => {
   expect(asks(item("a", { section: "snoozed", reason: "failed", since: 1 }))).toBe(false);
 });
 
-test("rowMark: a mark only when there is something to say", () => {
-  const mark = (section: Attention["section"], reason: Attention["reason"]) => rowMark(item("x", { section, reason, since: 1 }));
-  expect(mark("needs_you", "request")).toEqual({ label: "Answer", tone: "action" });
-  expect(mark("needs_you", "failed")).toEqual({ label: "Failed", tone: "danger" });
-  expect(mark("needs_you", "rate-limited")).toEqual({ label: "Limit", tone: "danger" });
-  expect(mark("needs_you", "disconnected")).toEqual({ label: "Offline", tone: "danger" });
-  expect(mark("needs_you", "bridge-behind")).toEqual({ label: "Behind", tone: "danger" });
-  expect(mark("needs_you", "ci-failed")).toEqual({ label: "CI failed", tone: "danger" });
-  expect(mark("needs_you", "completed")).toEqual({ label: "Done", tone: "done" });
-  expect(mark("idle", null)).toBeNull();
-  expect(mark("working", "running")).toBeNull();
-  expect(mark("settled", "completed")).toBeNull();
-  expect(mark("snoozed", "failed")).toBeNull();
-});
-
 test("branchLabel: a session's own numbered branch says only what the title does not", () => {
   const b = (branch: string | null | undefined, title = "Fix it") => branchLabel({ ...item("dev-r-3", { section: "idle", reason: null, since: 1 }), title, branch });
   expect(b(undefined)).toBeNull();
@@ -224,13 +235,13 @@ test("branchLabel: a session's own numbered branch says only what the title does
   expect(b("session/r-x")).toBe("session/r-x");
 });
 
-test("secondLine: an ask says what it asks; any other row where it runs", () => {
+test("secondLine: an ask says what it asks; any other row where it runs (the project is its badge)", () => {
   const ask = { ...item("a", { section: "needs_you", reason: "request", since: 1 }), lastText: "Run the **migration**?" };
   expect(secondLine(ask)).toBe("r · Run the migration?");
   expect(secondLine({ ...ask, lastText: null })).toBe("r · waiting for your answer");
   const idle = { ...item("i", { section: "idle", reason: null, since: 1 }), lastText: "All done" };
-  expect(secondLine(idle)).toBe("p/r");
-  expect(secondLine({ ...idle, branch: "feature/x" })).toBe("p/r · feature/x");
+  expect(secondLine(idle)).toBe("r");
+  expect(secondLine({ ...idle, branch: "feature/x" })).toBe("r · feature/x");
   const working = { ...item("w", { section: "working", reason: "running", since: 1 }), lastText: "Updating tokens" };
-  expect(secondLine(working)).toBe("p/r · Updating tokens");
+  expect(secondLine(working)).toBe("r · Updating tokens");
 });

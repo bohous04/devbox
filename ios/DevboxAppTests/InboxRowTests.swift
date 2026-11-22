@@ -23,13 +23,29 @@ final class InboxRowTests: XCTestCase {
         XCTAssertEqual(s.finished.map(\.sessionId), ["done-new", "done"])
     }
 
+    /// inboxView.test.ts rowStatus: a chip only when there is something to say; a settled row only for danger.
     func testRowStatus() throws {
-        XCTAssertEqual(InboxView.rowStatus(try item("a", "needs_you", reason: "request", since: 1)), .init(label: "Needs answer", tone: .action))
-        XCTAssertEqual(InboxView.rowStatus(try item("a", "needs_you", reason: "completed", since: 1)), .init(label: "Done", tone: .done))
-        XCTAssertEqual(InboxView.rowStatus(try item("a", "needs_you", reason: "ci-failed", since: 1))?.tone, .danger)
-        XCTAssertNil(InboxView.rowStatus(try item("a", "settled", reason: "completed", since: 1)))
-        XCTAssertNil(InboxView.rowStatus(try item("a", "idle", reason: nil, since: 1)))
-        XCTAssertEqual(InboxView.rowStatus(try item("a", "snoozed", reason: "completed", since: 1)), .init(label: "Snoozed", tone: .quiet))
+        func chip(_ section: String, _ reason: String?) throws -> InboxView.Mark? {
+            InboxView.rowStatus(try item("x", section, reason: reason, since: 1, until: section == "snoozed" ? 9 : nil))
+        }
+        XCTAssertEqual(try chip("needs_you", "request"), .init(label: "Answer", tone: .action))
+        XCTAssertEqual(try chip("needs_you", "failed"), .init(label: "Failed", tone: .danger))
+        XCTAssertEqual(try chip("needs_you", "rate-limited"), .init(label: "Rate limited", tone: .danger))
+        XCTAssertEqual(try chip("needs_you", "disconnected"), .init(label: "Disconnected", tone: .danger))
+        XCTAssertEqual(try chip("needs_you", "bridge-behind"), .init(label: "Bridge behind", tone: .danger))
+        XCTAssertEqual(try chip("needs_you", "ci-failed"), .init(label: "CI failed", tone: .danger))
+        XCTAssertEqual(try chip("needs_you", "completed"), .init(label: "Done", tone: .done))
+        XCTAssertEqual(try chip("working", "queued"), .init(label: "Queued", tone: .busy))
+        XCTAssertEqual(try chip("working", "background"), .init(label: "Background", tone: .busy))
+        XCTAssertEqual(try chip("working", "pr-checks"), .init(label: "CI running", tone: .busy))
+        XCTAssertNil(try chip("working", "running"), "the live dot and the time say it")
+        XCTAssertNil(try chip("idle", nil))
+        XCTAssertEqual(try chip("snoozed", "failed"), .init(label: "Snoozed", tone: .quiet))
+        XCTAssertNil(try chip("settled", "completed"))
+        XCTAssertNil(try chip("settled", "queued"))
+        XCTAssertNil(try chip("settled", nil))
+        XCTAssertEqual(try chip("settled", "ci-failed"), .init(label: "CI failed", tone: .danger))
+        XCTAssertEqual(try chip("settled", "failed"), .init(label: "Failed", tone: .danger))
         XCTAssertNil(InboxView.reasonStatus(.unknown))
     }
 
@@ -76,14 +92,6 @@ final class InboxRowTests: XCTestCase {
         XCTAssertEqual(InboxView.sessionTitle(sessionId: "dev-p-r-14", name: "  ", project: "p", repo: "r", topic: nil), "r #14")
     }
 
-    /// One rule set with the dashboard (inboxView.ts statusParts): a compact row shows its reason's mark whatever its
-    /// group. devd sends idle without a reason, so an Idle row has none in practice.
-    func testCompactRowShowsItsReasonMarkAsOnTheWeb() throws {
-        let p = InboxView.statusParts(try item("a", "idle", reason: "completed", since: 60_000), now: 180_000, compact: true)
-        XCTAssertEqual(p, .init(mark: .init(label: "Done", tone: .done), showLabel: false, until: nil, ago: "2m"))
-        XCTAssertNil(InboxView.statusParts(try item("a", "idle", reason: nil, since: 60_000), now: 180_000, compact: true)?.mark)
-    }
-
     func testMetaTailSeparatesAgentAndTmux() throws {
         let json: [String: Any] = ["sessionId": "dev-p-r-3", "runtime": "tmux", "title": "p/r", "project": "p", "repo": "r", "agent": "claude",
                                    "attention": ["section": "idle", "since": 1, "reason": NSNull()], "lastText": NSNull()]
@@ -92,6 +100,7 @@ final class InboxRowTests: XCTestCase {
         XCTAssertEqual(InboxView.metaTail(try item("a", "idle", reason: nil, since: 1), showAgent: true), ["Claude"])
         // One agent on every visible row says nothing: left out.
         XCTAssertEqual(InboxView.metaTail(tmux, showAgent: false), ["tmux"])
+        XCTAssertEqual(InboxView.metaTail(try item("a", "idle", reason: nil, since: 1), showAgent: false), [])
     }
 
     /// inboxView.test.ts mixedAgents: the agent is shown only while the visible rows use more than one.
@@ -131,15 +140,17 @@ final class InboxRowTests: XCTestCase {
         XCTAssertNil(InboxView.branchLabel(try branched("")))
     }
 
+    /// inboxView.test.ts statusParts: the chip, the snooze end and the age; nothing for an untouched idle row.
     func testStatusParts() throws {
         let now = 10 * 60_000
-        XCTAssertNil(InboxView.statusParts(try item("a", "idle", reason: nil, since: 0), now: now, compact: true))
-        XCTAssertEqual(InboxView.statusParts(try item("a", "snoozed", reason: "completed", since: 0, until: 99), now: now, compact: false),
-                       .init(mark: .init(label: "Snoozed", tone: .quiet), showLabel: true, until: 99, ago: ""))
-        XCTAssertEqual(InboxView.statusParts(try item("a", "needs_you", reason: "completed", since: now - 3 * 60_000), now: now, compact: true),
-                       .init(mark: .init(label: "Done", tone: .done), showLabel: false, until: nil, ago: "3m"))
-        XCTAssertEqual(InboxView.statusParts(try item("a", "settled", reason: "ci-failed", since: 1), now: now, compact: true)?.showLabel, true)
-        XCTAssertEqual(InboxView.statusParts(try item("a", "idle", reason: nil, since: now - 120_000), now: now, compact: true),
-                       .init(mark: nil, showLabel: false, until: nil, ago: "2m"))
+        XCTAssertNil(InboxView.statusParts(try item("a", "idle", reason: nil, since: 0), now: now))
+        XCTAssertEqual(InboxView.statusParts(try item("a", "snoozed", reason: "completed", since: 0, until: 99), now: now),
+                       .init(mark: .init(label: "Snoozed", tone: .quiet), until: 99, ago: ""))
+        XCTAssertEqual(InboxView.statusParts(try item("a", "needs_you", reason: "completed", since: now - 3 * 60_000), now: now),
+                       .init(mark: .init(label: "Done", tone: .done), until: nil, ago: "3m"))
+        XCTAssertEqual(InboxView.statusParts(try item("a", "settled", reason: "completed", since: now - 120_000), now: now),
+                       .init(mark: nil, until: nil, ago: "2m"))
+        XCTAssertEqual(InboxView.statusParts(try item("a", "working", reason: "running", since: now - 120_000), now: now),
+                       .init(mark: nil, until: nil, ago: "2m"))
     }
 }
