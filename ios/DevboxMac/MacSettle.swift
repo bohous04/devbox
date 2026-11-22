@@ -2,49 +2,17 @@ import AppKit
 import SwiftUI
 
 /// Settling from the sidebar in one gesture (the row's ✓, ⌘⇧S), the "Settled · ⌘Z to undo" notice that follows it,
-/// and the tmux seen marker. One for the app, as the inbox is: every window's sidebar shows the same notice. Failures
-/// are kept in `problem` for the sidebar to show, never dropped.
+/// and the tmux seen marker (InboxSettler, shared with the iPhone). One for the app, as the inbox is: every window's
+/// sidebar shows the same notice.
 @MainActor
-final class MacSettler: ObservableObject {
-    struct Notice: Equatable {
-        let sessionId: String
-        let title: String
-        let id = UUID()
-    }
-
-    enum Seen: Equatable { case posted, skipped, failed }
-
-    /// The last settle, while it can still be undone.
-    @Published private(set) var notice: Notice?
-    /// The last settle, undo or seen that failed, with why; the sidebar shows it until dismissed (`dismissProblem`).
-    @Published private(set) var problem: String?
+final class MacSettler: InboxSettler {
     /// The windows whose sidebar shows the notice now: ⌘Z is taken in those only. By identity, as a window's number
     /// is -1 until it is ordered in.
     private(set) var sidebarWindows: Set<ObjectIdentifier> = []
 
-    private let lifetime: Duration
-    private let voiceOver: () -> Bool
-    /// Seen posts per finish ("id@since"): one at a time (several triggers fire together), a done one never again,
-    /// a failed one tried once more.
-    private var seenInFlight: Set<String> = []
-    private var seenDone: Set<String> = []
-    private var seenFailures: [String: Int] = [:]
-    /// The finish whose failure `problem` shows, and the finishes whose failure the owner dismissed (not raised again).
-    private var problemSeenKey: String?
-    private var dismissedSeen: Set<String> = []
-
-    /// `voiceOver`: whether VoiceOver runs; the notice then stays until the next action, as a spoken notice cannot
-    /// be timed to be acted on.
-    init(lifetime: Duration = .seconds(5), voiceOver: @escaping () -> Bool = { NSWorkspace.shared.isVoiceOverEnabled }) {
-        self.lifetime = lifetime
-        self.voiceOver = voiceOver
+    init(lifetime: Duration = .seconds(5), voiceOver: @escaping @MainActor () -> Bool = InboxSettler.voiceOverRuns) {
+        super.init(lifetime: lifetime, voiceOver: voiceOver, undoHint: "⌘Z to undo")
     }
-
-    /// Why the row cannot be settled now (devd refuses it with 409 request-open), or nil.
-    static func block(_ i: InboxItem) -> String? { InboxView.shelfBlock(i) }
-
-    /// Whether the row offers Settle at all: not when it is already on the settled or snoozed shelf.
-    static func canSettle(_ i: InboxItem) -> Bool { ![.settled, .snoozed].contains(i.attention.section) }
 
     /// ⌘Z undoes the settle while the key window's sidebar shows its notice, unless what has the keyboard has an undo
     /// or a ⌘Z of its own (a text field being edited, the terminal).
@@ -53,94 +21,8 @@ final class MacSettler: ObservableObject {
             && flags.intersection(.deviceIndependentFlagsMask).subtracting([.capsLock, .numericPad, .function]) == .command
     }
 
-    /// A tmux session's finish or failure clears once the owner has looked at it (POST /seen). A chat session marks
-    /// its thread seen itself (ThreadStore), and waiting, working or idle sessions have nothing to clear.
-    static func wantsSeen(_ i: InboxItem?) -> Bool {
-        guard let i, i.runtime == .tmux, i.attention.section == .needsYou else { return false }
-        return i.attention.reason != .request
-    }
-
-    /// Whether marking the selected row seen now would move it from under the pointer: a failure is pinned on top and
-    /// would drop into the newest-first part; a finish keeps its time there (devd keeps `since`) and stays put.
-    static func seenMoves(_ i: InboxItem) -> Bool { MacSidebarLayout.asks(i) }
-
     func showingSidebar(window: ObjectIdentifier) { sidebarWindows.insert(window) }
     func leftSidebar(window: ObjectIdentifier) { sidebarWindows.remove(window) }
-
-    /// `checked: false` skips the client's own refusal, so a test can see devd's.
-    func settle(_ item: InboxItem, in store: InboxStore, checked: Bool = true) async {
-        let title = InboxView.rowTitle(item)
-        if checked, let why = Self.block(item) {
-            report("Couldn't settle “\(title)”: \(why)")
-            return
-        }
-        do {
-            try await store.settle(item.sessionId)
-        } catch {
-            report("Couldn't settle “\(title)”: \(chatErrorText(error))")
-            return
-        }
-        let next = Notice(sessionId: item.sessionId, title: title)
-        notice = next
-        AccessibilityNotification.Announcement("Settled \(title), ⌘Z to undo").post()
-        guard !voiceOver() else { return }
-        Task { [weak self, lifetime] in
-            try? await Task.sleep(for: lifetime)
-            if self?.notice?.id == next.id { self?.notice = nil }
-        }
-    }
-
-    /// The owner did something else (picked another row): a notice kept up for VoiceOver goes now.
-    func actionTaken() {
-        if voiceOver() { notice = nil }
-    }
-
-    /// Unsettles the session of the notice; false when there is no notice (it went, or was undone already).
-    @discardableResult
-    func undo(in store: InboxStore) async -> Bool {
-        guard let undone = notice else { return false }
-        notice = nil
-        do {
-            try await store.unsettle(undone.sessionId)
-        } catch {
-            report("Couldn't undo the settle of “\(undone.title)”: \(chatErrorText(error))")
-        }
-        return true
-    }
-
-    /// Marks a finished or failed tmux session seen: once per finish, a failed post tried once more. A failure the
-    /// owner dismissed is not raised again.
-    @discardableResult
-    func seen(_ item: InboxItem, in store: InboxStore) async -> Seen {
-        let key = "\(item.sessionId)@\(item.attention.since)"
-        guard Self.wantsSeen(item), !seenDone.contains(key), !seenInFlight.contains(key), seenFailures[key, default: 0] < 2
-        else { return .skipped }
-        seenInFlight.insert(key)
-        defer { seenInFlight.remove(key) }
-        do {
-            try await store.seen(item.sessionId)
-            seenDone.insert(key)
-            return .posted
-        } catch {
-            seenFailures[key, default: 0] += 1
-            if !dismissedSeen.contains(key) {
-                report("Couldn't mark “\(InboxView.rowTitle(item))” seen: \(chatErrorText(error))", seen: key)
-            }
-            return .failed
-        }
-    }
-
-    func dismissProblem() {
-        if let key = problemSeenKey { dismissedSeen.insert(key) }
-        problem = nil
-        problemSeenKey = nil
-    }
-
-    /// Shows a failure under the list; `seen` names the finish it is about.
-    func report(_ text: String, seen key: String? = nil) {
-        problem = text
-        problemSeenKey = key
-    }
 }
 
 /// Under the list, over the footer: the undo notice after a settle, or the last failure with a way to dismiss it.
