@@ -40,6 +40,7 @@ final class InboxRowTests: XCTestCase {
         XCTAssertEqual(try chip("working", "pr-checks"), .init(label: "CI running", tone: .busy))
         XCTAssertNil(try chip("working", "running"), "the live dot and the time say it")
         XCTAssertNil(try chip("idle", nil))
+        XCTAssertNil(try chip("idle", "failed"))
         XCTAssertEqual(try chip("snoozed", "failed"), .init(label: "Snoozed", tone: .quiet))
         XCTAssertNil(try chip("settled", "completed"))
         XCTAssertNil(try chip("settled", "queued"))

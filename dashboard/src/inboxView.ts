@@ -92,13 +92,14 @@ const CHIP: Record<NonNullable<Attention["reason"]>, { label: string; tone: Stat
 
 /** A row's chip, only when it has something to say (T3 Code's rule): what asks or failed, a finish not yet seen, work
  *  that waits on something (queued, background, CI), a snooze. A running row says it with its live dot and time, an
- *  idle one with its time. A settled row is out of the way: only a danger chip still shows there. */
+ *  idle one (a seen run, whatever its reason) with its time. A settled row is out of the way: only a danger chip
+ *  still shows there. */
 export function rowStatus(i: InboxItem): { label: string; tone: StatusTone } | null {
   const { section, reason } = i.attention;
   if (section === "snoozed") return { label: "Snoozed", tone: "quiet" };
   const chip = reasonStatus(reason);
   if (section === "settled") return chip?.tone === "danger" ? chip : null;
-  return reason === "running" ? null : chip;
+  return section === "idle" || reason === "running" ? null : chip;
 }
 
 /** The chip for a reason whatever shelf the row is on. */

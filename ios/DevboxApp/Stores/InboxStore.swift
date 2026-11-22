@@ -123,12 +123,13 @@ enum InboxView {
 
     /// A row's chip, only when it has something to say (T3 Code's rule): what asks or failed, a finish not yet seen,
     /// work that waits on something (queued, background, CI), a snooze. A running row says it with its live dot and
-    /// time, an idle one with its time. A settled row is out of the way: only a danger chip still shows there.
+    /// time, an idle one (a seen run, whatever its reason) with its time. A settled row is out of the way: only a
+    /// danger chip still shows there.
     static func rowStatus(_ i: InboxItem) -> Mark? {
         if i.attention.section == .snoozed { return Mark(label: "Snoozed", tone: .quiet) }
         let chip = reasonStatus(i.attention.reason)
         if i.attention.section == .settled { return chip?.tone == .danger ? chip : nil }
-        return i.attention.reason == .running ? nil : chip
+        return i.attention.section == .idle || i.attention.reason == .running ? nil : chip
     }
 
     struct StatusParts: Equatable {

@@ -95,6 +95,7 @@ test("rowStatus: a chip only when there is something to say; a settled row only 
   // A live dot and the time say it: nothing more to say.
   expect(chip("working", "running")).toBeNull();
   expect(chip("idle", null)).toBeNull();
+  expect(chip("idle", "failed")).toBeNull();
   expect(chip("snoozed", "failed")).toEqual({ label: "Snoozed", tone: "quiet" });
   expect(chip("settled", "completed")).toBeNull();
   expect(chip("settled", "queued")).toBeNull();
