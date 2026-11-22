@@ -10,6 +10,8 @@ struct MessageRow: View, Equatable {
     let sessionId: String
     let client: DevdClient
     let onAnswer: (String, String) async throws -> Void
+    /// An ended session's transcript: its images come from the archive (the session id may be a later session's).
+    var endedId: String? = nil
 
     private var item: ThreadItem { row.item }
     private var pending: PendingRequest? { row.pending }
@@ -18,7 +20,7 @@ struct MessageRow: View, Equatable {
     /// The notice is its run's failure (run.failed), not devd's or the bridge's own.
     private var failedRun: Bool { row.failedRun }
 
-    static func == (a: MessageRow, b: MessageRow) -> Bool { a.row == b.row && a.sessionId == b.sessionId }
+    static func == (a: MessageRow, b: MessageRow) -> Bool { a.row == b.row && a.sessionId == b.sessionId && a.endedId == b.endedId }
 
     var body: some View {
         switch item.kind {
@@ -68,7 +70,10 @@ struct MessageRow: View, Equatable {
                 if let paths = item.attachments {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 6) {
-                            ForEach(paths, id: \.self) { AttachmentThumbnail(path: ImagePrep.attachmentPath(sessionId: sessionId, path: $0), client: client) }
+                            ForEach(paths, id: \.self) { p in
+                                AttachmentThumbnail(path: endedId.map { ImagePrep.endedAttachmentPath(endedId: $0, path: p) }
+                                                        ?? ImagePrep.attachmentPath(sessionId: sessionId, path: p), client: client)
+                            }
                         }
                     }
                 }

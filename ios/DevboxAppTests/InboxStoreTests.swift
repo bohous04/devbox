@@ -200,6 +200,88 @@ final class InboxStoreTests: XCTestCase {
     }
 }
 
+
+/// Ended sessions' transcripts on the Settled shelf (dashboard/src/endedView.ts).
+@MainActor
+final class EndedSessionTests: XCTestCase {
+    private func endedJSON(_ id: String, endedAt: Int, title: String = "acme/app", topic: String? = nil, mode: String = "handoff") -> String {
+        let t = topic.map { "\"\($0)\"" } ?? "null"
+        return #"{"id":"\#(id)","sessionId":"dev-acme-app","runtime":"chat","title":"\#(title)","folder":"acme","project":"acme","repo":"app","agent":"claude","branch":"feat/x","topic":\#(t),"lastText":null,"endedAt":\#(endedAt),"continueMode":"\#(mode)"}"#
+    }
+
+    private func ended(_ id: String, endedAt: Int, title: String = "acme/app", topic: String? = nil, mode: String = "handoff") throws -> EndedSession {
+        try JSONDecoder().decode(EndedSession.self, from: Data(endedJSON(id, endedAt: endedAt, title: title, topic: topic, mode: mode).utf8))
+    }
+
+    private func settled(_ id: String, since: Int) throws -> InboxItem {
+        let json = #"{"sessionId":"\#(id)","runtime":"chat","title":"T","project":"p","repo":"r","agent":"claude","attention":{"section":"settled","reason":null,"since":\#(since)},"lastText":null}"#
+        return try JSONDecoder().decode(InboxItem.self, from: Data(json.utf8))
+    }
+
+    func testFramesDecodeAndUpsert() throws {
+        let a = try ended("a", endedAt: 1)
+        let change = try JSONDecoder().decode(EndedChange.self, from: Data(endedJSON("b", endedAt: 2).utf8))
+        var list = InboxView.upsertEnded([a], change)
+        XCTAssertEqual(list.map(\.id), ["a", "b"])
+        list = InboxView.upsertEnded(list, try JSONDecoder().decode(EndedChange.self, from: Data(#"{"id":"a","removed":true}"#.utf8)))
+        XCTAssertEqual(list.map(\.id), ["b"])
+    }
+
+    func testSettledShelfMixesTranscriptsNewestFirstAndCountsThem() throws {
+        let g = InboxView.group([try settled("s-old", since: 1), try settled("s-new", since: 30)])
+        let shelf = try XCTUnwrap(InboxView.shelves(g, ended: [try ended("e-mid", endedAt: 20), try ended("e-new", endedAt: 40)]).last)
+        XCTAssertEqual(shelf.label, "Settled")
+        XCTAssertEqual(shelf.count, 4)
+        XCTAssertEqual(shelf.rows.map(\.id), ["ended:e-new", "s-new", "ended:e-mid", "s-old"])
+        // Transcripts alone still make a Settled shelf.
+        XCTAssertEqual(InboxView.shelves(InboxView.group([]), ended: [try ended("e", endedAt: 1)]).map(\.label), ["Settled"])
+    }
+
+    func testRowWordsAndTheButtonLabel() throws {
+        XCTAssertEqual(InboxView.endedTitle(try ended("e", endedAt: 1, title: "Login fix")), "Login fix")
+        XCTAssertEqual(InboxView.endedTitle(try ended("e", endedAt: 1, topic: "Fix the login form")), "Fix the login form")
+        XCTAssertEqual(InboxView.endedSecondLine(try ended("e", endedAt: 1)), "acme/app · feat/x")
+        XCTAssertEqual(InboxView.continueLabel(.resume), "Continue in a new session (resume)")
+        XCTAssertEqual(InboxView.continueLabel(.handoff), "Start a new session with this chat (handoff)")
+        XCTAssertEqual(InboxView.endedId(fromTag: InboxView.endedTag("dev-a-1")), "dev-a-1")
+        XCTAssertNil(InboxView.endedId(fromTag: "dev-a"))
+        XCTAssertEqual(ImagePrep.endedAttachmentPath(endedId: "dev-a-1", path: "/inbox/dev-a/0b4e.png"), "/api/ended/dev-a-1/attachments/0b4e.png")
+    }
+
+    private func client() -> DevdClient {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        return DevdClient(endpoints: DevdEndpoints(cfBase: nil, cfId: nil, cfSecret: nil, tailnetBase: URL(string: "http://devd.test")!),
+                          session: URLSession(configuration: config))
+    }
+
+    override func setUp() {
+        super.setUp()
+        MockURLProtocol.capturedRequests = []
+        MockURLProtocol.handler = nil
+    }
+
+    func testTheStoreLoadsTranscriptsFollowsTheirFramesAndHides() async throws {
+        MockURLProtocol.handler = { req in
+            switch req.url?.path {
+            case "/api/ended": return .init(statusCode: 200, data: Data(#"{"items":[\#(self.endedJSON("a", endedAt: 1))]}"#.utf8))
+            case "/api/ended/a/hide": return .init(statusCode: 204, data: Data())
+            default: return .init(statusCode: 200, data: Data(#"{"items":[]}"#.utf8))
+            }
+        }
+        var feed: AsyncThrowingStream<String, Error>.Continuation?
+        let store = InboxStore(client: client(), connect: { _, _ in AsyncThrowingStream { feed = $0 } })
+        store.start()
+        try await waitUntil { store.ended.count == 1 }
+        for l in ["event: inbox-ended", "data: \(endedJSON("b", endedAt: 2))", ""] { feed?.yield(l) }
+        try await waitUntil { store.ended.count == 2 }
+        try await store.hideEnded("a")
+        XCTAssertEqual(store.ended.map(\.id), ["b"])
+        XCTAssertTrue(MockURLProtocol.capturedRequests.contains { $0.httpMethod == "POST" && $0.url?.path == "/api/ended/a/hide" })
+        store.stop()
+    }
+}
+
 /// Polls `cond` on the main actor for up to 2 s (stream callbacks arrive asynchronously).
 @MainActor
 func waitUntil(_ cond: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {

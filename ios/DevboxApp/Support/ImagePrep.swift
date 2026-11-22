@@ -106,4 +106,10 @@ enum ImagePrep {
         let name = path.split(separator: "/").last.map(String.init) ?? path
         return "/api/sessions/\(pathSegment(sessionId))/thread/attachments/\(pathSegment(name))"
     }
+
+    /// The same image of an ended session's transcript, from its archive (devd/src/endedApi.ts).
+    static func endedAttachmentPath(endedId: String, path: String) -> String {
+        let name = path.split(separator: "/").last.map(String.init) ?? path
+        return "/api/ended/\(pathSegment(endedId))/attachments/\(pathSegment(name))"
+    }
 }

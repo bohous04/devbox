@@ -92,6 +92,10 @@ struct MacWindowContent: View {
                         thread = id
                         self.page = nil
                     })
+                } else if let id = thread, let endedId = InboxView.endedId(fromTag: id) {
+                    // An ended session's transcript; continuing it selects the new session in this window.
+                    EndedTranscriptScreen(endedId: endedId, client: client) { thread = $0 }
+                        .id("\(id)|\(appModel.clientIdentity)")
                 } else if let id = thread {
                     MacThreadDetail(threadId: id, client: client, inbox: inbox)
                         .id("\(id)|\(appModel.clientIdentity)")
@@ -180,7 +184,7 @@ struct MacInboxSidebar: View {
             let shown = store.items?.filter { InboxView.matches($0, query) }
             let g = shown.map(InboxView.group)
             let list = g.map(InboxView.list) ?? []
-            let pinned = g.map(InboxView.shelves) ?? []
+            let pinned = g.map { InboxView.shelves($0, ended: store.ended.filter { InboxView.matches($0, query) }) } ?? []
             let seam = (list: list.map(\.sessionId), shelves: pinned.flatMap(visibleRows).map(\.sessionId))
             ScrollViewReader { proxy in List(selection: $selection) {
                 if store.paused || store.badFrame != nil {
@@ -400,10 +404,32 @@ struct MacInboxSidebar: View {
     /// A shelf as a disclosure group (MacSidebarLayout leaves out the empty ones); open while searching.
     private func group(_ group: InboxView.Shelf, now: Int) -> some View {
         Section {
-            rows(visibleRows(group), now: now, preview: group.preview)
+            if isOpen(group.label) || !query.isEmpty {
+                ForEach(group.rows) { r in
+                    switch r {
+                    case .session(let item): row(item, now: now, preview: group.preview, inList: false)
+                    case .ended(let e): endedRow(e, now: now)
+                    }
+                }
+            }
         } header: {
-            MacGroupHead(label: group.label, count: group.items.count, open: isOpen(group.label) || !query.isEmpty) { toggle(group.label) }
+            MacGroupHead(label: group.label, count: group.count, open: isOpen(group.label) || !query.isEmpty) { toggle(group.label) }
         }
+    }
+
+    /// An ended session's transcript (Settled only): it opens read-only in the detail and only hides.
+    private func endedRow(_ e: EndedSession, now: Int) -> some View {
+        InboxEndedRow(ended: e, now: now)
+            .tag(InboxView.endedTag(e.id) as String?)
+            .contextMenu {
+                Button("Hide") {
+                    Task {
+                        do { try await store.hideEnded(e.id) } catch {
+                            state.settler.report("Couldn't hide “\(InboxView.endedTitle(e))”: \(chatErrorText(error))")
+                        }
+                    }
+                }
+            }
     }
 
     private func isOpen(_ shelf: String) -> Bool {
@@ -424,32 +450,34 @@ struct MacInboxSidebar: View {
 
     /// `inList`: a row of the one list, which settles from its ✓ and says what it asks; `preview` for a shelf's rows.
     private func rows(_ items: [InboxItem], now: Int, preview: Bool = false, inList: Bool = false) -> some View {
-        ForEach(items) { item in
-            MacInboxRow(item: item, now: now, preview: inList ? InboxView.asks(item) : preview,
-                        settle: inList ? { settle(item) } : nil)
-                .tag(item.sessionId as String?)
-                .contextMenu {
-                    Button("Open in New Window") { state.openThread(item.sessionId) }
-                    Divider()
-                    if MacSettler.canSettle(item) {
-                        let block = MacSettler.block(item)
-                        Button(block.map { "Settle (\($0.prefix(1).lowercased() + $0.dropFirst()))" } ?? "Settle") { settle(item) }
-                            .keyboardShortcut("s", modifiers: [.command, .shift])
-                            .disabled(block != nil)
-                        Button("Snooze…") { actionsFor = item }
-                    } else {
-                        Button("Back to the Inbox") {
-                            Task {
-                                do { try await store.unsettle(item.sessionId) } catch {
-                                    state.settler.report("Couldn't bring back “\(InboxView.rowTitle(item))”: \(chatErrorText(error))")
-                                }
+        ForEach(items) { item in row(item, now: now, preview: preview, inList: inList) }
+    }
+
+    private func row(_ item: InboxItem, now: Int, preview: Bool, inList: Bool) -> some View {
+        MacInboxRow(item: item, now: now, preview: inList ? InboxView.asks(item) : preview,
+                    settle: inList ? { settle(item) } : nil)
+            .tag(item.sessionId as String?)
+            .contextMenu {
+                Button("Open in New Window") { state.openThread(item.sessionId) }
+                Divider()
+                if MacSettler.canSettle(item) {
+                    let block = MacSettler.block(item)
+                    Button(block.map { "Settle (\($0.prefix(1).lowercased() + $0.dropFirst()))" } ?? "Settle") { settle(item) }
+                        .keyboardShortcut("s", modifiers: [.command, .shift])
+                        .disabled(block != nil)
+                    Button("Snooze…") { actionsFor = item }
+                } else {
+                    Button("Back to the Inbox") {
+                        Task {
+                            do { try await store.unsettle(item.sessionId) } catch {
+                                state.settler.report("Couldn't bring back “\(InboxView.rowTitle(item))”: \(chatErrorText(error))")
                             }
                         }
                     }
-                    Divider()
-                    MacSessionMenuItems(item: item, actions: sessionActions)
                 }
-        }
+                Divider()
+                MacSessionMenuItems(item: item, actions: sessionActions)
+            }
     }
 }
 

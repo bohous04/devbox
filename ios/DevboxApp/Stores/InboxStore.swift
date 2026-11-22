@@ -234,6 +234,45 @@ enum InboxView {
         }
         return repo
     }
+
+    // MARK: - Ended sessions' transcripts (dashboard/src/endedView.ts)
+
+    /// An `inbox-ended` frame: a transcript just kept replaces its row (or adds it), a hidden or purged one leaves.
+    static func upsertEnded(_ list: [EndedSession], _ change: EndedChange) -> [EndedSession] {
+        switch change {
+        case .removed(let id):
+            return list.filter { $0.id != id }
+        case .ended(let next):
+            var out = list
+            if let idx = out.firstIndex(where: { $0.id == next.id }) { out[idx] = next } else { out.append(next) }
+            return out
+        }
+    }
+
+    /// The transcript's one button: it says what continuing will do.
+    static func continueLabel(_ mode: EndedSession.ContinueMode) -> String {
+        mode == .resume ? "Continue in a new session (resume)" : "Start a new session with this chat (handoff)"
+    }
+
+    static func endedTitle(_ e: EndedSession) -> String {
+        sessionTitle(sessionId: e.sessionId, name: e.title == "\(e.project)/\(e.repo)" ? nil : e.title, project: e.project, repo: e.repo, topic: e.topic)
+    }
+
+    static func endedSecondLine(_ e: EndedSession) -> String {
+        (["\(e.project)/\(e.repo)"] + [e.branch].compactMap { $0 }.filter { !$0.isEmpty }).joined(separator: " · ")
+    }
+
+    /// A transcript's row in a list whose selection holds session ids (the Mac sidebar): never a session id.
+    static func endedTag(_ id: String) -> String { "ended:\(id)" }
+    static func endedId(fromTag tag: String) -> String? { tag.hasPrefix("ended:") ? String(tag.dropFirst(6)) : nil }
+
+    /// The Mac sidebar's search over a transcript, as `matches` over a session.
+    static func matches(_ e: EndedSession, _ query: String) -> Bool {
+        let words = query.split(whereSeparator: \.isWhitespace)
+        guard !words.isEmpty else { return true }
+        let hay = [e.title, e.topic ?? "", e.project, e.repo, e.branch ?? "", e.lastText ?? ""].joined(separator: " ")
+        return words.allSatisfy { hay.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
+    }
 }
 
 /// The inbox over devd's stream: the list loads when the stream opens, `inbox` frames update it, and while the
@@ -244,6 +283,8 @@ final class InboxStore: ObservableObject {
 
     /// nil until the first full list arrived (a single frame before it would read as the whole inbox).
     @Published var items: [InboxItem]?
+    /// Ended sessions' transcripts, on the Settled shelf; empty until loaded (they never ask for anything).
+    @Published private(set) var ended: [EndedSession] = []
     /// The last list load failed, with why.
     @Published private(set) var loadError: String?
     /// The stream is down; the list is polled meanwhile.
@@ -263,6 +304,7 @@ final class InboxStore: ObservableObject {
     /// Frames that arrived while a list load was in flight: the fetched list may predate them, so they are applied
     /// over it. Kept while any load runs (they overlap: the poll and a stream open).
     private var framesDuringLoad: [InboxChange] = []
+    private var endedFramesDuringLoad: [EndedChange] = []
     private var loadsInFlight = 0
 
     init(client: DevdClient, connect: Connect? = nil, pollInterval: Duration = .seconds(5)) {
@@ -276,7 +318,7 @@ final class InboxStore: ObservableObject {
         let mark = framesDuringLoad.count
         defer {
             loadsInFlight -= 1
-            if loadsInFlight == 0 { framesDuringLoad = [] }
+            if loadsInFlight == 0 { framesDuringLoad = []; endedFramesDuringLoad = [] }
         }
         do {
             let list: InboxList = try await client.get("/api/inbox")
@@ -284,6 +326,15 @@ final class InboxStore: ObservableObject {
             loadError = nil
         } catch {
             loadError = errorText(error)
+            return
+        }
+        // After the sessions, so a failure here says what failed: the inbox itself loaded.
+        let endedMark = endedFramesDuringLoad.count
+        do {
+            let list: EndedList = try await client.get("/api/ended")
+            ended = endedFramesDuringLoad[endedMark...].reduce(list.items, InboxView.upsertEnded)
+        } catch {
+            loadError = "ended sessions: \(errorText(error))"
         }
     }
 
@@ -343,6 +394,7 @@ final class InboxStore: ObservableObject {
     }
 
     private func handle(_ e: SSEParser.Event) {
+        if e.name == "inbox-ended" { handleEnded(e); return }
         guard e.name == "inbox" else { return } // ping; thread frames come only with ?session=
         do {
             let change = try JSONDecoder().decode(InboxChange.self, from: Data(e.data.utf8))
@@ -352,6 +404,25 @@ final class InboxStore: ObservableObject {
             Self.logger.error("unreadable inbox frame: \(String(describing: error), privacy: .public)")
             badFrame = "unreadable inbox update: \(errorText(error))"
         }
+    }
+
+    private func handleEnded(_ e: SSEParser.Event) {
+        do {
+            let change = try JSONDecoder().decode(EndedChange.self, from: Data(e.data.utf8))
+            if loadsInFlight > 0 { endedFramesDuringLoad.append(change) }
+            ended = InboxView.upsertEnded(ended, change)
+        } catch {
+            Self.logger.error("unreadable inbox-ended frame: \(String(describing: error), privacy: .public)")
+            badFrame = "unreadable ended-session update: \(errorText(error))"
+        }
+    }
+
+    /// Out of the inbox for good (a transcript is never unsettled); devd still purges it on schedule.
+    func hideEnded(_ id: String) async throws {
+        try await client.postVoid("/api/ended/\(pathSegment(id))/hide", body: Empty())
+        let change = EndedChange.removed(id: id)
+        if loadsInFlight > 0 { endedFramesDuringLoad.append(change) }
+        ended = InboxView.upsertEnded(ended, change)
     }
 
     // MARK: - Row actions (any session, tmux too; each answers the session's new item)

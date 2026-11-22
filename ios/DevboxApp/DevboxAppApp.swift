@@ -275,6 +275,13 @@ private struct SessionsContainer: View {
                         switch route {
                         case .thread(let id): ChatScreen(sessionId: id, client: client).id(appModel.clientIdentity)
                         case .session(let id): SessionDetailView(sessionId: id, actions: actions)
+                        case .ended(let id):
+                            // The new session takes the transcript's place on the stack.
+                            EndedTranscriptScreen(endedId: id, client: client) { sessionId in
+                                if inboxPath.last == .ended(id) { inboxPath.removeLast() }
+                                inboxPath.append(.thread(sessionId))
+                            }
+                            .id(appModel.clientIdentity)
                         }
                     }
             }
