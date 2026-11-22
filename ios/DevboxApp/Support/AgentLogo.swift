@@ -1,21 +1,27 @@
 import SwiftUI
 
-/// An agent's mark (dashboard/src/components/agentLogos.tsx, the same paths as template SVGs in
-/// Assets.xcassets/AgentLogos; sources and licence there and in THIRD_PARTY_NOTICES.md). Drawn in the caller's
-/// foreground style, as metadata: colour in these apps means status. A mark's `brand` draws it in its brand colour
-/// instead; off for every mark.
+/// An agent's mark: the template SVGs in Assets.xcassets/AgentLogos, the same paths as
+/// dashboard/src/components/agentLogos.tsx (agentLogos.test.ts checks they match).
+///
+/// Source: LobeHub Icons, npm `@lobehub/icons-static-svg@1.102.0` (https://github.com/lobehub/lobe-icons), MIT,
+/// Copyright (c) 2023 LobeHub; licence text in THIRD_PARTY_NOTICES.md. The mono variants `claude`, `openai`, `grok`,
+/// `antigravity` and `mistral`, paths as they are. The marks are their owners' trademarks. `agent-generic` (a ring,
+/// for an agent this client does not know) is devbox's own.
+///
+/// Drawn in the caller's foreground style, as metadata: colour in these apps means status. A mark's `showsBrand`
+/// draws it in its brand colour instead; off for every mark.
 struct AgentLogo: View {
     enum Mark: String, CaseIterable {
-        case claude, gemini, mistral, generic
+        case claude, openai, grok, antigravity, mistral, generic
 
-        /// Simple Icons has no OpenAI or xAI mark: Codex and Grok take the generic one. Antigravity takes Google
-        /// Gemini's sparkle (no Antigravity mark either).
         init(_ agent: AgentName) {
             switch agent {
             case .claude, .claudeGemini, .claudeOpenrouter: self = .claude
-            case .antigravity: self = .gemini
+            case .codex: self = .openai
+            case .grok: self = .grok
+            case .antigravity: self = .antigravity
             case .vibe: self = .mistral
-            case .codex, .grok, .unknown: self = .generic
+            case .unknown: self = .generic
             }
         }
 
@@ -23,19 +29,19 @@ struct AgentLogo: View {
 
         var asset: String { "agent-\(rawValue)" }
 
-        /// Per mark: draw it in its brand colour (`hex`, Simple Icons') instead of the text's. Off for every mark.
+        /// Per mark: draw it in its brand colour (`hex`) instead of the text's. Off for every mark.
         var showsBrand: Bool {
             switch self {
-            case .claude, .gemini, .mistral, .generic: false
+            case .claude, .openai, .grok, .antigravity, .mistral, .generic: false
             }
         }
 
+        /// The set's colour variant's one colour. OpenAI's and Grok's marks are black and white; Antigravity's and
+        /// Mistral's colour variants are multicolour, so a one-colour switch has none for them.
         var hex: UInt32? {
             switch self {
             case .claude: 0xD97757
-            case .gemini: 0x8E75B2
-            case .mistral: 0xFA520F
-            case .generic: nil
+            case .openai, .grok, .antigravity, .mistral, .generic: nil
             }
         }
 

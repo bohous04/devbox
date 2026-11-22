@@ -6,7 +6,7 @@ import { AGENT_LOGOS, logoForAgent } from "./agentLogos";
 test("agent logos: the Apple asset catalog holds the same paths", () => {
   for (const [name, l] of Object.entries(AGENT_LOGOS)) {
     const svg = readFileSync(new URL(`../../../ios/DevboxApp/Assets.xcassets/AgentLogos/agent-${name}.imageset/agent-${name}.svg`, import.meta.url), "utf8");
-    expect([name, svg.match(/ d="([^"]+)"/)?.[1], svg.match(/fill-rule="([^"]+)"/)?.[1]]).toEqual([name, l.path, l.rule]);
+    expect([name, svg.match(/ d="([^"]+)"/)?.[1], svg.match(/fill-rule="([^"]+)"/)?.[1]]).toEqual([name, l.path, "evenodd"]);
   }
 });
 
@@ -16,5 +16,5 @@ test("agent logos: brand colours are off", () => {
 
 test("agent logos: each agent's mark, and the ring for one this dashboard does not know", () => {
   expect(["claude", "claude-openrouter", "codex", "grok", "antigravity", "vibe", "gpt", "toString"].map(logoForAgent))
-    .toEqual(["claude", "claude", "generic", "generic", "gemini", "mistral", "generic", "generic"]);
+    .toEqual(["claude", "claude", "openai", "grok", "antigravity", "mistral", "generic", "generic"]);
 });

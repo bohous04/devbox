@@ -106,9 +106,10 @@ final class MacAppTests: XCTestCase {
     func testSidebarAgentLogoAndConnection() {
         XCTAssertEqual(AgentLogo.Mark(agent: "claude"), .claude)
         XCTAssertEqual(AgentLogo.Mark(agent: "claude-openrouter"), .claude)
-        XCTAssertEqual(AgentLogo.Mark(agent: "antigravity"), .gemini)
+        XCTAssertEqual(AgentLogo.Mark(agent: "antigravity"), .antigravity)
         XCTAssertEqual(AgentLogo.Mark(agent: "vibe"), .mistral)
-        XCTAssertEqual(AgentLogo.Mark(agent: "codex"), .generic)
+        XCTAssertEqual(AgentLogo.Mark(agent: "codex"), .openai)
+        XCTAssertEqual(AgentLogo.Mark(agent: "grok"), .grok)
         XCTAssertEqual(AgentLogo.Mark(agent: "something-new"), .generic)
         // Every mark is in the asset catalog, as a template (it takes the text's colour), and no brand colour is on.
         for mark in AgentLogo.Mark.allCases {
