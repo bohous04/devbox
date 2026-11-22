@@ -158,7 +158,11 @@ struct SshApprovalsScreen: View {
                     Label("Allow once", systemImage: "faceid")
                 }
                 .buttonStyle(.borderedProminent)
+                // The Mac keeps the system accent (project.yml); the brand primary is near-white in dark mode there,
+                // under the button's white label.
+                #if os(iOS)
                 .tint(Theme.C.primary)
+                #endif
 
                 Menu {
                     ForEach(SshApprovalsStore.grantPresets, id: \.self) { minutes in
