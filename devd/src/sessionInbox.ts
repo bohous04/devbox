@@ -137,7 +137,10 @@ export class Inbox {
     const now = this.now();
     const settled: string[] = [];
     for (const s of this.d.sessions()) {
-      if (!autoSettleDue(this.base(s).item.attention, s, getSessionAttention(this.d.db, s.id), getSeenAt(this.d.db, s.id), now)) continue;
+      const live = storedRuntime(s) === "tmux" ? this.d.tmuxLive(s.id) : null;
+      const stateKnown = storedRuntime(s) === "chat" || (live !== null && live.status !== "unknown");
+      const look = { seenAt: getSeenAt(this.d.db, s.id), stateKnown };
+      if (!autoSettleDue(this.base(s).item.attention, s, getSessionAttention(this.d.db, s.id), look, now)) continue;
       this.settle(s.id, "idle");
       settled.push(s.id);
     }

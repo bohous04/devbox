@@ -58,16 +58,21 @@ export function shelve(base: Attention, row: SessionAttentionRow | null, now: nu
   return base;
 }
 
-/** Auto-settle: nothing has happened for AUTO_SETTLE_SEEN_IDLE_MS when the session is idle (seen, nothing to say),
- *  else for AUTO_SETTLE_IDLE_MS (the attention's own time, the session's last prompt and creation, and the owner's
- *  last look `seenAt` all count: a session must not drop off the list right after it was opened), and
- *  nothing blocks it: a pending request, an active run or holding work (both "working"), a snooze, or a settle
- *  already in place. */
-export function autoSettleDue(base: Attention, s: SessionRow, row: SessionAttentionRow | null, seenAt: number | null, now: number): boolean {
+/** The owner's last look at a session (`seenAt`, null = never) and whether its idle attention can be trusted
+ *  (`stateKnown`): a tmux session's is not without live state (absent or unknown after a devd restart), when a
+ *  finish may have been missed. Always true for chat. */
+export interface SettleLook { seenAt: number | null; stateKnown: boolean }
+
+/** Auto-settle: nothing has happened for AUTO_SETTLE_SEEN_IDLE_MS when the session is idle, was seen and its state is
+ *  known, else for AUTO_SETTLE_IDLE_MS (the attention's own time, the session's last prompt and creation, and the
+ *  owner's last look all count: a session must not drop off the list right after it was opened), and nothing blocks
+ *  it: a pending request, an active run or holding work (both "working"), a snooze, or a settle already in place. */
+export function autoSettleDue(base: Attention, s: SessionRow, row: SessionAttentionRow | null, look: SettleLook, now: number): boolean {
   if (row?.settled_at != null || snoozeActive(row, now)) return false;
   if (base.section === "working" || base.reason === "request") return false;
-  const quietFor = base.section === "idle" ? AUTO_SETTLE_SEEN_IDLE_MS : AUTO_SETTLE_IDLE_MS;
-  const lastActivity = Math.max(base.since, s.last_active_at, s.created_at, ...(seenAt === null ? [] : [seenAt]));
+  const seenIdle = base.section === "idle" && look.seenAt !== null && look.stateKnown;
+  const quietFor = seenIdle ? AUTO_SETTLE_SEEN_IDLE_MS : AUTO_SETTLE_IDLE_MS;
+  const lastActivity = Math.max(base.since, s.last_active_at, s.created_at, ...(look.seenAt === null ? [] : [look.seenAt]));
   return now - lastActivity >= quietFor;
 }
 
