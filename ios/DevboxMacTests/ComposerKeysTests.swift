@@ -16,7 +16,11 @@ final class ComposerKeysTests: XCTestCase {
         CaretField.debugWithoutSelection = name.contains("WithoutTheSystemsCaret")
         state = MacAppState(isTestRun: false, isFixtureRun: true)
         state.appModel.reloadConfiguration()
-        let root = MacWindowContent(thread: .constant(ThreadFixtures.sessionId), page: .constant(nil), newSession: .constant(false),
+        // A tmux session's Chat view (the mirror) for the tests that name it.
+        let session = name.contains("TerminalSession") ? MirrorFixtures.claudeId : ThreadFixtures.sessionId
+        // A tmux window opens on Terminal until Chat was chosen for it.
+        TmuxTabMemory.shared.remember(.chat, for: TmuxTabMemory.key(MirrorFixtures.claudeId, createdAt: MirrorFixtures.createdAt))
+        let root = MacWindowContent(thread: .constant(session), page: .constant(nil), newSession: .constant(false),
                                     findPending: .constant(false))
             .environmentObject(state)
             .environmentObject(state.appModel)
@@ -28,7 +32,7 @@ final class ComposerKeysTests: XCTestCase {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         let deadline = Date().addingTimeInterval(8)
-        while Date() < deadline, state.windows.store(for: ThreadFixtures.sessionId, client: state.appModel.client!).thread == nil { spin(0.1) }
+        while Date() < deadline, state.windows.store(for: session, client: state.appModel.client!).thread == nil { spin(0.1) }
         spin(1)
     }
 
@@ -45,7 +49,8 @@ final class ComposerKeysTests: XCTestCase {
     /// The composer's editor, focused, holding `text` typed in.
     private func type(_ text: String) throws -> NSTextView {
         let field = try XCTUnwrap(Self.allViews(window.contentView!).first {
-            ($0 as? NSTextField).map { ($0.placeholderAttributedString?.string ?? $0.placeholderString)?.hasPrefix("Ask anything") == true } == true
+            ($0 as? NSTextField).map { ($0.placeholderAttributedString?.string ?? $0.placeholderString)?.hasPrefix("Ask anything") == true
+                || ($0.placeholderAttributedString?.string ?? $0.placeholderString)?.hasPrefix(MirrorView.placeholder) == true } == true
                 || ($0 is NSTextView && $0.frame.width > 300)
         }, "no composer field")
         window.makeFirstResponder(field)
@@ -64,6 +69,36 @@ final class ComposerKeysTests: XCTestCase {
     }
 
     private static func allViews(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(allViews) }
+
+    /// ⌘V with an image on the clipboard attaches it and types nothing: Edit > Paste alone would paste nothing, the
+    /// field editor taking only text.
+    func testCommandVAttachesAClipboardImage() throws { try commandVAttaches() }
+
+    /// The same in a tmux session's Chat view: its images go to the terminal's agent as files (ThreadStore.sendToPane).
+    func testCommandVAttachesAClipboardImageInATerminalSession() throws { try commandVAttaches() }
+
+    private func commandVAttaches() throws {
+        let pb = NSPasteboard(name: NSPasteboard.Name("devbox-tests-\(UUID().uuidString)"))
+        ImagePasteboard.pasteboard = pb
+        defer { ImagePasteboard.pasteboard = .general; pb.releaseGlobally() }
+        let ctx = CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        let png = try XCTUnwrap(NSBitmapImageRep(cgImage: ctx.makeImage()!).representation(using: .png, properties: [:]))
+        pb.clearContents()
+        pb.setData(png, forType: .png)
+
+        let editor = try type("look")
+        var attached = 0
+        ComposerView.debugAttached = { attached = $0 }
+        defer { ComposerView.debugAttached = nil }
+        let v = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+                                               windowNumber: window.windowNumber, context: nil, characters: "v",
+                                               charactersIgnoringModifiers: "v", isARepeat: false, keyCode: 9))
+        NSApp.sendEvent(v)
+        spin(1)
+        XCTAssertEqual(attached, 1, "the image is attached")
+        XCTAssertEqual(editor.string, "look")
+    }
 
     func testReturnPicksTheHighlightedCommand() throws {
         let editor = try type("/rev")

@@ -27,20 +27,17 @@ extension Image {
 }
 
 enum ImagePasteboard {
-    static var hasImages: Bool {
-        #if os(iOS)
-        UIPasteboard.general.hasImages
-        #else
-        !providers().isEmpty
-        #endif
-    }
-
-    /// The pasteboard's images: on the Mac also image files copied in Finder.
+    #if os(iOS)
+    /// The pasteboard's images.
     static func providers() -> [NSItemProvider] {
-        #if os(iOS)
         UIPasteboard.general.itemProviders.filter { $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) }
-        #else
-        let pb = NSPasteboard.general
+    }
+    #else
+    /// The clipboard; tests put a private one here, so the user's clipboard is never touched.
+    static var pasteboard = NSPasteboard.general
+
+    /// The pasteboard's images, image files copied in Finder included.
+    static func providers(in pb: NSPasteboard = pasteboard) -> [NSItemProvider] {
         let files = (pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? [])
             .filter { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .image) == true }
             .compactMap { NSItemProvider(contentsOf: $0) }
@@ -50,9 +47,57 @@ enum ImagePasteboard {
                   let data = item.data(forType: type) else { return nil }
             return NSItemProvider(item: data as NSData, typeIdentifier: type.rawValue)
         }
-        #endif
+    }
+    #endif
+}
+
+#if os(macOS)
+/// ⌘V in the composer: the field editor pastes only text and Edit > Paste takes the key before any SwiftUI handler, so
+/// the composer watches for the key itself (ComposerView) and takes it only while the pasteboard holds images.
+enum ComposerPaste {
+    static func isPasteKey(flags: NSEvent.ModifierFlags, key: String) -> Bool {
+        flags.intersection([.command, .shift, .option, .control]) == .command && key == "v"
     }
 }
+
+/// Calls `onPaste` with the pasteboard's images for ⌘V in this view's window while `active`; other keys, and ⌘V
+/// with no image, go on to the field.
+struct ImagePasteKey: NSViewRepresentable {
+    let active: Bool
+    let onPaste: ([NSItemProvider]) -> Void
+
+    final class Coordinator {
+        var active = false
+        var onPaste: ([NSItemProvider]) -> Void = { _ in }
+        var monitor: Any?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        let c = context.coordinator
+        c.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak c, weak view] event in
+            guard let c, let view, c.active, event.window === view.window,
+                  ComposerPaste.isPasteKey(flags: event.modifierFlags, key: event.charactersIgnoringModifiers ?? "") else { return event }
+            let images = ImagePasteboard.providers()
+            guard !images.isEmpty else { return event }
+            c.onPaste(images)
+            return nil
+        }
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.active = active
+        context.coordinator.onPaste = onPaste
+    }
+
+    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
+        if let m = coordinator.monitor { NSEvent.removeMonitor(m) }
+    }
+}
+#endif
 
 enum Clipboard {
     static func copy(_ string: String) {

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import type { MirrorInfo } from "../../shared/mirror";
 import { ApiError } from "./api";
 import { activeTrigger, offeredTrigger } from "./composerTrigger";
-import { MIRROR_IMAGES_OFF, MIRROR_SEND_UNCONFIRMED, mirrorComposerProps, mirrorFieldOff, mirrorNotice, mirrorSendLock, mirrorUnsupported, sendToMirror, type MirrorLock } from "./mirrorView";
+import { MIRROR_SEND_UNCONFIRMED, mirrorComposerProps, mirrorFieldOff, mirrorMessageText, mirrorNotice, mirrorSendLock, mirrorUnsupported, sendToMirror, type MirrorLock } from "./mirrorView";
 import { streamUrl } from "./useEventStream";
 
 const live: MirrorInfo = { state: "live", agent: "Claude Code", conversationId: "c", activity: "idle", terminalPrompt: null, sendBlock: null };
@@ -65,7 +65,7 @@ test("a tmux session streams its mirror; a chat session the shared stream", () =
   expect(streamUrl(undefined, true, undefined)).toBe("/api/stream");
 });
 
-test("the mirror composer opens no / or @ menu and takes no images; its placeholder is devd's reason when sending is off", () => {
+test("the mirror composer opens no / or @ menu but takes images; its placeholder is devd's reason when sending is off", () => {
   const props = mirrorComposerProps(live);
   for (const text of ["/", "/rev", "look at @src", "@"]) {
     const found = activeTrigger(text, text.length);
@@ -74,10 +74,18 @@ test("the mirror composer opens no / or @ menu and takes no images; its placehol
     // The same word in a chat session's composer does open its menu.
     expect(offeredTrigger(found, { commands: [{ name: "review" }], searchFiles: async () => ({ files: [] }) })).toEqual(found);
   }
-  expect(props.imagesOff).toBe(MIRROR_IMAGES_OFF);
+  expect("imagesOff" in props).toBe(false);
   expect(props.placeholder).toBe("Message the agent in the terminal");
   const codex = mirrorComposerProps({ ...live, agent: "Codex", sendBlock: { code: "codex-send-unsupported", message: "Read-only." } });
   expect([codex.fieldOff, codex.placeholder]).toEqual(["Read-only.", "Read-only."]);
+});
+
+test("images reach the terminal's agent as their container paths after the text, no line starting with /", () => {
+  expect(mirrorMessageText("hi", [])).toBe("hi");
+  const text = mirrorMessageText("look\nhere", ["/inbox/s/a.png", "/inbox/s/b.jpg"]);
+  expect(text).toBe("look\nhere\n\nAttached image: /inbox/s/a.png\nAttached image: /inbox/s/b.jpg");
+  // devd refuses a command at the start of any line.
+  expect(text.split("\n").some((l) => l.startsWith("/"))).toBe(false);
 });
 
 test("a mirror send with no answer (network failure) may have reached the terminal: said so, no lock", async () => {

@@ -13,6 +13,15 @@ final class MirrorViewTests: XCTestCase {
                    terminalPrompt: prompt.map(MirrorInfo.TerminalPrompt.init) ?? i.terminalPrompt, sendBlock: block ?? i.sendBlock)
     }
 
+    /// Images reach the terminal's agent as their container paths after the text; no line starts with `/` (devd refuses
+    /// a command at the start of any line).
+    func testImagesGoAsTheirPathsAfterTheText() {
+        XCTAssertEqual(MirrorView.messageText("hi", imagePaths: []), "hi")
+        let text = MirrorView.messageText("look\nhere", imagePaths: ["/inbox/s/a.png", "/inbox/s/b.jpg"])
+        XCTAssertEqual(text, "look\nhere\n\nAttached image: /inbox/s/a.png\nAttached image: /inbox/s/b.jpg")
+        XCTAssertFalse(text.split(separator: "\n").contains { $0.hasPrefix("/") })
+    }
+
     func testARefusedSendBecomesTheLockOtherFailuresStayErrors() {
         let draft = DevdHTTPError(statusCode: 409, serverMessage: "terminal-has-draft", serverDetail: "Text is already typed.")
         XCTAssertEqual(MirrorView.sendLock(draft), MirrorLock(code: "terminal-has-draft", message: "Text is already typed."))

@@ -15,12 +15,16 @@ struct MirrorLock: Equatable {
 /// apps and the web lock the composer for the same reasons (devd's words; the apps say "reopen" where the web says
 /// "reload the page").
 enum MirrorView {
-    /// A tmux session takes no images through its Chat view: they would have to reach the pane as files.
-    static let imagesOff = "Images can't be sent to a terminal session; paste them in the terminal."
     static let placeholder = "Message the agent in the terminal"
     static let promptLead = "Waiting for you in the terminal:"
     static let noLongerTmux = "This is no longer a terminal session; reopen it."
     static let sendUnconfirmed = "The message may have reached the terminal — check it before sending again."
+
+    /// The text typed into the pane: the images, uploaded as a chat's are (`/inbox/<id>/…`, mounted in the container),
+    /// follow as their paths, one per line, for the agent to read. A line may not start with `/`: devd refuses commands.
+    static func messageText(_ text: String, imagePaths: [String]) -> String {
+        imagePaths.isEmpty ? text : text + "\n\n" + imagePaths.map { "Attached image: \($0)" }.joined(separator: "\n")
+    }
 
     /// devd's session-level refusals (devd/src/mirrorApi.ts) come as bare codes: what they mean for the user.
     static let sessionRefusals: [String: String] = [

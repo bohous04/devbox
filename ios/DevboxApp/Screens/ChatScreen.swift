@@ -307,7 +307,7 @@ struct ChatScreen: View {
     private static let changesId = "changes"
 
     /// The terminal's agent: what is typed here goes into its pane. No model or effort chip, no `/` commands (devd
-    /// refuses them: they belong in the terminal), no `@` files and no images.
+    /// refuses them: they belong in the terminal) and no `@` files; images go as files (ThreadStore.sendToPane).
     private func mirrorComposer(_ mirror: MirrorInfo) -> some View {
         let notice = MirrorView.notice(mirror, lock: store.sendLock)
         return VStack(alignment: .leading, spacing: 6) {
@@ -315,9 +315,9 @@ struct ChatScreen: View {
                 MirrorNoticeBar(notice: notice, openTerminal: toTerminal, dismiss: { store.sendLock = nil })
             }
             ComposerView(running: false, chip: nil,
-                         onSend: { text, _ in try await store.sendToPane(text: text) },
+                         onSend: { try await store.sendToPane(text: $0, images: $1) },
                          onStop: {},
-                         placeholder: MirrorView.placeholder, fieldOff: MirrorView.fieldOff(mirror), imagesOff: MirrorView.imagesOff)
+                         placeholder: MirrorView.placeholder, fieldOff: MirrorView.fieldOff(mirror))
         }
         // VoiceOver hears each new line once, as the web's live region says it: the one there on opening too.
         .onAppear { if let text = notice?.announcement { AccessibilityNotification.Announcement(text).post() } }

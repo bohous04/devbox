@@ -59,6 +59,41 @@ enum ImagePrep {
         return out as Data
     }
 
+    /// The image data of a dropped, pasted or picked item: image data itself, or an image file (Finder hands over a file
+    /// URL). Anything else is a `Failure` naming it: only images can be attached, and nothing is dropped silently.
+    static func loadImage(_ item: NSItemProvider) async throws -> Data {
+        if item.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+            return try await withCheckedThrowingContinuation { c in
+                _ = item.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, error in
+                    if let data { c.resume(returning: data) } else { c.resume(throwing: error ?? Failure(message: "The image could not be read")) }
+                }
+            }
+        }
+        if item.canLoadObject(ofClass: URL.self) {
+            let url: URL = try await withCheckedThrowingContinuation { c in
+                _ = item.loadObject(ofClass: URL.self) { url, error in
+                    if let url { c.resume(returning: url) } else { c.resume(throwing: error ?? Failure(message: "The file could not be read")) }
+                }
+            }
+            guard url.isFileURL, UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true else {
+                throw notAnImage(url.lastPathComponent)
+            }
+            return try readFile(url)
+        }
+        throw notAnImage(item.suggestedName ?? "This item")
+    }
+
+    /// A file the user picked or dropped, inside the sandbox's grant for it.
+    static func readFile(_ url: URL) throws -> Data {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        return try Data(contentsOf: url)
+    }
+
+    private static func notAnImage(_ name: String) -> Failure {
+        Failure(message: "\(name) is not an image; only images can be attached")
+    }
+
     /// How many of `adding` images fit next to the `attached` ones, and what to tell the user about the rest.
     static func take(attached: Int, adding: Int) -> (take: Int, message: String?) {
         let take = max(0, min(adding, maxImagesPerMessage - attached))
