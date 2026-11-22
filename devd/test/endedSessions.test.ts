@@ -122,7 +122,7 @@ test("openTranscript serves the archived store's snapshot, the same shape as a l
   expect(snap.runs.map((r) => r.status)).toEqual(["completed"]);
 });
 
-test("purge takes only what keeping transcripts added: the row and a mirror store; the chat archive stays forever", () => {
+test("purge takes only what keeping transcripts added: the row, a mirror store, the images; the chat archive stays forever", () => {
   const root = tmp();
   const db = openDb(":memory:");
   const chat = join(root, "_chat-archive", "dev-acme-app-20261001-101500");
@@ -139,10 +139,11 @@ test("purge takes only what keeping transcripts added: the row and a mirror stor
   recordEnded(db, S, fresh, 1_000 + ENDED_RETENTION_MS);
   const logs: string[] = [];
   expect(purgeEnded(db, 1_001 + ENDED_RETENTION_MS, (m) => logs.push(m)).sort()).toEqual(["dev-acme-app-20261001-101500", "dev-acme-tui-20261001-101500"]);
-  // The chat archive as it was kept before this feature: the thread store, the Claude jsonl, the images.
+  // The chat archive as it was kept before this feature: the thread store and the Claude jsonl.
   expect(existsSync(join(chat, "dev-acme-app.sqlite"))).toBe(true);
   expect(existsSync(join(chat, "abc.jsonl"))).toBe(true);
-  expect(existsSync(join(chat, "images", "x.png"))).toBe(true);
+  // The images end() used to delete: kept for the transcript, purged with it.
+  expect(existsSync(join(chat, "images"))).toBe(false);
   // The mirror copy only this feature made.
   expect(existsSync(join(tui, "dev-acme-tui.mirror.sqlite"))).toBe(false);
   expect(getEnded(db, "dev-acme-app-20261001-101500")).toBeNull();

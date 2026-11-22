@@ -327,14 +327,15 @@ final class EndedSessionTests: XCTestCase {
     }
 }
 
-/// Polls `cond` on the main actor for up to 2 s (stream callbacks arrive asynchronously).
+/// Polls `cond` on the main actor for up to 10 s (stream callbacks arrive asynchronously). It returns as soon as the
+/// condition holds, so the bound costs a passing test nothing; 2 s flaked on a loaded build machine.
 @MainActor
 func waitUntil(_ cond: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
-    for _ in 0..<200 {
+    for _ in 0..<1000 {
         if cond() { return }
         try await Task.sleep(for: .milliseconds(10))
     }
-    XCTFail("condition not met within 2 s", file: file, line: line)
+    XCTFail("condition not met within 10 s", file: file, line: line)
 }
 
 @MainActor

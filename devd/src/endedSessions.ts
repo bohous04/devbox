@@ -156,18 +156,19 @@ export function openTranscript(row: EndedRow): ThreadStore {
 /** The archived images of an ended session (archiveThreadImages). */
 export const endedImagesDir = (row: EndedRow) => join(row.archive_dir, "images");
 
-/** Removes the transcripts that ended more than 30 days ago from the inbox. It deletes only what keeping transcripts
- *  added: the row and a tmux session's mirror store. The chat archive stays as it always did, forever: a chat thread's
- *  `<id>.sqlite`, the Claude jsonl and the images. (A handoff's copy of the transcript lives in the new session's own
- *  control dir and goes with that session.) A failed removal is logged and the row stays for the next run. Returns the
- *  purged ids. */
+/** Removes the transcripts that ended more than 30 days ago. It deletes only what keeping transcripts added: the row,
+ *  a tmux session's mirror store and the images (end() deleted them before). The chat archive stays as it always did,
+ *  forever: a chat thread's `<id>.sqlite` and the Claude projects dir (the jsonl). (A handoff's copy of the transcript
+ *  lives in the new session's own control dir and goes with that session.) A failed removal is logged and the row stays
+ *  for the next run. Returns the purged ids. */
 export function purgeEnded(db: Database, now: number, log: (msg: string) => void,
-  remove: (path: string) => void = (p) => rmSync(p, { force: true })): string[] {
+  remove: (path: string) => void = (p) => rmSync(p, { recursive: true, force: true })): string[] {
   const due = db.query(`SELECT * FROM ended_sessions WHERE ended_at < ?`).all(now - ENDED_RETENTION_MS) as EndedRow[];
   const purged: string[] = [];
   for (const r of due) {
     try {
       if (r.store_file.endsWith(".mirror.sqlite")) for (const x of ["", "-wal", "-shm"]) remove(join(r.archive_dir, `${r.store_file}${x}`));
+      if (r.archive_dir !== "") remove(endedImagesDir(r));
     } catch (e) {
       log(`ended transcripts: purging ${r.id} failed, retried on the next run: ${(e as Error).message}`);
       continue;
