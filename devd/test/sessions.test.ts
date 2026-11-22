@@ -86,11 +86,25 @@ test.skipIf(!hasDocker)("open() progress carries the caller's requestId", async 
   const mgr = new SessionManager(d);
   const t = { folder: "acme", project: PROJECT, repo: "app", cloneUrl: d.bareUrl };
   const seen: (string | undefined)[] = [];
-  const sample = setInterval(() => { const p = mgr.openProgressFor(t); if (p) seen.push(p.requestId); }, 5);
+  const reports: NonNullable<ReturnType<SessionManager["openProgressFor"]>>[] = [];
+  const sample = setInterval(() => { const p = mgr.openProgressFor(t); if (p) { seen.push(p.requestId); reports.push(p); } }, 5);
   try {
     const opened = await mgr.open({ ...t, requestId: "mac-7f3a" });
     expect(seen.length).toBeGreaterThan(0);
     expect(new Set(seen)).toEqual(new Set(["mac-7f3a"]));
+    // Every report carries the steps so far and devd's clock; the running step is open, the earlier ones ended.
+    for (const r of reports) {
+      expect(r.phases?.at(-1)?.step).toBe(r.step);
+      expect(r.phases?.at(-1)?.endedAt).toBeUndefined();
+      expect(r.now).toBeGreaterThanOrEqual(r.phases!.at(-1)!.startedAt);
+    }
+    // The answer carries every step closed, each starting where the previous ended.
+    const phases = (opened as { phases?: { step: string; startedAt: number; endedAt?: number }[] }).phases ?? [];
+    expect(phases.map((p) => p.step)).toEqual(["clone", "worktree", "pull", "container"]);
+    phases.forEach((p, i) => {
+      expect(p.endedAt).toBeGreaterThanOrEqual(p.startedAt);
+      if (i > 0) expect(p.startedAt).toBe(phases[i - 1].endedAt!);
+    });
     expect(mgr.openProgressFor(t)).toBeNull();
     await mgr.end(opened.session.id);
   } finally {

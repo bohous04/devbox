@@ -89,6 +89,8 @@ export interface InstaboxLifecycle {
 export interface SessionDeps {
   db: Database; cfg: DevConfig; root: string; image: string;
   bindIp?: string; extraMounts?: string[]; cmd?: string[]; now?: () => number;
+  /** Monotonic ms for open()'s step times (tests); default `performance.now()`. */
+  monoNow?: () => number;
   controlRoot?: string; devdUrl?: string;
   /** Time zone of the containers. Without it they would run in UTC, i.e. differently from the host. */
   tz?: string;
@@ -443,11 +445,45 @@ export interface OpenProgress {
   /** The caller's own id for this open (POST /api/sessions `requestId`), so a client polling the repo's progress
    *  can tell its open from another one of the same repo. Absent when the caller sent none. */
   requestId?: string;
+  /** When each step devd has entered so far started and ended, in order (a step devd skips has none). In ms of
+   *  devd's monotonic clock (`performance.now()`): only differences between these values mean anything, never a
+   *  date. Absent from a devd before the field. */
+  phases?: OpenPhase[];
+  /** devd's monotonic clock when this report was read, for the running step's elapsed time. */
+  now?: number;
+}
+
+export interface OpenPhase { step: OpenProgress["step"]; startedAt: number; endedAt?: number }
+
+/** The start and end of each step of one open(), on a monotonic clock, so a wall-clock jump never makes a step
+ *  negative or hours long. Entering a new step ends the previous one; repeated reports of the same step (git's
+ *  percentages, the container's sub-steps) do not. */
+export class OpenPhases {
+  private readonly list: OpenPhase[] = [];
+  constructor(private readonly clock: () => number) {}
+
+  enter(step: OpenPhase["step"]): void {
+    const last = this.list.at(-1);
+    if (last?.step === step && last.endedAt === undefined) return;
+    const at = this.clock();
+    if (last && last.endedAt === undefined) last.endedAt = at;
+    this.list.push({ step, startedAt: at });
+  }
+
+  /** Ends the running step: open() has answered. */
+  finish(): void {
+    const last = this.list.at(-1);
+    if (last && last.endedAt === undefined) last.endedAt = this.clock();
+  }
+
+  snapshot(): OpenPhase[] { return this.list.map((p) => ({ ...p })); }
 }
 
 export class SessionManager {
   constructor(private d: SessionDeps) {}
   private now() { return this.d.now?.() ?? Date.now(); }
+  /** Monotonic, for durations only (OpenPhases). */
+  private mono() { return this.d.monoNow?.() ?? performance.now(); }
 
   /** Revokes the session's sharing — either because it is ending entirely (`end()`), or because
    *  its container is being replaced: the new tmux sessions inside have a different history, so
@@ -462,8 +498,10 @@ export class SessionManager {
   }
 
   private readonly openProgress = new Map<string, OpenProgress>();
+  private readonly openPhases = new Map<string, OpenPhases>();
   openProgressFor(t: { folder: string; project: string; repo: string }): OpenProgress | null {
-    return this.openProgress.get(openKey(t)) ?? null;
+    const p = this.openProgress.get(openKey(t));
+    return p ? { ...p, now: this.mono() } : null;
   }
 
   private readonly ownInFlight = new Set<string>();
@@ -880,9 +918,16 @@ export class SessionManager {
         ? nextSessionId(this.d.db, t.project, t.repo, leftover)
         : (joinableSessionId(this.d.db, t.project, t.repo, joinable, t.prompt !== undefined || t.firstPrompt !== undefined) ?? nextSessionId(this.d.db, t.project, t.repo, leftover)));
       try {
-        return await this.locked([id], "open", () => this.openWithEarlyDind(t, id));
+        const r = await this.locked([id], "open", () => this.openWithEarlyDind(t, id));
+        // The steps' times, the last one ended now. An open that entered no step (it rejoined a running session) sends
+        // none rather than an empty list.
+        const timeline = this.openPhases.get(openKey(t));
+        timeline?.finish();
+        const phases = timeline?.snapshot() ?? [];
+        return phases.length > 0 ? { ...r, phases } : r;
       } finally {
         this.openProgress.delete(openKey(t));
+        this.openPhases.delete(openKey(t));
       }
     });
   }
@@ -985,7 +1030,12 @@ export class SessionManager {
         ? sessionWorktreePath(this.d.root, id)
         : null;
     const dir = worktree ?? ws;                        // working directory of THIS session
-    const progress = (p: OpenProgress) => this.openProgress.set(openKey(t), t.requestId ? { ...p, requestId: t.requestId } : p);
+    const phases = new OpenPhases(() => this.mono());
+    this.openPhases.set(openKey(t), phases);
+    const progress = (p: OpenProgress) => {
+      phases.enter(p.step);
+      this.openProgress.set(openKey(t), { ...p, ...(t.requestId ? { requestId: t.requestId } : {}), phases: phases.snapshot() });
+    };
     const onClone = (clone: CloneProgress) => progress({ step: "clone", clone });
     let bornWorktree = false;
     let settledBranch: string | null = null;
