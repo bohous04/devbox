@@ -277,6 +277,17 @@ enum InboxView {
         sessionTitle(sessionId: e.sessionId, name: e.title == "\(e.project)/\(e.repo)" ? nil : e.title, project: e.project, repo: e.repo, topic: e.topic)
     }
 
+    /// The second line's trailing parts, as a session row's (metaTail): the agent while agents are mixed, and tmux.
+    static func endedMetaTail(_ e: EndedSession, showAgent: Bool) -> [String] {
+        (showAgent ? [AgentProfiles.profile(for: AgentName(rawValue: e.agent)).short] : []) + (e.runtime == .tmux ? ["tmux"] : [])
+    }
+
+    /// What a transcript row says to VoiceOver and, on the Mac, in its tooltip.
+    static func endedSpoken(_ e: EndedSession, now: Int, showAgent: Bool) -> String {
+        ([endedTitle(e), "ended", Format.agoLabel(Double(now - e.endedAt)), "\(e.project)/\(e.repo)"] + endedMetaTail(e, showAgent: showAgent))
+            .filter { !$0.isEmpty }.joined(separator: ", ")
+    }
+
     /// After the project badge, as a session row's (secondLine): the repo and the branch.
     static func endedSecondLine(_ e: EndedSession) -> String {
         ([e.repo] + [e.branch].compactMap { $0 }.filter { !$0.isEmpty }).joined(separator: "  ·  ")

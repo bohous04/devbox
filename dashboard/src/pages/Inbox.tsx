@@ -12,7 +12,7 @@ import { AppPage, Chevron, Collapse, RowsSkeleton } from "../components/primitiv
 import { SettleProblem } from "../components/SettleProblem";
 import { agoLabel } from "../format";
 import { profileFor } from "../newSession";
-import { endedHref, endedSecondLine, endedTitle, settledShelf, upsertEnded } from "../endedView";
+import { endedHref, endedMetaTail, endedSecondLine, endedTitle, settledShelf, upsertEnded } from "../endedView";
 import { claimsUndo, failureText, focusOwnsUndo, settleKey, settleShortcut } from "../inboxSettle";
 import { badgeSlots, groupInbox, inboxHref, inboxList, metaTail, mixedAgents, projectBadge, reasonLabel, rowStatus, rowTitle, secondLine, shelfBlock, shortAgo, snoozeEnd, snoozeTimes, statusParts, upsertInbox, type StatusTone } from "../inboxView";
 import { cn } from "@/lib/utils";
@@ -249,6 +249,7 @@ function EndedRow({ ended, now, onHidden }: { ended: EndedSession; now: number; 
   const showAgent = useContext(ShowAgent);
   const [error, setError] = useState<string | null>(null);
   const title = endedTitle(ended);
+  const tail = endedMetaTail(ended, showAgent);
   const label = [title, "ended", agoLabel(now - ended.endedAt), `${ended.project}/${endedSecondLine(ended)}`, showAgent ? profileFor(ended.agent).short : ""].filter(Boolean).join(", ");
   return (
     <li data-inbox-ended={ended.id} className="group relative flex min-w-0 flex-wrap rounded-lg transition-colors [@media(hover:hover)]:hover:bg-accent/60 has-[:focus-visible]:bg-accent/60 has-[[data-state=open]]:bg-accent/60">
@@ -263,8 +264,14 @@ function EndedRow({ ended, now, onHidden }: { ended: EndedSession; now: number; 
         <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
           <ProjectBadge project={ended.project} />
           <span className="min-w-0 flex-1 truncate">{endedSecondLine(ended)}</span>
-          {showAgent && <AgentLogo name={logoForAgent(ended.agent)} size={12} className="w-6 opacity-70 [@media(hover:hover)]:group-hover:invisible [@media(hover:hover)]:group-has-[:focus-visible]:invisible [@media(hover:hover)]:group-has-[[data-state=open]]:invisible" />}
-          {!showAgent && <span className="hidden w-6 flex-none [@media(hover:hover)]:block" aria-hidden="true" />}
+          {/* As a session row's tail; under the pointer the menu takes its place. */}
+          {tail.length > 0 && (
+            <span className={cn("flex flex-none items-center gap-1 text-[11px] opacity-80", HIDE_ON_HOVER)}>
+              {showAgent && <AgentLogo name={logoForAgent(ended.agent)} size={12} />}
+              {tail.join(" · ")}
+            </span>
+          )}
+          {tail.length === 0 && <span className="hidden w-6 flex-none [@media(hover:hover)]:block" aria-hidden="true" />}
         </span>
       </Link>
       <DropdownMenu>

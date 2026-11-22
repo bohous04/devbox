@@ -1,6 +1,7 @@
 import type { ContinueMode, ContinueResult, EndedRemoved, EndedSession } from "../../shared/ended";
 import type { InboxItem } from "../../shared/thread";
 import { sessionTitle } from "./inboxView";
+import { profileFor } from "./newSession";
 
 /** An SSE `inbox-ended` event: a transcript that was just kept replaces its row, a hidden or purged one leaves. */
 export function upsertEnded(list: EndedSession[], next: EndedSession | EndedRemoved): EndedSession[] {
@@ -62,6 +63,11 @@ export const continueInFlight = (id: string) => continuing.has(id);
 export function endedTitle(e: EndedSession): string {
   return sessionTitle({ sessionId: e.sessionId, name: e.title === `${e.project}/${e.repo}` ? null : e.title, project: e.project, repo: e.repo, topic: e.topic });
 }
+
+/** The second line's trailing parts, as a session row's (inboxView.ts metaTail): the agent's name while the inbox
+ *  mixes agents, and "tmux" for a terminal session. */
+export const endedMetaTail = (e: Pick<EndedSession, "agent" | "runtime">, showAgent: boolean): string[] =>
+  [...(showAgent ? [profileFor(e.agent).short] : []), ...(e.runtime === "tmux" ? ["tmux"] : [])];
 
 /** After the project badge, as a session row's (inboxView.ts secondLine): the repo and the branch. */
 export function endedSecondLine(e: EndedSession): string {

@@ -615,7 +615,6 @@ struct InboxRow: View {
 }
 
 /// An ended session's transcript on the Settled shelf: its title, an "Ended" mark with how long ago, and where it ran.
-/// The Mac sidebar draws the same row (MacWindow).
 struct InboxEndedRow: View {
     let ended: EndedSession
     let now: Int
@@ -624,6 +623,7 @@ struct InboxEndedRow: View {
     var body: some View {
         let title = InboxView.endedTitle(ended)
         let ago = InboxView.shortAgo(now - ended.endedAt)
+        let tail = InboxView.endedMetaTail(ended, showAgent: showAgent)
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(title).font(.body).foregroundStyle(InboxTone.quietTitle).lineLimit(1)
@@ -645,6 +645,9 @@ struct InboxEndedRow: View {
                         .foregroundStyle(Theme.C.mutedForeground.opacity(0.8))
                         .accessibilityHidden(true)
                 }
+                if !tail.isEmpty {
+                    Text(tail.joined(separator: " · ")).font(.footnote).foregroundStyle(Theme.C.mutedForeground).lineLimit(1).fixedSize()
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -652,9 +655,7 @@ struct InboxEndedRow: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel([title, "ended", Format.agoLabel(Double(now - ended.endedAt)), "\(ended.project)/\(ended.repo)",
-                             showAgent ? AgentProfiles.profile(for: AgentName(rawValue: ended.agent)).short : ""]
-            .filter { !$0.isEmpty }.joined(separator: ", "))
+        .accessibilityLabel(InboxView.endedSpoken(ended, now: now, showAgent: showAgent))
     }
 }
 

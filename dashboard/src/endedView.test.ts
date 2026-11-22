@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import type { EndedSession } from "../../shared/ended";
 import type { InboxItem } from "../../shared/thread";
 import {
-  canContinue, continueInFlight, continueLabel, continueOnce, endedAttachmentUrl, endedHref, endedSecondLine, endedTitle, openRequestLabel,
+  canContinue, continueInFlight, endedMetaTail, continueLabel, continueOnce, endedAttachmentUrl, endedHref, endedSecondLine, endedTitle, openRequestLabel,
   settledShelf, transcriptNote, upsertEnded,
 } from "./endedView";
 
@@ -32,6 +32,11 @@ test("the button says what continue will do", () => {
   expect(continueLabel("handoff")).toBe("Start a new session with this chat (handoff)");
   // A mode from a later devd promises neither.
   expect(continueLabel("fork")).toBe("Start a new session");
+});
+
+test("an ended row's tail names the agent while agents are mixed, and says tmux", () => {
+  expect(endedMetaTail(ended("e", 1), false)).toEqual([]);
+  expect(endedMetaTail(ended("e", 1, { runtime: "tmux" }), true)).toEqual(["Claude", "tmux"]);
 });
 
 test("an open request in a transcript will never be answered; a transcript that is not whole says so", () => {

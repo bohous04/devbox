@@ -278,6 +278,13 @@ final class EndedSessionTests: XCTestCase {
         XCTAssertEqual(InboxView.openRequestLabel(inTranscript: false), "waiting for an answer")
     }
 
+    func testAnEndedRowsTailNamesTheAgentWhileMixedAndSaysTmux() throws {
+        let tmux = try JSONDecoder().decode(EndedSession.self, from: Data(endedJSON("e", endedAt: 1).replacingOccurrences(of: #""runtime":"chat""#, with: #""runtime":"tmux""#).utf8))
+        XCTAssertEqual(InboxView.endedMetaTail(try ended("e", endedAt: 1), showAgent: false), [])
+        XCTAssertEqual(InboxView.endedMetaTail(tmux, showAgent: true), [AgentProfiles.profile(for: AgentName(rawValue: "claude")).short, "tmux"])
+        XCTAssertTrue(InboxView.endedSpoken(tmux, now: 1, showAgent: false).hasSuffix("acme/app, tmux"))
+    }
+
     func testAShelfWithOnlyAnErrorShowsAndTranscriptRowsCarrySelectionIds() throws {
         let shelves = InboxView.shelves(InboxView.group([]), ended: [], endedError: "offline")
         XCTAssertEqual(shelves.map(\.label), ["Settled"])

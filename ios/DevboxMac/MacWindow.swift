@@ -424,7 +424,7 @@ struct MacInboxSidebar: View {
 
     /// An ended session's transcript (Settled only): it opens read-only in the detail and only hides.
     private func endedRow(_ e: EndedSession, now: Int) -> some View {
-        InboxEndedRow(ended: e, now: now)
+        MacEndedRow(ended: e, now: now)
             .tag(InboxView.endedTag(e.id) as String?)
             .contextMenu {
                 Button("Hide") {
@@ -586,6 +586,54 @@ private struct MacGroupHead: View {
 /// out by its chip; danger and asks are loud, the rest quiet. With `settle`, a ✓ takes the state's place while the
 /// pointer is over the row, as in T3 Code; it is disabled, with the reason, while a request is open. The message, the
 /// agent's name and the full project name are also in the tooltip and the spoken label, which starts with the chip.
+/// An ended session's transcript in the sidebar, in MacInboxRow's sizes and selection-aware styles: a quiet title, a
+/// muted "Ended" mark with its age, and the project badge, repo, branch and tail under it.
+struct MacEndedRow: View {
+    let ended: EndedSession
+    let now: Int
+    @Environment(\.inboxShowsAgent) private var showAgent
+
+    var body: some View {
+        let spoken = InboxView.endedSpoken(ended, now: now, showAgent: showAgent)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(InboxView.endedTitle(ended))
+                    .font(.system(size: 13))
+                    .modifier(MacSelectionTone(color: MacInboxRow.quietTitle, onSelection: MacInboxRow.style(.primary)))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text("Ended  \(InboxView.shortAgo(now - ended.endedAt))").font(.system(size: 11)).monospacedDigit()
+                    .modifier(MacSelectionTone(color: Theme.C.mutedForeground, onSelection: MacInboxRow.style(.secondary)))
+            }
+            HStack(spacing: 5) {
+                ProjectBadge(project: ended.project, size: 8.5)
+                    .help(ended.project)
+                Text(InboxView.endedSecondLine(ended))
+                    .font(.system(size: 11.5))
+                    .modifier(MacSelectionTone(color: nil, onSelection: MacInboxRow.style(.secondary)))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if showAgent {
+                    AgentLogo(mark: AgentLogo.Mark(agent: ended.agent), size: 11)
+                        .modifier(MacSelectionTone(color: nil, onSelection: MacInboxRow.style(.tertiary)))
+                        .accessibilityHidden(true)
+                }
+                // The sidebar is narrow: the agent shows as its glyph only, as MacInboxRow's tail.
+                let tail = InboxView.endedMetaTail(ended, showAgent: false)
+                if !tail.isEmpty {
+                    Text(tail.joined(separator: " · ")).font(.system(size: 10.5)).lineLimit(1).fixedSize()
+                        .modifier(MacSelectionTone(color: nil, onSelection: MacInboxRow.style(.tertiary)))
+                }
+            }
+        }
+        .padding(.vertical, 5)
+        .contentShape(Rectangle())
+        .help(spoken)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spoken)
+    }
+}
+
 struct MacInboxRow: View {
     let item: InboxItem
     let now: Int
