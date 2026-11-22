@@ -616,6 +616,9 @@ export const api = {
     j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/effort`, post({ effort })),
   markSeen: (id: string, seq: number) => j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/seen`, post({ seq })),
   inbox: () => j<{ items: InboxItem[] }>("/api/inbox"),
+  /** A tmux session was looked at: its current finish or failure is seen. 204; 409 not-a-tmux-session or
+   *  session-ending; 404 unknown session. */
+  tmuxSeen: (id: string) => j<void>(`/api/sessions/${encodeURIComponent(id)}/seen`, { method: "POST" }),
   // Inbox shelves (any session, tmux too); each answers the session's new inbox item.
   settle: (id: string) => j<InboxItem>(`/api/sessions/${encodeURIComponent(id)}/settle`, { method: "POST" }),
   unsettle: (id: string) => j<InboxItem>(`/api/sessions/${encodeURIComponent(id)}/unsettle`, { method: "POST" }),

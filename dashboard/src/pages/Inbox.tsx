@@ -1,27 +1,44 @@
-import { createContext, useContext, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { AlarmClock, CircleAlert, CircleCheck, Ellipsis, LoaderCircle, MessageCircleQuestion } from "lucide-react";
+import { AlarmClock, Check, CircleAlert, CircleCheck, Ellipsis, MessageCircleQuestion, Undo2 } from "lucide-react";
 import type { InboxItem } from "../../../shared/thread";
-import { Button } from "@/components/ui/button";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { api } from "../api";
+import { AgentLogo, logoForAgent } from "../components/agentLogos";
 import { AppPage, Chevron, Collapse, RowsSkeleton } from "../components/primitives";
+import { SettleProblem } from "../components/SettleProblem";
 import { agoLabel } from "../format";
-import { groupInbox, inboxHref, mixedAgents, plainPreview, projectBadge, reasonLabel, rowTitle, shelfBlock, snoozeTimes, statusParts, splitNeedsYou, upsertInbox, type StatusTone } from "../inboxView";
+import { claimsUndo, focusOwnsUndo, settleShortcut } from "../inboxSettle";
+import { groupInbox, inboxHref, inboxList, mixedAgents, reasonLabel, rowMark, rowTitle, secondLine, shelfBlock, shortAgo, snoozeTimes, upsertInbox, type MarkTone } from "../inboxView";
 import { cn } from "@/lib/utils";
 import { profileFor } from "../newSession";
 import { useNow } from "../store";
 import { useEventStream } from "../useEventStream";
+import { settler, useSettleState } from "../useSettler";
 
 const untilLabel = (ms: number) => new Date(ms).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" });
+const shortUntil = (ms: number) => new Date(ms).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+
+const MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+const MOD = MAC ? "⌘" : "Ctrl+";
+const SETTLE_KEYS = MAC ? "⌘⇧S" : "Ctrl+Shift+S";
+/** How long the undo notice stays; it stays longer while the pointer or the keyboard is on it. */
+const NOTICE_MS = 5_000;
+
+/** Whether rows show their agent's mark (mixedAgents over the whole inbox). True by default on purpose: a row outside
+ *  the provider shows its agent rather than hide which one runs. */
+const ShowAgent = createContext(true);
+/** Settles a row from the list: its ✓, ⌘⇧S and the menu all go through the page, which moves the focus on. */
+const SettleRow = createContext<(item: InboxItem) => void>(() => {});
 
 /** Settle, unsettle and snooze. "Until the limit resets" asks devd when the menu opens; it stays disabled with
  *  devd's reason when there is no active limit (or no meter for this agent). */
-function RowMenu({ item, label, onItem, setError }: {
-  item: InboxItem; label: string; onItem: (i: InboxItem) => void; setError: (e: string | null) => void;
+function RowMenu({ item, label, onItem, setError, className }: {
+  item: InboxItem; label: string; onItem: (i: InboxItem) => void; setError: (e: string | null) => void; className: string;
 }) {
+  const settle = useContext(SettleRow);
   const [reset, setReset] = useState<{ resetsAt: number } | { reason: string } | null>(null);
   const section = item.attention.section;
   const run = (p: Promise<InboxItem>) => {
@@ -36,194 +53,205 @@ function RowMenu({ item, label, onItem, setError }: {
   };
   const t = snoozeTimes(new Date());
   return (
-    <span className="flex flex-none py-2 pr-1.5 [@media(hover:hover)]:absolute [@media(hover:hover)]:right-1.5 [@media(hover:hover)]:top-0 [@media(hover:hover)]:pr-0">
-      <DropdownMenu onOpenChange={open}>
-        <DropdownMenuTrigger asChild>
-          <Button type="button" variant="ghost" size="icon-sm" aria-label={`Actions for ${label}`}
-            className="text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 group-has-[a:focus-visible]:opacity-100 [@media(hover:none)]:opacity-100"><Ellipsis aria-hidden="true" /></Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" collisionPadding={16} className="w-64 max-w-[calc(100vw-2rem)]">
-          {section === "settled" || section === "snoozed" ? (
-            <DropdownMenuItem onSelect={() => run(api.unsettle(item.sessionId))}>Back to the inbox</DropdownMenuItem>
-          ) : (
-            <>
-              {blocked && <p className="px-2 py-1.5 text-xs text-muted-foreground">{blocked}</p>}
-              <DropdownMenuItem disabled={blocked !== null} onSelect={() => run(api.settle(item.sessionId))}>Settle</DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuLabel className="text-xs text-muted-foreground">Snooze</DropdownMenuLabel>
-              <DropdownMenuItem disabled={blocked !== null} onSelect={() => run(api.snooze(item.sessionId, { until: t.hour }))}>1 hour</DropdownMenuItem>
-              <DropdownMenuItem disabled={blocked !== null} onSelect={() => run(api.snooze(item.sessionId, { until: t.morning.at }))}>{t.morning.label}</DropdownMenuItem>
-              <DropdownMenuItem
-                disabled={blocked !== null || reset === null || "reason" in reset}
-                onSelect={() => run(api.snooze(item.sessionId, { untilReset: true }))}
-                className="items-start data-[disabled]:opacity-100"
-              >
-                <span className="flex min-w-0 flex-col">
-                  <span className={blocked !== null || reset === null || "reason" in reset ? "opacity-50" : undefined}>Until the limit resets</span>
-                  <span className="text-xs text-muted-foreground">
-                    {blocked !== null ? "" : reset === null ? "Checking…" : "reason" in reset ? reset.reason : untilLabel(reset.resetsAt)}
-                  </span>
+    <DropdownMenu onOpenChange={open}>
+      <DropdownMenuTrigger aria-label={`Actions for ${label}`} title="More actions" className={className}>
+        <Ellipsis className="size-4" aria-hidden="true" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" collisionPadding={16} className="w-64 max-w-[calc(100vw-2rem)]">
+        {section === "settled" || section === "snoozed" ? (
+          <DropdownMenuItem onSelect={() => run(api.unsettle(item.sessionId))}>Back to the inbox</DropdownMenuItem>
+        ) : (
+          <>
+            {blocked && <p className="px-2 py-1.5 text-xs text-muted-foreground">{blocked}</p>}
+            <DropdownMenuItem disabled={blocked !== null} onSelect={() => settle(item)}>
+              Settle<span className="ml-auto text-xs tracking-wide text-muted-foreground">{SETTLE_KEYS}</span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="text-xs text-muted-foreground">Snooze</DropdownMenuLabel>
+            <DropdownMenuItem disabled={blocked !== null} onSelect={() => run(api.snooze(item.sessionId, { until: t.hour }))}>1 hour</DropdownMenuItem>
+            <DropdownMenuItem disabled={blocked !== null} onSelect={() => run(api.snooze(item.sessionId, { until: t.morning.at }))}>{t.morning.label}</DropdownMenuItem>
+            <DropdownMenuItem
+              disabled={blocked !== null || reset === null || "reason" in reset}
+              onSelect={() => run(api.snooze(item.sessionId, { untilReset: true }))}
+              className="items-start data-[disabled]:opacity-100"
+            >
+              <span className="flex min-w-0 flex-col">
+                <span className={blocked !== null || reset === null || "reason" in reset ? "opacity-50" : undefined}>Until the limit resets</span>
+                <span className="text-xs text-muted-foreground">
+                  {blocked !== null ? "" : reset === null ? "Checking…" : "reason" in reset ? reset.reason : untilLabel(reset.resetsAt)}
                 </span>
-              </DropdownMenuItem>
-            </>
-          )}
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </span>
+              </span>
+            </DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
-const BADGE = [
-  "bg-rose-500/15 text-rose-700 dark:text-rose-300",
-  "bg-amber-500/15 text-amber-800 dark:text-amber-300",
-  "bg-emerald-500/15 text-emerald-800 dark:text-emerald-300",
-  "bg-sky-500/15 text-sky-800 dark:text-sky-300",
-  "bg-violet-500/15 text-violet-800 dark:text-violet-300",
-  "bg-fuchsia-500/15 text-fuchsia-800 dark:text-fuchsia-300",
-];
-
-const TONE: Record<StatusTone, string> = {
-  action: "text-amber-700 dark:text-amber-300",
-  danger: "text-red-600 dark:text-red-400",
+const MARK_TONE: Record<MarkTone, string> = {
+  action: "font-semibold text-amber-700 dark:text-amber-300",
+  danger: "font-semibold text-red-600 dark:text-red-400",
+  // A finished run is news, not a block: a green check and a regular muted word, under the asks.
   done: "text-muted-foreground [&>svg]:text-emerald-600 dark:[&>svg]:text-emerald-400",
-  busy: "text-sky-700 dark:text-sky-300",
-  quiet: "text-muted-foreground",
 };
 
-function ToneIcon({ tone }: { tone: StatusTone }) {
-  const c = "size-3.5 flex-none";
-  if (tone === "action") return <MessageCircleQuestion className={c} aria-hidden="true" />;
-  if (tone === "danger") return <CircleAlert className={c} aria-hidden="true" />;
-  if (tone === "done") return <CircleCheck className={c} aria-hidden="true" />;
-  if (tone === "busy") return <LoaderCircle className={cn(c, "animate-spin [animation-duration:2s] motion-reduce:animate-none")} aria-hidden="true" />;
-  return <AlarmClock className={c} aria-hidden="true" />;
-}
+const MARK_ICON: Record<MarkTone, typeof CircleAlert> = { action: MessageCircleQuestion, danger: CircleAlert, done: CircleCheck };
 
-/** The row's state next to its project. `compact` (Finished, Idle, shelves): only the outcome mark and the time, since
- *  the group heading already says the state; the full reason stays in the tooltip and for screen readers. */
-function Status({ item, now, parts }: { item: InboxItem; now: number; parts: NonNullable<ReturnType<typeof statusParts>> }) {
+/** The title line's right end: the mark when the row has something to say, else how long ago (after a live dot while
+ *  it works), or when a snooze ends. Under the pointer or the keyboard it gives way to the ✓ (hover devices). */
+function State({ item, now }: { item: InboxItem; now: number }) {
   const a = item.attention;
-  const st = parts.mark;
-  const when = parts.until !== null ? `until ${untilLabel(parts.until)}` : parts.ago;
-  const full = [reasonLabel(a.reason), a.since > 0 ? agoLabel(now - a.since) : ""].filter(Boolean).join(" · ");
+  const mark = rowMark(item);
+  if (mark) {
+    const Icon = MARK_ICON[mark.tone];
+    return (
+      <span className={cn("flex flex-none items-center gap-1 text-xs", MARK_TONE[mark.tone])}>
+        <Icon className="size-3.5 flex-none" aria-hidden="true" />{mark.label}
+      </span>
+    );
+  }
+  if (a.until) {
+    return <span className="flex flex-none items-center gap-1 text-xs tabular-nums text-muted-foreground"><AlarmClock className="size-3.5" aria-hidden="true" />{shortUntil(a.until)}</span>;
+  }
   return (
-    <span className={cn("flex flex-none items-center gap-1 tabular-nums", st && TONE[st.tone], parts.showLabel && "font-medium")} title={full || undefined}>
-      {st && <ToneIcon tone={st.tone} />}
-      {st && <span className={parts.showLabel ? undefined : "sr-only"}>{st.label}</span>}
-      {when && <span className={cn("font-normal", st ? "opacity-75" : "text-muted-foreground")}>{when}</span>}
+    <span className="flex flex-none items-center gap-1.5 text-xs tabular-nums text-muted-foreground">
+      {a.section === "working" && <span className="size-1.5 animate-pulse rounded-full bg-sky-500 motion-reduce:animate-none" aria-hidden="true" />}
+      {a.since > 0 ? shortAgo(now - a.since) : ""}
     </span>
   );
 }
 
-const Dot = () => <span className="flex-none opacity-50" aria-hidden="true">·</span>;
-
-/** One fixed shape per group: a meta line (project, state, time, agent), the title, and in groups where the latest
- *  message is the point (Needs you, Working, Snoozed) a dimmer preview line. */
-/** Whether rows name their agent (mixedAgents over the whole inbox). True by default on purpose: a row outside the
- *  provider names its agent rather than hide which one runs. */
-const ShowAgent = createContext(true);
-
-function Row({ item, now, onItem, preview }: { item: InboxItem; now: number; onItem: (i: InboxItem) => void; preview: boolean }) {
-  const showAgent = useContext(ShowAgent);
+/** What the row says to a screen reader and in its tooltip: the mark first and not again as the state. */
+function spoken(item: InboxItem, now: number, title: string, showAgent: boolean): string {
   const a = item.attention;
-  const badge = projectBadge(item.project);
+  const mark = rowMark(item);
+  const when = a.until ? `until ${untilLabel(a.until)}` : a.since > 0 ? agoLabel(now - a.since) : "";
+  const state = mark ? mark.label : a.section === "idle" || a.section === "settled" ? "" : reasonLabel(a.reason) || a.section;
+  return [mark?.label, title, mark ? "" : state, when, secondLine(item), showAgent ? profileFor(item.agent).short : "", item.runtime === "tmux" ? "tmux" : ""]
+    .filter(Boolean).join(", ");
+}
+
+// The actions sit over the row's right end: the ✓ in the state's place on the title line, the menu in the agent
+// mark's place on the second. On a touch screen (no hover) only the menu shows, always, beside the row.
+const ACTION = "grid place-items-center rounded-md text-muted-foreground outline-none transition-opacity hover:bg-foreground/10 hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/60";
+const ON_HOVER = "[@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:group-has-[:focus-visible]:opacity-100 data-[state=open]:opacity-100";
+const HIDE_ON_HOVER = "[@media(hover:hover)]:group-hover:invisible [@media(hover:hover)]:group-has-[:focus-visible]:invisible [@media(hover:hover)]:group-has-[[data-state=open]]:invisible";
+
+/** A row: the title with its state on the right, and one muted line (secondLine) ending in the agent's mark while the
+ *  inbox mixes agents (MacInboxRow). A row of the list with nothing to say has a title a step lighter, so the eye lands
+ *  on the marked ones first. `settle`: the row offers the ✓ (not on the snoozed and settled shelves). */
+function Row({ item, now, onItem, quiet, settle }: { item: InboxItem; now: number; onItem: (i: InboxItem) => void; quiet: boolean; settle: boolean }) {
+  const showAgent = useContext(ShowAgent);
+  const onSettle = useContext(SettleRow);
   const title = rowTitle(item);
-  const message = item.lastText !== null ? plainPreview(item.lastText) : "";
-  const detail = message || reasonLabel(a.reason);
-  const parts = statusParts(item, now, !preview);
+  const block = shelfBlock(item);
+  const label = spoken(item, now, title, showAgent);
   const [error, setError] = useState<string | null>(null);
   return (
-    <li className="group relative flex min-w-0 flex-wrap items-start rounded-lg transition-colors hover:bg-accent/60 has-[a:focus-visible]:bg-accent/60">
+    <li data-inbox-row={item.sessionId} className="group relative flex min-w-0 flex-wrap rounded-lg transition-colors [@media(hover:hover)]:hover:bg-accent/60 has-[:focus-visible]:bg-accent/60 has-[[data-state=open]]:bg-accent/60">
       <Link
-        to={inboxHref(item)}
-        title={!preview && message ? message : undefined}
-        className="flex min-w-0 flex-1 flex-col gap-0.5 rounded-lg py-2 pl-3 pr-3 outline-none focus-visible:ring-2 focus-visible:ring-ring/60 [@media(hover:hover)]:pr-11"
+        to={inboxHref(item)} aria-label={label} title={label}
+        className="flex min-w-0 flex-1 flex-col gap-0.5 rounded-lg py-2 pl-3 pr-3 outline-none focus-visible:ring-2 focus-visible:ring-ring/60 [@media(hover:none)]:pr-1"
       >
-        <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-          <span className={cn("grid h-4 min-w-5 flex-none place-items-center rounded px-0.5 text-[9px] font-bold leading-none tracking-wide", BADGE[badge.slot])} aria-hidden="true">
-            {badge.letters}
-          </span>
-          <span className="min-w-0 truncate">{item.project}<span className="opacity-60"> / </span>{item.repo}</span>
-          {parts && <><Dot /><Status item={item} now={now} parts={parts} /></>}
-          {showAgent && <><Dot /><span className="flex-none">{profileFor(item.agent).short}</span></>}
-          {item.runtime === "tmux" && <span className="flex-none opacity-80"><span className="sr-only">in </span>tmux</span>}
+        <span className="flex min-w-0 items-center gap-2">
+          <span className={cn("min-w-0 flex-1 truncate text-sm", quiet ? "text-foreground/70" : "text-foreground")}>{title}</span>
+          <span className={cn("flex min-w-6 flex-none justify-end", settle && HIDE_ON_HOVER)}><State item={item} now={now} /></span>
         </span>
-        {/* Groups below Needs you get a quieter title so they read as background. */}
-        <span className={cn("truncate text-sm", preview ? "font-medium text-foreground" : "text-foreground/85")}>{title}</span>
-        {preview && <span className="truncate text-xs text-muted-foreground/75">{detail}</span>}
+        <span className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+          <span className="min-w-0 flex-1 truncate">{secondLine(item)}</span>
+          {item.runtime === "tmux" && <span className="flex-none text-[11px] opacity-80">tmux</span>}
+          {showAgent && <AgentLogo name={logoForAgent(item.agent)} size={12} className="w-6 opacity-70 [@media(hover:hover)]:group-hover:invisible [@media(hover:hover)]:group-has-[:focus-visible]:invisible [@media(hover:hover)]:group-has-[[data-state=open]]:invisible" />}
+          {!showAgent && <span className="hidden w-6 flex-none [@media(hover:hover)]:block" aria-hidden="true" />}
+        </span>
       </Link>
-      <RowMenu item={item} label={title} onItem={onItem} setError={setError} />
+      {settle && (
+        <button
+          type="button" aria-label={`Settle ${title}`} aria-disabled={block !== null || undefined}
+          title={block ?? `Settle (${SETTLE_KEYS})`}
+          onClick={() => { if (block === null) onSettle(item); }}
+          className={cn(ACTION, ON_HOVER, "absolute right-2.5 top-[7px] hidden h-[22px] w-6 [@media(hover:hover)]:grid",
+            block !== null && "cursor-not-allowed text-muted-foreground/45 hover:bg-transparent hover:text-muted-foreground/45")}
+        >
+          <Check className="size-3.5" strokeWidth={2.5} aria-hidden="true" />
+        </button>
+      )}
+      <RowMenu item={item} label={title} onItem={onItem} setError={setError}
+        className={cn(ACTION, ON_HOVER, "size-9 flex-none self-center [@media(hover:hover)]:absolute [@media(hover:hover)]:bottom-[7px] [@media(hover:hover)]:right-2.5 [@media(hover:hover)]:size-auto [@media(hover:hover)]:h-[18px] [@media(hover:hover)]:w-6")} />
       {error && <p role="alert" className="basis-full px-3 pb-2 text-xs text-destructive">{error}</p>}
     </li>
   );
 }
 
-function Rows({ items, now, onItem, preview }: { items: InboxItem[]; now: number; onItem: (i: InboxItem) => void; preview: boolean }) {
-  return <ul className="flex flex-col gap-0.5">{items.map((i) => <Row key={i.sessionId} item={i} now={now} onItem={onItem} preview={preview} />)}</ul>;
-}
-
-/** A quiet group heading: name, count, and for the shelves a chevron that opens them. */
-function GroupHead({ label, count, open, onToggle, id }: { label: string; count: number; open?: boolean; onToggle?: () => void; id: string }) {
-  const body = (
-    <>
-      <span className="font-medium text-foreground/90">{label}</span>
-      <span className="tabular-nums text-muted-foreground">{count}</span>
-      {onToggle && <span className="ml-auto"><Chevron open={!!open} /></span>}
-    </>
-  );
-  return onToggle ? (
-    <h2 className="mb-1">
-      <button
-        type="button" id={id} aria-expanded={open} onClick={onToggle}
-        className="flex min-h-9 w-full items-center gap-2 rounded-md px-3 text-sm outline-none hover:bg-accent/50 focus-visible:ring-2 focus-visible:ring-ring/60"
-      >{body}</button>
-    </h2>
-  ) : (
-    <h2 id={id} className="mb-1 flex min-h-9 items-center gap-2 px-3 text-sm">{body}</h2>
-  );
-}
-
-/** An open group; empty ones are not shown. With `cap`, rows past it hide behind a counted "N more" toggle. */
-function Group({ label, items, now, onItem, preview, cap }: {
-  label: string; items: InboxItem[]; now: number; onItem: (i: InboxItem) => void; preview: boolean; cap?: number;
-}) {
-  const [all, setAll] = useState(false);
-  const id = `inbox-${label.toLowerCase().replace(/\s+/g, "-")}`;
-  if (items.length === 0) return null;
-  const hidden = cap !== undefined && !all ? Math.max(0, items.length - cap) : 0;
+function Rows({ items, now, onItem, quiet, settle }: { items: InboxItem[]; now: number; onItem: (i: InboxItem) => void; quiet?: boolean; settle: boolean }) {
   return (
-    <section aria-labelledby={id} className="mb-5">
-      <GroupHead id={id} label={label} count={items.length} />
-      <Rows items={hidden ? items.slice(0, cap) : items} now={now} onItem={onItem} preview={preview} />
-      {cap !== undefined && items.length > cap && (
-        <button type="button" aria-expanded={all} onClick={() => setAll((v) => !v)}
-          className="mt-0.5 flex min-h-9 items-center gap-1 rounded-md px-3 text-sm text-muted-foreground outline-none hover:bg-accent/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/60">
-          {all ? "Show fewer" : `${hidden} more`}<Chevron open={all} />
-        </button>
-      )}
-    </section>
+    <ul className="flex flex-col gap-px">
+      {items.map((i) => <Row key={i.sessionId} item={i} now={now} onItem={onItem} quiet={!!quiet && rowMark(i) === null} settle={settle} />)}
+    </ul>
   );
 }
 
-/** A group that starts collapsed (Working, Snoozed, Settled); not shown while empty. */
-function Shelf({ label, items, now, onItem, preview }: { label: string; items: InboxItem[]; now: number; onItem: (i: InboxItem) => void; preview: boolean }) {
+/** A collapsed shelf under the list (Working, Snoozed, Settled); not shown while empty. */
+function Shelf({ label, items, now, onItem, settle }: { label: string; items: InboxItem[]; now: number; onItem: (i: InboxItem) => void; settle: boolean }) {
   const [open, setOpen] = useState(false);
-  const id = `inbox-${label.toLowerCase().replace(/\s+/g, "-")}`;
+  const id = `inbox-${label.toLowerCase()}`;
   if (items.length === 0) return null;
   return (
-    <section aria-labelledby={id} className="mb-1">
-      <GroupHead id={id} label={label} count={items.length} open={open} onToggle={() => setOpen((o) => !o)} />
-      <Collapse open={open}><div className="pb-3"><Rows items={items} now={now} onItem={onItem} preview={preview} /></div></Collapse>
+    <section aria-labelledby={id}>
+      <h2>
+        <button
+          type="button" id={id} aria-expanded={open} onClick={() => setOpen((o) => !o)}
+          className="flex min-h-9 w-full items-center gap-2 rounded-md px-3 text-sm text-muted-foreground outline-none hover:bg-accent/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/60"
+        >
+          <Chevron open={open} />
+          <span className="font-medium">{label}</span>
+          <span className="ml-auto tabular-nums">{items.length}</span>
+        </button>
+      </h2>
+      <Collapse open={open}><div className="pb-2"><Rows items={items} now={now} onItem={onItem} settle={settle} /></div></Collapse>
     </section>
   );
 }
 
-/** Every session by what it needs: needs you (an answer, a failure, a finished run you have not seen, a lost
- *  agent), working, idle, then the snoozed and settled shelves. Live over the SSE stream; polled every 5 s while the
- *  stream is down. */
+/** After a settle: "Settled <title> · ⌘Z to undo" for a few seconds, longer while the pointer or the keyboard is on it.
+ *  The live region is always mounted so a screen reader hears each settle once. */
+function SettleNotice({ onUndo }: { onUndo: () => void }) {
+  const { notice } = useSettleState();
+  const [held, setHeld] = useState(false);
+  useEffect(() => {
+    if (!notice || held) return;
+    const t = setTimeout(() => settler.expire(notice.id), NOTICE_MS);
+    return () => clearTimeout(t);
+  }, [notice, held]);
+  useEffect(() => { if (!notice) setHeld(false); }, [notice]);
+  return (
+    <div role="status" aria-live="polite" aria-atomic="true"
+      onPointerEnter={() => setHeld(true)} onPointerLeave={() => setHeld(false)}
+      onFocus={() => setHeld(true)} onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setHeld(false); }}>
+      {notice && (
+        <div className="flex min-h-11 items-center gap-2 rounded-lg border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-lg">
+          <Check className="size-3.5 flex-none text-emerald-600 dark:text-emerald-400" strokeWidth={2.5} aria-hidden="true" />
+          <span className="flex-none">Settled</span>
+          <span className="min-w-0 flex-1 truncate text-muted-foreground">{notice.title}</span>
+          <span className="sr-only">. {MOD}Z to undo.</span>
+          <button type="button" onClick={onUndo} title={`Undo the settle (${MOD}Z)`}
+            className="flex h-7 flex-none items-center gap-1.5 rounded-md bg-foreground/[0.07] px-2 text-xs text-foreground/85 outline-none hover:bg-foreground/[0.12] focus-visible:ring-2 focus-visible:ring-ring/60">
+            <Undo2 className="size-3.5" aria-hidden="true" /><span aria-hidden="true">{MOD}Z to undo</span><span className="sr-only">Undo</span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The inbox as one list: what asks for the owner pinned on top, the longest wait first, then everything else that is
+ *  not working, snoozed or settled, newest first (inboxList), and those three as collapsed shelves under it. A row
+ *  settles in one gesture (its ✓, ⌘⇧S), undone with ⌘Z while the notice shows. Live over the SSE stream; polled
+ *  every 5 s while the stream is down. */
 export function Inbox() {
   const [items, setItems] = useState<InboxItem[] | null>(null);
   const now = useNow(15_000);
+  const { notice } = useSettleState();
   const { paused, pollError, badFrame } = useEventStream({
     enabled: true,
     onInboxList: setItems,
@@ -231,39 +259,78 @@ export function Inbox() {
     onInbox: (item) => setItems((cur) => (cur === null ? cur : upsertInbox(cur, item))),
   });
   const g = items ? groupInbox(items) : null;
-  const split = g ? splitNeedsYou(g.needsYou) : null;
+  const list = g ? inboxList(g) : [];
   // A row action answers the session's new item: shown at once, the SSE event that follows is the same.
   const onItem = (item: InboxItem) => setItems((cur) => (cur === null ? cur : upsertInbox(cur, item)));
+  const listRef = useRef<HTMLDivElement | null>(null);
+
+  // A settled row leaves: the keyboard moves on to the row that takes its place (or the one above the last).
+  const settle = (item: InboxItem) => {
+    const li = listRef.current?.querySelector<HTMLElement>(`[data-inbox-row="${CSS.escape(item.sessionId)}"]`);
+    const hadFocus = !!li && li.contains(document.activeElement);
+    const nextId = ((li?.nextElementSibling ?? li?.previousElementSibling) as HTMLElement | null)?.dataset.inboxRow;
+    void settler.settle(item).then((next) => {
+      if (!next) return;
+      onItem(next);
+      if (hadFocus && nextId) requestAnimationFrame(() => listRef.current?.querySelector<HTMLElement>(`[data-inbox-row="${CSS.escape(nextId)}"] a`)?.focus());
+    });
+  };
+  const undo = () => { void settler.undo().then((back) => { if (back) onItem(back); }); };
+  const settleRef = useRef(settle);
+  settleRef.current = settle;
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const noticeShown = notice !== null;
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (settleShortcut(e, MAC)) {
+        const id = (document.activeElement?.closest("[data-inbox-row]") as HTMLElement | null)?.dataset.inboxRow;
+        const item = id ? itemsRef.current?.find((i) => i.sessionId === id) : undefined;
+        if (!item || item.attention.section === "settled" || item.attention.section === "snoozed") return;
+        e.preventDefault();
+        settleRef.current(item);
+      } else if (claimsUndo(e, MAC, { noticeShown, focusOwnsUndo: focusOwnsUndo(document.activeElement as HTMLInputElement | null) })) {
+        e.preventDefault();
+        undo();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [noticeShown]);
 
   return (
-    <AppPage title="Inbox" sub="What needs you first, then what finished, then the rest.">
+    <AppPage title="Inbox" sub="What asks for you on top, then the rest, newest first.">
       {(paused || badFrame) && (
         <p role="status" className="mb-4 rounded-md border border-amber-600/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-300">
           {paused ? `live updates paused — refreshing every 5 s${pollError ? ` (last refresh failed: ${pollError})` : ""}` : `live update dropped: ${badFrame}`}
         </p>
       )}
       {!g ? (pollError ? <p role="alert" className="text-sm text-destructive">{pollError}</p> : <RowsSkeleton rows={4} />) : (
-        <>
-          <ShowAgent.Provider value={mixedAgents(items!)}>
-          <div className="-mx-3 max-w-[720px]">
-            {split!.action.length === 0 && (
-              <p className="mb-5 flex min-h-9 items-center gap-2 px-3 text-sm text-muted-foreground">
+        <ShowAgent.Provider value={mixedAgents(items!)}>
+        <SettleRow.Provider value={settle}>
+          <div ref={listRef} className="-mx-3 max-w-[720px]" data-inbox-column>
+            {list.length === 0 ? (
+              <p className="mb-3 flex min-h-9 items-center gap-2 px-3 text-sm text-muted-foreground">
                 <CircleCheck className="size-4 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />Nothing waiting for you
               </p>
+            ) : (
+              <section aria-label="Inbox" className="mb-3"><Rows items={list} now={now} onItem={onItem} quiet settle /></section>
             )}
-            <Group label="Needs you" items={split!.action} now={now} onItem={onItem} preview />
-            <Group label="Finished" items={split!.finished} now={now} onItem={onItem} preview={false} cap={5} />
-            <Group label="Idle" items={g.idle} now={now} onItem={onItem} preview={false} />
             {g.working.length + g.snoozed.length + g.settled.length > 0 && (
-              <div className="border-t pt-2">
-                <Shelf label="Working" items={g.working} now={now} onItem={onItem} preview />
-                <Shelf label="Snoozed" items={g.snoozed} now={now} onItem={onItem} preview />
-                <Shelf label="Settled" items={g.settled} now={now} onItem={onItem} preview={false} />
+              <div className="border-t pt-1.5">
+                <Shelf label="Working" items={g.working} now={now} onItem={onItem} settle />
+                <Shelf label="Snoozed" items={g.snoozed} now={now} onItem={onItem} settle={false} />
+                <Shelf label="Settled" items={g.settled} now={now} onItem={onItem} settle={false} />
               </div>
             )}
+            <div className="sticky bottom-20 z-10 mt-3 flex flex-col gap-2 px-3 lg:bottom-4">
+              <SettleProblem />
+              <SettleNotice onUndo={undo} />
+            </div>
           </div>
-          </ShowAgent.Provider>
-        </>
+        </SettleRow.Provider>
+        </ShowAgent.Provider>
       )}
     </AppPage>
   );

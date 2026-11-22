@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Attention, InboxItem } from "../../shared/thread";
-import { groupInbox, inboxHref, mixedAgents, plainPreview, projectBadge, reasonLabel, reasonStatus, rowStatus, rowTitle, statusParts, shelfBlock, shortAgo, snoozeTimes, splitNeedsYou, threadHeading, upsertInbox } from "./inboxView";
+import { asks, branchLabel, groupInbox, inboxHref, inboxList, rowMark, secondLine, mixedAgents, plainPreview, projectBadge, reasonLabel, reasonStatus, rowStatus, rowTitle, statusParts, shelfBlock, shortAgo, snoozeTimes, splitNeedsYou, threadHeading, upsertInbox } from "./inboxView";
 
 const item = (sessionId: string, attention: Attention, runtime: InboxItem["runtime"] = "chat"): InboxItem => ({
   sessionId, runtime, title: sessionId, project: "p", repo: "r", agent: "claude", attention, lastText: null,
@@ -168,4 +168,69 @@ test("mixedAgents: a row names its agent only while the visible rows use more th
   expect(mixedAgents([a, { ...a, sessionId: "b" }])).toBe(false);
   expect(mixedAgents([])).toBe(false);
   expect(mixedAgents([a, { ...a, sessionId: "b", agent: "codex" }])).toBe(true);
+});
+
+test("inboxList: asks pinned on top oldest first, then finished and idle together newest first; no cap", () => {
+  const rows = Array.from({ length: 12 }, (_, n) => item(`idle-${n}`, { section: "idle", reason: null, since: 100 + n }));
+  const list = inboxList(groupInbox([
+    ...rows,
+    item("done-new", { section: "needs_you", reason: "completed", since: 500 }),
+    item("fail", { section: "needs_you", reason: "failed", since: 30 }),
+    item("ask-old", { section: "needs_you", reason: "request", since: 5 }),
+    item("done-old", { section: "needs_you", reason: "completed", since: 50 }),
+    item("limit", { section: "needs_you", reason: "rate-limited", since: 40 }),
+    item("work", { section: "working", reason: "running", since: 999 }),
+    item("snz", { section: "snoozed", reason: null, since: 998, until: 2_000 }),
+    item("set", { section: "settled", reason: null, since: 997 }),
+  ]));
+  const ids = list.map((i) => i.sessionId);
+  expect(ids.slice(0, 5)).toEqual(["ask-old", "fail", "limit", "done-new", "idle-11"]);
+  expect(ids.at(-1)).toBe("done-old");
+  expect(ids).toHaveLength(17);
+  expect(ids).not.toContain("work");
+  expect(ids).not.toContain("snz");
+  expect(ids).not.toContain("set");
+});
+
+test("asks: a request or a failure in needs-you, not a finish", () => {
+  expect(asks(item("a", { section: "needs_you", reason: "request", since: 1 }))).toBe(true);
+  expect(asks(item("a", { section: "needs_you", reason: "ci-failed", since: 1 }))).toBe(true);
+  expect(asks(item("a", { section: "needs_you", reason: "completed", since: 1 }))).toBe(false);
+  expect(asks(item("a", { section: "snoozed", reason: "failed", since: 1 }))).toBe(false);
+});
+
+test("rowMark: a mark only when there is something to say", () => {
+  const mark = (section: Attention["section"], reason: Attention["reason"]) => rowMark(item("x", { section, reason, since: 1 }));
+  expect(mark("needs_you", "request")).toEqual({ label: "Answer", tone: "action" });
+  expect(mark("needs_you", "failed")).toEqual({ label: "Failed", tone: "danger" });
+  expect(mark("needs_you", "rate-limited")).toEqual({ label: "Limit", tone: "danger" });
+  expect(mark("needs_you", "disconnected")).toEqual({ label: "Offline", tone: "danger" });
+  expect(mark("needs_you", "bridge-behind")).toEqual({ label: "Behind", tone: "danger" });
+  expect(mark("needs_you", "ci-failed")).toEqual({ label: "CI failed", tone: "danger" });
+  expect(mark("needs_you", "completed")).toEqual({ label: "Done", tone: "done" });
+  expect(mark("idle", null)).toBeNull();
+  expect(mark("working", "running")).toBeNull();
+  expect(mark("settled", "completed")).toBeNull();
+  expect(mark("snoozed", "failed")).toBeNull();
+});
+
+test("branchLabel: a session's own numbered branch says only what the title does not", () => {
+  const b = (branch: string | null | undefined, title = "Fix it") => branchLabel({ ...item("dev-r-3", { section: "idle", reason: null, since: 1 }), title, branch });
+  expect(b(undefined)).toBeNull();
+  expect(b("")).toBeNull();
+  expect(b("feature/upload")).toBe("feature/upload");
+  expect(b("session/r-3")).toBe("#3");
+  expect(b("session/r-3", "p/r")).toBeNull();
+  expect(b("session/r-x")).toBe("session/r-x");
+});
+
+test("secondLine: an ask says what it asks; any other row where it runs", () => {
+  const ask = { ...item("a", { section: "needs_you", reason: "request", since: 1 }), lastText: "Run the **migration**?" };
+  expect(secondLine(ask)).toBe("r · Run the migration?");
+  expect(secondLine({ ...ask, lastText: null })).toBe("r · waiting for your answer");
+  const idle = { ...item("i", { section: "idle", reason: null, since: 1 }), lastText: "All done" };
+  expect(secondLine(idle)).toBe("p/r");
+  expect(secondLine({ ...idle, branch: "feature/x" })).toBe("p/r · feature/x");
+  const working = { ...item("w", { section: "working", reason: "running", since: 1 }), lastText: "Updating tokens" };
+  expect(secondLine(working)).toBe("p/r · Updating tokens");
 });

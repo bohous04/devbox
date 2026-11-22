@@ -166,3 +166,55 @@ export function sessionTitle(s: { sessionId: string; name: string | null; projec
 /** Whether the inbox mixes agents: only then does a row name its agent (the Apple apps' InboxView.mixedAgents).
  *  With one agent everywhere the label says nothing. */
 export const mixedAgents = (items: InboxItem[]): boolean => new Set(items.map((i) => i.agent)).size > 1;
+
+/** A row that asks something of the owner (a request or a failure): pinned on top, and its second line says what. */
+export const asks = (i: InboxItem): boolean => i.attention.section === "needs_you" && i.attention.reason !== "completed";
+
+/** The inbox as one list (the Mac sidebar's MacSidebarLayout.list): what asks pinned on top, the longest wait first,
+ *  as devd orders it; then the finished and the idle rows together, newest first. The owner chose this over T3 Code's
+ *  pure recency, so a question never sinks under newer finishes. Working, snoozed and settled stay on their shelves. */
+export function inboxList(g: ReturnType<typeof groupInbox>): InboxItem[] {
+  const { action, finished } = splitNeedsYou(g.needsYou);
+  return [...action, ...[...finished, ...g.idle].sort((a, b) => b.attention.since - a.attention.since)];
+}
+
+export type MarkTone = "action" | "danger" | "done";
+
+const MARK: Partial<Record<NonNullable<Attention["reason"]>, { label: string; tone: MarkTone }>> = {
+  request: { label: "Answer", tone: "action" },
+  completed: { label: "Done", tone: "done" },
+  failed: { label: "Failed", tone: "danger" },
+  "rate-limited": { label: "Limit", tone: "danger" },
+  disconnected: { label: "Offline", tone: "danger" },
+  "bridge-behind": { label: "Behind", tone: "danger" },
+  "ci-failed": { label: "CI failed", tone: "danger" },
+};
+
+/** The mark of a row that needs the owner, by its reason (a run that finished unseen is Done); null for every other
+ *  row, which shows its age instead (MacInboxRow.word). */
+export function rowMark(i: InboxItem): { label: string; tone: MarkTone } | null {
+  const { section, reason } = i.attention;
+  return section === "needs_you" && reason !== null ? MARK[reason] ?? null : null;
+}
+
+/** What tells a session's branch apart, or null when that says nothing: a session's own numbered branch
+ *  (`session/<repo>-<n>`) is "#n", and nothing when the title already ends in that number (InboxView.branchLabel). */
+export function branchLabel(i: InboxItem): string | null {
+  const b = i.branch;
+  if (!b) return null;
+  const own = `session/${i.repo}-`;
+  const n = b.startsWith(own) ? b.slice(own.length) : "";
+  if (!/^[0-9]+$/.test(n)) return b;
+  return rowTitle(i) === `${i.repo} #${n}` ? null : `#${n}`;
+}
+
+/** A row's second line (MacInboxRow.secondLine). A row that asks says what (the message, or the reason without one).
+ *  Any other row says where it runs: project/repo and what distinguishes its branch, and on the working and snoozed
+ *  shelves, where the latest message is the point, that message. */
+export function secondLine(i: InboxItem): string {
+  const message = i.lastText !== null ? plainPreview(i.lastText) : "";
+  if (asks(i)) return `${i.repo} · ${message || reasonLabel(i.attention.reason)}`;
+  const parts = [`${i.project}/${i.repo}`, branchLabel(i)];
+  if (i.attention.section === "working" || i.attention.section === "snoozed") parts.push(message);
+  return parts.filter(Boolean).join(" · ");
+}
