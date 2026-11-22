@@ -402,6 +402,8 @@ struct MacNewSessionSheet: View {
     let onOpen: (String) -> Void
     /// Sees every change of the picks (the key test); the app passes none.
     let onPicks: ((MacNewSession.Picks) -> Void)?
+    /// How long the finished page holds; a test of a key or click sets it long, so only that can open the session.
+    let holdSeconds: TimeInterval
 
     @State private var tree: [TreeProject]?
     @State private var treeError: String?
@@ -420,8 +422,9 @@ struct MacNewSessionSheet: View {
     /// `tree`, `picks` and `phase` preset the sheet for the screenshot test; the app passes none.
     init(actions: SessionActions, onStarted: @escaping () async -> Void, onOpen: @escaping (String) -> Void,
          tree: [TreeProject]? = nil, picks: MacNewSession.Picks = .init(), phase: MacNewSession.Phase = .form,
-         onPicks: ((MacNewSession.Picks) -> Void)? = nil) {
+         onPicks: ((MacNewSession.Picks) -> Void)? = nil, holdSeconds: TimeInterval = MacNewSession.holdSeconds) {
         self.actions = actions
+        self.holdSeconds = holdSeconds
         self.onStarted = onStarted
         self.onOpen = onOpen
         self.onPicks = onPicks
@@ -467,7 +470,7 @@ struct MacNewSessionSheet: View {
         .task(id: heldSession) {
             guard let held = heldSession, case .created(let t, _) = phase else { return }
             announce(MacNewSession.createdAnnouncement(t))
-            try? await Task.sleep(for: .seconds(MacNewSession.holdSeconds))
+            try? await Task.sleep(for: .seconds(holdSeconds))
             guard !Task.isCancelled else { return }
             open(held)
         }
