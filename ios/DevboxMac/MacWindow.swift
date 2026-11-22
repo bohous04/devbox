@@ -172,7 +172,7 @@ struct MacInboxSidebar: View {
     /// Key, active or inactive: a tmux session in a window that becomes key again is being looked at.
     @Environment(\.controlActiveState) private var activeState
     /// This sidebar's window, once it is in one.
-    @State private var windowNumber: Int?
+    @State private var window: ObjectIdentifier?
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 15)) { context in
@@ -251,16 +251,18 @@ struct MacInboxSidebar: View {
         .focusedSceneValue(\.macSettle, settleAction)
         .modifier(MacSettleFocus(settler: state.settler) { Task { await state.settler.undo(in: store) } })
         // ⌘Z is taken only in a window whose sidebar shows the notice (MacAppState).
-        .background(WindowConfigurator { window in DispatchQueue.main.async { windowNumber = window.windowNumber } })
-        .onChange(of: windowNumber) { old, new in
+        .background(WindowConfigurator { w in DispatchQueue.main.async { window = ObjectIdentifier(w) } })
+        .onChange(of: window) { old, new in
             if let old { state.settler.leftSidebar(window: old) }
             if let new { state.settler.showingSidebar(window: new) }
         }
-        .onDisappear { if let windowNumber { state.settler.leftSidebar(window: windowNumber) } }
+        .onDisappear { if let window { state.settler.leftSidebar(window: window) } }
         // Seen only in the window the owner is using. The selected row is marked only where that leaves it in place
         // (MacSettler.seenMoves); otherwise when he leaves it, so no row jumps from under the pointer.
         .onChange(of: selection) { old, new in
             state.settler.actionTaken()
+            // Not key: a selection changed from elsewhere (a notification, a link) is no look, so the row left is
+            // not marked either. Its finish then stays until he picks it again; better than clearing one unseen.
             guard activeState == .key else { return }
             markSeen(old)
             markSeen(new, selected: true)
@@ -731,7 +733,9 @@ struct MacInboxRow: View {
             }
         }
         .onHover { hovering = $0 }
+        #if DEBUG
         .modifier(MacForcedProminence(on: emphasizedForShot))
+        #endif
         .help(spoken)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(spoken)
@@ -758,6 +762,7 @@ struct MacInboxRow: View {
     }
 }
 
+#if DEBUG
 /// The screenshot test's stand-in for the focused selection (MacInboxRow.debugEmphasized).
 private struct MacForcedProminence: ViewModifier {
     let on: Bool
@@ -766,6 +771,7 @@ private struct MacForcedProminence: ViewModifier {
         if on { content.environment(\.backgroundProminence, .increased) } else { content }
     }
 }
+#endif
 
 /// The row's Settle as a VoiceOver action (the row is one element, so its ✓ is not reachable on its own).
 private struct MacSettleAccessibility: ViewModifier {

@@ -72,7 +72,7 @@ final class MacAppState: ObservableObject {
                 let responder = event.window?.firstResponder
                 guard let self, let inbox = self.inbox, let window = event.window,
                       MacSettler.claimsUndo(flags: event.modifierFlags, key: event.charactersIgnoringModifiers ?? "",
-                                            noticeShown: self.settler.notice != nil && self.settler.sidebarWindows.contains(window.windowNumber),
+                                            noticeShown: self.settler.notice != nil && self.settler.sidebarWindows.contains(ObjectIdentifier(window)),
                                             focusOwnsUndo: responder is NSText || responder is TerminalView)
                 else { return event }
                 Task { await self.settler.undo(in: inbox) }

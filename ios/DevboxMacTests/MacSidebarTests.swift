@@ -187,4 +187,24 @@ final class MacSidebarTests: XCTestCase {
         let third = await settler.seen(unknown, in: store)
         XCTAssertEqual(third, .skipped, "no third try for the same finish")
     }
+
+    /// Selecting a row fires two triggers at once: one post, the other skipped while it is in flight.
+    func testSimultaneousSeenPostsOnce() async throws {
+        let store = try await fixtureStore()
+        let settler = MacSettler()
+        let tmux = try item("dev-lumen-sketch", "needs_you", reason: "failed", since: 9, runtime: "tmux")
+        async let a = settler.seen(tmux, in: store)
+        async let b = settler.seen(tmux, in: store)
+        let results = await [a, b]
+        XCTAssertEqual(results.filter { $0 == .posted }.count, 1, "\(results)")
+        XCTAssertEqual(results.filter { $0 == .skipped }.count, 1, "\(results)")
+
+        let gone = try item("dev-gone", "needs_you", reason: "failed", since: 9, runtime: "tmux")
+        async let c = settler.seen(gone, in: store)
+        async let d = settler.seen(gone, in: store)
+        let failed = await [c, d]
+        XCTAssertEqual(failed.filter { $0 == .failed }.count, 1, "a skipped call does not use up the retry: \(failed)")
+        let retry = await settler.seen(gone, in: store)
+        XCTAssertEqual(retry, .failed, "the one retry is still there")
+    }
 }

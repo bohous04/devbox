@@ -18,13 +18,17 @@ final class MacSettler: ObservableObject {
     @Published private(set) var notice: Notice?
     /// The last settle, undo or seen that failed, with why; the sidebar shows it until dismissed (`dismissProblem`).
     @Published private(set) var problem: String?
-    /// The windows whose sidebar shows the notice now (window numbers): ⌘Z is taken in those only.
-    private(set) var sidebarWindows: Set<Int> = []
+    /// The windows whose sidebar shows the notice now: ⌘Z is taken in those only. By identity, as a window's number
+    /// is -1 until it is ordered in.
+    private(set) var sidebarWindows: Set<ObjectIdentifier> = []
 
     private let lifetime: Duration
     private let voiceOver: () -> Bool
-    /// Seen posts per finish ("id@since"): a failed one is tried once more, a done one never again.
-    private var seenAttempts: [String: Int] = [:]
+    /// Seen posts per finish ("id@since"): one at a time (several triggers fire together), a done one never again,
+    /// a failed one tried once more.
+    private var seenInFlight: Set<String> = []
+    private var seenDone: Set<String> = []
+    private var seenFailures: [String: Int] = [:]
     /// The finish whose failure `problem` shows, and the finishes whose failure the owner dismissed (not raised again).
     private var problemSeenKey: String?
     private var dismissedSeen: Set<String> = []
@@ -60,8 +64,8 @@ final class MacSettler: ObservableObject {
     /// would drop into the newest-first part; a finish keeps its time there (devd keeps `since`) and stays put.
     static func seenMoves(_ i: InboxItem) -> Bool { MacSidebarLayout.asks(i) }
 
-    func showingSidebar(window: Int) { sidebarWindows.insert(window) }
-    func leftSidebar(window: Int) { sidebarWindows.remove(window) }
+    func showingSidebar(window: ObjectIdentifier) { sidebarWindows.insert(window) }
+    func leftSidebar(window: ObjectIdentifier) { sidebarWindows.remove(window) }
 
     /// `checked: false` skips the client's own refusal, so a test can see devd's.
     func settle(_ item: InboxItem, in store: InboxStore, checked: Bool = true) async {
@@ -109,14 +113,16 @@ final class MacSettler: ObservableObject {
     @discardableResult
     func seen(_ item: InboxItem, in store: InboxStore) async -> Seen {
         let key = "\(item.sessionId)@\(item.attention.since)"
-        let attempts = seenAttempts[key, default: 0]
-        guard Self.wantsSeen(item), attempts < 2 else { return .skipped }
-        seenAttempts[key] = attempts + 1
+        guard Self.wantsSeen(item), !seenDone.contains(key), !seenInFlight.contains(key), seenFailures[key, default: 0] < 2
+        else { return .skipped }
+        seenInFlight.insert(key)
+        defer { seenInFlight.remove(key) }
         do {
             try await store.seen(item.sessionId)
-            seenAttempts[key] = 2
+            seenDone.insert(key)
             return .posted
         } catch {
+            seenFailures[key, default: 0] += 1
             if !dismissedSeen.contains(key) {
                 report("Couldn't mark “\(InboxView.rowTitle(item))” seen: \(chatErrorText(error))", seen: key)
             }
