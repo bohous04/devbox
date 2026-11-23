@@ -107,8 +107,8 @@ def signature(path, hash_content=True):
         # metadata; mode+inode+rdev below still catch a replacement. Rejecting them
         # made every End of a dind session fail permanently.
         special = not (stat.S_ISREG(s.st_mode) or stat.S_ISDIR(s.st_mode) or stat.S_ISLNK(s.st_mode))
-        # Metadata alone misses same-size rewrites within one filesystem timestamp
-        # tick. Every regular file is hashed before AND after preservation.
+        # Metadata alone misses same-size rewrites within one filesystem timestamp tick.
+        # Callers either hash content or rule that out (prepare_end: stopped writers + a gap).
         content = ((digest(p) if hash_content else None) if stat.S_ISREG(s.st_mode) else os.readlink(p) if stat.S_ISLNK(s.st_mode)
                    else f'rdev:{s.st_rdev}' if special else None)
         after = p.lstat()
@@ -256,29 +256,34 @@ class Guard:
             raise RuntimeError(f'borg {args[0]} failed (rc={p.returncode}): ' + p.stderr.decode(errors='replace')[-800:])
         return p.stdout
 
-    def archive(self, paths, kind, shared=(), require_stable=True, verify_only=None):
+    def archive(self, paths, kind, shared=(), require_stable=True, verify_only=None, hash_content=True):
         """`shared` = Git common store of a repo other live sessions keep writing to
         (new objects, refs, their worktrees/*). It is archived, but not required to
         be stable: removal never deletes it, and requiring it would deny every End
         while any sibling session commits. Only `paths` authorize deletion.
         `verify_only` limits the full read-back to these archived paths (what the caller
-        deletes); None reads back the whole archive."""
+        deletes); None reads back the whole archive. hash_content=False: see prepare_end."""
         paths = [Path(p).resolve() for p in paths]
         shared = [Path(p).resolve() for p in shared if Path(p).resolve() not in paths]
         if not paths or any(p == Path('/') for p in paths + shared):
             raise RuntimeError('Unsafe archive path')
         name = 'storage-guard-' + kind + '-' + time.strftime('%Y%m%dT%H%M%S') + '-' + uuid.uuid4().hex[:8]
         dest = self.c['borg_repo'] + '::' + name
+        sign = lambda p: signature(p, hash_content)
         if require_stable:
-            before = {str(p): signature(p) for p in paths}
+            before = {str(p): sign(p) for p in paths}
         else:
             # Batch mode: a path busy while hashing is left out of `before`, so the caller keeps it.
             before = {}
             for p in paths:
                 try:
-                    before[str(p)] = signature(p)
+                    before[str(p)] = sign(p)
                 except (RuntimeError, OSError):
                     pass
+        if not hash_content:
+            # Without content hashes a write must land in a later timestamp tick than the
+            # `before` stat to be seen; borg reading only after this gap guarantees that.
+            time.sleep(1.1)
         # Exit code 1 is also a failure here: changing files cannot authorize deletion.
         # With shared sources a warning can only come from them — owned paths are
         # re-verified by signature below, so rc=1 is accepted in that case alone.
@@ -289,7 +294,7 @@ class Guard:
         self.borg(['extract', '--dry-run', dest, *check])
         # require_stable=False: the caller re-checks every path against `before` itself and
         # deletes only the unchanged ones (a batch must not fail on one busy worktree).
-        if require_stable and before != {str(p): signature(p) for p in paths}:
+        if require_stable and before != {str(p): sign(p) for p in paths}:
             raise RuntimeError('Source changed during backup; deletion denied')
         self.audit('archive-verified', archive=name, paths=list(before), shared=list(map(str, shared)))
         return name, before
@@ -675,6 +680,8 @@ class Guard:
         sidecar = json.loads(side.stdout)[0] if side.returncode == 0 else None
         if sidecar:
             run([DOCKER,'stop','--time','30','dind-'+name],timeout=90)
+        writers = [name] + (['dind-'+name] if sidecar else [])
+        started = self.stopped(writers)
         paths, shared = self.managed_sources(c)
         if sidecar:
             paths += [Path(m['Source']) for m in sidecar['Mounts'] if m['Destination'] == '/var/lib/docker']
@@ -682,7 +689,13 @@ class Guard:
         # (git worktree remove). The shared Git store stays on disk; re-downloading it (28 GiB for
         # the largest repo) on every End proved nothing about the deleted data.
         check = paths + worktree_admin_dirs(paths, shared)
-        path_archive, source_signatures = self.archive(paths, 'end-data', shared, verify_only=check) if paths else (None, {})
+        # Metadata signatures (inode/size/mtime/ctime, no content hash). Owner decision 2026-11-23:
+        # hashing every file twice cost ~17 min for a 37 GiB workspace. Sound because both writers
+        # are stopped for the whole window (checked below: same StartedAt, not running) and borg
+        # reads each file >1 tick after its `before` stat (archive sleeps), so any write after
+        # borg's read sets a newer ctime than recorded; ctime cannot be set from userspace.
+        path_archive, source_signatures = (self.archive(paths, 'end-data', shared, verify_only=check, hash_content=False)
+                                           if paths else (None, {}))
         # Export streams directly to encrypted offsite Borg, never to the local disk.
         name_archive = 'storage-guard-end-rootfs-' + time.strftime('%Y%m%dT%H%M%S') + '-' + c['Id'][:12]
         dest = self.c['borg_repo'] + '::' + name_archive
@@ -716,7 +729,9 @@ class Guard:
                 if extract.poll() is None:
                     extract.kill()
                     extract.wait()
-        if source_signatures != {str(p):signature(p) for p in paths}:
+        if self.stopped(writers) != started:
+            raise RuntimeError('Session was started during the backup; removal denied')
+        if source_signatures != {str(p):signature(p, hash_content=False) for p in paths}:
             raise RuntimeError('Mounted data changed; removal denied')
         result = dict(container_id=c['Id'], name=name, verified_at=time.time(), data_archive=path_archive,
                       rootfs_archive=name_archive, signatures=source_signatures,
@@ -725,6 +740,19 @@ class Guard:
         atomic(destfile,result)
         self.audit('end-preserved',name=name,data_archive=path_archive,rootfs_archive=name_archive)
         return result
+
+    def stopped(self, names):
+        """StartedAt of each container; raises unless all are stopped."""
+        out = {}
+        for n in names:
+            r = subprocess.run([DOCKER,'inspect',n],capture_output=True)
+            if r.returncode:
+                raise RuntimeError(f'Cannot inspect {n}; removal denied')
+            st = json.loads(r.stdout)[0]['State']
+            if st.get('Running') or st.get('Restarting'):
+                raise RuntimeError(f'{n} is running during the backup; removal denied')
+            out[n] = st.get('StartedAt')
+        return out
 
     def end_ready(self, c, fresh=0):
         """fresh=N: accept a full check done within N seconds without walking again.

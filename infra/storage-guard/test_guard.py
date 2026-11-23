@@ -209,18 +209,19 @@ class Safety(unittest.TestCase):
 
     def end_fixture(self):
         """A stopped session whose workspace is a linked worktree of a shared bare repo."""
-        common=self.root/'repo.git';(common/'objects').mkdir(parents=True)
-        admin=common/'worktrees'/'dev-x';admin.mkdir(parents=True);(admin/'HEAD').write_text('ref: refs/heads/s\n')
-        ws=self.root/'_sessions'/'dev-x';ws.mkdir(parents=True);(ws/'.git').write_text(f'gitdir: {admin}\n')
+        common=self.root/'repo.git';(common/'objects').mkdir(parents=True,exist_ok=True)
+        admin=common/'worktrees'/'dev-x';admin.mkdir(parents=True,exist_ok=True);(admin/'HEAD').write_text('ref: refs/heads/s\n')
+        ws=self.root/'_sessions'/'dev-x';ws.mkdir(parents=True,exist_ok=True);(ws/'.git').write_text(f'gitdir: {admin}\n')
         c={'Id':'abc123456789ff','Name':'/dev-x','State':{'Running':False},
            'Mounts':[{'Source':str(ws),'Destination':'/workspace'},{'Source':str(common),'Destination':str(common)}]}
         return c,ws,common,admin
 
-    def run_prepare_end(self,c,tar_rc=0):
+    def run_prepare_end(self,c,tar_rc=0,during=lambda:None,real_archive=False):
         borg_calls=[];archived={}
         class Proc:
             def __init__(self,args,**k):
                 borg_calls.append(list(map(str,args)));self.stdout=open(os.devnull,'rb')
+                if 'extract' in args:during()
             def wait(self,timeout=None):return 0
             def poll(self):return 0
             def kill(self):pass
@@ -230,9 +231,9 @@ class Safety(unittest.TestCase):
                 return SimpleNamespace(returncode=0 if args[2]=='dev-x' else 1,stdout=json.dumps([c]).encode(),stderr=b'')
             if args[0]=='tar':return SimpleNamespace(returncode=tar_rc,stdout=b'',stderr=b'')
             borg_calls.append(args);return SimpleNamespace(returncode=0,stdout=b'',stderr=b'')
-        def fake_archive(paths,kind,shared=(),require_stable=True,verify_only=None):
+        def fake_archive(paths,kind,shared=(),require_stable=True,verify_only=None,hash_content=True):
             archived.update(paths=paths,shared=shared,verify_only=verify_only)
-            return 'data-archive',{str(Path(p).resolve()):guard.signature(Path(p).resolve()) for p in paths}
+            return 'data-archive',{str(Path(p).resolve()):guard.signature(Path(p).resolve(),hash_content) for p in paths}
         def fake_borg(args,**k):
             borg_calls.append(['borg',*args]);return b''
         def fake_run(args,**k):
@@ -240,9 +241,11 @@ class Safety(unittest.TestCase):
                 return (str(Path(c['Mounts'][1]['Source']))+'\n').encode()
             return b''
         with patch.object(guard.subprocess,'run',side_effect=fake_sub_run),patch.object(guard.subprocess,'Popen',Proc), \
-             patch.object(guard,'run',side_effect=fake_run),patch.object(self.g,'archive',side_effect=fake_archive), \
-             patch.object(self.g,'borg',side_effect=fake_borg):
-            result=self.g.prepare_end('dev-x')
+             patch.object(guard,'run',side_effect=fake_run),patch.object(self.g,'borg',side_effect=fake_borg):
+            if real_archive:
+                return self.g.prepare_end('dev-x'),archived,borg_calls
+            with patch.object(self.g,'archive',side_effect=fake_archive):
+                result=self.g.prepare_end('dev-x')
         return result,archived,borg_calls
 
     def test_end_reads_back_deleted_data_but_not_the_shared_git_store(self):
@@ -266,6 +269,32 @@ class Safety(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'validation'):
             self.run_prepare_end(c,tar_rc=2)
         self.assertFalse((self.g.state/'prepared'/(c['Id']+'.json')).exists())
+
+    def test_metadata_signature_catches_same_size_rewrite_during_backup(self):
+        # Content is not hashed; archive() waits >1 timestamp tick before borg reads, so any later
+        # write moves ctime even when size and mtime are forced back.
+        p=self.root/'work';p.mkdir();(p/'f').write_text('one')
+        def borg(args,allow_warning=False):
+            if args[0]=='extract':
+                st=(p/'f').stat();(p/'f').write_text('two');os.utime(p/'f',ns=(st.st_atime_ns,st.st_mtime_ns))
+            return b''
+        with patch.object(guard,'digest',side_effect=AssertionError('content hashed')),patch.object(self.g,'borg',side_effect=borg):
+            with self.assertRaisesRegex(RuntimeError,'changed'):self.g.archive([p],'test',hash_content=False)
+
+    def test_end_never_hashes_content(self):
+        c,ws,*_=self.end_fixture();(ws/'f').write_text('data')
+        with patch.object(guard,'digest',side_effect=AssertionError('content hashed')):
+            result,_,_=self.run_prepare_end(c,real_archive=True)
+        self.assertTrue((self.g.state/'prepared'/(c['Id']+'.json')).exists())
+        self.assertTrue(all(x[7] is None for x in result['signatures'][str(ws)] if x[0].endswith('/f')))
+
+    def test_end_denied_when_session_started_during_backup(self):
+        # Metadata signatures are only sound while no writer runs (owner decision 2026-11-23).
+        for state in ({'Running':True},{'Running':False,'StartedAt':'later'}):
+            c,*_=self.end_fixture();c['State']['StartedAt']='first'
+            with self.assertRaisesRegex(RuntimeError,'removal denied'):
+                self.run_prepare_end(c,during=lambda:c['State'].update(state))
+            self.assertFalse((self.g.state/'prepared'/(c['Id']+'.json')).exists())
 
     @unittest.skipUnless(Path('/proc').is_dir(), 'Linux procfs integration test')
     def test_reference_scan_detects_open_file(self):
