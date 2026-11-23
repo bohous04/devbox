@@ -119,6 +119,21 @@ export interface InboxItem {
    *  unlike lastText. null for tmux sessions, an empty thread, or a first message with nothing that reads as words.
    *  Optional: older devd does not send it. */
   topic?: string | null;
+  /** A settle ends the session: when (epoch ms), while its undo grace runs; null when no end is pending. Optional:
+   *  older devd does not send it. */
+  endsAt?: number | null;
+  /** Why the last end after a settle failed: the session is back in the inbox. null when none failed. Optional: older
+   *  devd does not send it. */
+  endError?: string | null;
+  /** The settle's end runs now (it can take minutes): the row sits in Settled, neither undoable nor continuable
+   *  yet; its transcript replaces it when the end is done. Optional: older devd does not send it. */
+  ending?: boolean;
+  /** Only in POST settle's answer: ms from devd's now to endsAt, so a client bounds its Undo without comparing its own
+   *  clock with devd's. */
+  endsIn?: number | null;
+  /** Why the auto rule leaves this quiet session alive ("Uncommitted changes", "Worktree state unknown"): an end
+   *  would delete work nobody committed. null when nothing holds it. Optional: older devd does not send it. */
+  autoEndHold?: string | null;
 }
 
 /** Bridge housekeeping that once went into threads as notices: a restart (resumed, nothing to act on) and devd's

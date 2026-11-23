@@ -91,10 +91,20 @@ class InboxSettler: ObservableObject {
     /// When the iPhone marks an open tmux session seen: it was opened, left, or the app came back while it is open.
     enum Moment { case opened, left, foreground }
 
+    /// A settle waiting for the owner's yes to devd's question (a waiting or working agent, uncommitted changes).
+    /// `window`: the Mac window whose gesture it was, where alone the question shows; nil on the iPhone.
+    struct Confirming: Equatable {
+        let item: InboxItem
+        let question: String
+        var window: ObjectIdentifier? = nil
+    }
+
     /// The last settle, while it can still be undone.
     @Published private(set) var notice: Notice?
     /// The last settle, undo or seen that failed, with why; shown until dismissed (`dismissProblem`).
     @Published private(set) var problem: String?
+    /// The settle the owner is asked about (devd's 409 question to `settle`), answered by `confirm` or `cancelConfirm`.
+    @Published private(set) var confirming: Confirming?
 
     private let lifetime: Duration
     private let voiceOver: @MainActor () -> Bool
@@ -131,11 +141,15 @@ class InboxSettler: ObservableObject {
         #endif
     }
 
-    /// Why the row cannot be settled now (devd refuses it with 409 request-open), or nil.
-    static func block(_ i: InboxItem) -> String? { InboxView.shelfBlock(i) }
-
     /// Whether the row offers Settle at all: not when it is already on the settled or snoozed shelf.
     static func canSettle(_ i: InboxItem) -> Bool { ![.settled, .snoozed].contains(i.attention.section) }
+
+    /// Whether a shelved row can go back to the inbox: not while its end runs (devd refuses it, session-ending).
+    static func canUnsettle(_ i: InboxItem) -> Bool { !canSettle(i) && i.ending != true }
+
+    /// A settled session still alive (settled before settles ended the session): its menu offers the end itself.
+    /// Not while its grace or its end runs (inboxView.ts canEnd).
+    static func canEnd(_ i: InboxItem) -> Bool { i.attention.section == .settled && i.endsAt == nil && i.ending != true }
 
     /// A tmux session's finish or failure clears once the owner has looked at it (POST /seen). A chat session marks
     /// its thread seen itself (ThreadStore), and waiting, working or idle sessions have nothing to clear.
@@ -162,25 +176,49 @@ class InboxSettler: ObservableObject {
         return i.runtime == .tmux && i.attention.section == .idle
     }
 
-    /// `checked: false` skips the client's own refusal, so a test can see devd's.
-    func settle(_ item: InboxItem, in store: InboxStore, checked: Bool = true) async {
+    /// How long the undo notice shows: its lifetime (until the next action with VoiceOver, nil), never past the
+    /// session's end, when an undo can no longer take the settle back. `endsIn`: devd's ms to the end from the
+    /// settle's answer (devd's endsAt is on devd's clock, which this device's may not match).
+    static func noticeLifetime(_ lifetime: Duration, endsIn: Int?, voiceOver: Bool) -> Duration? {
+        guard let endsIn else { return voiceOver ? nil : lifetime }
+        let left = Duration.milliseconds(max(0, endsIn))
+        return voiceOver ? left : min(lifetime, left)
+    }
+
+    /// Settles, which ends the session after devd's grace. When devd asks first (a waiting or working agent,
+    /// uncommitted changes), its question waits for `confirm`, shown in `window` only (the Mac's; nil on the iPhone).
+    func settle(_ item: InboxItem, in store: InboxStore, window: ObjectIdentifier? = nil) async {
+        await settle(item, in: store, confirmed: false, window: window)
+    }
+
+    /// The owner said yes to `c` (the alert hands it over: dismissing it may clear `confirming` before its button runs).
+    func confirm(_ c: Confirming, in store: InboxStore) async {
+        confirming = nil
+        await settle(c.item, in: store, confirmed: true)
+    }
+
+    func cancelConfirm() { confirming = nil }
+
+    private func settle(_ item: InboxItem, in store: InboxStore, confirmed: Bool, window: ObjectIdentifier? = nil) async {
         let title = InboxView.rowTitle(item)
-        if checked, let why = Self.block(item) {
-            report("Couldn't settle “\(title)”: \(why)")
-            return
-        }
         do {
-            try await store.settle(item.sessionId)
+            try await store.settle(item.sessionId, confirm: confirmed)
         } catch {
-            report("Couldn't settle “\(title)”: \(chatErrorText(error))")
+            if !confirmed, let question = InboxView.settleConfirmation(error) {
+                confirming = Confirming(item: item, question: question, window: window)
+            } else {
+                report("Couldn't settle “\(title)”: \(chatErrorText(error))")
+            }
             return
         }
         let next = Notice(sessionId: item.sessionId, title: title)
         notice = next
-        AccessibilityNotification.Announcement("Settled \(title), \(undoHint)").post()
-        guard !voiceOver() else { return }
-        Task { [weak self, lifetime] in
-            try? await Task.sleep(for: lifetime)
+        AccessibilityNotification.Announcement("Settled \(title), the session ends, \(undoHint)").post()
+        let endsIn = store.items?.first { $0.sessionId == item.sessionId }?.endsIn
+        guard let shown = Self.noticeLifetime(lifetime, endsIn: endsIn, voiceOver: voiceOver())
+        else { return }
+        Task { [weak self] in
+            try? await Task.sleep(for: shown)
             if self?.notice?.id == next.id { self?.notice = nil }
         }
     }
@@ -252,5 +290,27 @@ class InboxSettler: ObservableObject {
     func report(_ text: String, seen key: String? = nil) {
         problem = text
         problemSeenKey = key
+    }
+}
+
+/// devd's question before a settle (InboxSettler.confirming), on the iPhone and the Mac. `window`: the Mac window this
+/// modifier sits in; the settler is the app's, so only the window whose gesture asked shows it (nil on the iPhone).
+struct SettleConfirmation: ViewModifier {
+    @ObservedObject var settler: InboxSettler
+    let store: InboxStore
+    var window: ObjectIdentifier? = nil
+
+    static func shows(_ c: InboxSettler.Confirming?, in window: ObjectIdentifier?) -> Bool { c != nil && c?.window == window }
+
+    func body(content: Content) -> some View {
+        let shown = Self.shows(settler.confirming, in: window) ? settler.confirming : nil
+        content.alert(shown?.question ?? "",
+                      isPresented: Binding(get: { shown != nil }, set: { if !$0 { settler.cancelConfirm() } }),
+                      presenting: shown) { c in
+            Button("End Session", role: .destructive) { Task { await settler.confirm(c, in: store) } }
+            Button("Cancel", role: .cancel) { settler.cancelConfirm() }
+        } message: { c in
+            Text("“\(InboxView.rowTitle(c.item))” is settled and ends in a few seconds; Undo still brings it back until then.")
+        }
     }
 }

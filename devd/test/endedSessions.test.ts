@@ -55,7 +55,7 @@ test("recordEnded keeps a chat session's archived thread as an ended transcript"
     id: "dev-acme-app-20261120-101500", sessionId: "dev-acme-app", runtime: "chat", title: "Login fix",
     folder: "acme", project: "acme", repo: "app", agent: "claude", branch: "feat/x",
     topic: "Fix the login form validation", lastText: "Fixed it; the email check now trims spaces.", endedAt: 5_000, continueMode: "handoff",
-    transcript: "complete",
+    transcript: "complete", keptWorktree: null, keptWorktreeRemoved: false,
   });
   expect(listEnded(db)).toEqual([e]);
   expect(getEnded(db, e.id)?.native_thread).toBe("0b1c2d3e-0000-4000-8000-000000000001");

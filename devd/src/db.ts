@@ -245,6 +245,20 @@ export function openDb(path: string): Database {
   db.run(`CREATE TABLE IF NOT EXISTS session_attention (
     session_id TEXT PRIMARY KEY, settled_at INTEGER, settled_reason TEXT,
     snooze_until INTEGER, snooze_kind TEXT, updated_at INTEGER NOT NULL)`);
+  // A settle ends the session (sessionInbox.ts): end_at is when, after the undo grace; end_error the last end that
+  // failed. Rows settled before then stay alive until the auto rule ends them: their clock starts at this migration
+  // (updated_at), so the first deploy does not end every one of them at once.
+  const attentionCols = (db.query("PRAGMA table_info(session_attention)").all() as { name: string }[]).map((c) => c.name);
+  if (!attentionCols.includes("end_at")) {
+    db.transaction(() => {
+      db.run(`ALTER TABLE session_attention ADD COLUMN end_at INTEGER`);
+      db.run(`ALTER TABLE session_attention ADD COLUMN end_error TEXT`);
+      db.query(`UPDATE session_attention SET updated_at=? WHERE settled_at IS NOT NULL`).run(Date.now());
+    })();
+  }
+  // When the settle's end started running (it cannot be taken back then): a restart resumes it whatever the session's
+  // state says, since its container may be gone already.
+  if (!attentionCols.includes("end_started_at")) db.run(`ALTER TABLE session_attention ADD COLUMN end_started_at INTEGER`);
   // When the owner last looked at a session, despite the table's name for chat sessions too (POST /api/sessions/:id/seen
   // for tmux, /thread/seen for chat). The auto-settle clock counts it (autoSettleDue). For tmux it is also the seen
   // marker: a done or failed state that began at or before it is seen (tmuxAttention); chat's marker is the thread
@@ -257,6 +271,10 @@ export function openDb(path: string): Database {
     agent TEXT NOT NULL, runtime TEXT NOT NULL, title TEXT NOT NULL, branch TEXT, topic TEXT, last_text TEXT,
     ended_at INTEGER NOT NULL, archive_dir TEXT NOT NULL, store_file TEXT NOT NULL,
     native_harness TEXT, native_thread TEXT, hidden_at INTEGER, transcript TEXT NOT NULL DEFAULT 'complete')`);
+  // Where an end left the worktree because it held uncommitted work (endSessionKeepingWork); NULL when it went.
+  if (!(db.query("PRAGMA table_info(ended_sessions)").all() as { name: string }[]).some((c) => c.name === "kept_worktree")) {
+    db.run(`ALTER TABLE ended_sessions ADD COLUMN kept_worktree TEXT`);
+  }
   // The PR of a session's pushed branch as the PR watch last saw it (prWatch.ts). Kept across devd restarts so a
   // CI failure is notified once and a merge settles once. One row per session, deleted with it (deleteSession).
   // First deploy of the PR watch: the table is new, so PRs that are already failing or merged are not news. The
@@ -1178,17 +1196,25 @@ export type SnoozeKind = "time" | "reset";
 export interface SessionAttentionRow {
   session_id: string; settled_at: number | null; settled_reason: SettleReason | null;
   snooze_until: number | null; snooze_kind: SnoozeKind | null; updated_at: number;
+  /** When the settle ends the session (null: no end pending); the last end's error (null: none). */
+  end_at: number | null; end_error: string | null;
+  /** When the end started running (null: not started); omitted by writers that start nothing. */
+  end_started_at?: number | null;
 }
 export function getSessionAttention(db: Database, sessionId: string): SessionAttentionRow | null {
   return (db.query(`SELECT * FROM session_attention WHERE session_id=?`).get(sessionId) as SessionAttentionRow | null) ?? null;
+}
+/** Sessions with an end pending (a settle within its grace, or one devd went down during). */
+export function pendingEnds(db: Database): { session_id: string; end_at: number; settled_reason: SettleReason; end_started_at: number | null }[] {
+  return db.query(`SELECT session_id, end_at, settled_reason, end_started_at FROM session_attention WHERE end_at IS NOT NULL`).all() as { session_id: string; end_at: number; settled_reason: SettleReason; end_started_at: number | null }[];
 }
 /** Sessions whose snooze ends after `now`. */
 export function snoozedSessionIds(db: Database, now: number): string[] {
   return (db.query(`SELECT session_id FROM session_attention WHERE snooze_until > ?`).all(now) as { session_id: string }[]).map((r) => r.session_id);
 }
 export function putSessionAttention(db: Database, r: SessionAttentionRow): void {
-  db.query(`INSERT OR REPLACE INTO session_attention (session_id,settled_at,settled_reason,snooze_until,snooze_kind,updated_at)
-    VALUES (?,?,?,?,?,?)`).run(r.session_id, r.settled_at, r.settled_reason, r.snooze_until, r.snooze_kind, r.updated_at);
+  db.query(`INSERT OR REPLACE INTO session_attention (session_id,settled_at,settled_reason,snooze_until,snooze_kind,updated_at,end_at,end_error,end_started_at)
+    VALUES (?,?,?,?,?,?,?,?,?)`).run(r.session_id, r.settled_at, r.settled_reason, r.snooze_until, r.snooze_kind, r.updated_at, r.end_at, r.end_error, r.end_started_at ?? null);
 }
 
 /** When the owner last looked at the session (tmux_seen); null = never. */

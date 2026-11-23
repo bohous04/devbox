@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ChevronRight, Plus, Search, Terminal, Monitor, Star, ShieldCheck, Pencil, Square, RotateCcw, Trash2, ArrowLeftRight, Download, Folder, Box, Bell, Save, Share2 } from "lucide-react";
+import { Check, ChevronRight, Plus, Search, Terminal, Monitor, Star, ShieldCheck, Pencil, Square, RotateCcw, Trash2, ArrowLeftRight, Download, Folder, Box, Bell, Save, Share2 } from "lucide-react";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
   api, type ActivityEvent, type AgentName, type CcStatus, type SessionLive, type SessionUsage,
@@ -18,6 +18,7 @@ import { agoLabel, bytes, compactNumber, czCurrency, durationLabel, stateLabel }
 import { AGENT_IDS, AGENT_PROFILES, agentNameFor, profileFor, tmuxRuntimeBlock } from "../newSession";
 import { CC_EVENT_TYPES, fleetBadge, historyLine, rowState, type HistoryTone } from "../ccUpkeepView";
 import { agentSwitchError } from "../sessionsView";
+import { settleAsking } from "../inboxSettle";
 import { terminalTabUrl } from "../terminalRoute";
 import { useNow, useStore } from "../store";
 import { FormDialog } from "../components/FormDialog";
@@ -324,12 +325,16 @@ function SessionRow({ s, usage, cc, ccLatest, open, onToggle, onChanged, onShare
                     onAction={async () => { await api.restart(s.id); await onChanged(); }} icon={<RotateCcw className="size-4" />}>Restart</ActionButton>
                 ) : <span />}
 
+                {/* Ending is the inbox's settle (one action, owner's call): it ends after the undo grace and keeps a
+                    worktree with work in it. A solo session's workspace delete is a different act and stays. */}
                 {s.solo === 1 ? (
                   <ConfirmButton variant="outline" size="sm" confirmLabel="Delete workspace" onError={setErr}
-                    onConfirm={async () => { await api.end(s.id, "delete"); await onChanged(); }}><Trash2 className="size-4" />End session</ConfirmButton>
+                    onConfirm={async () => { await api.end(s.id, "delete"); await onChanged(); }}><Trash2 className="size-4" />Delete workspace</ConfirmButton>
                 ) : (
-                  <ConfirmButton variant="outline" size="sm" confirmLabel="Yes, end it" onError={setErr}
-                    onConfirm={async () => { await api.end(s.id); await onChanged(); }}><Trash2 className="size-4" />End session</ConfirmButton>
+                  // No undo notice on this page, so it confirms first; devd's own question (uncommitted changes, a working
+                  // agent) follows when it has one.
+                  <ConfirmButton variant="outline" size="sm" confirmLabel="Yes, settle and end it" onError={setErr}
+                    onConfirm={async () => { await settleAsking(api.settle, s.id, async (q) => window.confirm(q)); await onChanged(); }}><Check className="size-4" />Settle</ConfirmButton>
                 )}
 
                 </div>

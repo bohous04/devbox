@@ -16,22 +16,22 @@ final class MacSessionActionsTests: XCTestCase {
         MockURLProtocol.handler = nil
     }
 
-    private func menu(_ runtime: InboxItem.Runtime, _ agent: String, worktree: Bool? = false, accountId: String? = nil,
+    /// `known`: the live list has the session.
+    private func menu(_ runtime: InboxItem.Runtime, _ agent: String, known: Bool = true, accountId: String? = nil,
                       claude: M.Accounts? = nil) -> M.Menu {
         M.menu(sessionId: "dev-shop-cms", runtime: runtime, agent: agent,
-               facts: worktree.map { M.Facts(worktree: $0, accountId: accountId) }, claude: claude ?? accounts, codex: codexAccounts)
+               facts: known ? M.Facts(accountId: accountId) : nil, claude: claude ?? accounts, codex: codexAccounts)
     }
 
     // MARK: - Which items appear
 
-    /// devd refuses agent and account switches on chat sessions (409), so chat gets Rename and End only.
-    func testChatOffersRenameAndEndOnly() {
+    /// devd refuses agent and account switches on chat sessions (409), so chat gets Rename only.
+    func testChatOffersRenameOnly() {
         for agent in ["claude", "codex", "grok"] {
             let m = menu(.chat, agent)
             XCTAssertTrue(m.canRename)
             XCTAssertEqual(m.agents, [], agent)
             XCTAssertNil(m.account, agent)
-            XCTAssertNotNil(m.end)
         }
     }
 
@@ -118,19 +118,10 @@ final class MacSessionActionsTests: XCTestCase {
         XCTAssertEqual(menu(.tmux, "claude", claude: .loaded([])).account?.note, "No usable account")
     }
 
-    /// End says what it deletes, in the CLI's words: a worktree session loses its files, a shared workspace stays.
-    func testEndConfirmationSaysWhetherTheWorktreeIsDeleted() {
-        XCTAssertEqual(menu(.tmux, "claude", worktree: true).end,
-                       M.EndConfirmation(title: "End session dev-shop-cms?",
-                                         message: "Permanent — this session's files are deleted, its branch stays."))
-        XCTAssertEqual(menu(.chat, "claude", worktree: false).end?.message, "Permanent — the workspace stays.")
-    }
-
-    /// Before the live list has the session, its worktree and name are unknown: Rename and End wait.
-    func testUnknownSessionDisablesRenameAndEnd() {
-        let m = menu(.tmux, "claude", worktree: nil)
+    /// Before the live list has the session, its name is unknown: Rename waits.
+    func testUnknownSessionDisablesRename() {
+        let m = menu(.tmux, "claude", known: false)
         XCTAssertFalse(m.canRename)
-        XCTAssertNil(m.end)
         XCTAssertFalse(m.agents.isEmpty)
     }
 
@@ -173,32 +164,6 @@ final class MacSessionActionsTests: XCTestCase {
         let json: [String: Any] = ["sessionId": "dev-shop-cms", "runtime": runtime, "title": "shop/cms", "project": "shop", "repo": "cms",
                                    "agent": agent, "attention": ["section": "idle", "since": 0]]
         return try JSONDecoder().decode(InboxItem.self, from: JSONSerialization.data(withJSONObject: json))
-    }
-
-    /// End never runs from the menu: it opens the confirmation, and only `confirm()` posts it.
-    func testEndAsksBeforeItPosts() async throws {
-        let (model, _) = makeActions { _ in .init(statusCode: 204) }
-        model.requestEnd(try item(), M.EndConfirmation(title: "End session dev-shop-cms?", message: "Permanent — x."), worktree: true)
-        guard case .job(let job)? = model.sheet, case .confirm = job.phase else { return XCTFail("End did not ask first") }
-        XCTAssertTrue(job.destructive)
-        XCTAssertEqual(MockURLProtocol.capturedRequests.count, 0)
-
-        await model.confirm()?.value
-        let req = try XCTUnwrap(MockURLProtocol.capturedRequests.first)
-        XCTAssertEqual(req.url?.path, "/api/sessions/dev-shop-cms/end")
-        XCTAssertEqual(body(req).count, 0, "no soloAction: devd keeps a solo workspace, as the F9 End does")
-        guard case .job(let done)? = model.sheet, case .done(let outcome) = done.phase else { return XCTFail("no outcome") }
-        XCTAssertEqual(outcome, .init(text: "Ended — this session's files are deleted, its branch stays.", tone: .success))
-    }
-
-    /// devd still backing up (202 pending) is said, not reported as done.
-    func testEndPendingIsSaid() async throws {
-        let (model, _) = makeActions { _ in .init(statusCode: 202, data: Data(#"{"pending":true}"#.utf8)) }
-        model.requestEnd(try item(), M.EndConfirmation(title: "End session dev-shop-cms?", message: "Permanent — x."), worktree: true)
-        await model.confirm()?.value
-        guard case .job(let done)? = model.sheet, case .done(let outcome) = done.phase else { return XCTFail("no outcome") }
-        XCTAssertEqual(outcome, .init(text: "Ending dev-shop-cms — backup queued or in progress; cleanup finishes in the background. You'll get a notification.",
-                                      tone: .success))
     }
 
     /// Closing the sheet while a job runs stops the waiting; the outcome is unknown, not a failure.

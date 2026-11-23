@@ -8,7 +8,7 @@ import { api } from "../api";
 import { MessageList } from "../components/chat/MessageList";
 import { OlderItems } from "../components/chat/OlderItems";
 import { EmptyState, RowsSkeleton } from "../components/primitives";
-import { canContinue, continueInFlight, continueLabel, continueOnce, endedTitle, transcriptNote } from "../endedView";
+import { canContinue, continueInFlight, continueLabel, continueOnce, endedTitle, keptWorktreeNote, transcriptNote } from "../endedView";
 import { criticRunIds, emptyHeld, hasOlderThan, olderBeforeSeq, prependOlder, tailView, THREAD_PAGE } from "../threadView";
 
 const NOTHING_QUEUED = new Set<string>();
@@ -103,6 +103,9 @@ function Transcript({ id }: { id: string }) {
           <div className="mx-auto w-full max-w-[42rem] flex-1">
             {transcriptNote(ended.transcript) !== null && (
               <p className="mb-4 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">{transcriptNote(ended.transcript)}</p>
+            )}
+            {keptWorktreeNote(ended) !== null && (
+              <p className="mb-4 break-words rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">{keptWorktreeNote(ended)}</p>
             )}
             {ended.transcript === "missing" ? null : thread.items.length === 0
               ? <EmptyState title="No messages" hint="The session ended before anything was said." />

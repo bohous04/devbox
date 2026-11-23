@@ -251,7 +251,8 @@ final class MacScreenshotTests: XCTestCase {
         }
     }
 
-    /// The row menu's Rename and End sheets (MacSessionActions.swift), drawn on their own as the sheet shows them.
+    /// The row menu's Rename sheet and a job's confirmation sheet (MacSessionActions.swift), drawn on their own as the
+    /// sheet shows them.
     func testSessionActionSheets() throws {
         let actions = MacSessionActions()
         let item = try JSONDecoder().decode(InboxItem.self, from: Data(#"""
@@ -260,11 +261,10 @@ final class MacScreenshotTests: XCTestCase {
             """#.utf8))
         let rename = MacRenameSheet(rename: .init(sessionId: item.sessionId, name: "Run the invoice table migration"),
                                     actions: actions)
-        actions.requestEnd(item, MacSessionMenu.EndConfirmation(title: "End session dev-acme-billing?",
-                                                                message: "Permanent — \(MacSessionMenu.endEffect(worktree: true))."), worktree: true)
+        actions.requestCodexAccount(item, account: MacSessionMenu.Choice(id: "default", label: "Codex main", current: false))
         for look in ["light", "dark"] {
             try shootView(rename, name: "rename-sheet-\(look)", look: look)
-            try shootView(MacSessionTaskSheet(actions: actions), name: "end-sheet-\(look)", look: look)
+            try shootView(MacSessionTaskSheet(actions: actions), name: "job-sheet-\(look)", look: look)
         }
     }
 

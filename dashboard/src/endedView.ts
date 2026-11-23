@@ -43,6 +43,14 @@ export function transcriptNote(t: EndedSession["transcript"]): string | null {
   return null;
 }
 
+/** Where the ended session's uncommitted work stayed (EndedSession.keptWorktree): continue starts a new worktree, so
+ *  the transcript page says it; null when the worktree went with the session. */
+export function keptWorktreeNote(e: Pick<EndedSession, "keptWorktree" | "keptWorktreeRemoved">): string | null {
+  if (!e.keptWorktree) return null;
+  if (e.keptWorktreeRemoved) return `Uncommitted work from this session was kept at ${e.keptWorktree}, since removed.`;
+  return `Uncommitted work from this session was kept on disk at ${e.keptWorktree}. Continuing starts a new worktree without it.`;
+}
+
 /** Continue on the transcript page: a handoff needs the transcript; a resume does not. */
 export function canContinue(e: Pick<EndedSession, "transcript" | "continueMode">): boolean {
   return e.transcript !== "missing" || e.continueMode === "resume";

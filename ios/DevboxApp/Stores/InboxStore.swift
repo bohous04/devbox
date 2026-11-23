@@ -53,9 +53,20 @@ enum InboxView {
         return SnoozeTimes(hour: ms(now) + 3_600_000, morningAt: ms(at), morningLabel: today ? "9:00" : "Tomorrow 9:00")
     }
 
-    /// Why a row cannot be settled or snoozed (devd refuses it with 409 request-open), or nil.
+    /// Why a row cannot be snoozed (devd refuses it with 409 request-open), or nil.
     static func shelfBlock(_ i: InboxItem) -> String? {
         i.attention.reason == .request ? "Answer the open request first" : nil
+    }
+
+    /// A settle whose end failed (devd's endError): the session is back in the inbox.
+    static func endErrorText(_ error: String) -> String { "Couldn't end the session: \(error)" }
+
+    /// devd's question before a settle that needs the owner's yes (409 with a message: a waiting or working agent,
+    /// uncommitted changes; inboxSettle.ts settleConfirmation), or nil when the error is something else.
+    static func settleConfirmation(_ error: Error) -> String? {
+        guard let e = error as? DevdHTTPError, e.statusCode == 409, let message = e.serverDetail,
+              ["request-open", "agent-working", "uncommitted-changes"].contains(e.serverMessage ?? "") else { return nil }
+        return message
     }
 
     static func reasonLabel(_ r: AttentionReason?) -> String {
@@ -127,9 +138,13 @@ enum InboxView {
     /// danger chip still shows there.
     static func rowStatus(_ i: InboxItem) -> Mark? {
         if i.attention.section == .snoozed { return Mark(label: "Snoozed", tone: .quiet) }
+        // The settle's end runs (minutes: devd backs the container up first); its transcript replaces the row when done.
+        if i.ending == true { return Mark(label: "Ending…", tone: .busy) }
         let chip = reasonStatus(i.attention.reason)
         if i.attention.section == .settled { return chip?.tone == .danger ? chip : nil }
-        return i.attention.section == .idle || i.attention.reason == .running ? nil : chip
+        let quiet = i.attention.section == .idle || i.attention.reason == .running ? nil : chip
+        // Why the auto rule leaves this quiet session alive (uncommitted changes): said only when nothing else is.
+        return quiet ?? i.autoEndHold.map { Mark(label: $0, tone: .quiet) }
     }
 
     struct StatusParts: Equatable {
@@ -259,6 +274,14 @@ enum InboxView {
     }
 
     /// What the transcript says about itself when it is not whole; nil when it is.
+    /// Where the ended session's uncommitted work stayed (endedView.ts keptWorktreeNote); nil when the worktree went.
+    static func keptWorktreeNote(_ e: EndedSession) -> String? {
+        e.keptWorktree.map {
+            e.keptWorktreeRemoved ? "Uncommitted work from this session was kept at \($0), since removed."
+                : "Uncommitted work from this session was kept on disk at \($0). Continuing starts a new worktree without it."
+        }
+    }
+
     static func transcriptNote(_ t: EndedSession.TranscriptState) -> String? {
         switch t {
         case .truncated: return "The end of this conversation may be missing: the last read before the session ended stopped short."
@@ -465,8 +488,14 @@ final class InboxStore: ObservableObject {
     private struct SnoozeUntil: Encodable { let until: Int }
     private struct SnoozeUntilReset: Encodable { let untilReset = true }
     private struct Empty: Encodable {}
+    private struct Confirm: Encodable { let confirm = true }
 
-    func settle(_ id: String) async throws { apply(try await client.post("/api/sessions/\(pathSegment(id))/settle", body: Empty())) }
+    /// Ends the session after devd's undo grace. `confirm`: the owner agreed to devd's question (a waiting or working
+    /// agent, uncommitted changes: 409 otherwise, InboxView.settleConfirmation).
+    func settle(_ id: String, confirm: Bool = false) async throws {
+        let path = "/api/sessions/\(pathSegment(id))/settle"
+        apply(confirm ? try await client.post(path, body: Confirm()) : try await client.post(path, body: Empty()))
+    }
     /// Back into the inbox: ends a settle and a snooze.
     func unsettle(_ id: String) async throws { apply(try await client.post("/api/sessions/\(pathSegment(id))/unsettle", body: Empty())) }
     func snooze(_ id: String, until: Int) async throws {

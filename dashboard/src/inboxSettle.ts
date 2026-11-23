@@ -1,7 +1,8 @@
 import type { InboxItem } from "../../shared/thread";
-import { asks, rowTitle, shelfBlock } from "./inboxView";
+import { asks, rowTitle } from "./inboxView";
 
-/** Settling from the inbox in one gesture (the row's ✓, E, ⌘⇧S), the "Settled · ⌘Z to undo" notice that follows it, and
+/** Settling from the inbox in one gesture (the row's ✓, E, ⌘⇧S), which ends the session after devd's undo grace, the
+ *  "Settled · ⌘Z to undo" notice that follows it (gone when the grace is), and
  *  the tmux seen marker: the web's MacSettler (ios/DevboxMac/MacSettle.swift), same rules. Failures are kept in
  *  `problem` for the page to show until dismissed, never dropped. */
 
@@ -51,7 +52,8 @@ export interface SettleState {
 }
 
 interface SettleApi {
-  settle: (id: string) => Promise<InboxItem>;
+  /** `confirm`: the owner agreed to devd's question (settleConfirmation). */
+  settle: (id: string, confirm: boolean) => Promise<InboxItem>;
   unsettle: (id: string) => Promise<InboxItem>;
   seen: (id: string) => Promise<void>;
 }
@@ -70,6 +72,25 @@ export function failureText(e: unknown): string {
   return typeof status === "number" && !text.includes(String(status)) ? `${text} (HTTP ${status})` : text;
 }
 
+/** devd's question before a settle that needs the owner's yes (409 with `message`: a waiting or working agent,
+ *  uncommitted changes), or null when the error is something else. */
+export function settleConfirmation(e: unknown): string | null {
+  const body = (e as { status?: unknown; body?: unknown }).body as { error?: unknown; message?: unknown } | null | undefined;
+  if ((e as { status?: unknown }).status !== 409 || typeof body?.message !== "string") return null;
+  return body.error === "request-open" || body.error === "agent-working" || body.error === "uncommitted-changes" ? body.message : null;
+}
+
+/** Settles `id`, asking devd's question first when it has one (settleConfirmation): the new item, or null when the
+ *  owner said no. Other failures throw. */
+export async function settleAsking(settle: SettleApi["settle"], id: string, ask: (question: string) => Promise<boolean>): Promise<InboxItem | null> {
+  try { return await settle(id, false); }
+  catch (e) {
+    const question = settleConfirmation(e);
+    if (question === null) throw e;
+    return (await ask(question)) ? await settle(id, true) : null;
+  }
+}
+
 export class Settler {
   state: SettleState = { notice: null, problem: null };
   private listeners = new Set<() => void>();
@@ -78,6 +99,10 @@ export class Settler {
    *  comes back stale. Held (no timer) while the pointer or the keyboard is on the notice. */
   private timer: unknown = null;
   private held = false;
+  /** When the notice's session ends, on this device's clock: now + devd's endsIn when the settle answered (devd's
+   *  endsAt is on devd's clock). An undo after it cannot take the settle back, so the notice goes then even while
+   *  held. null: devd did not say (an older devd). */
+  private endsAt: number | null = null;
   /** Seen posts per finish ("id@since"): a failed one is tried once more, a done one never again. */
   private seenAttempts = new Map<string, number>();
   /** The failure `problem` shows when it is about seen, and the ones the owner dismissed (not raised again). */
@@ -86,7 +111,11 @@ export class Settler {
   /** Finishes with a post on its way: the window's focus and visibility events arrive together. */
   private seenInFlight = new Set<string>();
 
-  constructor(private api: SettleApi, private lifetime = 5_000, private timers: Timers = { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) }) {}
+  /** `ask`: devd's question before ending a waiting or working session, or one with uncommitted changes; true to go
+   *  ahead. */
+  constructor(private api: SettleApi, private lifetime = 5_000,
+    private timers: Timers = { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
+    private ask: (question: string) => Promise<boolean> = async (q) => window.confirm(q), private now: () => number = Date.now) {}
 
   subscribe = (fn: () => void): (() => void) => {
     this.listeners.add(fn);
@@ -104,11 +133,13 @@ export class Settler {
   private arm(id: number | null) {
     if (this.timer !== null) this.timers.clear(this.timer);
     this.timer = null;
-    if (id === null || this.held) return;
+    if (id === null) return;
+    const left = this.endsAt === null ? null : Math.max(0, this.endsAt - this.now());
+    if (this.held && left === null) return;
     this.timer = this.timers.set(() => {
       this.timer = null;
       if (this.state.notice?.id === id) this.set({ notice: null });
-    }, this.lifetime);
+    }, this.held ? left! : left === null ? this.lifetime : Math.min(this.lifetime, left));
   }
 
   /** The pointer or the keyboard is on the notice (true) or left it (false: a full lifetime from now). */
@@ -121,11 +152,11 @@ export class Settler {
   /** Settles the row and shows the notice; the session's new item, or null when it was refused (the reason shown). */
   async settle(item: InboxItem): Promise<InboxItem | null> {
     const title = rowTitle(item);
-    const block = shelfBlock(item);
-    if (block) { this.set({ problem: `Couldn't settle “${title}”: ${block}` }); return null; }
-    let next: InboxItem;
-    try { next = await this.api.settle(item.sessionId); }
+    let next: InboxItem | null;
+    try { next = await settleAsking(this.api.settle, item.sessionId, this.ask); }
     catch (e) { this.set({ problem: `Couldn't settle “${title}”: ${failureText(e)}` }); return null; }
+    if (next === null) return null;
+    this.endsAt = next.endsIn == null ? null : this.now() + next.endsIn;
     this.set({ notice: { sessionId: item.sessionId, title, id: this.nextId++ } });
     return next;
   }
@@ -136,7 +167,12 @@ export class Settler {
     if (!undone) return null;
     this.set({ notice: null });
     try { return await this.api.unsettle(undone.sessionId); }
-    catch (e) { this.set({ problem: `Couldn't undo the settle of “${undone.title}”: ${failureText(e)}` }); return null; }
+    catch (e) {
+      // 409 already-ending: the end already runs; devd's message says so better than its code.
+      const message = ((e as { body?: unknown }).body as { message?: unknown } | null | undefined)?.message;
+      this.set({ problem: `Couldn't undo the settle of “${undone.title}”: ${typeof message === "string" ? message : failureText(e)}` });
+      return null;
+    }
   }
 
   /** A seen failure outside `seen` (the inbox could not be read), under `key` so a dismissal holds for it too. */

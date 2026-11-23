@@ -1,7 +1,7 @@
 import { loadRemoteRoute, inspectRemoteContainer, prepareRemoteWorkspace, restoreExactSession, retainRemoteWorkspace, type RemoteRoute } from "../../infra/codex-remote/restoreSession";
 import { archiveChats, archiveStamp } from "./chatArchive";
 import { archiveThreadImages, removeThreadImages } from "./threadImages";
-import { HANDOFF_TRANSCRIPT, recordEnded } from "./endedSessions";
+import { endedAlready, HANDOFF_TRANSCRIPT, recordEnded } from "./endedSessions";
 import type { EndedSession } from "../../shared/ended";
 import { codexRemoteLaunchScope } from "./codexRemoteLaunch";
 import type { Database } from "bun:sqlite";
@@ -623,7 +623,7 @@ export class SessionManager {
   /** After the archive: the chat images go next to the transcript, and the transcript is listed as an ended session.
    *  Never throws (end() deletes the session row after this, the container is already gone); a failure is logged and,
    *  where the owner loses something, notified. `truncated`: the last mirror read stopped short. */
-  private keepTranscript(s: SessionRow, dest: string | null, truncated: boolean) {
+  private keepTranscript(s: SessionRow, dest: string | null, truncated: boolean, keptWorktree: string | null) {
     const id = s.id;
     // A mirror store the archive did not take must not greet a later session that reuses the id.
     try { for (const x of ["", "-wal", "-shm"]) rmSync(join(this.d.root, "_mirrors", `${id}.sqlite${x}`), { force: true }); }
@@ -637,7 +637,12 @@ export class SessionManager {
     try { removeThreadImages(this.d.root, id); }
     catch (e) { console.error(`removing the chat images of ${id} failed, they stay in _inbox/${id}:`, e); }
     try {
-      const ended = recordEnded(this.d.db, s, dest, this.now(), { id: `${id}-${archiveStamp(new Date(this.now()))}`, truncated });
+      // An end resumed after a restart archives nothing new: the first run's row stays, no second "missing" one.
+      if (dest === null && endedAlready(this.d.db, s)) {
+        console.error(`${id}: its ended transcript is listed already (an end resumed after a restart), not listed again`);
+        return;
+      }
+      const ended = recordEnded(this.d.db, s, dest, this.now(), { id: `${id}-${archiveStamp(new Date(this.now()))}`, truncated, keptWorktree });
       if (ended?.transcript === "truncated") console.error(`the ended transcript of ${id} is cut short: the last read did not reach the end`);
       if (ended) this.d.onEnded?.(ended);
     } catch (e) {
@@ -1570,10 +1575,10 @@ export class SessionManager {
     });
   }
 
-  /** `keepWorktree`: do NOT delete the session's working directory. Used by a single caller —
-   *  the automatic cleanup after a scheduled run (autoEnd.ts), when uncommitted work
-   *  remained in the directory. It is not passed on a manual end (F9, `dev end`, dashboard):
-   *  there a human is in the loop and the text tells them what will happen. */
+  /** `keepWorktree`: do NOT delete the session's working directory. Passed by endSessionKeepingWork (autoEnd.ts: the
+   *  cleanup after a scheduled run, and a settle's end) when uncommitted work remained in the directory; the ended
+   *  transcript records where it stayed. It is not passed on a manual End (F9, `dev end`): there a human is in the
+   *  loop and the text tells them what will happen. */
   async end(id: string, soloAction: "keep" | "delete" = "keep", opts: { keepWorktree?: boolean } = {}) {
     return this.locked([id], "end", async () => {
       const s = getSession(this.d.db, id);
@@ -1619,7 +1624,9 @@ export class SessionManager {
       // The chat store is released only now: until the container is gone the bridge may still send events, and
       // the store takes them (isEnding keeps readers out). Closed here, it is archived with no handle open.
       this.d.releaseThread?.(id, true);
-      this.keepTranscript(s, this.keepChats(id), final?.truncated ?? false);
+      // Recorded only when it is on disk: an earlier, cut-short run of this end may have removed it already.
+      const kept = s.worktree && opts.keepWorktree && existsSync(s.worktree) ? s.worktree : null;
+      this.keepTranscript(s, this.keepChats(id), final?.truncated ?? false, kept);
       deleteGitStat(this.d.db, id);
       // The lease belongs to the session — without releasing it the account would look occupied until the
       // period expires and the poller would needlessly keep it at the fast cadence. An error here must not, however,

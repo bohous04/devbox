@@ -253,8 +253,9 @@ struct MacInboxSidebar: View {
             findPending = false
         }
         .sheet(item: $actionsFor) { item in
-            InboxRowActions(item: item, store: store).frame(minWidth: 360, minHeight: 320)
+            InboxRowActions(item: item, store: store) { settle(item) }.frame(minWidth: 360, minHeight: 320)
         }
+        .modifier(SettleConfirmation(settler: state.settler, store: store, window: window))
         .macSessionActions(sessionActions, inbox: store)
         .focusedSceneValue(\.macSettle, settleAction)
         .modifier(MacSettleFocus(settler: state.settler) { Task { await state.settler.undo(in: store) } })
@@ -286,11 +287,11 @@ struct MacInboxSidebar: View {
     /// ⌘⇧S for the selected row; nil when nothing selected can be settled.
     private var settleAction: MacSettleAction? {
         guard let item = selectedItem, MacSettler.canSettle(item) else { return nil }
-        return MacSettleAction(block: MacSettler.block(item)) { settle(item) }
+        return MacSettleAction { settle(item) }
     }
 
     private func settle(_ item: InboxItem) {
-        Task { await state.settler.settle(item, in: store) }
+        Task { await state.settler.settle(item, in: store, window: window) }
     }
 
     /// `look`: he opened the row or came back to the window; an idle tmux session then records the look (devd
@@ -467,16 +468,18 @@ struct MacInboxSidebar: View {
                 Button("Open in New Window") { state.openThread(item.sessionId) }
                 Divider()
                 if MacSettler.canSettle(item) {
-                    let block = MacSettler.block(item)
-                    Button(block.map { "Settle (\($0.prefix(1).lowercased() + $0.dropFirst()))" } ?? "Settle") { settle(item) }
+                    Button("Settle and End") { settle(item) }
                         .keyboardShortcut("s", modifiers: [.command, .shift])
-                        .disabled(block != nil)
                     Button("Snooze…") { actionsFor = item }
+                        .disabled(InboxView.shelfBlock(item) != nil)
                 } else {
-                    Button("Back to the Inbox") {
-                        Task {
-                            do { try await store.unsettle(item.sessionId) } catch {
-                                state.settler.report("Couldn't bring back “\(InboxView.rowTitle(item))”: \(chatErrorText(error))")
+                    if MacSettler.canEnd(item) { Button("Settle and End") { settle(item) } }
+                    if MacSettler.canUnsettle(item) {
+                        Button("Back to the Inbox") {
+                            Task {
+                                do { try await store.unsettle(item.sessionId) } catch {
+                                    state.settler.report("Couldn't bring back “\(InboxView.rowTitle(item))”: \(chatErrorText(error))")
+                                }
                             }
                         }
                     }
@@ -777,6 +780,11 @@ struct MacInboxRow: View {
                         .modifier(MacSelectionTone(color: nil, onSelection: Self.style(.tertiary)))
                 }
             }
+            // A settle whose end failed: devd brought the session back.
+            if let error = item.endError {
+                Text(InboxView.endErrorText(error)).font(.system(size: 11)).lineLimit(2)
+                    .modifier(MacSelectionTone(color: InboxTone.text(.danger), onSelection: Self.style(.primary)))
+            }
         }
         .padding(.vertical, 5)
         .contentShape(Rectangle())
@@ -794,26 +802,23 @@ struct MacInboxRow: View {
         .help(spoken)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(spoken)
-        .modifier(MacSettleAccessibility(settle: settle, block: MacSettler.block(item)))
+        .modifier(MacSettleAccessibility(settle: settle))
     }
 
-    /// The hovered row's ✓, in the state's place; disabled with the reason while a request is open.
+    /// The hovered row's ✓, in the state's place: settles and so ends the session (a working or waiting one asks
+    /// first, InboxSettler.confirming).
     private func settleButton(_ settle: @escaping () -> Void) -> some View {
-        let block = MacSettler.block(item)
-        return Button(action: settle) {
+        Button(action: settle) {
             Image(systemName: "checkmark").font(.system(size: 11, weight: .semibold))
                 .frame(width: 24, height: 16)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .modifier(MacSelectionTone(color: block == nil ? Theme.C.foreground.opacity(0.75) : Theme.C.mutedForeground.opacity(0.45),
-                                   onSelection: Self.style(block == nil ? .primary : .tertiary)))
-        .disabled(block != nil)
-        // On the frame, not the button: a disabled button shows no tooltip of its own.
+        .modifier(MacSelectionTone(color: Theme.C.foreground.opacity(0.75), onSelection: Self.style(.primary)))
         .frame(height: 14)
         .contentShape(Rectangle())
-        .help(block ?? "Settle (⌘⇧S)")
-        .accessibilityLabel("Settle")
+        .help("Settle and end the session (⌘⇧S)")
+        .accessibilityLabel("Settle and End")
     }
 }
 
@@ -831,11 +836,10 @@ private struct MacForcedProminence: ViewModifier {
 /// The row's Settle as a VoiceOver action (the row is one element, so its ✓ is not reachable on its own).
 private struct MacSettleAccessibility: ViewModifier {
     let settle: (() -> Void)?
-    let block: String?
 
     func body(content: Content) -> some View {
-        if let settle, block == nil {
-            content.accessibilityAction(named: "Settle", settle)
+        if let settle {
+            content.accessibilityAction(named: "Settle and End", settle)
         } else {
             content
         }

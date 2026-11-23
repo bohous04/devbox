@@ -632,7 +632,8 @@ export const api = {
    *  session-ending; 404 unknown session. */
   tmuxSeen: (id: string) => j<void>(`/api/sessions/${encodeURIComponent(id)}/seen`, { method: "POST" }),
   // Inbox shelves (any session, tmux too); each answers the session's new inbox item.
-  settle: (id: string) => j<InboxItem>(`/api/sessions/${encodeURIComponent(id)}/settle`, { method: "POST" }),
+  /** Ends the session after devd's undo grace; `confirm` for one whose agent waits or works (409 otherwise). */
+  settle: (id: string, confirm = false) => j<InboxItem>(`/api/sessions/${encodeURIComponent(id)}/settle`, confirm ? post({ confirm: true }) : { method: "POST" }),
   unsettle: (id: string) => j<InboxItem>(`/api/sessions/${encodeURIComponent(id)}/unsettle`, { method: "POST" }),
   snooze: (id: string, to: { until: number } | { untilReset: true }) => j<InboxItem>(`/api/sessions/${encodeURIComponent(id)}/snooze`, post(to)),
   snoozeReset: (id: string) => j<{ resetsAt: number } | { reason: string }>(`/api/sessions/${encodeURIComponent(id)}/snooze-reset`),

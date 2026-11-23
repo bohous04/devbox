@@ -1382,6 +1382,18 @@ struct InboxItem: Decodable, Equatable, Identifiable {
     /// A short title from the first user message (devd, shared/threadTitle.ts), stable for the thread's life; nil
     /// for tmux, an empty thread, or an older devd.
     let topic: String?
+    /// A settle ends the session: when (epoch ms), while devd's undo grace runs; nil when no end is pending or from an
+    /// older devd.
+    var endsAt: Int? = nil
+    /// Why the end after the last settle failed (the session is back in the inbox); nil when none failed.
+    var endError: String? = nil
+    /// The settle's end runs now (minutes): the row sits in Settled, neither undoable nor continuable yet, until its
+    /// transcript replaces it. nil from an older devd.
+    var ending: Bool? = nil
+    /// Only in POST settle's answer: ms from devd's now to `endsAt`, which bounds the Undo without this device's clock.
+    var endsIn: Int? = nil
+    /// Why devd's auto rule leaves this quiet session alive ("Uncommitted changes"); nil when nothing holds it.
+    var autoEndHold: String? = nil
 
     var id: String { sessionId }
 }
@@ -1432,6 +1444,11 @@ struct EndedSession: Decodable, Equatable, Identifiable {
     let continueMode: ContinueMode
     /// How much of the conversation it holds (shared/ended.ts TranscriptState); complete from a devd that predates it.
     var transcript: TranscriptState = .complete
+    /// Where the session's worktree stayed on disk because it held uncommitted work when it ended; nil when it was
+    /// removed (or from an older devd). Continue starts a new worktree, so the transcript says where this one is.
+    var keptWorktree: String? = nil
+    /// The kept worktree is no longer on disk (removed since): the transcript says it was kept, not where it is.
+    var keptWorktreeRemoved: Bool = false
 
     enum TranscriptState: String, Decodable {
         case complete, truncated, missing
@@ -1439,7 +1456,7 @@ struct EndedSession: Decodable, Equatable, Identifiable {
         init(from decoder: Decoder) throws { self = try tolerant(decoder, unknown: .unknown) }
     }
 
-    private enum K: String, CodingKey { case id, sessionId, runtime, title, project, repo, agent, branch, topic, lastText, endedAt, continueMode, transcript }
+    private enum K: String, CodingKey { case id, sessionId, runtime, title, project, repo, agent, branch, topic, lastText, endedAt, continueMode, transcript, keptWorktree, keptWorktreeRemoved }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: K.self)
@@ -1456,6 +1473,8 @@ struct EndedSession: Decodable, Equatable, Identifiable {
         endedAt = try c.decode(Int.self, forKey: .endedAt)
         continueMode = try c.decode(ContinueMode.self, forKey: .continueMode)
         transcript = try c.decodeIfPresent(TranscriptState.self, forKey: .transcript) ?? .complete
+        keptWorktree = try c.decodeIfPresent(String.self, forKey: .keptWorktree)
+        keptWorktreeRemoved = try c.decodeIfPresent(Bool.self, forKey: .keptWorktreeRemoved) ?? false
     }
 }
 

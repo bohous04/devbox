@@ -7,7 +7,7 @@ import { AgentDisconnected, CommandFailed, CommandTimeout, type BridgeLinks } fr
 import { SwitchRefused, type ChatSwitch, type SwitchRequest } from "./chatSwitch";
 import { getSession, type SessionRow } from "./db";
 import type { BusTopic, EventBus } from "./eventBus";
-import { REQUEST_OPEN, type ResetTarget } from "./sessionAttention";
+import { REQUEST_OPEN, settleConfirmation, type ResetTarget } from "./sessionAttention";
 import type { Inbox } from "./sessionInbox";
 import { storedRuntime } from "./sessions";
 import { threadImageByName, threadImageFile } from "./threadImages";
@@ -34,7 +34,13 @@ export interface ThreadApiDeps {
   untilReset?: (s: SessionRow) => ResetTarget;
   /** The session's bridge version from its latest handshake (chatSwitch.ts); null before one or for a 1.0.0 bridge. */
   bridgeVersion: (sessionId: string) => string | null;
+  /** The session worktree's uncommitted changes (null: unreadable) and unpushed commits (null: unknown), for the
+   *  settle's question; a session without a worktree of its own has none to lose. Without it settle answers 503. */
+  worktree?: (s: SessionRow) => Promise<{ changes: string[] | null; unpushed: number | null }>;
 }
+
+/** Unsettle or snooze while the settle's end runs: it cannot be taken back. */
+const ALREADY_ENDING = { error: "already-ending", message: "The session is already ending; it can't be taken back." };
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
@@ -254,19 +260,40 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
     return c.body(null, 204);
   });
   /** Each answers the session's new inbox item. */
-  app.post("/api/sessions/:id/settle", (c) => {
+  /** Settling ends the session (after the inbox's undo grace). One whose agent works or waits for an answer, or whose
+   *  worktree has uncommitted changes, is 409 (settleConfirmation) with the question to ask, until the body says
+   *  `{confirm: true}`. The end keeps such a worktree on disk (endSessionKeepingWork). */
+  app.post("/api/sessions/:id/settle", async (c) => {
     const r = anySession(c, c.req.param("id"));
     if ("res" in r) return r.res;
-    const open = requestOpen(c, r.s);
-    if (open) return open;
-    d.inbox.settle(r.s.id, "manual");
-    return c.json(d.inbox.item(r.s));
+    const text = await c.req.text();
+    let confirm = false;
+    if (text.trim() !== "") {
+      let body: unknown = null;
+      try { body = JSON.parse(text); } catch { /* refused below */ }
+      if (!isRecord(body) || Object.keys(body).some((k) => k !== "confirm") || (body.confirm !== undefined && body.confirm !== true)) {
+        return c.json({ error: "body must be empty or {confirm: true}" }, 400);
+      }
+      confirm = body.confirm === true;
+    }
+    if (!confirm) {
+      if (!d.worktree) return c.json({ error: "the worktree check is not configured" }, 503);
+      const w = r.s.worktree ? await d.worktree(r.s) : { changes: [], unpushed: null };
+      // The session's own attention, not its shelf: a snoozed or settled session may be working.
+      const ask = settleConfirmation({ attention: d.inbox.liveAttention(r.s), worktree: r.s.worktree ?? null, ...w, branch: r.s.branch ?? null });
+      if (ask) return c.json(ask, 409);
+    }
+    d.inbox.settle(r.s.id, "manual", { confirmed: confirm });
+    const item = d.inbox.item(r.s);
+    return c.json({ ...item, endsIn: item.endsAt == null ? null : Math.max(0, item.endsAt - d.inbox.now()) });
   });
   /** Back into the inbox: ends a settle and a snooze. */
   app.post("/api/sessions/:id/unsettle", (c) => {
+    // Before anySession's session-ending: the clients say why their Undo did not take.
+    if (d.inbox.isEnding(c.req.param("id"))) return c.json(ALREADY_ENDING, 409);
     const r = anySession(c, c.req.param("id"));
     if ("res" in r) return r.res;
-    d.inbox.unsettle(r.s.id);
+    if (!d.inbox.unsettle(r.s.id)) return c.json(ALREADY_ENDING, 409);
     return c.json(d.inbox.item(r.s));
   });
   /** `{until}` (epoch ms, in the future) or `{untilReset: true}`; 409 no-active-limit with the reason when the
@@ -286,14 +313,14 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
       if (typeof until !== "number" || !Number.isSafeInteger(until) || until <= d.inbox.now()) {
         return c.json({ error: "until must be a time in the future (epoch ms)" }, 400);
       }
-      d.inbox.snooze(r.s.id, until, "time");
+      if (!d.inbox.snooze(r.s.id, until, "time")) return c.json(ALREADY_ENDING, 409);
       return c.json(d.inbox.item(r.s));
     }
     if (body.untilReset !== true) return c.json({ error: "body must be {until} or {untilReset: true}" }, 400);
     if (!d.untilReset) return noUsage(c);
     const target = d.untilReset(r.s);
     if ("reason" in target) return c.json({ error: "no-active-limit", message: target.reason }, 409);
-    d.inbox.snooze(r.s.id, target.resetsAt, "reset");
+    if (!d.inbox.snooze(r.s.id, target.resetsAt, "reset")) return c.json(ALREADY_ENDING, 409);
     return c.json(d.inbox.item(r.s));
   });
   /** For the snooze menu: `{resetsAt}` or `{reason}` why "until the limit resets" is not possible. */

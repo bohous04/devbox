@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Attention, InboxItem } from "../../shared/thread";
-import { claimsUndo, failureText, FOCUS_LOOK_GAP_MS, focusOwnsUndo, SeenWatch, seenMoves, settleKey, settleShortcut, Settler, wantsSeen } from "./inboxSettle";
+import { claimsUndo, failureText, FOCUS_LOOK_GAP_MS, focusOwnsUndo, SeenWatch, seenMoves, settleAsking, settleKey, settleShortcut, Settler, wantsSeen } from "./inboxSettle";
 
 const item = (sessionId: string, attention: Attention, runtime: InboxItem["runtime"] = "tmux"): InboxItem => ({
   sessionId, runtime, title: sessionId, project: "p", repo: "r", agent: "claude", attention, lastText: null,
@@ -21,7 +21,7 @@ function fakeApi() {
   return {
     calls, errors,
     api: {
-      settle: (id: string) => answer("settle", id).then(() => item(id, { section: "settled", reason: null, since: 1 })),
+      settle: (id: string, confirm: boolean) => answer(confirm ? "settle!" : "settle", id).then(() => ({ ...item(id, { section: "settled", reason: null, since: 1 }), endsAt: 8_000, endsIn: 7_000 })),
       unsettle: (id: string) => answer("unsettle", id).then(() => item(id, { section: "idle", reason: null, since: 1 })),
       seen: (id: string) => answer("seen", id),
     },
@@ -95,13 +95,51 @@ test("settle: shows the undo notice; undo unsettles it once", async () => {
   expect(f.calls).toEqual(["settle a", "unsettle a"]);
 });
 
-test("settle: an open request is refused before devd, with the reason shown", async () => {
+/** devd's 409 before a settle that needs the owner's yes (api.ts ApiError's shape). */
+const needsYes = (error: string, message: string) => Object.assign(new Error(error), { status: 409, body: { error, message } });
+
+test("settle: devd's question (a waiting or working agent, uncommitted changes) is asked; it ends only on yes", async () => {
+  for (const [code, question] of [
+    ["request-open", "The agent is waiting for your answer. End it?"],
+    ["agent-working", "The agent is still working. End it?"],
+    ["uncommitted-changes", "Uncommitted changes stay on disk at /srv/_sessions/q. 3 unpushed commits stay on branch session/q. End it?"],
+  ] as const) {
+    const f = fakeApi();
+    const asked: string[] = [];
+    let yes = false;
+    const s = new Settler(f.api, 5_000, undefined, async (q) => { asked.push(q); return yes; });
+    f.errors.push(needsYes(code, question));
+    expect(await s.settle(done("q"))).toBeNull();
+    expect(f.calls).toEqual(["settle q"]);
+    expect(s.state).toEqual({ notice: null, problem: null });
+    yes = true;
+    f.errors.push(needsYes(code, question));
+    expect(await s.settle(done("q"))).not.toBeNull();
+    expect(f.calls).toEqual(["settle q", "settle q", "settle! q"]);
+    expect(asked).toEqual([question, question]);
+  }
+  // Any other 409 is a failure shown, not a question.
+  const other = fakeApi();
+  const o = new Settler(other.api, 5_000, undefined, async () => { throw new Error("asked"); });
+  other.errors.push(Object.assign(new Error("session-ending"), { status: 409, body: { error: "session-ending" } }));
+  expect(await o.settle(done("x"))).toBeNull();
+  expect(o.state.problem).toContain("session-ending");
+  // A finished session settles without a question.
   const f = fakeApi();
-  const s = new Settler(f.api);
-  expect(await s.settle(item("q", { section: "needs_you", reason: "request", since: 1 }))).toBeNull();
-  expect(f.calls).toEqual([]);
-  expect(s.state.problem).toBe("Couldn't settle “q”: Answer the open request first");
-  expect(s.state.notice).toBeNull();
+  const s = new Settler(f.api, 5_000, undefined, async () => { throw new Error("asked"); });
+  await s.settle(done("a"));
+  expect(f.calls).toEqual(["settle a"]);
+});
+
+test("settleAsking (the Sessions page's settle): asks devd's question, settles on yes, null on no, other errors throw", async () => {
+  const f = fakeApi();
+  f.errors.push(needsYes("uncommitted-changes", "Uncommitted changes stay on disk at /x. End it?"));
+  expect(await settleAsking(f.api.settle, "a", async () => false)).toBeNull();
+  f.errors.push(needsYes("uncommitted-changes", "Uncommitted changes stay on disk at /x. End it?"));
+  expect((await settleAsking(f.api.settle, "a", async () => true))?.attention.section).toBe("settled");
+  expect(f.calls).toEqual(["settle a", "settle a", "settle! a"]);
+  f.errors.push(new Error("boom"));
+  await expect(settleAsking(f.api.settle, "a", async () => true)).rejects.toThrow("boom");
 });
 
 test("settle and undo failures are shown, never dropped", async () => {
@@ -123,9 +161,11 @@ test("settle and undo failures are shown, never dropped", async () => {
 function fakeTimers() {
   let n = 0;
   const due = new Map<number, () => void>();
+  const delays = new Map<number, number>();
   return {
-    timers: { set: (fn: () => void) => { due.set(++n, fn); return n; }, clear: (h: unknown) => { due.delete(h as number); } },
+    timers: { set: (fn: () => void, ms: number) => { due.set(++n, fn); delays.set(n, ms); return n; }, clear: (h: unknown) => { due.delete(h as number); } },
     pending: () => due.size,
+    delays: () => [...due.keys()].map((k) => delays.get(k)),
     fire: () => { const all = [...due.values()]; due.clear(); for (const fn of all) fn(); },
   };
 }
@@ -141,16 +181,37 @@ test("the notice's timer lives in the settler: it ends the notice whatever page 
   expect(await s.undo()).toBeNull();
 });
 
-test("hold keeps the notice while the pointer or the keyboard is on it; letting go starts a full lifetime", async () => {
+test("hold keeps the notice while the pointer or the keyboard is on it, but never past the session's end", async () => {
   const t = fakeTimers();
-  const s = new Settler(fakeApi().api, 5_000, t.timers);
+  // The settle answers endsAt 8000: at 1000 the undo has 7000 ms left.
+  const s = new Settler(fakeApi().api, 5_000, t.timers, undefined, () => 1_000);
   await s.settle(done("a"));
+  expect(t.delays()).toEqual([5_000]);
   s.hold(true);
-  expect(t.pending()).toBe(0);
+  expect(t.delays()).toEqual([7_000]);
   s.hold(false);
-  expect(t.pending()).toBe(1);
+  expect(t.delays()).toEqual([5_000]);
   t.fire();
   expect(s.state.notice).toBeNull();
+});
+
+test("the notice's bound is devd's endsIn from the answer, not endsAt against this device's clock", async () => {
+  const t = fakeTimers();
+  // This device's clock is far off devd's: endsAt (8000, devd's clock) would read as long past.
+  const s = new Settler(fakeApi().api, 5_000, t.timers, undefined, () => 5_000_000);
+  await s.settle(done("a"));
+  s.hold(true);
+  expect(t.delays()).toEqual([7_000]);
+});
+
+test("an undo devd refuses because the end already runs says devd's reason", async () => {
+  const f = fakeApi();
+  const s = new Settler(f.api);
+  await s.settle(done("a"));
+  f.errors.push(Object.assign(new Error("already-ending"), { status: 409, body: { error: "already-ending", message: "The session is already ending; it can't be taken back." } }));
+  expect(await s.undo()).toBeNull();
+  expect(s.state.notice).toBeNull();
+  expect(s.state.problem).toBe("Couldn't undo the settle of “a”: The session is already ending; it can't be taken back.");
 });
 
 test("an undo ends the notice's timer", async () => {

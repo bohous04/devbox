@@ -56,9 +56,9 @@ struct MacWindowCommands: Commands {
                 .disabled(actions == nil)
         }
         CommandMenu("Session") {
-            Button("Settle") { settle?.settle() }
+            Button("Settle and End") { settle?.settle() }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
-                .disabled(settle == nil || settle?.block != nil)
+                .disabled(settle == nil)
             // Listed for discovery and VoiceOver. ⌘Z is only in the title: as a key equivalent it would fire from a
             // text field or the terminal too; MacAppState's monitor owns the key and leaves those their own ⌘Z.
             Button("Undo Settle (⌘Z)") { undoSettle?.undo() }

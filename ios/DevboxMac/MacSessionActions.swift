@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// The terminal's F9 menu (cli/src/manager-view.ts `exitMenuOptions`, run by `handleExit` in cli/src/main.ts) in the
-/// sidebar row's context menu: Rename, Change Agent, Change Account and End. "Back to session" and "Just detach" are
+/// sidebar row's context menu: Rename, Change Agent and Change Account (End is the row's settle). "Back to session" and "Just detach" are
 /// about the terminal tab and have no place here. What the menu offers is decided here, apart from the views, so the
 /// rules are tested on their own.
 enum MacSessionMenu {
@@ -37,11 +37,6 @@ enum MacSessionMenu {
         let note: String?
     }
 
-    struct EndConfirmation: Equatable {
-        let title: String
-        let message: String
-    }
-
     struct Menu: Equatable {
         /// False until the session is in the live list (its current name is needed to prefill the field).
         let canRename: Bool
@@ -49,13 +44,10 @@ enum MacSessionMenu {
         let agents: [Choice]
         /// nil = no Change Account submenu.
         let account: AccountMenu?
-        /// nil until the session is in the live list: what ending deletes depends on its worktree.
-        let end: EndConfirmation?
     }
 
     /// What the live session list knows of the session.
     struct Facts: Equatable {
-        let worktree: Bool
         let accountId: String?
     }
 
@@ -71,8 +63,7 @@ enum MacSessionMenu {
             Choice(id: $0.rawValue, label: AgentProfiles.profile(for: $0).label, current: $0 == current)
         } : []
         return Menu(canRename: facts != nil, agents: agents,
-                    account: switches ? accountMenu(agent: agent, accountId: facts?.accountId, claude: claude, codex: codex) : nil,
-                    end: facts.map { EndConfirmation(title: "End session \(sessionId)?", message: "Permanent — \(endEffect(worktree: $0.worktree)).") })
+                    account: switches ? accountMenu(agent: agent, accountId: facts?.accountId, claude: claude, codex: codex) : nil)
     }
 
     /// Only native Claude Code (the Anthropic pool) and Codex switch accounts (F9: `specFor(agent).anthropicAccount`
@@ -98,11 +89,6 @@ enum MacSessionMenu {
         }
         return AccountMenu(pool: pool, title: pool == .claude ? "Change Account (Claude Code)" : "Change Account (Codex)",
                            automatic: pool == .claude, accounts: accounts, note: note)
-    }
-
-    /// cli/src/format.ts `endEffect`: what ending does to the session's files.
-    static func endEffect(worktree: Bool) -> String {
-        worktree ? "this session's files are deleted, its branch stays" : "the workspace stays"
     }
 
     /// devd/src/agents.ts `conversationCarries`: only a swap within Claude Code keeps the conversation.
@@ -270,18 +256,6 @@ final class MacSessionActions: ObservableObject {
         })
     }
 
-    /// Never runs without the sheet's confirmation (the sheet opens in `.confirm`).
-    func requestEnd(_ item: InboxItem, _ end: MacSessionMenu.EndConfirmation, worktree: Bool) {
-        open(Job(title: end.title, message: end.message, confirmLabel: "End Session", destructive: true,
-                  progress: "Ending \(item.sessionId)…") { [weak self] _ in
-            guard let actions = self?.actions else { throw DevdClientError(description: "Not connected to devd") }
-            let pending = try await actions.endReportingPending(item.sessionId)
-            return Outcome(text: pending
-                ? "Ending \(item.sessionId) — backup queued or in progress; cleanup finishes in the background. You'll get a notification."
-                : "Ended — \(MacSessionMenu.endEffect(worktree: worktree)).", tone: .success)
-        })
-    }
-
     private func open(_ task: Job) {
         sheet = .job(task)
     }
@@ -406,7 +380,7 @@ struct MacSessionMenuItems: View {
     var body: some View {
         let session = live.live?.sessions.first { $0.id == item.sessionId }
         let menu = MacSessionMenu.menu(sessionId: item.sessionId, runtime: item.runtime, agent: item.agent,
-                                       facts: session.map { .init(worktree: $0.worktree != nil, accountId: $0.accountId) },
+                                       facts: session.map { .init(accountId: $0.accountId) },
                                        claude: actions.claude, codex: actions.codex[item.sessionId] ?? .loading)
         Divider()
         Button("Rename Session…") { actions.requestRename(item, name: session?.name) }
@@ -443,11 +417,7 @@ struct MacSessionMenuItems: View {
                 }
             }
         }
-        Divider()
-        Button("End Session…", role: .destructive) {
-            if let end = menu.end, let session { actions.requestEnd(item, end, worktree: session.worktree != nil) }
-        }
-        .disabled(menu.end == nil)
+        // No End here: settling ends a session (the owner's one action for it), from the row's ✓, ⌘⇧S or its menu.
     }
 }
 

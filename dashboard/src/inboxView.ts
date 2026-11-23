@@ -25,9 +25,15 @@ export function snoozeTimes(now: Date): { hour: number; morning: { at: number; l
   return { hour: now.getTime() + 3_600_000, morning: { at, label: today ? "9:00" : "Tomorrow 9:00" } };
 }
 
-/** Why a row cannot be settled or snoozed (devd refuses it with 409 request-open), or null. */
+/** Why a row cannot be snoozed (devd refuses it with 409 request-open), or null. */
 export function shelfBlock(i: InboxItem): string | null {
   return i.attention.reason === "request" ? "Answer the open request first" : null;
+}
+
+/** A settled session still alive (settled before settles ended the session, or its end failed and devd brought it
+ *  back settled): its menu offers the end itself, not only the way back. Not while its grace or its end runs. */
+export function canEnd(i: InboxItem): boolean {
+  return i.attention.section === "settled" && i.endsAt == null && !i.ending;
 }
 
 /** An SSE `inbox` event carries one session's current item: it replaces that session's row. A removal drops it. */
@@ -97,9 +103,13 @@ const CHIP: Record<NonNullable<Attention["reason"]>, { label: string; tone: Stat
 export function rowStatus(i: InboxItem): { label: string; tone: StatusTone } | null {
   const { section, reason } = i.attention;
   if (section === "snoozed") return { label: "Snoozed", tone: "quiet" };
+  // The settle's end runs (minutes: devd backs the container up first); its transcript replaces the row when done.
+  if (i.ending) return { label: "Ending…", tone: "busy" };
   const chip = reasonStatus(reason);
   if (section === "settled") return chip?.tone === "danger" ? chip : null;
-  return section === "idle" || reason === "running" ? null : chip;
+  const quiet = section === "idle" || reason === "running" ? null : chip;
+  // Why the auto rule leaves this quiet session alive (uncommitted changes): said only when nothing else is.
+  return quiet ?? (i.autoEndHold ? { label: i.autoEndHold, tone: "quiet" } : null);
 }
 
 /** The chip for a reason whatever shelf the row is on. */

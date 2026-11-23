@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useId, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { AlarmClock, Check, CircleAlert, CircleCheck, CircleDashed, Ellipsis, MessageCircleQuestion, Undo2 } from "lucide-react";
 import type { EndedSession } from "../../../shared/ended";
@@ -14,7 +14,7 @@ import { agoLabel } from "../format";
 import { profileFor } from "../newSession";
 import { endedHref, endedMetaTail, endedSecondLine, endedTitle, settledShelf, upsertEnded } from "../endedView";
 import { claimsUndo, failureText, focusOwnsUndo, settleKey, settleShortcut } from "../inboxSettle";
-import { badgeSlots, groupInbox, inboxHref, inboxList, metaTail, mixedAgents, projectBadge, reasonLabel, rowStatus, rowTitle, secondLine, shelfBlock, shortAgo, snoozeEnd, snoozeTimes, statusParts, upsertInbox, type StatusTone } from "../inboxView";
+import { badgeSlots, canEnd, groupInbox, inboxHref, inboxList, metaTail, mixedAgents, projectBadge, reasonLabel, rowStatus, rowTitle, secondLine, shelfBlock, shortAgo, snoozeEnd, snoozeTimes, statusParts, upsertInbox, type StatusTone } from "../inboxView";
 import { cn } from "@/lib/utils";
 import { useNow } from "../store";
 import { useEventStream } from "../useEventStream";
@@ -63,16 +63,21 @@ function RowMenu({ item, label, onItem, setError, className }: {
         <Ellipsis className="size-4" aria-hidden="true" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" collisionPadding={16} className="w-64 max-w-[calc(100vw-2rem)]">
-        {section === "settled" || section === "snoozed" ? (
-          <DropdownMenuItem onSelect={() => run(api.unsettle(item.sessionId))}>Back to the inbox</DropdownMenuItem>
+        {item.ending ? (
+          <DropdownMenuItem disabled>Ending… its transcript replaces it when done</DropdownMenuItem>
+        ) : section === "settled" || section === "snoozed" ? (
+          <>
+            {canEnd(item) && <DropdownMenuItem onSelect={() => settle(item)}>Settle and end</DropdownMenuItem>}
+            <DropdownMenuItem onSelect={() => run(api.unsettle(item.sessionId))}>Back to the inbox</DropdownMenuItem>
+          </>
         ) : (
           <>
-            {blocked && <p className="px-2 py-1.5 text-xs text-muted-foreground">{blocked}</p>}
-            <DropdownMenuItem disabled={blocked !== null} onSelect={() => settle(item)}>
-              Settle<span className="ml-auto text-xs tracking-wide text-muted-foreground">E</span>
+            <DropdownMenuItem onSelect={() => settle(item)}>
+              Settle and end<span className="ml-auto text-xs tracking-wide text-muted-foreground">E</span>
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuLabel className="text-xs text-muted-foreground">Snooze</DropdownMenuLabel>
+            {blocked && <p className="px-2 py-1.5 text-xs text-muted-foreground">{blocked}</p>}
             <DropdownMenuItem disabled={blocked !== null} onSelect={() => run(api.snooze(item.sessionId, { until: t.hour }))}>1 hour</DropdownMenuItem>
             <DropdownMenuItem disabled={blocked !== null} onSelect={() => run(api.snooze(item.sessionId, { until: t.morning.at }))}>{t.morning.label}</DropdownMenuItem>
             <DropdownMenuItem
@@ -184,17 +189,15 @@ const HIDE_ON_HOVER = "[@media(hover:hover)]:group-hover:invisible [@media(hover
 function Row({ item, now, onItem, quiet, settle }: { item: InboxItem; now: number; onItem: (i: InboxItem) => void; quiet: boolean; settle: boolean }) {
   const showAgent = useContext(ShowAgent);
   const onSettle = useSettleRow();
-  const blockId = useId();
   const title = rowTitle(item);
-  const block = shelfBlock(item);
   const label = spoken(item, now, title, showAgent);
   const tail = metaTail(item, showAgent);
   const [error, setError] = useState<string | null>(null);
   return (
     <li data-inbox-row={item.sessionId} className="group relative flex min-w-0 flex-wrap rounded-lg transition-colors [@media(hover:hover)]:hover:bg-accent/60 has-[:focus-visible]:bg-accent/60 has-[[data-state=open]]:bg-accent/60">
       <Link
-        to={inboxHref(item)} aria-label={label} title={settle && block === null ? `${label}\nE to settle` : label}
-        aria-keyshortcuts={settle && block === null ? "E" : undefined}
+        to={inboxHref(item)} aria-label={label} title={settle ? `${label}\nE to settle and end` : label}
+        aria-keyshortcuts={settle ? "E" : undefined}
         className="flex min-w-0 flex-1 flex-col gap-0.5 rounded-lg py-2 pl-3 pr-3 outline-none focus-visible:ring-2 focus-visible:ring-ring/60 [@media(hover:none)]:pr-1"
       >
         <span className="flex min-w-0 items-center gap-2">
@@ -217,19 +220,18 @@ function Row({ item, now, onItem, quiet, settle }: { item: InboxItem; now: numbe
       </Link>
       {settle && (
         <button
-          type="button" aria-label={`Settle ${title} (E)`} aria-disabled={block !== null || undefined}
-          aria-describedby={block !== null ? blockId : undefined} aria-keyshortcuts={block === null ? "E" : undefined}
-          title={block ?? `Settle (E or ${SETTLE_CHORD})`}
-          onClick={() => { if (block === null) onSettle(item); }}
-          className={cn(ACTION, ON_HOVER, "absolute right-2.5 top-[7px] hidden h-[22px] w-6 [@media(hover:hover)]:grid",
-            block !== null && "cursor-not-allowed text-muted-foreground/45 hover:bg-transparent hover:text-muted-foreground/45")}
+          type="button" aria-label={`Settle and end ${title} (E)`} aria-keyshortcuts="E"
+          title={`Settle and end the session (E or ${SETTLE_CHORD})`}
+          onClick={() => onSettle(item)}
+          className={cn(ACTION, ON_HOVER, "absolute right-2.5 top-[7px] hidden h-[22px] w-6 [@media(hover:hover)]:grid")}
         >
           <Check className="size-3.5" strokeWidth={2.5} aria-hidden="true" />
-          {block !== null && <span id={blockId} className="sr-only">{block}</span>}
         </button>
       )}
       <RowMenu item={item} label={title} onItem={onItem} setError={setError}
         className={cn(ACTION, ON_HOVER, "size-9 flex-none self-center [@media(hover:hover)]:absolute [@media(hover:hover)]:bottom-[7px] [@media(hover:hover)]:right-2.5 [@media(hover:hover)]:size-auto [@media(hover:hover)]:h-[18px] [@media(hover:hover)]:w-6")} />
+      {/* A settle whose end failed: devd brought the session back (sessionInbox.ts runEnd). */}
+      {item.endError && <p role="alert" className="basis-full px-3 pb-2 text-xs text-destructive">Couldn't end the session: {item.endError}</p>}
       {error && <p role="alert" className="basis-full px-3 pb-2 text-xs text-destructive">{error}</p>}
     </li>
   );
@@ -328,7 +330,7 @@ function SettleNotice({ onUndo }: { onUndo: () => void }) {
       {notice && (
         <div className="flex min-h-11 items-center gap-2 rounded-lg border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-lg">
           <Check className="size-3.5 flex-none text-emerald-600 dark:text-emerald-400" strokeWidth={2.5} aria-hidden="true" />
-          <span className="flex-none">Settled</span>
+          <span className="flex-none" title="The session ends unless you undo now">Settled · ending</span>
           <span className="min-w-0 flex-1 truncate text-muted-foreground">{notice.title}</span>
           <span className="sr-only">. {MOD}Z to undo.</span>
           <button type="button" onClick={onUndo} title={`Undo the settle (${MOD}Z)`}

@@ -47,8 +47,6 @@ struct InboxScreen: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var actionsFor: InboxItem?
     @State private var openShelves: Set<String> = []
-    /// Why a row cannot be settled now, after its "Answer first" swipe; goes on its own.
-    @State private var hint: String?
     /// On screen (not under a pushed chat or another tab): only then does coming back reopen the stream.
     @State private var visible = false
     private let client: DevdClient
@@ -97,9 +95,10 @@ struct InboxScreen: View {
             if let new, new != old { Task { await markSeen(new, .opened, reload: false) } }
         }
         .sheet(item: $actionsFor) { item in
-            InboxRowActions(item: item, store: store)
+            InboxRowActions(item: item, store: store) { Task { await settler.settle(item, in: store) } }
                 .presentationDetents([.medium, .large])
         }
+        .modifier(SettleConfirmation(settler: settler, store: store))
     }
 
     private func markSeen(_ id: String, _ moment: InboxSettler.Moment, reload: Bool) async {
@@ -159,10 +158,9 @@ struct InboxScreen: View {
                 .scrollContentBackground(.hidden)
                 // On the List itself, so its content scrolls clear of the notice as it does of the tab bar.
                 .safeAreaInset(edge: .bottom, spacing: 0) {
-                    InboxSettleNotice(settler: settler, hint: hint) { Task { await settler.undo(in: store) } }
+                    InboxSettleNotice(settler: settler) { Task { await settler.undo(in: store) } }
                         .animation(.snappy(duration: 0.25), value: settler.notice)
                         .animation(.snappy(duration: 0.25), value: settler.problem)
-                        .animation(.snappy(duration: 0.25), value: hint)
                 }
                 .environment(\.defaultMinListRowHeight, 1)
             }
@@ -257,11 +255,11 @@ struct InboxScreen: View {
                 .opacity(0)
             }
             .plainRow()
-            .swipeActions(edge: .trailing, allowsFullSwipe: inList && InboxSettler.canSettle(item) && InboxSettler.block(item) == nil) {
+            .swipeActions(edge: .trailing, allowsFullSwipe: inList && InboxSettler.canSettle(item)) {
                 trailingAction(item)
             }
             .swipeActions(edge: .leading) {
-                if InboxSettler.canSettle(item) && InboxSettler.block(item) == nil {
+                if InboxSettler.canSettle(item) && InboxView.shelfBlock(item) == nil {
                     Button { actionsFor = item } label: { Label("Snooze", systemImage: "alarm") }
                         .tint(InboxTone.snoozeSwipe)
                 }
@@ -273,41 +271,31 @@ struct InboxScreen: View {
     @ViewBuilder
     private func trailingAction(_ item: InboxItem) -> some View {
         if !InboxSettler.canSettle(item) {
-            Button { unsettle(item) } label: { Label("Back", systemImage: "arrow.uturn.backward") }
-                .tint(InboxTone.backSwipe)
-        } else if let block = InboxSettler.block(item) {
-            // A swipe action has no disabled look: a grey "Answer first" that says why for a moment when tapped.
-            Button { explain(block) } label: { Label("Answer first", systemImage: "questionmark.bubble") }
-                .tint(InboxTone.blockedSwipe)
-                .accessibilityLabel("Settle: answer the open request first")
+            if InboxSettler.canUnsettle(item) {
+                Button { unsettle(item) } label: { Label("Back", systemImage: "arrow.uturn.backward") }
+                    .tint(InboxTone.backSwipe)
+            }
         } else {
+            // Settling ends the session; one that waits or works asks first (SettleConfirmation).
             Button { Task { await settler.settle(item, in: store) } } label: { Label("Settle", systemImage: "checkmark") }
                 .tint(InboxTone.settleSwipe)
+                .accessibilityLabel("Settle and end")
         }
     }
 
     @ViewBuilder
     private func menu(_ item: InboxItem) -> some View {
         if InboxSettler.canSettle(item) {
-            let block = InboxSettler.block(item)
-            Button { Task { await settler.settle(item, in: store) } } label: {
-                Label("Settle", systemImage: "checkmark")
-                if let block { Text(block) }
-            }
-            .disabled(block != nil)
+            Button { Task { await settler.settle(item, in: store) } } label: { Label("Settle and End", systemImage: "checkmark") }
             Button { actionsFor = item } label: { Label("Snooze…", systemImage: "alarm") }
-                .disabled(block != nil)
+                .disabled(InboxView.shelfBlock(item) != nil)
         } else {
-            Button { unsettle(item) } label: { Label("Back to the inbox", systemImage: "arrow.uturn.backward") }
-        }
-    }
-
-    private func explain(_ why: String) {
-        hint = why
-        AccessibilityNotification.Announcement(why).post()
-        Task {
-            try? await Task.sleep(for: .seconds(3))
-            if hint == why { hint = nil }
+            if InboxSettler.canEnd(item) {
+                Button { Task { await settler.settle(item, in: store) } } label: { Label("Settle and End", systemImage: "checkmark") }
+            }
+            if InboxSettler.canUnsettle(item) {
+                Button { unsettle(item) } label: { Label("Back to the inbox", systemImage: "arrow.uturn.backward") }
+            }
         }
     }
 
@@ -332,21 +320,11 @@ private extension View {
 /// Over the tab bar: "Settled · Undo" after a settle, and the last failure with a way to dismiss it.
 struct InboxSettleNotice: View {
     @ObservedObject var settler: InboxSettler
-    /// A short, neutral explanation (a blocked settle), shown while set.
-    var hint: String?
     let undo: () -> Void
 
     var body: some View {
-        if settler.problem != nil || settler.notice != nil || hint != nil {
+        if settler.problem != nil || settler.notice != nil {
             VStack(spacing: 8) {
-                if let hint {
-                    card {
-                        Image(systemName: "questionmark.bubble").foregroundStyle(InboxTone.action).accessibilityHidden(true)
-                        Text(hint).font(.subheadline).foregroundStyle(Theme.C.foreground).padding(.vertical, 10)
-                        Spacer(minLength: 0)
-                    }
-                    .accessibilityElement(children: .combine)
-                }
                 if let problem = settler.problem { failure(problem) }
                 if let notice = settler.notice { settled(notice) }
             }
@@ -388,7 +366,7 @@ struct InboxSettleNotice: View {
         card {
             Image(systemName: "checkmark").font(.subheadline.weight(.semibold)).foregroundStyle(InboxTone.doneIcon)
                 .accessibilityHidden(true)
-            Text("Settled").font(.subheadline.weight(.semibold)).foregroundStyle(Theme.C.foreground)
+            Text("Settled · ending").font(.subheadline.weight(.semibold)).foregroundStyle(Theme.C.foreground)
             Text(notice.title).font(.subheadline).foregroundStyle(Theme.C.mutedForeground).lineLimit(1)
             Spacer(minLength: 4)
             Button(action: undo) {
@@ -402,7 +380,7 @@ struct InboxSettleNotice: View {
             .accessibilityLabel("Undo settle")
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Settled \(notice.title)")
+        .accessibilityLabel("Settled \(notice.title), the session ends")
     }
 }
 
@@ -419,7 +397,6 @@ enum InboxTone {
     static let settleSwipe = Color(light: 0x047857, dark: 0x047857)
     static let snoozeSwipe = Color(light: 0x4F46E5, dark: 0x4F46E5)
     static let backSwipe = Color(light: 0x0369A1, dark: 0x0369A1)
-    static let blockedSwipe = Color(light: 0x71717A, dark: 0x52525B)
 
     static func text(_ t: InboxView.Tone) -> Color {
         switch t {
@@ -561,6 +538,10 @@ struct InboxRow: View {
                         .fixedSize()
                 }
             }
+            // A settle whose end failed: devd brought the session back.
+            if let error = item.endError {
+                Text(InboxView.endErrorText(error)).font(.footnote).foregroundStyle(Theme.C.dangerText).lineLimit(2)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 10)
@@ -604,7 +585,7 @@ struct InboxRow: View {
     /// What VoiceOver (and the Mac's tooltip) says. A row with a chip says it first and not again as the state
     /// ("Answer, …", not also "waiting for your answer"); the others say their state.
     static func spoken(_ i: InboxItem, now: Int, title: String, detail: String, showAgent: Bool) -> String {
-        let branch = i.branch.map { $0.isEmpty ? "" : ", branch \($0)" } ?? ""
+        let branch = (i.branch.map { $0.isEmpty ? "" : ", branch \($0)" } ?? "") + (i.endError.map { ". \(InboxView.endErrorText($0))" } ?? "")
         guard let mark = InboxView.rowStatus(i) else { return spokenLabel(i, now: now, title: title, detail: detail, showAgent: showAgent) + branch }
         let when = i.attention.until.map { "until \(Self.untilLabel($0))" } ?? (i.attention.since > 0 ? Format.agoLabel(Double(now - i.attention.since)) : "")
         let agent = showAgent ? AgentProfiles.profile(for: AgentName(rawValue: i.agent)).short : ""
@@ -661,9 +642,11 @@ struct InboxEndedRow: View {
 
 /// Settle, unsettle and snooze for one row. "Until the limit resets" asks devd when the sheet opens; it stays
 /// disabled with devd's reason when there is no active limit. devd's refusals (409 request-open…) are shown.
+/// `settle`: the inbox's own settle (InboxSettler), which asks first for a session that waits or works.
 struct InboxRowActions: View {
     let item: InboxItem
     @ObservedObject var store: InboxStore
+    let settle: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var reset: Result<SnoozeReset, Error>?
     @State private var error: String?
@@ -676,14 +659,17 @@ struct InboxRowActions: View {
         let times = InboxView.snoozeTimes(now: Date())
         NavigationStack {
             List {
-                if shelved {
+                if item.ending == true {
+                    Text("Ending… its transcript replaces it when done.").foregroundStyle(Theme.C.mutedForeground)
+                } else if shelved {
+                    if InboxSettler.canEnd(item) { Button("Settle and End") { dismiss(); settle() } }
                     Button("Back to the inbox") { run { try await store.unsettle(item.sessionId) } }
                 } else {
+                    Section {
+                        Button("Settle and End") { dismiss(); settle() }
+                    }
                     if let blocked {
                         Text(blocked).font(Theme.F.meta).foregroundStyle(Theme.C.mutedForeground)
-                    }
-                    Section {
-                        Button("Settle") { run { try await store.settle(item.sessionId) } }.disabled(blocked != nil)
                     }
                     Section("Snooze") {
                         Button("1 hour") { run { try await store.snooze(item.sessionId, until: times.hour) } }.disabled(blocked != nil)
