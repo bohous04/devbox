@@ -74,7 +74,7 @@ struct EndedTranscriptScreen: View {
             guard loadedFor == asked, let cur = thread else { return }
             // A transcript gets no live updates: nothing is held, and everything new goes in front.
             let more = ThreadView.hasOlder(page)
-            let next = ThreadView.prependOlder(cur, page.items, more: more)
+            let next = ThreadView.prependOlder(cur, page.items, pageSeq: page.lastSeq, more: more)
             rowBase -= ThreadView.shownItems(next).count - ThreadView.shownItems(cur).count
             hasOlder = more
             olderError = nil

@@ -261,7 +261,7 @@ export const olderBeforeSeq = (t: ThreadSnapshot): number | null => (t.items[0] 
  *  id (heldKey). `items`: whole items a stream replay sent (they changed after the client's seq, but began before the
  *  window); `finishes`: tool.finished events whose tool.started is not loaded. Either would otherwise be appended at the
  *  thread's end, out of place ("(unknown)" for a finish), and then come back a second time with the older page. */
-export interface Held { items: Record<string, ThreadItem>; finishes: Record<string, LoggedEvent> }
+export interface Held { items: Record<string, { item: ThreadItem; atSeq: number }>; finishes: Record<string, LoggedEvent> }
 export const emptyHeld = (): Held => ({ items: {}, finishes: {} });
 const heldKey = (runId: string | null, itemId: string) => `${runId ?? ""}\u0000${itemId}`;
 
@@ -282,25 +282,33 @@ export function mergeLive(t: ThreadSnapshot, m: { afterSeq: number; snapshot: Th
   if (!more || edge === undefined) return { thread: mergeSnapshot(t, m), held };
   const outside = (it: ThreadItem) => it.itemId !== null && it.seq < edge && !t.items.some((x) => x.runId === it.runId && x.itemId === it.itemId);
   const items = { ...held.items };
-  for (const it of m.snapshot.items) if (outside(it)) items[heldKey(it.runId, it.itemId!)] = it;
+  // atSeq: the replay's seq, to tell whether a page answered later already has this state or a newer one.
+  for (const it of m.snapshot.items) if (outside(it)) items[heldKey(it.runId, it.itemId!)] = { item: it, atSeq: m.snapshot.lastSeq };
   return { thread: mergeSnapshot(t, { ...m, snapshot: { ...m.snapshot, items: m.snapshot.items.filter((it) => !outside(it)) } }), held: { ...held, items } };
 }
 
 /** Puts a page of older items (asked with `olderBeforeSeq`) in front of the thread; `more`: the page says older ones
  *  are still left. An item is never there twice: one already loaded keeps its place and its (live) state, and the page's
- *  copy is dropped (items without an item id: those at the boundary seq, which the page repeats). A held item replaces
- *  the page's older copy, then held finishes apply to the items they finish. Once nothing older is left, a held item or
- *  finish whose item is still missing never had its start in the log: the item is appended, a finish shows as an
- *  unknown tool, as applyThreadEvent shows one. Pure, and `held` is only read (a state updater may run twice): applying
- *  the same held entries again changes nothing. The rest of the thread stays: the stream keeps it. */
-export function prependOlder(t: ThreadSnapshot, older: ThreadItem[], held: Held, more: boolean): ThreadSnapshot {
+ *  copy is dropped (items without an item id: those at the boundary seq, which the page repeats). The newest state of
+ *  an item wins: a held item replaces the page's copy only when it was held at a seq after the one the page was answered
+ *  at (`page.lastSeq`); held finishes apply to the items they finish; an item still streaming whose run has ended since
+ *  is done (as the run's end left it in devd). Once nothing older is left, a held item or finish whose item is still
+ *  missing never had its start in the log: the item is appended, a finish shows as an unknown tool, as applyThreadEvent
+ *  shows one. Pure, and `held` is only read (a state updater may run twice): applying the same held entries again
+ *  changes nothing. The rest of the thread stays: the stream keeps it. */
+export function prependOlder(t: ThreadSnapshot, page: { items: ThreadItem[]; lastSeq: number }, held: Held, more: boolean): ThreadSnapshot {
   // Without an item id, the text tells apart two notices at one seq (a bridge restart's and devd's own).
   const id = (x: ThreadItem) => (x.itemId !== null ? `id:${heldKey(x.runId, x.itemId)}:${x.kind}` : `seq:${x.seq}:${x.runId}:${x.kind}:${x.text}`);
   const loaded = new Set(t.items.map(id));
-  const page = older.filter((it) => !loaded.has(id(it))).map((it) => (it.itemId !== null && held.items[heldKey(it.runId, it.itemId)]) || it);
-  const items = [...page, ...t.items];
+  const newer = (it: ThreadItem) => {
+    const h = it.itemId !== null ? held.items[heldKey(it.runId, it.itemId)] : undefined;
+    return h !== undefined && h.atSeq > page.lastSeq ? h.item : it;
+  };
+  const ended = new Set(t.runs.filter((r) => TERMINAL.has(r.status)).map((r) => r.runId));
+  const settle = (it: ThreadItem) => (it.status === "streaming" && it.runId !== null && ended.has(it.runId) ? { ...it, status: "done" as const } : it);
+  const items = [...page.items.filter((it) => !loaded.has(id(it))).map((it) => settle(newer(it))), ...t.items];
   const at = (runId: string | null, itemId: string) => items.findIndex((x) => x.runId === runId && x.itemId === itemId);
-  if (!more) for (const it of Object.values(held.items)) if (at(it.runId, it.itemId!) < 0) items.push(it);
+  if (!more) for (const { item } of Object.values(held.items)) if (at(item.runId, item.itemId!) < 0) items.push(settle(item));
   for (const e of Object.values(held.finishes)) {
     if (e.event.type !== "tool.finished") continue;
     const { runId, itemId, output, isError } = e.event;
@@ -310,6 +318,11 @@ export function prependOlder(t: ThreadSnapshot, older: ThreadItem[], held: Held,
   }
   return { ...t, items };
 }
+
+/** The state updater for a page back: it reads the held updates when it runs, after any stream frame queued before
+ *  it (one may have held a finish of an item on this page), not when the page arrived. */
+export const olderUpdate = (page: { items: ThreadItem[]; lastSeq: number }, more: boolean, held: () => Held) =>
+  (cur: ThreadSnapshot | null): ThreadSnapshot | null => (cur ? prependOlder(cur, page, held(), more) : cur);
 
 /** What a thread loaded only to some point back shows (`items` without housekeeping notices). The oldest loaded run
  *  (head) may have begun before that point. It is whole when its prompt (its first item) is loaded. Otherwise, when it

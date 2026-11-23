@@ -147,8 +147,14 @@ enum ThreadView {
     /// Held). `items`: whole items a stream replay sent that began before the window; `finishes`: tool.finished events
     /// whose tool.started is not loaded. Either would otherwise be appended at the thread's end, out of place
     /// ("(unknown)" for a finish), and come back a second time with the older page.
+    struct HeldItem: Equatable {
+        var item: ThreadItem
+        var atSeq: Int
+    }
+
     struct Held: Equatable {
-        var items: [String: ThreadItem] = [:]
+        /// `atSeq`: the replay's seq, to tell whether a page answered later already has this state or a newer one.
+        var items: [String: HeldItem] = [:]
         var finishes: [String: LoggedEvent] = [:]
     }
 
@@ -176,29 +182,42 @@ enum ThreadView {
         var rest = m.snapshot
         rest.items = []
         for it in m.snapshot.items {
-            if outside(it) { held.items[heldKey(it.runId, it.itemId!)] = it } else { rest.items.append(it) }
+            if outside(it) { held.items[heldKey(it.runId, it.itemId!)] = HeldItem(item: it, atSeq: m.snapshot.lastSeq) } else { rest.items.append(it) }
         }
         return mergeSnapshot(t, ThreadSnapshotFrame(afterSeq: m.afterSeq, snapshot: rest))
     }
 
-    /// Puts a page of older items (asked with `olderBeforeSeq`) in front of the thread; `more`: the page says older
-    /// ones are still left. An item is never there twice: one already loaded keeps its place and its (live) state, and
-    /// the page's copy is dropped (items without an item id: those at the boundary seq, which the page repeats). A held
-    /// item replaces the page's older copy, then held finishes apply to the items they finish. Once nothing older is
-    /// left, a held item or finish whose item is still missing never had its start in the log: the item is appended, a
-    /// finish shows as an unknown tool, as `apply` shows one. `held` is only read: applying the same entries again
-    /// changes nothing (dashboard parity, where a state updater may run twice). The rest of the thread stays.
-    static func prependOlder(_ t: ThreadSnapshot, _ older: [ThreadItem], held: Held = Held(), more: Bool) -> ThreadSnapshot {
+    /// Puts a page of older items (asked with `olderBeforeSeq`) in front of the thread; `pageSeq`: the seq the page was
+    /// answered at (its lastSeq); `more`: the page says older ones are still left (threadView.ts prependOlder). An item
+    /// is never there twice: one already loaded keeps its place and its (live) state, and the page's copy is dropped
+    /// (items without an item id: those at the boundary seq, which the page repeats). The newest state of an item wins:
+    /// a held item replaces the page's copy only when it was held at a seq after `pageSeq`; held finishes apply to the
+    /// items they finish; an item still streaming whose run has ended since is done (as the run's end left it in devd).
+    /// Once nothing older is left, a held item or finish whose item is still missing never had its start in the log:
+    /// the item is appended, a finish shows as an unknown tool, as `apply` shows one. `held` is only read: applying
+    /// the same entries again changes nothing. The rest of the thread stays: the stream keeps it.
+    static func prependOlder(_ t: ThreadSnapshot, _ older: [ThreadItem], pageSeq: Int, held: Held = Held(), more: Bool) -> ThreadSnapshot {
         let id = { (x: ThreadItem) in
             // Without an item id, the text tells apart two notices at one seq (a bridge restart's and devd's own).
             x.itemId.map { "id:\(heldKey(x.runId, $0)):\(x.kind)" } ?? "seq:\(x.seq):\(x.runId ?? ""):\(x.kind):\(x.text)"
         }
         let loaded = Set(t.items.map(id))
-        let page = older.filter { !loaded.contains(id($0)) }.map { it in it.itemId.flatMap { held.items[heldKey(it.runId, $0)] } ?? it }
-        var items = page + t.items
+        let ended = Set(t.runs.filter { isTerminal($0.status) }.map(\.runId))
+        let settle = { (it: ThreadItem) -> ThreadItem in
+            var it = it
+            if it.status == .streaming, let run = it.runId, ended.contains(run) { it.status = .done }
+            return it
+        }
+        let newer = { (it: ThreadItem) -> ThreadItem in
+            guard let key = it.itemId.map({ heldKey(it.runId, $0) }), let h = held.items[key], h.atSeq > pageSeq else { return it }
+            return h.item
+        }
+        var items = older.filter { !loaded.contains(id($0)) }.map { settle(newer($0)) } + t.items
         let at = { (items: [ThreadItem], runId: String?, itemId: String) in items.firstIndex { $0.runId == runId && $0.itemId == itemId } }
         if !more {
-            for it in held.items.values.sorted(by: { $0.seq < $1.seq }) where at(items, it.runId, it.itemId!) == nil { items.append(it) }
+            for h in held.items.values.sorted(by: { $0.item.seq < $1.item.seq }) where at(items, h.item.runId, h.item.itemId!) == nil {
+                items.append(settle(h.item))
+            }
         }
         for e in held.finishes.values.sorted(by: { $0.seq < $1.seq }) {
             guard case let .toolFinished(runId, itemId, isError, output) = e.event else { continue }
@@ -599,7 +618,8 @@ final class ThreadStore: ObservableObject {
                 : try await client.get("\(base)/thread?\(query)")
             guard let cur = thread else { return }
             let more = ThreadView.hasOlder(page)
-            let next = ThreadView.prependOlder(cur, page.items, held: held, more: more)
+            // Read here, after the await: the held updates of every frame that arrived meanwhile are in (main actor).
+            let next = ThreadView.prependOlder(cur, page.items, pageSeq: page.lastSeq, held: held, more: more)
             if !more { held = ThreadView.Held() } // all applied, or appended as never started
             // Only what went in front moves the ids down (held items or unknown finishes appended at the end do not).
             let front = cur.items.first.flatMap { f in

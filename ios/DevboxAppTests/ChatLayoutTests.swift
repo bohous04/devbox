@@ -53,9 +53,9 @@ final class ChatLayoutTests: XCTestCase {
         var running = item(4, "r1", .tool, tool: "Bash")
         running.itemId = "t1"
         running.status = .streaming
-        t = ThreadView.prependOlder(t, [running, item(10, "r1", .tool)], held: held, more: true)
+        t = ThreadView.prependOlder(t, [running, item(10, "r1", .tool)], pageSeq: 10, held: held, more: true)
         XCTAssertEqual(t.items.map(row), ["t1:Bash:done:ok", "10::done:"])
-        XCTAssertEqual(ThreadView.prependOlder(t, [], held: held, more: false), t, "applying it again changes nothing")
+        XCTAssertEqual(ThreadView.prependOlder(t, [], pageSeq: 10, held: held, more: false), t, "applying it again changes nothing")
         var whole = ThreadView.Held()
         XCTAssertEqual(ThreadView.applyLive(ThreadSnapshot(lastSeq: 1, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: nil),
                                             finished(2, "t9", "x"), more: false, held: &whole).items.first?.tool, "(unknown)")
@@ -74,8 +74,33 @@ final class ChatLayoutTests: XCTestCase {
         var stale = t1
         stale.output = nil
         stale.status = .streaming
-        let n = ThreadView.prependOlder(merged, [stale], held: held, more: false)
+        let n = ThreadView.prependOlder(merged, [stale], pageSeq: 10, held: held, more: false)
         XCTAssertEqual(n.items.map(row), ["t1:Bash:done:ok", "10::done:", "12::done:"])
+    }
+
+    /// threadView.test.ts: a held replayed item yields to the page's copy when the page is newer; a run that ended
+    /// finishes its streaming items.
+    func testNewestStateWinsBetweenAHeldItemAndThePage() {
+        var r1 = run("r1", .completed)
+        r1.endedSeq = 15
+        let t = ThreadSnapshot(lastSeq: 16, seenSeq: 0, runs: [r1], items: [item(10, "r2", .user)], pending: [], background: [], native: nil)
+        var streaming = item(4, "r1", .assistant, text: "half")
+        streaming.itemId = "a1"
+        streaming.status = .streaming
+        var held = ThreadView.Held()
+        let merged = ThreadView.mergeLive(t, ThreadSnapshotFrame(afterSeq: 11, snapshot: ThreadSnapshot(lastSeq: 12, seenSeq: 0, runs: [],
+            items: [streaming], pending: [], background: [], native: nil)), more: true, held: &held)
+        var done = streaming
+        done.text = "whole"
+        done.status = .done
+        // Answered at seq 16, after the run ended: the page's copy wins.
+        XCTAssertEqual(ThreadView.prependOlder(merged, [done], pageSeq: 16, held: held, more: true).items.first, done)
+        // Answered at 11, before the replay: the held copy is newer and wins; its run ended since, so it is done.
+        var stale = streaming
+        stale.text = ""
+        var expected = streaming
+        expected.status = .done
+        XCTAssertEqual(ThreadView.prependOlder(merged, [stale], pageSeq: 11, held: held, more: true).items.first, expected)
     }
 
     /// threadView.test.ts: a finish whose start never comes (trimmed log) shows as an unknown tool once nothing older
@@ -84,8 +109,8 @@ final class ChatLayoutTests: XCTestCase {
         var held = ThreadView.Held()
         let t = ThreadView.applyLive(ThreadSnapshot(lastSeq: 10, seenSeq: 0, runs: [], items: [item(10, "r1", .tool)], pending: [], background: [], native: nil),
                                      finished(11, "gone", "x"), more: true, held: &held)
-        XCTAssertFalse(ThreadView.prependOlder(t, [item(2, "r1", .user)], held: held, more: true).items.contains { $0.tool == "(unknown)" })
-        XCTAssertEqual(ThreadView.prependOlder(t, [item(2, "r1", .user)], held: held, more: false).items.map { $0.tool ?? "\($0.kind)" },
+        XCTAssertFalse(ThreadView.prependOlder(t, [item(2, "r1", .user)], pageSeq: 10, held: held, more: true).items.contains { $0.tool == "(unknown)" })
+        XCTAssertEqual(ThreadView.prependOlder(t, [item(2, "r1", .user)], pageSeq: 10, held: held, more: false).items.map { $0.tool ?? "\($0.kind)" },
                        ["user", "tool", "(unknown)"])
         var live = item(9, "r1", .tool)
         live.itemId = "t1"
@@ -93,7 +118,7 @@ final class ChatLayoutTests: XCTestCase {
         var stale = live
         stale.output = nil
         let loaded = ThreadSnapshot(lastSeq: 12, seenSeq: 0, runs: [], items: [live, item(12, "r1", .assistant)], pending: [], background: [], native: nil)
-        XCTAssertEqual(ThreadView.prependOlder(loaded, [item(3, "r1", .user), stale], more: false).items.map(row), ["3::done:", "t1::done:new", "12::done:"])
+        XCTAssertEqual(ThreadView.prependOlder(loaded, [item(3, "r1", .user), stale], pageSeq: 12, more: false).items.map(row), ["3::done:", "t1::done:new", "12::done:"])
     }
 
     /// threadView.test.ts "tailView": a cut thread starts at its first whole run; a run that fills the page stays.
@@ -131,7 +156,7 @@ final class ChatLayoutTests: XCTestCase {
         var own = item(5, nil, .notice, text: "Resumed the conversation")
         own.itemId = nil
         let t = ThreadSnapshot(lastSeq: 9, seenSeq: 0, runs: [], items: [own, item(6, "r2", .user, text: "t6")], pending: [], background: [], native: nil)
-        XCTAssertEqual(ThreadView.prependOlder(t, [item(4, "r1", .user, text: "t4"), restarted, own], more: false).items.map(\.text),
+        XCTAssertEqual(ThreadView.prependOlder(t, [item(4, "r1", .user, text: "t4"), restarted, own], pageSeq: 9, more: false).items.map(\.text),
                        ["t4", "Agent bridge restarted (v2)", "Resumed the conversation", "t6"])
     }
 
@@ -153,7 +178,7 @@ final class ChatLayoutTests: XCTestCase {
         t.topic = "Fix it"
         XCTAssertEqual(ThreadView.olderBeforeSeq(t), 6)
         XCTAssertNil(ThreadView.olderBeforeSeq(.empty))
-        let n = ThreadView.prependOlder(t, [item(3, "r1", .user), item(5, "r1", .tool), notice], more: true)
+        let n = ThreadView.prependOlder(t, [item(3, "r1", .user), item(5, "r1", .tool), notice], pageSeq: 9, more: true)
         XCTAssertEqual(n.items.map { "\($0.seq):\($0.itemId ?? "-")" }, ["3:3", "5:5", "5:notice:1", "6:6"])
         XCTAssertEqual(n.lastSeq, 9)
         XCTAssertEqual(n.topic, "Fix it")

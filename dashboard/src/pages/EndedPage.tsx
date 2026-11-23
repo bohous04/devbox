@@ -58,7 +58,7 @@ function Transcript({ id }: { id: string }) {
     const page = await api.endedTranscript(id, { beforeSeq, limit: THREAD_PAGE });
     if (opened.current !== asked) return;
     // A transcript gets no live updates: nothing is held.
-    setThread((cur) => (cur ? prependOlder(cur, page.items, emptyHeld(), hasOlderThan(page)) : cur));
+    setThread((cur) => (cur ? prependOlder(cur, page, emptyHeld(), hasOlderThan(page)) : cur));
     setMore(hasOlderThan(page));
   };
   const view = thread ? tailView(thread.items.filter((i) => !isHousekeepingNotice(i)), more, thread.runs, thread.pending) : null;

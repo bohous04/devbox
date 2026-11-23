@@ -14,7 +14,7 @@ import { EmptyState, RowsSkeleton } from "../components/primitives";
 import { SettleProblem } from "../components/SettleProblem";
 import { threadHeading } from "../inboxView";
 import { useStore } from "../store";
-import { activeRun, applyCommands, applyEffort, applyNotice, applyLive, criticRunIds, emptyHeld, hasOlderThan, type Held, mergeLive, olderBeforeSeq, prependOlder, queuedRunIds, seenToPost, tailView, THREAD_PAGE } from "../threadView";
+import { activeRun, applyCommands, applyEffort, applyNotice, applyLive, criticRunIds, emptyHeld, hasOlderThan, type Held, mergeLive, olderBeforeSeq, olderUpdate, queuedRunIds, seenToPost, tailView, THREAD_PAGE } from "../threadView";
 import { FOCUS_LOOK_GAP_MS } from "../inboxSettle";
 import { useEventStream } from "../useEventStream";
 import { useTmuxSeen } from "../useSettler";
@@ -97,9 +97,7 @@ function ChatPage({ id }: { id: string }) {
     const page = mirrorRef.current !== null ? (await api.mirror(id, opts)).snapshot : await api.thread(id, opts);
     if (opened.current !== asked) return;
     const older = hasOlderThan(page);
-    // Read, not consumed (prependOlder is pure): entries already applied apply again as no-ops.
-    const h = held.current;
-    setThread((cur) => (cur ? prependOlder(cur, page.items, h, older) : cur));
+    setThread(olderUpdate(page, older, () => held.current));
     setMore(older);
   };
 
