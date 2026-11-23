@@ -102,7 +102,7 @@ export function MobileHeader() {
   // A chat thread has its own one-line bar (back, title, Chat/Terminal); two stacked bars cost a phone a quarter
   // of its height.
   const { pathname } = useLocation();
-  if (pathname.startsWith("/s/")) return null;
+  if (pathname.startsWith("/s/") || pathname.startsWith("/ended/")) return null;
   return (
     <header className="sticky top-0 z-30 flex h-14 items-center gap-2 border-b bg-background px-4 lg:hidden">
       <BrandMark />

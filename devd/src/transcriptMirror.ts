@@ -11,7 +11,8 @@
 // The mapped events go into a ThreadStore of its own (`_mirrors/<id>.sqlite`), so the snapshot, paging and SSE replay
 // work exactly like a chat thread's. Polling runs only while a client watches (SSE) and on the session's hook events.
 // Transcript content never goes to logs.
-import { closeSync, constants as C, fstatSync, openSync, readSync, rmSync } from "node:fs";
+import { closeSync, constants as C, fstatSync, openSync, read as readFd, readSync } from "node:fs";
+import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { MirrorInfo, MirrorSendError } from "../../shared/mirror";
@@ -286,30 +287,33 @@ const runtimeLabel = (runtime: string): string => Object.values(AGENTS).find((a)
 
 // ── Reading the transcript ───────────────────────────────────────────────────────────
 
+const readFdAsync = promisify(readFd);
+
 export interface Chunk { lines: string[]; next: number; skipped: number }
 
 /** Complete lines from `offset` (at most `budget` bytes, or one line up to `lineCap`); an unfinished last line is left
  *  for the next read. A line longer than `lineCap` is skipped unparsed (`skipped` counts them). */
-export function readChunk(fd: number, offset: number, size: number, budget = CHUNK_BYTES, lineCap = LINE_CAP): Chunk {
-  const read = (at: number, n: number): Buffer => {
+export async function readChunk(fd: number, offset: number, size: number, budget = CHUNK_BYTES, lineCap = LINE_CAP): Promise<Chunk> {
+  // Async (the thread pool reads it): a transcript never mirrored before is read whole before an end.
+  const read = async (at: number, n: number): Promise<Buffer> => {
     const b = Buffer.alloc(n);
-    const got = readSync(fd, b, 0, n, at);
-    return b.subarray(0, got);
+    const { bytesRead } = await readFdAsync(fd, b, 0, n, at);
+    return b.subarray(0, bytesRead);
   };
   if (offset >= size) return { lines: [], next: offset, skipped: 0 };
-  let buf = read(offset, Math.min(size - offset, budget));
+  let buf = await read(offset, Math.min(size - offset, budget));
   let nl = buf.lastIndexOf(0x0a);
   if (nl === -1) {
     // One line longer than the budget: read it whole while it fits the cap.
     if (size - offset <= budget) return { lines: [], next: offset, skipped: 0 }; // still being written
-    buf = read(offset, Math.min(size - offset, lineCap + 1));
+    buf = await read(offset, Math.min(size - offset, lineCap + 1));
     nl = buf.indexOf(0x0a);
     if (nl === -1) {
       if (buf.length <= lineCap) return { lines: [], next: offset, skipped: 0 }; // still being written
       // Over the cap: find its end without keeping it.
       let at = offset + buf.length;
       while (at < size) {
-        const part = read(at, Math.min(size - at, 1024 * 1024));
+        const part = await read(at, Math.min(size - at, 1024 * 1024));
         const i = part.indexOf(0x0a);
         if (i !== -1) return { lines: [], next: at + i + 1, skipped: 1 };
         at += part.length;
@@ -495,7 +499,13 @@ export interface MirrorDeps {
   live: (id: string) => AgentLiveSnapshot | null;
   now?: () => number;
   log?: (msg: string) => void;
+  /** How long the last read before an end may take (FINAL_READ_MS); tests shorten it. */
+  finalReadMs?: number;
 }
+
+/** The last read before an end reads a Codex backlog to its end, not CODEX_TICK_CHUNKS of it, but for at most this
+ *  long: end() waits for it with the session locked. */
+export const FINAL_READ_MS = 60_000;
 
 interface Pending { text: string; at: number }
 
@@ -525,8 +535,14 @@ export class TranscriptMirror {
   /** Per session, for the pane's codex process (`pid:start`): the rollouts it was seen with open, and the newest hook
    *  row at the time an unchosen one newly opened (see codexThread). */
   private codexWatch = new Map<string, CodexWatch>();
+  /** Sessions whose last read before the end runs now (finalRefresh): for it alone they are not ending yet. */
+  private finalizing = new Set<string>();
+  /** Sessions whose last read stopped short (the time cap, a read that failed): their transcript is not complete. */
+  private cutShort = new Set<string>();
 
   constructor(private d: MirrorDeps) {}
+
+  private ending(id: string): boolean { return this.d.isEnding(id) && !this.finalizing.has(id); }
 
   private now() { return this.d.now?.() ?? Date.now(); }
   private log(msg: string) { (this.d.log ?? ((m) => console.error(m)))(msg); }
@@ -536,7 +552,7 @@ export class TranscriptMirror {
     const s = getSession(this.d.db, id);
     if (!s) return { error: "unknown-session" };
     if (storedRuntime(s) !== "tmux") return { error: "not-a-tmux-session" };
-    if (this.d.isEnding(id)) return { error: "session-ending" };
+    if (this.ending(id)) return { error: "session-ending" };
     return { s };
   }
 
@@ -545,7 +561,7 @@ export class TranscriptMirror {
   store(id: string): ThreadStore {
     const open = this.stores.get(id);
     if (open) return open;
-    if (this.d.isEnding(id)) throw new Error(`session ${id} is ending`);
+    if (this.ending(id)) throw new Error(`session ${id} is ending`);
     const store = ThreadStore.open(this.d.root, id, { dir: "_mirrors", onNotice: (item) => this.d.bus.publish(`mirror:${id}`, { notice: item }) });
     this.stores.set(id, store);
     return store;
@@ -592,8 +608,26 @@ export class TranscriptMirror {
     return run;
   }
 
-  /** Session stopped (close the store) or ended (and delete it: the transcript itself stays). */
-  release(id: string, ended = false): void {
+  /** The last read of an ending session, while its container still runs: end() (sessions.ts) archives the store as
+   *  the ended session's transcript. Waits for a refresh in progress (it stops at its next step: the session is
+   *  ending), then reads to the end of the transcript, within FINAL_READ_MS. `truncated`: it did not get there (the
+   *  cap, a failed read), logged. Never throws. */
+  async finalRefresh(id: string): Promise<{ truncated: boolean }> {
+    await this.running.get(id);
+    this.finalizing.add(id);
+    this.cutShort.delete(id);
+    const run = this.tick(id).catch((e) => {
+      this.cutShort.add(id);
+      this.log(`mirror ${id}: final refresh failed, the transcript ends where the last read got to: ${(e as Error).message}`);
+    }).finally(() => { this.finalizing.delete(id); this.running.delete(id); });
+    this.running.set(id, run);
+    await run;
+    const truncated = this.cutShort.delete(id);
+    return { truncated };
+  }
+
+  /** Session stopped or ended: closes the store. An ended session's store stays on disk for end() to archive. */
+  release(id: string): void {
     this.generation.set(id, this.gen(id) + 1);
     const w = this.watchers.get(id);
     if (w) { clearInterval(w.timer); this.watchers.delete(id); }
@@ -606,7 +640,6 @@ export class TranscriptMirror {
     this.panes.delete(id);
     this.codexWatch.delete(id);
     this.pending.delete(id);
-    if (ended) for (const x of ["", "-wal", "-shm"]) rmSync(join(this.d.root, "_mirrors", `${id}.sqlite${x}`), { force: true });
   }
 
   private async locate(s: SessionRow): Promise<PaneAgent | null> {
@@ -663,7 +696,7 @@ export class TranscriptMirror {
     if ("error" in r) return;
     const { s } = r;
     const gen = this.gen(id);
-    const current = () => gen === this.gen(id) && !this.d.isEnding(id);
+    const current = () => gen === this.gen(id) && !this.ending(id);
     const pane = (s.host ?? "vps") === "instabox" || s.status !== "running" ? null : await this.locate(s);
     if (!current()) return;
     // The pane is known to a send only together with the info from the same refresh: one that fails partway (a read
@@ -741,13 +774,19 @@ export class TranscriptMirror {
     }
     if (pane.home === null || thread === null) return { thread: null, busy: false };
     const proc = `${pane.pid}:${pane.start}`;
+    const final = this.finalizing.has(id);
+    const deadline = Date.now() + (this.d.finalReadMs ?? FINAL_READ_MS);
     for (let chunk = 1; ; chunk++) {
       const r = await this.d.exec(s.container, ["python3", "-I", "-c", MIRROR_CODEX_READ, pane.home, thread,
         JSON.stringify({ sid: cur.sid, offset: cur.offset, ino: cur.ino, headLen: cur.headLen, headHash: cur.headHash, home: cur.home }),
         String(CODEX_CHUNK_BYTES), String(CODEX_LINE_CAP)], 10_000);
       if (!current()) return null;
       const out = r.code === 0 && !r.timedOut ? parseCodexRead(r.stdout) : null;
-      if (out === null) { this.log(`mirror ${id}: the Codex rollout could not be read`); return null; }
+      if (out === null) {
+        this.log(`mirror ${id}: the Codex rollout could not be read`);
+        if (final) this.cutShort.add(id);
+        return null;
+      }
       if (out.id === null) return { thread: null, busy: false };
       const pre: BridgeEvent[] = [];
       const closeOpenRun = () => {
@@ -778,8 +817,14 @@ export class TranscriptMirror {
       if (advanced || pre.length || moved) this.commit(id, store, pre, mapped.events, cur);
       this.markSeen(id, mapped.seen);
       const done = !advanced || out.next >= out.size;
-      // A long backlog continues on the next refresh, so one refresh stays a bounded read.
-      if (done || chunk >= CODEX_TICK_CHUNKS) return { thread: out.id, busy: map.turn !== null };
+      if (done) return { thread: out.id, busy: map.turn !== null };
+      // A long backlog continues on the next refresh, so one refresh stays a bounded read; the last one has no next.
+      if (!final && chunk >= CODEX_TICK_CHUNKS) return { thread: out.id, busy: map.turn !== null };
+      if (final && Date.now() >= deadline) {
+        this.cutShort.add(id);
+        this.log(`mirror ${id}: the last read stopped after ${chunk} chunks (${out.next} of ${out.size} bytes): the transcript is cut short`);
+        return { thread: out.id, busy: map.turn !== null };
+      }
       if (!current()) return null;
     }
   }
@@ -826,7 +871,9 @@ export class TranscriptMirror {
         cur.headHash = head(cur.headLen);
       }
       for (;;) {
-        const chunk = readChunk(fd, cur.offset, st.size);
+        const chunk = await readChunk(fd, cur.offset, st.size);
+        // Released or ended while it read: the store is closed.
+        if (!current()) return;
         if (chunk.skipped > 0) this.log(`mirror ${id}: skipped ${chunk.skipped} transcript line(s) over ${LINE_CAP} bytes`);
         const mapped = mapClaudeLines(chunk.lines, cur.map, this.now());
         const advanced = chunk.next !== cur.offset;

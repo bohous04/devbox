@@ -150,7 +150,7 @@ function codexAccount(id: string, auth = '{"tokens":{}}'): void {
   writeFileSync(join(homes().sharedHome, "config.toml"), 'model = "x"\n');
 }
 
-async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string | null; claudeExecutable?: string | null; acpBins?: string[]; logError?: (msg: string) => void; logCompactMinBytes?: number; now?: () => number; sweepMs?: number } = {}) {
+async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string | null; claudeExecutable?: string | null; acpBins?: string[]; logError?: (msg: string) => void; logCompactMinBytes?: number; now?: () => number; sweepMs?: number; resumeFile?: string } = {}) {
   const bridge = await serve({
     bridgeDir: dir,
     socketPath,
@@ -168,6 +168,7 @@ async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string
     logError: over.logError ?? (() => {}),
     ...(over.logCompactMinBytes === undefined ? {} : { logCompactMinBytes: over.logCompactMinBytes }),
     ...(over.sweepMs === undefined ? {} : { sweepMs: over.sweepMs }),
+    ...(over.resumeFile === undefined ? {} : { resumeFile: over.resumeFile }),
   });
   closers.push(() => bridge.close());
   return bridge;
@@ -188,6 +189,57 @@ describe("serve", () => {
     expect(f.opens[0].resume).toBeNull();
     expect(events()).toEqual(STARTED_IDLE);
     expect(state()).toMatchObject({ harness: "claude", activeRunId: null, queue: [] });
+  });
+
+  test("a first start resumes the thread devd left in the resume file, says so, and consumes the file", async () => {
+    const file = join(dir, "resume");
+    writeFileSync(file, "claude 0b1c2d3e-0000-4000-8000-000000000001\n");
+    const f = fakeHarness();
+    await start(f, { resumeFile: file });
+    expect(f.opens[0].resume).toBe("0b1c2d3e-0000-4000-8000-000000000001");
+    expect(state().nativeThreadId).toBe("0b1c2d3e-0000-4000-8000-000000000001");
+    expect(events()[0]).toEqual({ type: "bridge.started", version: expect.any(String), resumed: true,
+      notice: "This session continues Claude conversation 0b1c2d3e-0000-4000-8000-000000000001 of an ended session." });
+    expect(readdirSync(dir)).not.toContain("resume");
+  });
+
+  test("a resume file for another harness, or not a thread id, is refused out loud and the thread opens new", async () => {
+    for (const text of ["codex 0b1c2d3e-0000-4000-8000-000000000001", "claude ../../etc/passwd"]) {
+      rmSync(join(dir, "state.json"), { force: true });
+      rmSync(join(dir, "events.jsonl"), { force: true });
+      const file = join(dir, "resume");
+      writeFileSync(file, text);
+      const logs: string[] = [];
+      const f = fakeHarness();
+      const bridge = await start(f, { resumeFile: file, logError: (m) => logs.push(m) });
+      expect(f.opens[0].resume).toBeNull();
+      expect(events()[0]).toMatchObject({ type: "bridge.started", resumed: false, notice: expect.stringContaining("not resumed") });
+      expect(logs.some((m) => m.includes("not resumed"))).toBe(true);
+      expect(readdirSync(dir)).not.toContain("resume");
+      await bridge.close();
+    }
+  });
+
+  test("a resume file that exists but cannot be read is reported out loud and the thread opens new", async () => {
+    // A directory in its place: a read error that is not ENOENT, as EACCES would be, but also for root.
+    const file = join(dir, "resume");
+    mkdirSync(file);
+    const logs: string[] = [];
+    const f = fakeHarness();
+    await start(f, { resumeFile: file, logError: (m) => logs.push(m) });
+    expect(f.opens[0].resume).toBeNull();
+    expect(events()[0]).toMatchObject({ type: "bridge.started", resumed: false, notice: expect.stringContaining("could not be read") });
+    expect(logs.some((m) => m.includes("could not be read") && m.includes("EISDIR"))).toBe(true);
+  });
+
+  test("a resume file never replaces the thread of a bridge that already has state", async () => {
+    saveState(join(dir, "state.json"), baseState({ nativeThreadId: "thread-1" }));
+    const file = join(dir, "resume");
+    writeFileSync(file, "claude 0b1c2d3e-0000-4000-8000-000000000001");
+    const f = fakeHarness();
+    await start(f, { resumeFile: file });
+    expect(f.opens[0].resume).toBe("thread-1");
+    expect(readdirSync(dir)).not.toContain("resume");
   });
 
   test("start with activeRunId emits run.interrupted then a continuation run", async () => {

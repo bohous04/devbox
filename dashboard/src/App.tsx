@@ -32,6 +32,7 @@ const SshApprovals = lazy(() => import("./pages/SshApprovals").then((m) => ({ de
 const Unpushed = lazy(() => import("./pages/Unpushed").then((m) => ({ default: m.Unpushed })));
 const TerminalPage = lazy(() => import("./pages/TerminalPage").then((m) => ({ default: m.TerminalPage })));
 const SessionPage = lazy(() => import("./pages/SessionPage").then((m) => ({ default: m.SessionPage })));
+const EndedPage = lazy(() => import("./pages/EndedPage").then((m) => ({ default: m.EndedPage })));
 
 function OfflineBar() {
   const { connected, attempted } = useStore();
@@ -83,6 +84,8 @@ export function App() {
           <Route path="/overview" element={<Overview />} />
           {/* A chat session: conversation + terminal tab. */}
           <Route path="/s/:id" element={<SessionPage />} />
+          {/* An ended session's read-only transcript. */}
+          <Route path="/ended/:id" element={<EndedPage />} />
           <Route path="/upkeep" element={<AgentUpkeep />} />
           <Route path="/sessions" element={<Sessions />} />
           <Route path="/new" element={<NewSession />} />

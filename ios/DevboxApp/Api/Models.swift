@@ -1403,6 +1403,85 @@ struct InboxList: Decodable {
     let items: [InboxItem]
 }
 
+/// An ended session's read-only transcript (`GET /api/ended`, SSE `inbox-ended`; shared/ended.ts). It sits on the
+/// Settled shelf until hidden or purged, 30 days after the end.
+struct EndedSession: Decodable, Equatable, Identifiable {
+    enum ContinueMode: String, Decodable {
+        case resume, handoff
+        case unknown
+        init(from decoder: Decoder) throws { self = try tolerant(decoder, unknown: .unknown) }
+    }
+
+    /// The transcript's id (the session id and when it ended): session ids are reused, this one is not.
+    let id: String
+    let sessionId: String
+    let runtime: InboxItem.Runtime
+    let title: String
+    let project: String
+    let repo: String
+    let agent: String
+    let branch: String?
+    let topic: String?
+    let lastText: String?
+    let endedAt: Int
+    /// What continuing it will do, so the button can say it.
+    let continueMode: ContinueMode
+    /// How much of the conversation it holds (shared/ended.ts TranscriptState); complete from a devd that predates it.
+    var transcript: TranscriptState = .complete
+
+    enum TranscriptState: String, Decodable {
+        case complete, truncated, missing
+        case unknown
+        init(from decoder: Decoder) throws { self = try tolerant(decoder, unknown: .unknown) }
+    }
+
+    private enum K: String, CodingKey { case id, sessionId, runtime, title, project, repo, agent, branch, topic, lastText, endedAt, continueMode, transcript }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: K.self)
+        id = try c.decode(String.self, forKey: .id)
+        sessionId = try c.decode(String.self, forKey: .sessionId)
+        runtime = try c.decode(InboxItem.Runtime.self, forKey: .runtime)
+        title = try c.decode(String.self, forKey: .title)
+        project = try c.decode(String.self, forKey: .project)
+        repo = try c.decode(String.self, forKey: .repo)
+        agent = try c.decode(String.self, forKey: .agent)
+        branch = try c.decodeIfPresent(String.self, forKey: .branch)
+        topic = try c.decodeIfPresent(String.self, forKey: .topic)
+        lastText = try c.decodeIfPresent(String.self, forKey: .lastText)
+        endedAt = try c.decode(Int.self, forKey: .endedAt)
+        continueMode = try c.decode(ContinueMode.self, forKey: .continueMode)
+        transcript = try c.decodeIfPresent(TranscriptState.self, forKey: .transcript) ?? .complete
+    }
+}
+
+/// SSE `inbox-ended`: a transcript that was just kept, or `{id, removed: true}` once hidden or purged.
+enum EndedChange: Decodable, Equatable {
+    case ended(EndedSession)
+    case removed(id: String)
+
+    private enum K: String, CodingKey { case id, removed }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: K.self)
+        if c.contains(.removed) {
+            self = .removed(id: try c.decode(String.self, forKey: .id))
+        } else {
+            self = .ended(try EndedSession(from: decoder))
+        }
+    }
+}
+
+struct EndedList: Decodable {
+    let items: [EndedSession]
+}
+
+/// `POST /api/ended/:id/continue`: the new session and how devd started it.
+struct ContinueResult: Decodable, Equatable {
+    let mode: EndedSession.ContinueMode
+    let sessionId: String
+}
+
 /// `GET /api/sessions/:id/snooze-reset`: when the active usage limit resets, or why "until reset" is not possible.
 enum SnoozeReset: Decodable, Equatable {
     case resetsAt(Int)

@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { imageSize, MAX_THREAD_IMAGE_BYTES, removeThreadImages, sniffImage, stageThreadImage, ThreadImageError, threadImageFile } from "../src/threadImages";
+import { archiveThreadImages, imageSize, MAX_THREAD_IMAGE_BYTES, removeThreadImages, sniffImage, stageThreadImage, ThreadImageError, threadImageFile } from "../src/threadImages";
 import { gif, jpeg, png, webp } from "./helpers/images";
 
 const dirs: string[] = [];
@@ -114,4 +114,32 @@ test("removeThreadImages leaves `_inbox/<id>` alone unless it is a directory (a 
   removeThreadImages(root, "dev-link");
   expect(lstatSync(join(root, "_inbox", "dev-link")).isSymbolicLink()).toBe(true);
   expect(existsSync(join(target, "keep.png"))).toBe(true);
+});
+
+// An ended session's transcript keeps its images (endedSessions.ts): they move next to it instead of being deleted.
+test("archiveThreadImages moves the session's images into <archive>/images and nothing else", () => {
+  const root = tmp();
+  const name = stageThreadImage(root, "dev-a-chat", png(1, 1)).split("/").pop()!;
+  stageThreadImage(root, "dev-b-chat", png(1, 1));
+  const dest = join(root, "_chat-archive", "dev-a-chat-20261120-101500");
+  mkdirSync(dest, { recursive: true });
+  expect(archiveThreadImages(root, "dev-a-chat", dest)).toBe(true);
+  expect(existsSync(join(dest, "images", name))).toBe(true);
+  expect(existsSync(join(root, "_inbox", "dev-a-chat"))).toBe(false);
+  expect(existsSync(join(root, "_inbox", "dev-b-chat"))).toBe(true);
+  expect(archiveThreadImages(root, "dev-never-had-images", dest)).toBe(false);
+});
+
+test("archiveThreadImages leaves a shared file or a symlink named like the session where it is", () => {
+  const root = tmp();
+  const dest = tmp();
+  mkdirSync(join(root, "_inbox"), { recursive: true });
+  writeFileSync(join(root, "_inbox", "dev-file"), "shared upload");
+  expect(archiveThreadImages(root, "dev-file", dest)).toBe(false);
+  expect(existsSync(join(root, "_inbox", "dev-file"))).toBe(true);
+  const target = tmp();
+  symlinkSync(target, join(root, "_inbox", "dev-link"));
+  expect(archiveThreadImages(root, "dev-link", dest)).toBe(false);
+  expect(lstatSync(join(root, "_inbox", "dev-link")).isSymbolicLink()).toBe(true);
+  expect(() => archiveThreadImages(root, "..", dest)).toThrow("not a session id");
 });

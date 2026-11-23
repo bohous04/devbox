@@ -6,6 +6,7 @@ import { normalizeForm, type DbCandidate, type DbDiscovery, type DbRequestRow, t
 import type { IbxJobDto, IbxStatusDto, PlacementDto } from "./instaboxView";
 import type { MirrorResponse } from "../../shared/mirror";
 import type { InboxItem, ThreadSnapshot } from "../../shared/thread";
+import type { ContinueResult, EndedSession } from "../../shared/ended";
 
 export interface SessionPort { host: number; container: number }
 export type ClaudeState = "working" | "waiting" | "idle";
@@ -616,6 +617,13 @@ export const api = {
     j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/effort`, post({ effort })),
   markSeen: (id: string, seq: number) => j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/seen`, post({ seq })),
   inbox: () => j<{ items: InboxItem[] }>("/api/inbox"),
+  // Ended sessions' read-only transcripts (devd/src/endedApi.ts): listed in the inbox's Settled shelf.
+  ended: () => j<{ items: EndedSession[] }>("/api/ended"),
+  endedSession: (id: string) => j<EndedSession>(`/api/ended/${encodeURIComponent(id)}`),
+  endedTranscript: (id: string) => j<ThreadSnapshot>(`/api/ended/${encodeURIComponent(id)}/transcript`),
+  hideEnded: (id: string) => j<void>(`/api/ended/${encodeURIComponent(id)}/hide`, { method: "POST" }),
+  /** A new session in the same repo; the answer names the mode devd used and the session to open. */
+  continueEnded: (id: string) => j<ContinueResult>(`/api/ended/${encodeURIComponent(id)}/continue`, { method: "POST" }),
   /** A tmux session was looked at: its current finish or failure is seen. 204; 409 not-a-tmux-session or
    *  session-ending; 404 unknown session. */
   tmuxSeen: (id: string) => j<void>(`/api/sessions/${encodeURIComponent(id)}/seen`, { method: "POST" }),

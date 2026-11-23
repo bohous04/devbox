@@ -92,6 +92,11 @@ struct MacWindowContent: View {
                         thread = id
                         self.page = nil
                     })
+                } else if let id = thread, let endedId = InboxView.endedId(fromTag: id) {
+                    // An ended session's transcript; continuing it selects the new session in this window, while the
+                    // transcript is still what it shows.
+                    EndedTranscriptScreen(endedId: endedId, client: client) { if thread == id { thread = $0 } }
+                        .id("\(id)|\(appModel.clientIdentity)")
                 } else if let id = thread {
                     MacThreadDetail(threadId: id, client: client, inbox: inbox)
                         .id("\(id)|\(appModel.clientIdentity)")
@@ -180,8 +185,9 @@ struct MacInboxSidebar: View {
             let shown = store.items?.filter { InboxView.matches($0, query) }
             let g = shown.map(InboxView.group)
             let list = g.map(InboxView.list) ?? []
-            let pinned = g.map(InboxView.shelves) ?? []
-            let seam = (list: list.map(\.sessionId), shelves: pinned.flatMap(visibleRows).map(\.sessionId))
+            let pinned = g.map { InboxView.shelves($0, ended: store.ended.filter { InboxView.matches($0, query) }, endedError: store.endedError) } ?? []
+            // Selection ids: a transcript row's is its tag (InboxView.endedTag), so ↑/↓ and the height count it too.
+            let seam = (list: list.map(\.sessionId), shelves: pinned.flatMap(visibleRows).map(\.id))
             ScrollViewReader { proxy in List(selection: $selection) {
                 if store.paused || store.badFrame != nil {
                     Text(store.paused ? "Live updates paused — refreshing every 5 s\(store.loadError.map { " (last refresh failed: \($0))" } ?? "")"
@@ -393,17 +399,42 @@ struct MacInboxSidebar: View {
     }
 
     /// The rows a shelf shows: none while shut (it is open while searching, so every match shows).
-    private func visibleRows(_ group: InboxView.Shelf) -> [InboxItem] {
-        isOpen(group.label) || !query.isEmpty ? group.items : []
+    private func visibleRows(_ group: InboxView.Shelf) -> [InboxView.ShelfRow] {
+        isOpen(group.label) || !query.isEmpty ? group.rows : []
     }
 
     /// A shelf as a disclosure group (MacSidebarLayout leaves out the empty ones); open while searching.
     private func group(_ group: InboxView.Shelf, now: Int) -> some View {
         Section {
-            rows(visibleRows(group), now: now, preview: group.preview)
+            if let note = group.note {
+                Text(note).font(Theme.F.meta).foregroundStyle(Theme.C.dangerText).selectionDisabled()
+            }
+            if isOpen(group.label) || !query.isEmpty {
+                ForEach(group.rows) { r in
+                    switch r {
+                    case .session(let item): row(item, now: now, preview: group.preview, inList: false)
+                    case .ended(let e): endedRow(e, now: now)
+                    }
+                }
+            }
         } header: {
-            MacGroupHead(label: group.label, count: group.items.count, open: isOpen(group.label) || !query.isEmpty) { toggle(group.label) }
+            MacGroupHead(label: group.label, count: group.count, open: isOpen(group.label) || !query.isEmpty) { toggle(group.label) }
         }
+    }
+
+    /// An ended session's transcript (Settled only): it opens read-only in the detail and only hides.
+    private func endedRow(_ e: EndedSession, now: Int) -> some View {
+        MacEndedRow(ended: e, now: now)
+            .tag(InboxView.endedTag(e.id) as String?)
+            .contextMenu {
+                Button("Hide") {
+                    Task {
+                        do { try await store.hideEnded(e.id) } catch {
+                            state.settler.report("Couldn't hide “\(InboxView.endedTitle(e))”: \(chatErrorText(error))")
+                        }
+                    }
+                }
+            }
     }
 
     private func isOpen(_ shelf: String) -> Bool {
@@ -424,32 +455,34 @@ struct MacInboxSidebar: View {
 
     /// `inList`: a row of the one list, which settles from its ✓ and says what it asks; `preview` for a shelf's rows.
     private func rows(_ items: [InboxItem], now: Int, preview: Bool = false, inList: Bool = false) -> some View {
-        ForEach(items) { item in
-            MacInboxRow(item: item, now: now, preview: inList ? InboxView.asks(item) : preview,
-                        settle: inList ? { settle(item) } : nil)
-                .tag(item.sessionId as String?)
-                .contextMenu {
-                    Button("Open in New Window") { state.openThread(item.sessionId) }
-                    Divider()
-                    if MacSettler.canSettle(item) {
-                        let block = MacSettler.block(item)
-                        Button(block.map { "Settle (\($0.prefix(1).lowercased() + $0.dropFirst()))" } ?? "Settle") { settle(item) }
-                            .keyboardShortcut("s", modifiers: [.command, .shift])
-                            .disabled(block != nil)
-                        Button("Snooze…") { actionsFor = item }
-                    } else {
-                        Button("Back to the Inbox") {
-                            Task {
-                                do { try await store.unsettle(item.sessionId) } catch {
-                                    state.settler.report("Couldn't bring back “\(InboxView.rowTitle(item))”: \(chatErrorText(error))")
-                                }
+        ForEach(items) { item in row(item, now: now, preview: preview, inList: inList) }
+    }
+
+    private func row(_ item: InboxItem, now: Int, preview: Bool, inList: Bool) -> some View {
+        MacInboxRow(item: item, now: now, preview: inList ? InboxView.asks(item) : preview,
+                    settle: inList ? { settle(item) } : nil)
+            .tag(item.sessionId as String?)
+            .contextMenu {
+                Button("Open in New Window") { state.openThread(item.sessionId) }
+                Divider()
+                if MacSettler.canSettle(item) {
+                    let block = MacSettler.block(item)
+                    Button(block.map { "Settle (\($0.prefix(1).lowercased() + $0.dropFirst()))" } ?? "Settle") { settle(item) }
+                        .keyboardShortcut("s", modifiers: [.command, .shift])
+                        .disabled(block != nil)
+                    Button("Snooze…") { actionsFor = item }
+                } else {
+                    Button("Back to the Inbox") {
+                        Task {
+                            do { try await store.unsettle(item.sessionId) } catch {
+                                state.settler.report("Couldn't bring back “\(InboxView.rowTitle(item))”: \(chatErrorText(error))")
                             }
                         }
                     }
-                    Divider()
-                    MacSessionMenuItems(item: item, actions: sessionActions)
                 }
-        }
+                Divider()
+                MacSessionMenuItems(item: item, actions: sessionActions)
+            }
     }
 }
 
@@ -553,6 +586,54 @@ private struct MacGroupHead: View {
 /// out by its chip; danger and asks are loud, the rest quiet. With `settle`, a ✓ takes the state's place while the
 /// pointer is over the row, as in T3 Code; it is disabled, with the reason, while a request is open. The message, the
 /// agent's name and the full project name are also in the tooltip and the spoken label, which starts with the chip.
+/// An ended session's transcript in the sidebar, in MacInboxRow's sizes and selection-aware styles: a quiet title, a
+/// muted "Ended" mark with its age, and the project badge, repo, branch and tail under it.
+struct MacEndedRow: View {
+    let ended: EndedSession
+    let now: Int
+    @Environment(\.inboxShowsAgent) private var showAgent
+
+    var body: some View {
+        let spoken = InboxView.endedSpoken(ended, now: now, showAgent: showAgent)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(InboxView.endedTitle(ended))
+                    .font(.system(size: 13))
+                    .modifier(MacSelectionTone(color: MacInboxRow.quietTitle, onSelection: MacInboxRow.style(.primary)))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text("Ended  \(InboxView.shortAgo(now - ended.endedAt))").font(.system(size: 11)).monospacedDigit()
+                    .modifier(MacSelectionTone(color: Theme.C.mutedForeground, onSelection: MacInboxRow.style(.secondary)))
+            }
+            HStack(spacing: 5) {
+                ProjectBadge(project: ended.project, size: 8.5)
+                    .help(ended.project)
+                Text(InboxView.endedSecondLine(ended))
+                    .font(.system(size: 11.5))
+                    .modifier(MacSelectionTone(color: nil, onSelection: MacInboxRow.style(.secondary)))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if showAgent {
+                    AgentLogo(mark: AgentLogo.Mark(agent: ended.agent), size: 11)
+                        .modifier(MacSelectionTone(color: nil, onSelection: MacInboxRow.style(.tertiary)))
+                        .accessibilityHidden(true)
+                }
+                // The sidebar is narrow: the agent shows as its glyph only, as MacInboxRow's tail.
+                let tail = InboxView.endedMetaTail(ended, showAgent: false)
+                if !tail.isEmpty {
+                    Text(tail.joined(separator: " · ")).font(.system(size: 10.5)).lineLimit(1).fixedSize()
+                        .modifier(MacSelectionTone(color: nil, onSelection: MacInboxRow.style(.tertiary)))
+                }
+            }
+        }
+        .padding(.vertical, 5)
+        .contentShape(Rectangle())
+        .help(spoken)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spoken)
+    }
+}
+
 struct MacInboxRow: View {
     let item: InboxItem
     let now: Int

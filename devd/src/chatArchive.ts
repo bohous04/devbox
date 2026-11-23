@@ -9,18 +9,22 @@ import { join } from "node:path";
  *
  *  A chat session's thread store (`_threads/<id>.sqlite` plus `-wal`/`-shm`) moves into the same
  *  archive directory after the transcripts (a failed move leaves it in `_threads`); the caller closes the store
- *  first. Without a store file nothing changes. */
+ *  first. Without a store file nothing changes. A tmux session's Chat-view mirror (`_mirrors/<id>.sqlite`) moves the
+ *  same way as `<id>.mirror.sqlite`: it is the ended session's transcript (endedSessions.ts). */
 export function archiveChats(root: string, id: string, now: Date): string | null {
   const src = join(root, "_claude-projects", id);
   let entries: string[];
   try { entries = readdirSync(src); } catch { entries = []; }
-  const threadFiles = ["", "-wal", "-shm"].map((x) => join(root, "_threads", `${id}.sqlite${x}`)).filter((f) => existsSync(f));
+  // [from, name in the archive]
+  const threadFiles = ["", "-wal", "-shm"].flatMap((x): [string, string][] => [
+    [join(root, "_threads", `${id}.sqlite${x}`), `${id}.sqlite${x}`],
+    [join(root, "_mirrors", `${id}.sqlite${x}`), `${id}.mirror.sqlite${x}`],
+  ]).filter(([f]) => existsSync(f));
   if (!entries.length && !threadFiles.length) {
     rmSync(src, { recursive: true, force: true });
     return null;
   }
-  const stamp = now.toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
-  const dest = join(root, "_chat-archive", `${id}-${stamp}`);
+  const dest = join(root, "_chat-archive", `${id}-${archiveStamp(now)}`);
   if (entries.length) {
     // One rename of the whole directory: a failure cannot split the transcripts between two places.
     mkdirSync(join(root, "_chat-archive"), { recursive: true });
@@ -29,6 +33,11 @@ export function archiveChats(root: string, id: string, now: Date): string | null
     mkdirSync(dest, { recursive: true });
     rmSync(src, { recursive: true, force: true });
   }
-  for (const f of threadFiles) renameSync(f, join(dest, f.slice(f.lastIndexOf("/") + 1)));
+  for (const [f, name] of threadFiles) renameSync(f, join(dest, name));
   return dest;
+}
+
+/** The archive's time stamp (`20261120-101500`, UTC); an ended session's id is `<session id>-<stamp>`. */
+export function archiveStamp(now: Date): string {
+  return now.toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
 }

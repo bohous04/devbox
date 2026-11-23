@@ -110,21 +110,25 @@ test("a long tool input is clipped and a long result is cut to its byte budget",
   expect(tool.output!.length).toBeLessThan(16 * 1024 + 30);
 });
 
-test("readChunk returns complete lines only, reads a line longer than the budget whole, and skips one over the cap", () => {
+test("readChunk returns complete lines only, reads a line longer than the budget whole, and skips one over the cap, off the event loop", async () => {
   const dir = tmp("mirror-chunk-");
   const file = join(dir, "t.jsonl");
   writeFileSync(file, `{"a":1}\n${"y".repeat(30)}\n{"b":2}\n{"partial"`);
   const fd = openSync(file, "r");
   cleanups.push(() => closeSync(fd));
   const size = Buffer.byteLength(readFileSync(file));
-  const first = readChunk(fd, 0, size, 10, 100);
+  // An async read (the thread pool's), so a long transcript read before an end does not block devd's event loop.
+  const pending = readChunk(fd, 0, size, 10, 100);
+  expect(pending).toBeInstanceOf(Promise);
+  await pending;
+  const first = await readChunk(fd, 0, size, 10, 100);
   expect(first.lines).toEqual(['{"a":1}']);
-  const second = readChunk(fd, first.next, size, 10, 100);
+  const second = await readChunk(fd, first.next, size, 10, 100);
   expect(second.lines).toEqual(["y".repeat(30)]);
-  const rest = readChunk(fd, second.next, size, 1000, 100);
+  const rest = await readChunk(fd, second.next, size, 1000, 100);
   expect(rest.lines).toEqual(['{"b":2}']);
-  expect(readChunk(fd, rest.next, size, 1000, 100)).toEqual({ lines: [], next: rest.next, skipped: 0 });
-  const over = readChunk(fd, second.next - 31, size, 10, 20);
+  expect(await readChunk(fd, rest.next, size, 1000, 100)).toEqual({ lines: [], next: rest.next, skipped: 0 });
+  const over = await readChunk(fd, second.next - 31, size, 10, 20);
   expect(over).toEqual({ lines: [], next: second.next, skipped: 1 });
 });
 
@@ -164,7 +168,7 @@ interface Pane {
   codexHome?: string; home?: string; homes?: Record<string, string>; codexOpen?: string[]; pid?: number; start?: string;
 }
 
-function setup(pane: Pane, isEnding: (id: string) => boolean = () => false) {
+function setup(pane: Pane, isEnding: (id: string) => boolean = () => false, o: { finalReadMs?: number } = {}) {
   const root = tmp("mirror-root-");
   const projects = join(root, "_claude-projects", TMUX.id);
   mkdirSync(projects, { recursive: true });
@@ -194,7 +198,7 @@ function setup(pane: Pane, isEnding: (id: string) => boolean = () => false) {
     throw new Error(`unexpected exec ${cmd.join(" ")}`);
   };
   const bus = new EventBus();
-  const mirror = new TranscriptMirror({ db, root, bus, exec, isEnding, live: () => null, now: () => now, log: (m) => logs.push(m) });
+  const mirror = new TranscriptMirror({ db, root, bus, exec, isEnding, live: () => null, now: () => now, log: (m) => logs.push(m), ...o });
   cleanups.push(() => { mirror.release(TMUX.id); mirror.release(CHAT.id); });
   const write = (sid: string, lines: string[]) => appendFileSync(join(projects, `${sid}.jsonl`), lines.map((l) => `${l}\n`).join(""));
   /** A hook event of the session naming agent thread `thread` (what Codex's hooks record). */
@@ -256,9 +260,29 @@ test("a refresh still running when the session is released does not reopen the s
   const t = setup({ sid: SID });
   t.write(SID, fixtureLines());
   const pending = t.mirror.refresh(TMUX.id);
-  t.mirror.release(TMUX.id, true);
+  t.mirror.release(TMUX.id);
   await pending;
   expect(existsSync(join(t.root, "_mirrors", `${TMUX.id}.sqlite`))).toBe(false);
+});
+
+// end() (sessions.ts) keeps the mirror as the ended session's transcript: one last read while the session is ending.
+test("finalRefresh reads the transcript of an ending session that plain refreshes skip, and release leaves the store for the archive", async () => {
+  let ending = false;
+  const t = setup({ sid: SID }, () => ending);
+  const lines = fixtureLines();
+  t.write(SID, lines.slice(0, 10));
+  await t.mirror.refresh(TMUX.id);
+  t.write(SID, lines.slice(10));
+  ending = true;
+  await t.mirror.refresh(TMUX.id);
+  expect(await t.mirror.finalRefresh(TMUX.id)).toEqual({ truncated: false });
+  t.mirror.release(TMUX.id);
+  expect(existsSync(join(t.root, "_mirrors", `${TMUX.id}.sqlite`))).toBe(true);
+  const store = ThreadStore.open(t.root, TMUX.id, { dir: "_mirrors" });
+  cleanups.push(() => store.close());
+  expect(store.snapshot().items.map(brief)).toEqual(render(lines).snapshot.items.map(brief));
+  // After the final read the session is ending again for everyone else.
+  expect(t.mirror.session(TMUX.id)).toEqual({ error: "session-ending" });
 });
 
 test("a rewritten transcript is read again from the start with a notice", async () => {
@@ -773,6 +797,25 @@ test.skipIf(!Bun.which("python3"))("a long Codex backlog is read a few chunks pe
   await t.mirror.refresh(TMUX.id);
   expect(items(t.mirror).at(-1)).toBe("user: End");
 }, 20_000);
+
+// The last read before an end has no next refresh: it reads a backlog to its end, within a time cap.
+test.skipIf(!Bun.which("python3"))("the last read before an end reads a long Codex backlog to its end, or says it is cut short", async () => {
+  for (const [finalReadMs, truncated, last] of [[60_000, false, "user: End"], [0, true, "user: Start"]] as const) {
+    const c = codexHome();
+    const t = setup({ sid: null, agent: "codex", codexHome: c.home, codexOpen: [TID] }, () => true, { finalReadMs });
+    const filler = JSON.stringify({ type: "response_item", payload: { type: "reasoning", summary: [], encrypted_content: "r".repeat(100_000) } });
+    c.write(TID, [userMsg("u1", "Start"), ...Array(Math.ceil((CODEX_TICK_CHUNKS + 1) * CODEX_CHUNK_BYTES / filler.length)).fill(filler), userMsg("u2", "End")]);
+    t.hook(TID);
+    expect(await t.mirror.finalRefresh(TMUX.id)).toEqual({ truncated });
+    const reads = t.calls.filter((x) => x.cmd[3] === MIRROR_CODEX_READ).length;
+    if (truncated) expect(reads).toBe(1); else expect(reads).toBeGreaterThan(CODEX_TICK_CHUNKS);
+    t.mirror.release(TMUX.id);
+    const store = ThreadStore.open(t.root, TMUX.id, { dir: "_mirrors" });
+    cleanups.push(() => store.close());
+    expect(store.snapshot().items.map((i) => `${i.kind}: ${i.text}`).at(-1)).toBe(last);
+    expect(t.logs.some((l) => l.includes("cut short"))).toBe(truncated);
+  }
+}, 30_000);
 
 test.skipIf(!Bun.which("python3"))("MIRROR_LOCATE reports a codex process's CODEX_HOME, start and the main rollouts it has open", () => {
   const c = fakeContainer({ status: "idle", agent: "codex" });

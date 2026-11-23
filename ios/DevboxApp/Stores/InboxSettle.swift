@@ -13,6 +13,37 @@ extension InboxView {
         let items: [InboxItem]
         /// Whether the rows show the latest message.
         let preview: Bool
+        /// Settled only: ended sessions' transcripts, among the settled sessions.
+        var ended: [EndedSession] = []
+        /// Settled only: why the transcripts did not load. The shelf shows it, empty or shut.
+        var note: String? = nil
+
+        var count: Int { items.count + ended.count }
+
+        /// The shelf's rows: its sessions, with the ended transcripts among them newest first (endedView.ts settledShelf).
+        var rows: [ShelfRow] {
+            guard !ended.isEmpty else { return items.map(ShelfRow.session) }
+            return (items.map(ShelfRow.session) + ended.map(ShelfRow.ended)).sorted { $0.at > $1.at }
+        }
+    }
+
+    enum ShelfRow: Identifiable {
+        case session(InboxItem)
+        case ended(EndedSession)
+
+        var id: String {
+            switch self {
+            case .session(let i): return i.sessionId
+            case .ended(let e): return InboxView.endedTag(e.id)
+            }
+        }
+
+        var at: Int {
+            switch self {
+            case .session(let i): return i.attention.since
+            case .ended(let e): return e.endedAt
+            }
+        }
     }
 
     /// The one list: what asks for action (a request or a failure) pinned on top, the longest wait first, as devd
@@ -24,10 +55,11 @@ extension InboxView {
     }
 
     /// The shelves under the list, in order, the empty ones left out.
-    static func shelves(_ g: Groups) -> [Shelf] {
+    static func shelves(_ g: Groups, ended: [EndedSession] = [], endedError: String? = nil) -> [Shelf] {
         [Shelf(label: "Working", items: g.working, preview: true),
          Shelf(label: "Snoozed", items: g.snoozed, preview: true),
-         Shelf(label: "Settled", items: g.settled, preview: false)].filter { !$0.items.isEmpty }
+         Shelf(label: "Settled", items: g.settled, preview: false, ended: ended,
+               note: endedError.map { "Ended sessions could not be loaded: \($0)" })].filter { $0.count > 0 || $0.note != nil }
     }
 
     /// A row that asks something (a request or a failure) says what in its second line; the others say where they run.

@@ -526,16 +526,21 @@ final class ThreadStore: ObservableObject {
         if ThreadView.lastEndedSeq(next) != endedBefore { markSeen(look: false) }
     }
 
-    private func setThread(_ t: ThreadSnapshot) {
+    /// The thread's rows as the screen draws them; also an ended session's transcript (EndedTranscriptScreen).
+    static func chatRows(_ t: ThreadSnapshot) -> [ChatRow] {
         let queued = Set(ThreadView.queuedRunIds(t))
         let critic = Set(ThreadView.criticRunIds(t))
         let open = Dictionary(t.pending.map { ($0.requestId, $0) }, uniquingKeysWith: { a, _ in a })
         let failed = Set(t.runs.filter { $0.status == .failed }.map(\.runId))
-        rows = ThreadView.shownItems(t).enumerated().map { i, it in
+        return ThreadView.shownItems(t).enumerated().map { i, it in
             ChatRow(id: i, item: it, pending: it.itemId.flatMap { open[$0] },
                     queued: it.runId.map(queued.contains) ?? false, critic: it.runId.map(critic.contains) ?? false,
                     failedRun: it.kind == .notice && it.runId.map(failed.contains) == true)
         }
+    }
+
+    private func setThread(_ t: ThreadSnapshot) {
+        rows = Self.chatRows(t)
         display = WorkGroups.rows(rows, runs: t.runs)
         changesAnchor = ChangesView.anchor(rows, runs: t.runs)
         // As devd's topic: an attachment-only first message (empty text) names nothing; the next one does.

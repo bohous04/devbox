@@ -250,6 +250,13 @@ export function openDb(path: string): Database {
   // marker: a done or failed state that began at or before it is seen (tmuxAttention); chat's marker is the thread
   // store's seenSeq. Deleted with the session (deleteSession).
   db.run(`CREATE TABLE IF NOT EXISTS tmux_seen (session_id TEXT PRIMARY KEY, seen_at INTEGER NOT NULL)`);
+  // Ended sessions whose transcript is kept (endedSessions.ts): listed in the inbox's Settled section until hidden, and
+  // purged with their transcript 30 days after the end. Not tied to a sessions row: the id is reused by later sessions.
+  db.run(`CREATE TABLE IF NOT EXISTS ended_sessions (
+    id TEXT PRIMARY KEY, session_id TEXT NOT NULL, folder TEXT NOT NULL, project TEXT NOT NULL, repo TEXT NOT NULL,
+    agent TEXT NOT NULL, runtime TEXT NOT NULL, title TEXT NOT NULL, branch TEXT, topic TEXT, last_text TEXT,
+    ended_at INTEGER NOT NULL, archive_dir TEXT NOT NULL, store_file TEXT NOT NULL,
+    native_harness TEXT, native_thread TEXT, hidden_at INTEGER, transcript TEXT NOT NULL DEFAULT 'complete')`);
   // The PR of a session's pushed branch as the PR watch last saw it (prWatch.ts). Kept across devd restarts so a
   // CI failure is notified once and a merge settles once. One row per session, deleted with it (deleteSession).
   // First deploy of the PR watch: the table is new, so PRs that are already failing or merged are not news. The

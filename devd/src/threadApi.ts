@@ -304,7 +304,8 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
     return c.json(d.untilReset(r.s));
   });
 
-  /** Server-sent events: `inbox` (InboxItem, coalesced per session by Inbox), `ping` every 25 s and, with
+  /** Server-sent events: `inbox` (InboxItem, coalesced per session by Inbox), `inbox-ended` (an EndedSession that was
+   *  just kept, or an EndedRemoved once hidden or purged: shared/ended.ts), `ping` every 25 s and, with
    *  `?session=<id>`, `thread` (LoggedEvent, `id: <seq>`) and `thread-notice` (a devd notice, ThreadItem with item id
    *  `notice:<n>`, no id) for that chat session only.
    *
@@ -351,10 +352,10 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
         // Every thread event sent has a seq above this: drops what the replay snapshot already holds
         // and any duplicate delivery.
         let sentSeq = -1;
-        const topics: BusTopic[] = sessionId === undefined ? ["inbox"] : ["inbox", `thread:${sessionId}`];
+        const topics: BusTopic[] = sessionId === undefined ? ["inbox", "inbox-ended"] : ["inbox", "inbox-ended", `thread:${sessionId}`];
         // Subscribed BEFORE the store is read, so nothing published in between is lost.
         const unsubscribe = d.bus.subscribe(topics, (topic, data) => {
-          if (topic === "inbox") { send(sseFrame("inbox", data)); return; }
+          if (topic === "inbox" || topic === "inbox-ended") { send(sseFrame(topic, data)); return; }
           // A devd notice (ThreadStore.addNotice) has no seq of its own: no id, so Last-Event-ID stays the bridge's.
           if (isRecord(data) && "notice" in data) { send(sseFrame("thread-notice", data.notice)); return; }
           const e = data as LoggedEvent;

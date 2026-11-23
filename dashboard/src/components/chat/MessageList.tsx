@@ -1,10 +1,11 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Check, ChevronRight, CircleAlert, Copy, ShieldCheck, TriangleAlert } from "lucide-react";
 import type { PendingRequest, RunRow, ThreadItem } from "../../../../shared/thread";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { changesAnchor } from "../../changesView";
 import { attachmentUrl } from "../../imageView";
+import { endedAttachmentUrl, openRequestLabel } from "../../endedView";
 import { opensTurn, threadRows, workLabel, workSummary, type ThreadRow } from "../../workGroups";
 import { Collapse } from "../primitives";
 import { Markdown } from "./Markdown";
@@ -12,7 +13,12 @@ import { RequestForm } from "./RequestForm";
 import { ChangesCard } from "./ChangesCard";
 import { ToolCall } from "./ToolCall";
 
+/** An ended session's transcript (endedView.ts) shows its images from the archive, has no changes card, and its open
+ *  requests will never be answered. */
+const Transcript = createContext<string | null>(null);
+
 function RequestItem({ item, pending, onAnswer }: { item: ThreadItem; pending: PendingRequest | undefined; onAnswer: (requestId: string, answer: string) => Promise<void> }) {
+  const inTranscript = useContext(Transcript) !== null;
   if (item.status === "open" && pending) return <RequestForm request={pending} onAnswer={(a) => onAnswer(pending.requestId, a)} />;
   return (
     <div className="rounded-xl border bg-card/40 px-4 py-3 text-sm">
@@ -20,18 +26,20 @@ function RequestItem({ item, pending, onAnswer }: { item: ThreadItem; pending: P
       <p className="mt-2 text-xs text-muted-foreground">
         {item.status === "answered" ? <>answered: <span className="text-foreground">{item.output ?? "—"}</span></>
           : item.status === "expired" ? "expired without an answer"
-            : "waiting for an answer"}
+            : openRequestLabel(inTranscript)}
       </p>
     </div>
   );
 }
 
 function Images({ sessionId, paths }: { sessionId: string; paths: string[] }) {
+  const endedId = useContext(Transcript);
+  const url = (p: string) => (endedId !== null ? endedAttachmentUrl(endedId, p) : attachmentUrl(sessionId, p));
   return (
     <div className="mb-2 flex flex-wrap gap-1.5">
       {paths.map((p) => (
-        <a key={p} href={attachmentUrl(sessionId, p)} target="_blank" rel="noreferrer">
-          <img src={attachmentUrl(sessionId, p)} alt="Attached image" loading="lazy" className="max-h-40 max-w-full rounded-lg object-cover" />
+        <a key={p} href={url(p)} target="_blank" rel="noreferrer">
+          <img src={url(p)} alt="Attached image" loading="lazy" className="max-h-40 max-w-full rounded-lg object-cover" />
         </a>
       ))}
     </div>
@@ -174,9 +182,12 @@ function WorkGroup({ row }: { row: WorkRow }) {
 
 /** The thread: user and assistant messages, tool calls (a finished run's folded under one line), requests (open
  *  ones as a form) and notices. */
-export function MessageList({ sessionId, items, runs, pending, queued, critic, onAnswer, onLayout }: {
+export function MessageList({ sessionId, endedId = null, items, runs, pending, queued, critic, onAnswer, onLayout }: {
   /** For the user's images (attachmentUrl). */
   sessionId: string;
+  /** The thread is this ended session's read-only transcript: images from its archive, no changes card (the session
+   *  id may belong to a later session by now). */
+  endedId?: string | null;
   items: ThreadItem[];
   /** Which runs ended and when: their work folds. */
   runs: RunRow[];
@@ -190,10 +201,11 @@ export function MessageList({ sessionId, items, runs, pending, queued, critic, o
   onLayout?: () => void;
 }) {
   const rows = threadRows(items, runs);
-  const anchor = changesAnchor(items, runs);
+  const anchor = endedId === null ? changesAnchor(items, runs) : null;
   // A notice is a run's failure only when that run failed (run.failed); "event for unknown run" also carries a runId.
   const failed = new Set(runs.filter((r) => r.status === "failed").map((r) => r.runId));
   return (
+    <Transcript.Provider value={endedId}>
     <ol className="flex flex-col gap-4 sm:gap-5" aria-label="Conversation">
       {rows.map((row, i) => {
         if (row.type === "work") return <li key={`work:${row.runId}`} className="min-w-0"><WorkGroup row={row} /></li>;
@@ -245,5 +257,6 @@ export function MessageList({ sessionId, items, runs, pending, queued, critic, o
         );
       })}
     </ol>
+    </Transcript.Provider>
   );
 }

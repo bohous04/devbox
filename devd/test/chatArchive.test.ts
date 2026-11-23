@@ -69,3 +69,25 @@ test("archiveChats moves the transcript directory in one rename (same inode), th
   expect(readFileSync(join(dest, "dev-a-b-3.sqlite"), "utf8")).toBe("db");
   expect(existsSync(join(dest, "sub"))).toBe(true);
 });
+
+// An ended tmux session keeps its Chat-view mirror as its transcript (endedSessions.ts), under a name of its own.
+test("archiveChats moves a tmux session's mirror store as <id>.mirror.sqlite", () => {
+  const root = mkdtempSync(join(tmpdir(), "chats-"));
+  const src = join(root, "_claude-projects", "dev-m");
+  mkdirSync(src, { recursive: true });
+  writeFileSync(join(src, "x.jsonl"), "{}\n");
+  mkdirSync(join(root, "_mirrors"));
+  for (const x of ["", "-wal"]) writeFileSync(join(root, "_mirrors", `dev-m.sqlite${x}`), "m" + x);
+  const dest = archiveChats(root, "dev-m", new Date("2026-11-17T12:30:05Z"))!;
+  expect(readFileSync(join(dest, "dev-m.mirror.sqlite"), "utf8")).toBe("m");
+  expect(readFileSync(join(dest, "dev-m.mirror.sqlite-wal"), "utf8")).toBe("m-wal");
+  expect(existsSync(join(root, "_mirrors", "dev-m.sqlite"))).toBe(false);
+});
+
+test("archiveChats archives a mirror store alone", () => {
+  const root = mkdtempSync(join(tmpdir(), "chats-"));
+  mkdirSync(join(root, "_mirrors"));
+  writeFileSync(join(root, "_mirrors", "dev-n.sqlite"), "m");
+  const dest = archiveChats(root, "dev-n", new Date("2026-11-17T12:30:05Z"))!;
+  expect(readFileSync(join(dest, "dev-n.mirror.sqlite"), "utf8")).toBe("m");
+});

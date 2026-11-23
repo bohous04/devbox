@@ -203,6 +203,20 @@ if [ "$profile" = claude ] && [ "${DEVD_RECOVERY_LAUNCH:-0}" != 1 ] && [ -x /usr
   if [ -n "$pool_dir" ]; then export CLAUDE_CONFIG_DIR="$pool_dir"; fi
 fi
 
+# A session that continues an ended one (devd POST /api/ended/:id/continue): devd leaves `claude <thread id>` in
+# /run/devd/resume and Claude Code starts on that conversation, once (the file is consumed). Anything else in it is
+# said on stderr, never silently dropped; the agent then starts a new conversation. DEVD_RESUME_FILE: test hatch.
+RESUME_FILE="${DEVD_RESUME_FILE:-/run/devd/resume}"
+if [ "${DEVD_RECOVERY_LAUNCH:-0}" != 1 ] && [ -s "$RESUME_FILE" ]; then
+  read -r resume_harness resume_id _ < "$RESUME_FILE"
+  rm -f "$RESUME_FILE"
+  if [ "$bin" = cc ] && [ "$resume_harness" = claude ] && [[ "$resume_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    extra+=(--resume "$resume_id")
+  else
+    printf 'devbox: the ended session'"'"'s conversation was not resumed (%s cannot open "%s %s"); starting a new one.\n' "$profile" "$resume_harness" "$resume_id" >&2
+  fi
+fi
+
 # DEVD_PROMPT_FILE is a test escape hatch (production always reads /run/devd/prompt) — tests
 # have no right to write to /run.
 PROMPT_FILE="${DEVD_PROMPT_FILE:-/run/devd/prompt}"

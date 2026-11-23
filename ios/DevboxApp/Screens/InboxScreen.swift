@@ -5,10 +5,14 @@ import SwiftUI
 enum InboxRoute: Hashable {
     case thread(String)
     case session(String)
+    /// An ended session's read-only transcript, by its transcript id (EndedTranscriptScreen).
+    case ended(String)
 
+    /// The id the inbox looks the opened row up by; a transcript's matches no session, so nothing is marked seen.
     var sessionId: String {
         switch self {
         case .thread(let id), .session(let id): return id
+        case .ended(let id): return InboxView.endedTag(id)
         }
     }
 
@@ -131,12 +135,22 @@ struct InboxScreen: View {
                             .plainRow()
                     }
                     rows(list, now: now, inList: true) { InboxView.asks($0) }
-                    let shelves = InboxView.shelves(g)
+                    let shelves = InboxView.shelves(g, ended: store.ended, endedError: store.endedError)
                     if !shelves.isEmpty {
                         Rectangle().fill(Theme.C.border).frame(height: 1).padding(.vertical, 8).plainRow().accessibilityHidden(true)
                         ForEach(shelves, id: \.label) { shelf in
-                            shelfHead(shelf)
-                            if openShelves.contains(shelf.label) { rows(shelf.items, now: now, inList: false) { _ in shelf.preview } }
+                            if shelf.count > 0 { shelfHead(shelf) }
+                            if let note = shelf.note {
+                                Text(note).font(Theme.F.meta).foregroundStyle(Theme.C.dangerText).plainRow()
+                            }
+                            if openShelves.contains(shelf.label) {
+                                ForEach(shelf.rows) { r in
+                                    switch r {
+                                    case .session(let item): row(item, now: now, inList: false, preview: shelf.preview, createdAt: createdAt)
+                                    case .ended(let e): endedRow(e, now: now)
+                                    }
+                                }
+                            }
                         }
                     }
                     Color.clear.frame(height: 1).plainRow().id(Self.bottomId)
@@ -183,7 +197,7 @@ struct InboxScreen: View {
                     .rotationEffect(.degrees(open ? 90 : 0))
                 Text(shelf.label).font(.subheadline.weight(.semibold)).foregroundStyle(Theme.C.mutedForeground)
                 Spacer()
-                Text("\(shelf.items.count)").font(.subheadline.monospacedDigit()).foregroundStyle(Theme.C.mutedForeground)
+                Text("\(shelf.count)").font(.subheadline.monospacedDigit()).foregroundStyle(Theme.C.mutedForeground)
             }
             .frame(minHeight: 44)
             .contentShape(Rectangle())
@@ -192,36 +206,67 @@ struct InboxScreen: View {
         .plainRow()
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isHeader)
-        .accessibilityLabel("\(shelf.label), \(shelf.items.count)")
+        .accessibilityLabel("\(shelf.label), \(shelf.count)")
         .accessibilityValue(open ? "expanded" : "collapsed")
         .accessibilityHint(open ? "Hides these sessions" : "Shows these sessions")
+    }
+
+    /// For each session's created_at, which keys its remembered view (InboxRoute.row).
+    private var createdAt: [String: Int] {
+        Dictionary((live.live?.sessions ?? []).map { ($0.id, $0.created_at) }, uniquingKeysWith: { _, last in last })
     }
 
     @ViewBuilder
     /// `inList`: a full swipe settles only in the list; on a shelf it would act on rows read less closely.
     private func rows(_ items: [InboxItem], now: Int, inList: Bool, preview: @escaping (InboxItem) -> Bool) -> some View {
-        let createdAt = Dictionary((live.live?.sessions ?? []).map { ($0.id, $0.created_at) }, uniquingKeysWith: { _, last in last })
-        ForEach(items) { item in
-            InboxRow(item: item, now: now, preview: preview(item))
-                // The link fills the row without its disclosure chevron: rows read as T3 Code's, not as a settings list.
-                .background {
-                    NavigationLink(value: InboxRoute.row(sessionId: item.sessionId, runtime: item.runtime, createdAt: createdAt[item.sessionId], memory: tabs)) {
-                        EmptyView()
-                    }
-                    .opacity(0)
-                }
-                .plainRow()
-                .swipeActions(edge: .trailing, allowsFullSwipe: inList && InboxSettler.canSettle(item) && InboxSettler.block(item) == nil) {
-                    trailingAction(item)
-                }
-                .swipeActions(edge: .leading) {
-                    if InboxSettler.canSettle(item) && InboxSettler.block(item) == nil {
-                        Button { actionsFor = item } label: { Label("Snooze", systemImage: "alarm") }
-                            .tint(InboxTone.snoozeSwipe)
-                    }
-                }
-                .contextMenu { menu(item) }
+        let createdAt = createdAt
+        ForEach(items) { item in row(item, now: now, inList: inList, preview: preview(item), createdAt: createdAt) }
+    }
+
+    /// An ended session's transcript on the Settled shelf: it opens read-only and only hides, never back to the inbox.
+    private func endedRow(_ e: EndedSession, now: Int) -> some View {
+        InboxEndedRow(ended: e, now: now)
+            .background {
+                NavigationLink(value: InboxRoute.ended(e.id)) { EmptyView() }.opacity(0)
+            }
+            .plainRow()
+            .swipeActions(edge: .trailing) {
+                Button { hide(e) } label: { Label("Hide", systemImage: "eye.slash") }.tint(InboxTone.backSwipe)
+            }
+            .contextMenu {
+                Button { hide(e) } label: { Label("Hide", systemImage: "eye.slash") }
+            }
+    }
+
+    private func hide(_ e: EndedSession) {
+        Task {
+            do { try await store.hideEnded(e.id) } catch {
+                settler.report("Couldn't hide “\(InboxView.endedTitle(e))”: \(chatErrorText(error))")
+            }
         }
+    }
+
+    @ViewBuilder
+    private func row(_ item: InboxItem, now: Int, inList: Bool, preview: Bool, createdAt: [String: Int]) -> some View {
+        InboxRow(item: item, now: now, preview: preview)
+            // The link fills the row without its disclosure chevron: rows read as T3 Code's, not as a settings list.
+            .background {
+                NavigationLink(value: InboxRoute.row(sessionId: item.sessionId, runtime: item.runtime, createdAt: createdAt[item.sessionId], memory: tabs)) {
+                    EmptyView()
+                }
+                .opacity(0)
+            }
+            .plainRow()
+            .swipeActions(edge: .trailing, allowsFullSwipe: inList && InboxSettler.canSettle(item) && InboxSettler.block(item) == nil) {
+                trailingAction(item)
+            }
+            .swipeActions(edge: .leading) {
+                if InboxSettler.canSettle(item) && InboxSettler.block(item) == nil {
+                    Button { actionsFor = item } label: { Label("Snooze", systemImage: "alarm") }
+                        .tint(InboxTone.snoozeSwipe)
+                }
+            }
+            .contextMenu { menu(item) }
     }
 
     /// Settle, or for a row with an open request the reason it cannot be (devd refuses it); on a shelf, back to the inbox.
@@ -566,6 +611,51 @@ struct InboxRow: View {
         return [mark.label, title, when, "\(i.project)/\(i.repo)", agent, i.runtime == .tmux ? "tmux" : "",
                 detail == InboxView.reasonLabel(i.attention.reason) ? "" : detail]
             .filter { !$0.isEmpty }.joined(separator: ", ") + branch
+    }
+}
+
+/// An ended session's transcript on the Settled shelf: its title, an "Ended" mark with how long ago, and where it ran.
+struct InboxEndedRow: View {
+    let ended: EndedSession
+    let now: Int
+    @Environment(\.inboxShowsAgent) private var showAgent
+
+    var body: some View {
+        let title = InboxView.endedTitle(ended)
+        let ago = InboxView.shortAgo(now - ended.endedAt)
+        let tail = InboxView.endedMetaTail(ended, showAgent: showAgent)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(title).font(.body).foregroundStyle(InboxTone.quietTitle).lineLimit(1)
+                Spacer(minLength: 0)
+                HStack(spacing: 6) {
+                    Text("Ended").font(.caption2.weight(.medium)).padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Theme.C.muted, in: RoundedRectangle(cornerRadius: 4))
+                    Text(ago).font(.footnote).monospacedDigit()
+                }
+                .foregroundStyle(Theme.C.mutedForeground)
+                .fixedSize()
+            }
+            HStack(spacing: 6) {
+                ProjectBadge(project: ended.project)
+                Text(InboxView.endedSecondLine(ended)).font(.subheadline).foregroundStyle(Theme.C.mutedForeground).lineLimit(1)
+                Spacer(minLength: 0)
+                if showAgent {
+                    AgentLogo(mark: AgentLogo.Mark(agent: ended.agent), size: 13)
+                        .foregroundStyle(Theme.C.mutedForeground.opacity(0.8))
+                        .accessibilityHidden(true)
+                }
+                if !tail.isEmpty {
+                    Text(tail.joined(separator: " · ")).font(.footnote).foregroundStyle(Theme.C.mutedForeground).lineLimit(1).fixedSize()
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 10)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(InboxView.endedSpoken(ended, now: now, showAgent: showAgent))
     }
 }
 
