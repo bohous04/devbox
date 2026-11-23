@@ -30,14 +30,6 @@ export function shelfBlock(i: InboxItem): string | null {
   return i.attention.reason === "request" ? "Answer the open request first" : null;
 }
 
-/** Settling ends the session: what to ask first when its agent waits for an answer or still works (devd's 409
- *  request-open / agent-working until confirmed), or null when it settles at once. */
-export function settleQuestion(i: InboxItem): string | null {
-  if (i.attention.reason === "request") return "The agent is waiting for your answer. End it?";
-  if (i.attention.section === "working") return "The agent is still working. End it?";
-  return null;
-}
-
 /** An SSE `inbox` event carries one session's current item: it replaces that session's row. A removal drops it. */
 export function upsertInbox(items: InboxItem[], next: InboxItem | InboxRemoved): InboxItem[] {
   if ("removed" in next) return items.filter((i) => i.sessionId !== next.sessionId);
@@ -105,9 +97,13 @@ const CHIP: Record<NonNullable<Attention["reason"]>, { label: string; tone: Stat
 export function rowStatus(i: InboxItem): { label: string; tone: StatusTone } | null {
   const { section, reason } = i.attention;
   if (section === "snoozed") return { label: "Snoozed", tone: "quiet" };
+  // The settle's end runs (minutes: devd backs the container up first); its transcript replaces the row when done.
+  if (i.ending) return { label: "Ending…", tone: "busy" };
   const chip = reasonStatus(reason);
   if (section === "settled") return chip?.tone === "danger" ? chip : null;
-  return section === "idle" || reason === "running" ? null : chip;
+  const quiet = section === "idle" || reason === "running" ? null : chip;
+  // Why the auto rule leaves this quiet session alive (uncommitted changes): said only when nothing else is.
+  return quiet ?? (i.autoEndHold ? { label: i.autoEndHold, tone: "quiet" } : null);
 }
 
 /** The chip for a reason whatever shelf the row is on. */

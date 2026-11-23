@@ -1,5 +1,5 @@
 import type { InboxItem } from "../../shared/thread";
-import { asks, rowTitle, settleQuestion } from "./inboxView";
+import { asks, rowTitle } from "./inboxView";
 
 /** Settling from the inbox in one gesture (the row's ✓, E, ⌘⇧S), which ends the session after devd's undo grace, the
  *  "Settled · ⌘Z to undo" notice that follows it (gone when the grace is), and
@@ -52,7 +52,7 @@ export interface SettleState {
 }
 
 interface SettleApi {
-  /** `confirm`: the owner agreed to end a session whose agent waits or works (settleQuestion). */
+  /** `confirm`: the owner agreed to devd's question (settleConfirmation). */
   settle: (id: string, confirm: boolean) => Promise<InboxItem>;
   unsettle: (id: string) => Promise<InboxItem>;
   seen: (id: string) => Promise<void>;
@@ -70,6 +70,25 @@ export function failureText(e: unknown): string {
   const text = e.message || e.name;
   const status = (e as { status?: unknown }).status;
   return typeof status === "number" && !text.includes(String(status)) ? `${text} (HTTP ${status})` : text;
+}
+
+/** devd's question before a settle that needs the owner's yes (409 with `message`: a waiting or working agent,
+ *  uncommitted changes), or null when the error is something else. */
+export function settleConfirmation(e: unknown): string | null {
+  const body = (e as { status?: unknown; body?: unknown }).body as { error?: unknown; message?: unknown } | null | undefined;
+  if ((e as { status?: unknown }).status !== 409 || typeof body?.message !== "string") return null;
+  return body.error === "request-open" || body.error === "agent-working" || body.error === "uncommitted-changes" ? body.message : null;
+}
+
+/** Settles `id`, asking devd's question first when it has one (settleConfirmation): the new item, or null when the
+ *  owner said no. Other failures throw. */
+export async function settleAsking(settle: SettleApi["settle"], id: string, ask: (question: string) => Promise<boolean>): Promise<InboxItem | null> {
+  try { return await settle(id, false); }
+  catch (e) {
+    const question = settleConfirmation(e);
+    if (question === null) throw e;
+    return (await ask(question)) ? await settle(id, true) : null;
+  }
 }
 
 export class Settler {
@@ -91,7 +110,8 @@ export class Settler {
   /** Finishes with a post on its way: the window's focus and visibility events arrive together. */
   private seenInFlight = new Set<string>();
 
-  /** `ask`: the question before ending a waiting or working session; true to go ahead. */
+  /** `ask`: devd's question before ending a waiting or working session, or one with uncommitted changes; true to go
+   *  ahead. */
   constructor(private api: SettleApi, private lifetime = 5_000,
     private timers: Timers = { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
     private ask: (question: string) => Promise<boolean> = async (q) => window.confirm(q), private now: () => number = Date.now) {}
@@ -131,11 +151,10 @@ export class Settler {
   /** Settles the row and shows the notice; the session's new item, or null when it was refused (the reason shown). */
   async settle(item: InboxItem): Promise<InboxItem | null> {
     const title = rowTitle(item);
-    const question = settleQuestion(item);
-    if (question !== null && !(await this.ask(question))) return null;
-    let next: InboxItem;
-    try { next = await this.api.settle(item.sessionId, question !== null); }
+    let next: InboxItem | null;
+    try { next = await settleAsking(this.api.settle, item.sessionId, this.ask); }
     catch (e) { this.set({ problem: `Couldn't settle “${title}”: ${failureText(e)}` }); return null; }
+    if (next === null) return null;
     this.endsAt = next.endsAt ?? null;
     this.set({ notice: { sessionId: item.sessionId, title, id: this.nextId++ } });
     return next;

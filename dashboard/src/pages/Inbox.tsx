@@ -63,7 +63,9 @@ function RowMenu({ item, label, onItem, setError, className }: {
         <Ellipsis className="size-4" aria-hidden="true" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" collisionPadding={16} className="w-64 max-w-[calc(100vw-2rem)]">
-        {section === "settled" || section === "snoozed" ? (
+        {item.ending ? (
+          <DropdownMenuItem disabled>Ending… its transcript replaces it when done</DropdownMenuItem>
+        ) : section === "settled" || section === "snoozed" ? (
           <DropdownMenuItem onSelect={() => run(api.unsettle(item.sessionId))}>Back to the inbox</DropdownMenuItem>
         ) : (
           <>

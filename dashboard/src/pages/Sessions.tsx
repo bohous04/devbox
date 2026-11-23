@@ -18,6 +18,7 @@ import { agoLabel, bytes, compactNumber, czCurrency, durationLabel, stateLabel }
 import { AGENT_IDS, AGENT_PROFILES, agentNameFor, profileFor, tmuxRuntimeBlock } from "../newSession";
 import { CC_EVENT_TYPES, fleetBadge, historyLine, rowState, type HistoryTone } from "../ccUpkeepView";
 import { agentSwitchError } from "../sessionsView";
+import { settleAsking } from "../inboxSettle";
 import { terminalTabUrl } from "../terminalRoute";
 import { useNow, useStore } from "../store";
 import { FormDialog } from "../components/FormDialog";
@@ -330,8 +331,10 @@ function SessionRow({ s, usage, cc, ccLatest, open, onToggle, onChanged, onShare
                   <ConfirmButton variant="outline" size="sm" confirmLabel="Delete workspace" onError={setErr}
                     onConfirm={async () => { await api.end(s.id, "delete"); await onChanged(); }}><Trash2 className="size-4" />Delete workspace</ConfirmButton>
                 ) : (
+                  // No undo notice on this page, so it confirms first; devd's own question (uncommitted changes, a working
+                  // agent) follows when it has one.
                   <ConfirmButton variant="outline" size="sm" confirmLabel="Yes, settle and end it" onError={setErr}
-                    onConfirm={async () => { await api.settle(s.id, true); await onChanged(); }}><Check className="size-4" />Settle</ConfirmButton>
+                    onConfirm={async () => { await settleAsking(api.settle, s.id, async (q) => window.confirm(q)); await onChanged(); }}><Check className="size-4" />Settle</ConfirmButton>
                 )}
 
                 </div>
