@@ -13,7 +13,7 @@ import {
 } from "../src/db";
 import { EventBus } from "../src/eventBus";
 import { AUTO_END_HOLDS, AUTO_END_PER_TICK, AUTO_SETTLE_IDLE_MS, AUTO_SETTLE_TICK_MS, AUTO_SETTLE_SEEN_IDLE_MS, autoSettleDue, hubShelfDeps, resetDeps, untilReset, type ResetDeps } from "../src/sessionAttention";
-import { Inbox, SETTLE_END_GRACE_MS } from "../src/sessionInbox";
+import { Inbox, RESUME_POLL_MS, RESUME_WAIT_MS, SETTLE_END_GRACE_MS } from "../src/sessionInbox";
 import { ThreadStore } from "../src/threadStore";
 import type { Attention, BackgroundWork, BridgeEvent, InboxItem } from "../../shared/thread";
 
@@ -727,7 +727,7 @@ test("a run that starts while the auto end reads git status cancels the end", as
   expect(t.inbox.item(getSession(t.db, CHAT.id)!).attention.section).toBe("working");
 });
 
-test("after a restart a pending end does not fire on a session that is busy or whose state is unknown; it is back, logged", async () => {
+test("after a restart a pending end does not fire on a session that is busy or whose state stays unknown; it is back with why", async () => {
   for (const kind of ["working", "unknown"] as const) {
     const t = setup();
     const target = kind === "working" ? CHAT.id : TMUX.id;
@@ -744,12 +744,67 @@ test("after a restart a pending end does not fire on a session that is busy or w
     });
     t.tick(SETTLE_END_GRACE_MS + 60_000);
     inbox.armEnds();
-    restarted.due();
-    await settled();
+    // An unknown tmux state gets RESUME_WAIT_MS for its first live read; a busy one is decided at once.
+    for (let waited = 0; waited <= RESUME_WAIT_MS; waited += RESUME_POLL_MS) {
+      restarted.due();
+      await settled();
+      t.tick(RESUME_POLL_MS);
+    }
     expect(ends).toEqual([]);
     expect(getSessionAttention(t.db, target)).toMatchObject({ settled_at: null, end_at: null });
+    // The owner sees why on the row, not only in the log.
+    expect(getSessionAttention(t.db, target)!.end_error).toContain("restart");
     expect(logs.some((l) => l.includes(target) && l.includes("not ended"))).toBe(true);
   }
+});
+
+test("after a restart an end waits (bounded) for the tmux session's first live read, then goes ahead when it is known", async () => {
+  const t = setup();
+  t.inbox.settle(TMUX.id, "manual");
+  const restarted = fakeTimers(t.now);
+  const ends: string[] = [];
+  let live: ReturnType<AgentEventHub["liveSnapshot"]> = null;
+  const inbox = new Inbox({
+    db: t.db, sessions: () => listSessions(t.db), session: (id) => getSession(t.db, id), threads: t.threads,
+    chatLink: () => null, tmuxLive: () => live, bus: new EventBus(), now: t.now, coalesceMs: 0, timers: restarted.timers,
+    end: async (id, reason) => { ends.push(`${id}:${reason}`); }, worktreeChanges: async () => [],
+  });
+  t.tick(SETTLE_END_GRACE_MS + 60_000);
+  inbox.armEnds();
+  restarted.due();
+  await settled();
+  expect(ends).toEqual([]);
+  expect(getSessionAttention(t.db, TMUX.id)!.end_at).not.toBeNull(); // still pending, not refused
+  live = { status: "done", body: "", reason: null, startedAt: 0, updatedAt: 0, statusSince: 0 } as never;
+  t.tick(RESUME_POLL_MS);
+  restarted.due();
+  await settled();
+  expect(ends).toEqual([`${TMUX.id}:manual`]);
+});
+
+test("a started end is ending from the moment armEnds runs: no hook or unsettle can take it back before its timer", async () => {
+  let release!: () => void;
+  const t = setup({ endGate: new Promise<void>((r) => { release = r; }) });
+  t.inbox.settle(TMUX.id, "manual");
+  t.tick(SETTLE_END_GRACE_MS);
+  t.timers.due();
+  await settled();
+  const restarted = fakeTimers(t.now);
+  const ends: string[] = [];
+  const inbox = new Inbox({
+    db: t.db, sessions: () => listSessions(t.db), session: (id) => getSession(t.db, id), threads: t.threads,
+    chatLink: () => null, tmuxLive: () => null, bus: new EventBus(), now: t.now, coalesceMs: 0, timers: restarted.timers,
+    end: async (id, reason) => { ends.push(`${id}:${reason}`); }, worktreeChanges: async () => [],
+  });
+  inbox.armEnds();
+  expect(inbox.unsettle(TMUX.id)).toBe(false);
+  inbox.activity(TMUX.id, "failure");
+  expect(getSessionAttention(t.db, TMUX.id)).toMatchObject({ end_at: expect.any(Number), end_started_at: expect.any(Number) });
+  expect(inbox.item(getSession(t.db, TMUX.id)!).ending).toBe(true);
+  restarted.due();
+  await settled();
+  expect(ends).toEqual([`${TMUX.id}:manual`]);
+  release();
 });
 
 test("an end that had started when devd went down resumes after the restart, whatever the state says now", async () => {

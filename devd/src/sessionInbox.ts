@@ -14,6 +14,10 @@ export const LAST_TEXT_MAX = 200;
 export const INBOX_COALESCE_MS = 250;
 /** A settle ends the session this long after it, so an undo (unsettle) can still take it back. */
 export const SETTLE_END_GRACE_MS = 8_000;
+/** After a restart a tmux session's live state is unknown until its first read: a pending end waits for it this long,
+ *  checking every RESUME_POLL_MS, before it gives up and puts the session back (with endError). */
+export const RESUME_WAIT_MS = 60_000;
+export const RESUME_POLL_MS = 5_000;
 
 const SECTION_ORDER: Record<InboxSection, number> = { needs_you: 0, working: 1, idle: 2, snoozed: 3, settled: 4 };
 /** setTimeout's longest delay; a snooze that ends later is re-checked at this distance until it ends. */
@@ -107,17 +111,34 @@ export class Inbox {
 
   /** At startup: the settles whose end was pending when devd went down end when their time comes (at once if past). */
   armEnds(): void {
-    for (const p of pendingEnds(this.d.db)) this.armEnd(p.session_id, p.end_at, p.settled_reason, p.end_started_at === null ? "resumed" : "started");
+    for (const p of pendingEnds(this.d.db)) {
+      if (p.end_started_at !== null) {
+        // Ending from now, not from its timer: a hook or an unsettle in between must not take back an end whose
+        // container may be gone already.
+        const s = this.d.session(p.session_id);
+        if (s) this.markEnding(s);
+        this.armEnd(p.session_id, p.end_at, p.settled_reason, "started");
+      } else {
+        this.armEnd(p.session_id, p.end_at, p.settled_reason, "resumed", Math.max(this.now(), p.end_at) + RESUME_WAIT_MS);
+      }
+    }
+  }
+
+  /** The row in Settled while the end runs (`ending`). */
+  private markEnding(s: SessionRow) {
+    const shown = this.build(s).item;
+    this.ending.set(s.id, { ...shown, attention: { ...shown.attention, section: "settled", reason: null }, endsAt: null, endError: null, ending: true, autoEndHold: null });
+    this.changedSafe(s.id);
   }
 
   /** `resumed`: armed at startup, when hooks devd missed while down may have left the state unknown; `started`: its
    *  end had started running when devd went down, so it goes on (end() is safe to run again: a missing container,
    *  worktree or archive is skipped). */
-  private armEnd(sessionId: string, at: number, reason: SettleReason, resumed: "no" | "resumed" | "started" = "no") {
+  private armEnd(sessionId: string, at: number, reason: SettleReason, resumed: "no" | "resumed" | "started" = "no", waitUntil = 0) {
     this.cancelEnd(sessionId);
     this.endTimers.set(sessionId, this.timers.set(() => {
       this.endTimers.delete(sessionId);
-      void this.runEnd(sessionId, reason, resumed);
+      void this.runEnd(sessionId, reason, resumed, waitUntil);
     }, Math.max(0, at - this.now())));
   }
 
@@ -135,7 +156,8 @@ export class Inbox {
     if (t !== undefined) { this.timers.clear(t); this.endTimers.delete(sessionId); }
   }
 
-  private async runEnd(sessionId: string, reason: SettleReason, resumed: "no" | "resumed" | "started") {
+  /** `waitUntil`: a resumed end whose tmux state is still unknown checks again until then (RESUME_WAIT_MS). */
+  private async runEnd(sessionId: string, reason: SettleReason, resumed: "no" | "resumed" | "started", waitUntil = 0) {
     const s = this.d.session(sessionId);
     if (s && reason !== "manual" && resumed !== "started") {
       // An automatic settle (the idle rule checked before it, a merged PR did not) never ends a session with work
@@ -153,10 +175,17 @@ export class Inbox {
     if (s) {
       const row = getSessionAttention(this.d.db, sessionId);
       if (!row || row.end_at === null || row.settled_at === null) return; // taken back meanwhile
-      const why = resumed === "started" ? null : this.endBlock(s, resumed === "resumed");
-      if (why !== null) {
-        this.log(`inbox: ${sessionId} was due to end but is not ended: ${why}; it is back in the inbox`);
-        putSessionAttention(this.d.db, { ...row, settled_at: null, settled_reason: null, end_at: null, end_started_at: null, updated_at: this.now() });
+      const block = resumed === "started" ? null : this.endBlock(s, resumed === "resumed");
+      if (block?.unknown && this.now() < waitUntil) {
+        // Its first live read after the restart has not come yet: ask again shortly.
+        this.armEnd(sessionId, this.now() + RESUME_POLL_MS, reason, resumed, waitUntil);
+        return;
+      }
+      if (block !== null) {
+        this.log(`inbox: ${sessionId} was due to end but is not ended: ${block.why}; it is back in the inbox`);
+        // After a restart nobody saw the session come back: its row says why. A run or a request seen live needs none.
+        const endError = resumed === "resumed" ? `Not ended after a devd restart: ${block.why}. Settle it again to end it.` : row.end_error;
+        putSessionAttention(this.d.db, { ...row, settled_at: null, settled_reason: null, end_at: null, end_started_at: null, end_error: endError, updated_at: this.now() });
         this.confirmed.delete(sessionId);
         this.changedSafe(sessionId);
         return;
@@ -165,11 +194,7 @@ export class Inbox {
       if (row.end_started_at == null) putSessionAttention(this.d.db, { ...row, end_started_at: this.now() });
     }
     this.confirmed.delete(sessionId);
-    if (s) {
-      const shown = this.build(s).item;
-      this.ending.set(sessionId, { ...shown, attention: { ...shown.attention, section: "settled", reason: null }, endsAt: null, endError: null, ending: true, autoEndHold: null });
-      this.changedSafe(sessionId);
-    }
+    if (s && !this.ending.has(sessionId)) this.markEnding(s);
     try {
       await this.d.end(sessionId, reason);
       this.ending.delete(sessionId);
@@ -186,14 +211,14 @@ export class Inbox {
 
   /** Why a pending end must not go ahead now, or null: the agent works or waits (unless the owner confirmed that),
    *  or, `resumed` after a restart, a tmux session's state is unknown. */
-  private endBlock(s: SessionRow, resumed: boolean): string | null {
+  private endBlock(s: SessionRow, resumed: boolean): { why: string; unknown: boolean } | null {
     const a = this.base(s).item.attention;
     if ((a.section === "working" || a.reason === "request") && !this.confirmed.has(s.id)) {
-      return a.reason === "request" ? "the agent waits for an answer" : "the agent works";
+      return { why: a.reason === "request" ? "the agent waits for an answer" : "the agent works", unknown: false };
     }
     if (resumed && storedRuntime(s) === "tmux") {
       const live = this.d.tmuxLive(s.id);
-      if (live === null || live.status === "unknown") return "its state is unknown after a devd restart";
+      if (live === null || live.status === "unknown") return { why: "its state stayed unknown", unknown: true };
     }
     return null;
   }
