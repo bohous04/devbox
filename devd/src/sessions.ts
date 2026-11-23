@@ -1587,6 +1587,14 @@ export class SessionManager {
       // Written down for the next devd: a restart mid-end (a deploy) leaves it behind and startup finishes it (endsInFlight.ts).
       putEndInFlight(this.d.db, id, soloAction, opts.keepWorktree ?? false, this.now());
       try { await this.endLocked(s, soloAction, opts); }
+      catch (e) {
+        // The backup stops the container before archiving: a failed end must not leave the row saying "running"
+        // (a resumed end's session was skipped by startup recovery, so nothing else would correct it).
+        if (s.host !== "instabox" && getSession(this.d.db, id) && await containerState(s.container) !== "running") {
+          updateSession(this.d.db, id, { status: "stopped" });
+        }
+        throw e;
+      }
       finally { deleteEndInFlight(this.d.db, id); }
     });
   }

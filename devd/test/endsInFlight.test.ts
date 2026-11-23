@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { insertSession, openDb, putSessionAttention, type SessionRow } from "../src/db";
+import { getSession, insertSession, openDb, putSessionAttention, type SessionRow } from "../src/db";
 import { endingIds, endsInFlight, resumeEnds } from "../src/endsInFlight";
 import { SessionManager } from "../src/sessions";
 import { DEFAULT_CONFIG } from "../src/config";
@@ -90,4 +90,28 @@ test("sessions with an end cut short (any end, or a started settle) are not for 
     updated_at: 1, end_at: 1, end_error: null, end_started_at: null });
   expect([...endingIds(db)].sort()).toEqual(["dev-a-manual", "dev-a-settled"]);
   db.close();
+});
+
+// Review of #145 (M4): the backup stops the container before archiving. When the end then fails — above all a resumed
+// one, which startup recovery left alone — the row must not keep saying "running" over a stopped container.
+test("a failed end leaves a stopped container's session stopped, and a running one running", async () => {
+  for (const state of ["exited", "running"]) {
+    const bin = mkdtempSync(join(tmpdir(), "fake-docker-"));
+    writeFileSync(join(bin, "docker"), `#!/usr/bin/env bash\n[ "$1" = inspect ] && echo ${state}\nexit 0\n`);
+    chmodSync(join(bin, "docker"), 0o755);
+    const orig = process.env.PATH;
+    process.env.PATH = `${bin}:${orig}`;
+    try {
+      const db = openDb(":memory:");
+      const root = mkdtempSync(join(tmpdir(), "end-fail-"));
+      insertSession(db, row("dev-a-b"));
+      const mgr = new SessionManager({
+        db, cfg: DEFAULT_CONFIG, root, image: "unused", extraMounts: [], cmd: [], controlRoot: join(root, "ctl"),
+        preserveForEnd: async () => { throw new Error("backup before ending failed: x"); },
+      });
+      await expect(mgr.end("dev-a-b")).rejects.toThrow("backup before ending failed");
+      expect(getSession(db, "dev-a-b")?.status).toBe(state === "running" ? "running" : "stopped");
+      db.close();
+    } finally { process.env.PATH = orig; }
+  }
 });
