@@ -61,12 +61,12 @@ enum InboxView {
     /// A settle whose end failed (devd's endError): the session is back in the inbox.
     static func endErrorText(_ error: String) -> String { "Couldn't end the session: \(error)" }
 
-    /// Settling ends the session: what to ask first when its agent waits for an answer or still works (devd's 409
-    /// request-open / agent-working until confirmed), or nil when it settles at once (inboxView.ts settleQuestion).
-    static func settleQuestion(_ i: InboxItem) -> String? {
-        if i.attention.reason == .request { return "The agent is waiting for your answer. End it?" }
-        if i.attention.section == .working { return "The agent is still working. End it?" }
-        return nil
+    /// devd's question before a settle that needs the owner's yes (409 with a message: a waiting or working agent,
+    /// uncommitted changes; inboxSettle.ts settleConfirmation), or nil when the error is something else.
+    static func settleConfirmation(_ error: Error) -> String? {
+        guard let e = error as? DevdHTTPError, e.statusCode == 409, let message = e.serverDetail,
+              ["request-open", "agent-working", "uncommitted-changes"].contains(e.serverMessage ?? "") else { return nil }
+        return message
     }
 
     static func reasonLabel(_ r: AttentionReason?) -> String {
@@ -138,9 +138,13 @@ enum InboxView {
     /// danger chip still shows there.
     static func rowStatus(_ i: InboxItem) -> Mark? {
         if i.attention.section == .snoozed { return Mark(label: "Snoozed", tone: .quiet) }
+        // The settle's end runs (minutes: devd backs the container up first); its transcript replaces the row when done.
+        if i.ending == true { return Mark(label: "Ending…", tone: .busy) }
         let chip = reasonStatus(i.attention.reason)
         if i.attention.section == .settled { return chip?.tone == .danger ? chip : nil }
-        return i.attention.section == .idle || i.attention.reason == .running ? nil : chip
+        let quiet = i.attention.section == .idle || i.attention.reason == .running ? nil : chip
+        // Why the auto rule leaves this quiet session alive (uncommitted changes): said only when nothing else is.
+        return quiet ?? i.autoEndHold.map { Mark(label: $0, tone: .quiet) }
     }
 
     struct StatusParts: Equatable {
@@ -270,6 +274,11 @@ enum InboxView {
     }
 
     /// What the transcript says about itself when it is not whole; nil when it is.
+    /// Where the ended session's uncommitted work stayed (endedView.ts keptWorktreeNote); nil when the worktree went.
+    static func keptWorktreeNote(_ e: EndedSession) -> String? {
+        e.keptWorktree.map { "Uncommitted work from this session was kept on disk at \($0). Continuing starts a new worktree without it." }
+    }
+
     static func transcriptNote(_ t: EndedSession.TranscriptState) -> String? {
         switch t {
         case .truncated: return "The end of this conversation may be missing: the last read before the session ended stopped short."
@@ -478,8 +487,8 @@ final class InboxStore: ObservableObject {
     private struct Empty: Encodable {}
     private struct Confirm: Encodable { let confirm = true }
 
-    /// Ends the session after devd's undo grace. `confirm`: the owner agreed to end one whose agent waits or works
-    /// (devd refuses it with 409 otherwise).
+    /// Ends the session after devd's undo grace. `confirm`: the owner agreed to devd's question (a waiting or working
+    /// agent, uncommitted changes: 409 otherwise, InboxView.settleConfirmation).
     func settle(_ id: String, confirm: Bool = false) async throws {
         let path = "/api/sessions/\(pathSegment(id))/settle"
         apply(confirm ? try await client.post(path, body: Confirm()) : try await client.post(path, body: Empty()))

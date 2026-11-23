@@ -91,18 +91,19 @@ class InboxSettler: ObservableObject {
     /// When the iPhone marks an open tmux session seen: it was opened, left, or the app came back while it is open.
     enum Moment { case opened, left, foreground }
 
-    /// A settle waiting for the owner's yes: the session's agent waits or works, and settling ends it.
+    /// A settle waiting for the owner's yes to devd's question (a waiting or working agent, uncommitted changes).
+    /// `window`: the Mac window whose gesture it was, where alone the question shows; nil on the iPhone.
     struct Confirming: Equatable {
         let item: InboxItem
         let question: String
+        var window: ObjectIdentifier? = nil
     }
 
     /// The last settle, while it can still be undone.
     @Published private(set) var notice: Notice?
     /// The last settle, undo or seen that failed, with why; shown until dismissed (`dismissProblem`).
     @Published private(set) var problem: String?
-    /// The settle the owner is asked about (`settle` of a waiting or working session), answered by `confirm` or
-    /// `cancelConfirm`.
+    /// The settle the owner is asked about (devd's 409 question to `settle`), answered by `confirm` or `cancelConfirm`.
     @Published private(set) var confirming: Confirming?
 
     private let lifetime: Duration
@@ -143,6 +144,9 @@ class InboxSettler: ObservableObject {
     /// Whether the row offers Settle at all: not when it is already on the settled or snoozed shelf.
     static func canSettle(_ i: InboxItem) -> Bool { ![.settled, .snoozed].contains(i.attention.section) }
 
+    /// Whether a shelved row can go back to the inbox: not while its end runs (devd refuses it, session-ending).
+    static func canUnsettle(_ i: InboxItem) -> Bool { !canSettle(i) && i.ending != true }
+
     /// A tmux session's finish or failure clears once the owner has looked at it (POST /seen). A chat session marks
     /// its thread seen itself (ThreadStore), and waiting, working or idle sessions have nothing to clear.
     static func wantsSeen(_ i: InboxItem?) -> Bool {
@@ -176,13 +180,10 @@ class InboxSettler: ObservableObject {
         return voiceOver ? left : min(lifetime, left)
     }
 
-    /// Settles, which ends the session after devd's grace. One whose agent waits or works waits for `confirm` first.
-    func settle(_ item: InboxItem, in store: InboxStore) async {
-        if let question = InboxView.settleQuestion(item) {
-            confirming = Confirming(item: item, question: question)
-            return
-        }
-        await settle(item, in: store, confirmed: false)
+    /// Settles, which ends the session after devd's grace. When devd asks first (a waiting or working agent,
+    /// uncommitted changes), its question waits for `confirm`, shown in `window` only (the Mac's; nil on the iPhone).
+    func settle(_ item: InboxItem, in store: InboxStore, window: ObjectIdentifier? = nil) async {
+        await settle(item, in: store, confirmed: false, window: window)
     }
 
     /// The owner said yes to `c` (the alert hands it over: dismissing it may clear `confirming` before its button runs).
@@ -193,12 +194,16 @@ class InboxSettler: ObservableObject {
 
     func cancelConfirm() { confirming = nil }
 
-    private func settle(_ item: InboxItem, in store: InboxStore, confirmed: Bool) async {
+    private func settle(_ item: InboxItem, in store: InboxStore, confirmed: Bool, window: ObjectIdentifier? = nil) async {
         let title = InboxView.rowTitle(item)
         do {
             try await store.settle(item.sessionId, confirm: confirmed)
         } catch {
-            report("Couldn't settle “\(title)”: \(chatErrorText(error))")
+            if !confirmed, let question = InboxView.settleConfirmation(error) {
+                confirming = Confirming(item: item, question: question, window: window)
+            } else {
+                report("Couldn't settle “\(title)”: \(chatErrorText(error))")
+            }
             return
         }
         let next = Notice(sessionId: item.sessionId, title: title)
@@ -283,16 +288,20 @@ class InboxSettler: ObservableObject {
     }
 }
 
-/// The question before a settle that ends a session whose agent waits or works (InboxSettler.confirming), on the
-/// iPhone and the Mac.
+/// devd's question before a settle (InboxSettler.confirming), on the iPhone and the Mac. `window`: the Mac window this
+/// modifier sits in; the settler is the app's, so only the window whose gesture asked shows it (nil on the iPhone).
 struct SettleConfirmation: ViewModifier {
     @ObservedObject var settler: InboxSettler
     let store: InboxStore
+    var window: ObjectIdentifier? = nil
+
+    static func shows(_ c: InboxSettler.Confirming?, in window: ObjectIdentifier?) -> Bool { c != nil && c?.window == window }
 
     func body(content: Content) -> some View {
-        content.alert(settler.confirming?.question ?? "",
-                      isPresented: Binding(get: { settler.confirming != nil }, set: { if !$0 { settler.cancelConfirm() } }),
-                      presenting: settler.confirming) { c in
+        let shown = Self.shows(settler.confirming, in: window) ? settler.confirming : nil
+        content.alert(shown?.question ?? "",
+                      isPresented: Binding(get: { shown != nil }, set: { if !$0 { settler.cancelConfirm() } }),
+                      presenting: shown) { c in
             Button("End Session", role: .destructive) { Task { await settler.confirm(c, in: store) } }
             Button("Cancel", role: .cancel) { settler.cancelConfirm() }
         } message: { c in

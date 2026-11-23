@@ -255,7 +255,7 @@ struct MacInboxSidebar: View {
         .sheet(item: $actionsFor) { item in
             InboxRowActions(item: item, store: store) { settle(item) }.frame(minWidth: 360, minHeight: 320)
         }
-        .modifier(SettleConfirmation(settler: state.settler, store: store))
+        .modifier(SettleConfirmation(settler: state.settler, store: store, window: window))
         .macSessionActions(sessionActions, inbox: store)
         .focusedSceneValue(\.macSettle, settleAction)
         .modifier(MacSettleFocus(settler: state.settler) { Task { await state.settler.undo(in: store) } })
@@ -291,7 +291,7 @@ struct MacInboxSidebar: View {
     }
 
     private func settle(_ item: InboxItem) {
-        Task { await state.settler.settle(item, in: store) }
+        Task { await state.settler.settle(item, in: store, window: window) }
     }
 
     /// `look`: he opened the row or came back to the window; an idle tmux session then records the look (devd
@@ -472,7 +472,7 @@ struct MacInboxSidebar: View {
                         .keyboardShortcut("s", modifiers: [.command, .shift])
                     Button("Snooze…") { actionsFor = item }
                         .disabled(InboxView.shelfBlock(item) != nil)
-                } else {
+                } else if MacSettler.canUnsettle(item) {
                     Button("Back to the Inbox") {
                         Task {
                             do { try await store.unsettle(item.sessionId) } catch {

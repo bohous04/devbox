@@ -47,8 +47,6 @@ struct InboxScreen: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var actionsFor: InboxItem?
     @State private var openShelves: Set<String> = []
-    /// Why a row cannot be settled now, after its "Answer first" swipe; goes on its own.
-    @State private var hint: String?
     /// On screen (not under a pushed chat or another tab): only then does coming back reopen the stream.
     @State private var visible = false
     private let client: DevdClient
@@ -160,10 +158,9 @@ struct InboxScreen: View {
                 .scrollContentBackground(.hidden)
                 // On the List itself, so its content scrolls clear of the notice as it does of the tab bar.
                 .safeAreaInset(edge: .bottom, spacing: 0) {
-                    InboxSettleNotice(settler: settler, hint: hint) { Task { await settler.undo(in: store) } }
+                    InboxSettleNotice(settler: settler) { Task { await settler.undo(in: store) } }
                         .animation(.snappy(duration: 0.25), value: settler.notice)
                         .animation(.snappy(duration: 0.25), value: settler.problem)
-                        .animation(.snappy(duration: 0.25), value: hint)
                 }
                 .environment(\.defaultMinListRowHeight, 1)
             }
@@ -274,8 +271,10 @@ struct InboxScreen: View {
     @ViewBuilder
     private func trailingAction(_ item: InboxItem) -> some View {
         if !InboxSettler.canSettle(item) {
-            Button { unsettle(item) } label: { Label("Back", systemImage: "arrow.uturn.backward") }
-                .tint(InboxTone.backSwipe)
+            if InboxSettler.canUnsettle(item) {
+                Button { unsettle(item) } label: { Label("Back", systemImage: "arrow.uturn.backward") }
+                    .tint(InboxTone.backSwipe)
+            }
         } else {
             // Settling ends the session; one that waits or works asks first (SettleConfirmation).
             Button { Task { await settler.settle(item, in: store) } } label: { Label("Settle", systemImage: "checkmark") }
@@ -290,17 +289,8 @@ struct InboxScreen: View {
             Button { Task { await settler.settle(item, in: store) } } label: { Label("Settle and End", systemImage: "checkmark") }
             Button { actionsFor = item } label: { Label("Snooze…", systemImage: "alarm") }
                 .disabled(InboxView.shelfBlock(item) != nil)
-        } else {
+        } else if InboxSettler.canUnsettle(item) {
             Button { unsettle(item) } label: { Label("Back to the inbox", systemImage: "arrow.uturn.backward") }
-        }
-    }
-
-    private func explain(_ why: String) {
-        hint = why
-        AccessibilityNotification.Announcement(why).post()
-        Task {
-            try? await Task.sleep(for: .seconds(3))
-            if hint == why { hint = nil }
         }
     }
 
@@ -325,21 +315,11 @@ private extension View {
 /// Over the tab bar: "Settled · Undo" after a settle, and the last failure with a way to dismiss it.
 struct InboxSettleNotice: View {
     @ObservedObject var settler: InboxSettler
-    /// A short, neutral explanation (a blocked settle), shown while set.
-    var hint: String?
     let undo: () -> Void
 
     var body: some View {
-        if settler.problem != nil || settler.notice != nil || hint != nil {
+        if settler.problem != nil || settler.notice != nil {
             VStack(spacing: 8) {
-                if let hint {
-                    card {
-                        Image(systemName: "questionmark.bubble").foregroundStyle(InboxTone.action).accessibilityHidden(true)
-                        Text(hint).font(.subheadline).foregroundStyle(Theme.C.foreground).padding(.vertical, 10)
-                        Spacer(minLength: 0)
-                    }
-                    .accessibilityElement(children: .combine)
-                }
                 if let problem = settler.problem { failure(problem) }
                 if let notice = settler.notice { settled(notice) }
             }
@@ -412,7 +392,6 @@ enum InboxTone {
     static let settleSwipe = Color(light: 0x047857, dark: 0x047857)
     static let snoozeSwipe = Color(light: 0x4F46E5, dark: 0x4F46E5)
     static let backSwipe = Color(light: 0x0369A1, dark: 0x0369A1)
-    static let blockedSwipe = Color(light: 0x71717A, dark: 0x52525B)
 
     static func text(_ t: InboxView.Tone) -> Color {
         switch t {
@@ -675,7 +654,9 @@ struct InboxRowActions: View {
         let times = InboxView.snoozeTimes(now: Date())
         NavigationStack {
             List {
-                if shelved {
+                if item.ending == true {
+                    Text("Ending… its transcript replaces it when done.").foregroundStyle(Theme.C.mutedForeground)
+                } else if shelved {
                     Button("Back to the inbox") { run { try await store.unsettle(item.sessionId) } }
                 } else {
                     Section {

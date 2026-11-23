@@ -36,10 +36,13 @@ struct SessionActions {
     }
 
     private struct ConfirmBody: Encodable { let confirm = true }
+    private struct NoBody: Encodable {}
 
-    /// Settles the session, which ends it after devd's undo grace (the inbox's settle, confirmed: the caller asked).
-    func settle(_ id: String) async throws {
-        try await client.postVoid("/api/sessions/\(id)/settle", body: ConfirmBody())
+    /// Settles the session, which ends it after devd's undo grace (the inbox's settle). Without `confirm` devd may
+    /// answer 409 with a question first (a working agent, uncommitted changes: InboxView.settleConfirmation).
+    func settle(_ id: String, confirm: Bool) async throws {
+        if confirm { try await client.postVoid("/api/sessions/\(id)/settle", body: ConfirmBody()) }
+        else { try await client.postVoid("/api/sessions/\(id)/settle", body: NoBody()) }
     }
 
     private struct ImportantBody: Encodable { let important: Bool }
@@ -59,16 +62,6 @@ struct SessionActions {
     /// Session nickname (an empty string clears it) — the server sanitizes the input itself.
     func setName(_ id: String, _ name: String) async throws {
         try await client.postVoid("/api/sessions/\(id)/name", body: NameBody(name: name))
-    }
-
-    private struct EndResult: Decodable { let pending: Bool? }
-
-    /// `end` that says whether devd finished: false = ended (204); true = devd is still backing up and finishes in the
-    /// background (202 `{pending: true}`), with a notification when done. Mirrors `api.end` in cli/src/api.ts.
-    func endReportingPending(_ id: String) async throws -> Bool {
-        let data = try await client.postData("/api/sessions/\(id)/end", body: EndBody(soloAction: nil))
-        guard !data.isEmpty else { return false }
-        return try JSONDecoder().decode(EndResult.self, from: data).pending == true
     }
 
     private struct AccountBody: Encodable { let accountId: String? }

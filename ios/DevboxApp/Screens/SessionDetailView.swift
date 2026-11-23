@@ -22,6 +22,8 @@ struct SessionDetailView: View {
 
     @State private var agentPick: AgentName?
     @State private var showEndConfirm = false
+    /// devd's question before the settle (uncommitted changes, a working agent), asked after the first confirmation.
+    @State private var settleQuestion: String?
     @State private var showSwitchAccountConfirm = false
     @State private var showSwitchAgentConfirm = false
     @State private var showTerminal = false
@@ -354,7 +356,22 @@ struct SessionDetailView: View {
         ) {
             Button(session.solo == 1 ? "Delete workspace" : "Settle and End", role: .destructive) {
                 run {
-                    if session.solo == 1 { try await actions.end(session.id, soloAction: .delete) } else { try await actions.settle(session.id) }
+                    if session.solo == 1 { try await actions.end(session.id, soloAction: .delete) } else {
+                        do { try await actions.settle(session.id, confirm: false) } catch {
+                            guard let question = InboxView.settleConfirmation(error) else { throw error }
+                            settleQuestion = question
+                            return
+                        }
+                    }
+                    dismiss()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert(settleQuestion ?? "", isPresented: Binding(get: { settleQuestion != nil }, set: { if !$0 { settleQuestion = nil } })) {
+            Button("End Session", role: .destructive) {
+                run {
+                    try await actions.settle(session.id, confirm: true)
                     dismiss()
                 }
             }

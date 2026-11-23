@@ -107,8 +107,8 @@ struct EndedTranscriptScreen: View {
         let turnStarts = WorkGroups.turnStarts(rows)
         return ScrollViewReader { proxy in ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
-                if let note = InboxView.transcriptNote(e.transcript) {
-                    Text(note).font(.subheadline).foregroundStyle(Theme.C.mutedForeground)
+                ForEach([InboxView.transcriptNote(e.transcript), InboxView.keptWorktreeNote(e)].compactMap { $0 }, id: \.self) { note in
+                    Text(note).font(.subheadline).foregroundStyle(Theme.C.mutedForeground).textSelection(.enabled)
                         .padding(.horizontal, 12).padding(.vertical, 8)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Theme.C.muted.opacity(0.5), in: RoundedRectangle(cornerRadius: Theme.R.md))

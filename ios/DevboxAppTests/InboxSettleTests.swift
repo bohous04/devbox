@@ -82,14 +82,16 @@ final class InboxSettleTests: XCTestCase {
         XCTAssertTrue(later.hasPrefix("Snoozed, Bump, until "), later)
     }
 
-    /// Settling ends the session: one waiting on an answer or still working asks first; the others settle at once.
-    /// Every row in the list and in Working can be settled.
-    func testSettleAsksFirstForAWaitingOrWorkingSession() throws {
-        XCTAssertEqual(InboxView.settleQuestion(try item("a", "needs_you", reason: "request")), "The agent is waiting for your answer. End it?")
-        XCTAssertEqual(InboxView.settleQuestion(try item("a", "working", reason: "running")), "The agent is still working. End it?")
-        XCTAssertNil(InboxView.settleQuestion(try item("a", "needs_you", reason: "failed")))
-        XCTAssertNil(InboxView.settleQuestion(try item("a", "needs_you", reason: "completed")))
-        XCTAssertNil(InboxView.settleQuestion(try item("a", "idle", reason: nil)))
+    /// Settling ends the session: devd asks first (409 with its question) for a waiting or working agent or uncommitted
+    /// changes; any other refusal is an error, not a question. Every row in the list and in Working can be settled.
+    func testSettleAsksDevdsQuestion() throws {
+        let dirty = "Uncommitted changes stay on disk at /srv/_sessions/a. 3 unpushed commits stay on branch session/a. End it?"
+        for code in ["request-open", "agent-working", "uncommitted-changes"] {
+            XCTAssertEqual(InboxView.settleConfirmation(DevdHTTPError(statusCode: 409, serverMessage: code, serverDetail: dirty)), dirty, code)
+        }
+        XCTAssertNil(InboxView.settleConfirmation(DevdHTTPError(statusCode: 409, serverMessage: "session-ending")))
+        XCTAssertNil(InboxView.settleConfirmation(DevdHTTPError(statusCode: 409, serverMessage: "agent-working")), "no question to ask")
+        XCTAssertNil(InboxView.settleConfirmation(DevdHTTPError(statusCode: 500, serverMessage: "agent-working", serverDetail: dirty)))
         XCTAssertFalse(InboxSettler.canSettle(try item("a", "settled", reason: "completed")), "already settled")
         XCTAssertFalse(InboxSettler.canSettle(try item("a", "snoozed", reason: "completed")), "snoozed: unsnooze first")
         XCTAssertTrue(InboxSettler.canSettle(try item("a", "idle", reason: nil)))
@@ -106,6 +108,36 @@ final class InboxSettleTests: XCTestCase {
         XCTAssertEqual(InboxSettler.noticeLifetime(five, endsAt: 8_000, now: 1_000, voiceOver: true), .milliseconds(7_000))
         XCTAssertNil(InboxSettler.noticeLifetime(five, endsAt: nil, now: 0, voiceOver: true), "kept until the next action")
         XCTAssertEqual(InboxSettler.noticeLifetime(five, endsAt: 500, now: 1_000, voiceOver: false), .zero)
+    }
+
+    /// While its end runs a settled row says Ending… and cannot go back; a quiet row the auto rule keeps alive says why,
+    /// unless it has more to say.
+    func testEndingAndAutoEndHoldMarks() throws {
+        var ending = try item("a", "settled", reason: nil)
+        ending.ending = true
+        XCTAssertEqual(InboxView.rowStatus(ending), InboxView.Mark(label: "Ending…", tone: .busy))
+        XCTAssertFalse(InboxSettler.canUnsettle(ending), "devd refuses an unsettle while the end runs")
+        XCTAssertTrue(InboxSettler.canUnsettle(try item("a", "settled", reason: nil)))
+        XCTAssertFalse(InboxSettler.canUnsettle(try item("a", "idle", reason: nil)), "not on a shelf")
+        var held = try item("b", "idle", reason: nil)
+        held.autoEndHold = "Uncommitted changes"
+        XCTAssertEqual(InboxView.rowStatus(held), InboxView.Mark(label: "Uncommitted changes", tone: .quiet))
+        var done = try item("c", "needs_you", reason: "completed")
+        done.autoEndHold = "Uncommitted changes"
+        XCTAssertEqual(InboxView.rowStatus(done)?.label, "Done")
+        let json = #"{"sessionId":"a","runtime":"chat","title":"t","project":"p","repo":"r","agent":"claude","attention":{"section":"idle","since":1},"ending":false,"autoEndHold":"Uncommitted changes"}"#
+        let decoded = try JSONDecoder().decode(InboxItem.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.autoEndHold, "Uncommitted changes")
+        XCTAssertEqual(decoded.ending, false)
+    }
+
+    /// An ended session whose worktree stayed (uncommitted work) says where; an older devd sends nothing.
+    func testKeptWorktreeIsSaid() throws {
+        let base = #"{"id":"e","sessionId":"a","runtime":"tmux","title":"t","project":"p","repo":"r","agent":"claude","endedAt":1,"continueMode":"handoff""#
+        let kept = try JSONDecoder().decode(EndedSession.self, from: Data((base + #","keptWorktree":"/srv/_sessions/a"}"#).utf8))
+        XCTAssertEqual(InboxView.keptWorktreeNote(kept),
+                       "Uncommitted work from this session was kept on disk at /srv/_sessions/a. Continuing starts a new worktree without it.")
+        XCTAssertNil(InboxView.keptWorktreeNote(try JSONDecoder().decode(EndedSession.self, from: Data((base + "}").utf8))))
     }
 
     /// devd's endsAt and endError decode; an older devd sends neither.
@@ -273,6 +305,7 @@ final class InboxSettleTests: XCTestCase {
         let waiting = try row(store, "dev-acme-billing")
         await settler.settle(waiting, in: store)
         XCTAssertEqual(settler.confirming?.question, "The agent is waiting for your answer. End it?")
+        XCTAssertNil(settler.confirming?.window, "the iPhone has one window")
         XCTAssertNil(settler.notice)
         XCTAssertEqual(try row(store, "dev-acme-billing").attention.section, .needsYou)
         settler.cancelConfirm()
@@ -284,6 +317,19 @@ final class InboxSettleTests: XCTestCase {
         XCTAssertNil(settler.problem)
         XCTAssertEqual(settler.notice?.sessionId, "dev-acme-billing")
         XCTAssertEqual(try row(store, "dev-acme-billing").attention.section, .settled)
+    }
+
+    /// The settler is the Mac app's, every window's: its question shows only in the window whose gesture asked.
+    func testTheQuestionShowsOnlyInTheWindowThatAsked() async throws {
+        let store = try await fixtureStore()
+        let settler = InboxSettler(lifetime: .seconds(60), voiceOver: { false })
+        let one = NSObject(), two = NSObject()
+        await settler.settle(try row(store, "dev-acme-billing"), in: store, window: ObjectIdentifier(one))
+        XCTAssertTrue(SettleConfirmation.shows(settler.confirming, in: ObjectIdentifier(one)))
+        XCTAssertFalse(SettleConfirmation.shows(settler.confirming, in: ObjectIdentifier(two)))
+        XCTAssertFalse(SettleConfirmation.shows(settler.confirming, in: nil))
+        settler.cancelConfirm()
+        XCTAssertFalse(SettleConfirmation.shows(settler.confirming, in: ObjectIdentifier(one)))
     }
 
     /// Seen posts once per finish of a tmux session. A failed post is shown and tried once more; a failure the owner

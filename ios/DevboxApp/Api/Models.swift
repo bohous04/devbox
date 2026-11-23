@@ -1387,6 +1387,11 @@ struct InboxItem: Decodable, Equatable, Identifiable {
     var endsAt: Int? = nil
     /// Why the end after the last settle failed (the session is back in the inbox); nil when none failed.
     var endError: String? = nil
+    /// The settle's end runs now (minutes): the row sits in Settled, neither undoable nor continuable yet, until its
+    /// transcript replaces it. nil from an older devd.
+    var ending: Bool? = nil
+    /// Why devd's auto rule leaves this quiet session alive ("Uncommitted changes"); nil when nothing holds it.
+    var autoEndHold: String? = nil
 
     var id: String { sessionId }
 }
@@ -1437,6 +1442,9 @@ struct EndedSession: Decodable, Equatable, Identifiable {
     let continueMode: ContinueMode
     /// How much of the conversation it holds (shared/ended.ts TranscriptState); complete from a devd that predates it.
     var transcript: TranscriptState = .complete
+    /// Where the session's worktree stayed on disk because it held uncommitted work when it ended; nil when it was
+    /// removed (or from an older devd). Continue starts a new worktree, so the transcript says where this one is.
+    var keptWorktree: String? = nil
 
     enum TranscriptState: String, Decodable {
         case complete, truncated, missing
@@ -1444,7 +1452,7 @@ struct EndedSession: Decodable, Equatable, Identifiable {
         init(from decoder: Decoder) throws { self = try tolerant(decoder, unknown: .unknown) }
     }
 
-    private enum K: String, CodingKey { case id, sessionId, runtime, title, project, repo, agent, branch, topic, lastText, endedAt, continueMode, transcript }
+    private enum K: String, CodingKey { case id, sessionId, runtime, title, project, repo, agent, branch, topic, lastText, endedAt, continueMode, transcript, keptWorktree }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: K.self)
@@ -1461,6 +1469,7 @@ struct EndedSession: Decodable, Equatable, Identifiable {
         endedAt = try c.decode(Int.self, forKey: .endedAt)
         continueMode = try c.decode(ContinueMode.self, forKey: .continueMode)
         transcript = try c.decodeIfPresent(TranscriptState.self, forKey: .transcript) ?? .complete
+        keptWorktree = try c.decodeIfPresent(String.self, forKey: .keptWorktree)
     }
 }
 
