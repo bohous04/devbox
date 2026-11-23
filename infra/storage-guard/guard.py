@@ -475,10 +475,12 @@ class Guard:
                         entry['created_at']=max(entry.get('created_at',0),e['time'])
                         if entry.get('released_at',0)<=e['time']:
                             entry.pop('released_at',None);entry.pop('removed_at',None);entry.pop('archive',None)
+                            entry.pop('auto_released',None)
                         entry['created_by_guard']=True
                         entry['purpose']=str(e.get('purpose','auxiliary worktree'))[:300]
                     if e['kind'] == 'release' and e['time'] >= entry.get('created_at', 0):
                         entry['released_at'] = e['time']
+                        entry.pop('auto_released', None)
                     done.append(p)
                 except (OSError, ValueError, KeyError):
                     continue
@@ -796,6 +798,7 @@ class Guard:
         report=[dict(path=e['path'],owner=e.get('session'),reason=e.get('purpose','Ownership/release review needed'))
                 for e in registry.values() if not e.get('released_at') and not e.get('removed_at')]
         mounts=[m['Source'] for c in read(self.state/'containers.json',[]) for m in c['Mounts']]
+        self.release_idle(registry,mounts)
         bare_roots=[self.root/g.split('/')[0] for g in self.c.get('bare_repo_worktree_globs',[])]
         todo={}
         for key,e in registry.items():
@@ -861,6 +864,13 @@ class Guard:
             e.update(removed_at=time.time(),archive=None)
             self.audit('released-worktree-removed-in-git',path=str(p),pinned_commits=pinned)
         self.save_removals(registry)
+        # An auto-release covers only worktrees whose files are all in Git. One that changed or
+        # could not be removed is never archived and removed under its agent: the release is
+        # dropped and the next sweep judges the worktree afresh.
+        back=[k for k,e in registry.items() if e.get('auto_released') and not e.get('removed_at')]
+        for k in back:
+            todo.pop(k,None)
+        self.set_release(registry,back,None)
         # The rest is archived in bounded batches, each removed and recorded before the next:
         # one archive of everything (31-46 checkouts, ~3 h) outlived the unit timeout and lost all progress.
         batch_size=max(1,self.c.get('sweep_batch_size',8))
@@ -884,11 +894,73 @@ class Guard:
             raise RuntimeError('Root-owned worktree: repo filters would run as root')
         return ['setpriv',f'--reuid={s.st_uid}',f'--regid={s.st_gid}','--clear-groups'] if os.geteuid()==0 else []
 
+    def release_idle(self, registry, mounts):
+        """Agents rarely release their worktrees (45 clean, pushed ones, ~180 GB, sat untouched for
+        four days). A session worktree that holds nothing outside Git and saw no Git activity for
+        idle_release_hours is released as if its agent had; the sweep then re-checks and removes it."""
+        idle=self.c.get('idle_release_hours',12)*3600
+        keys=[]
+        for key,e in registry.items():
+            if e.get('released_at') or e.get('removed_at') or not e.get('session'):
+                continue
+            p=Path(e['path'])
+            owner=self.root/'_sessions'/e['session']
+            try:
+                if (not any(beneath(p,owner/rel) for rel in ('.worktrees','.claude/worktrees')) or p.is_symlink()
+                        or not (p/'.git').is_file() or any(m==str(p) or beneath(m,p) for m in mounts)):
+                    continue
+                admin=self.admin_dir(p,owner)
+                # Cheap checks first; in_git runs `git status` on a multi-GB checkout.
+                if (not admin or time.time()-self.last_git_activity(p,admin)<idle or self.kept_by_git(admin)
+                        or referenced(p) or not self.in_git(p)):
+                    continue
+            except OSError:   # removed by its agent meanwhile
+                continue
+            keys.append(key)
+            self.audit('idle-worktree-released',path=str(p),session=e['session'])
+        self.set_release(registry,keys,time.time()-self.c.get('release_grace_hours',1)*3600-1)
+
+    def set_release(self, registry, keys, released):
+        """Set (or with None drop) an automatic release in memory and in the registry file, which
+        inventory updates meanwhile: a newer agent event for the entry wins."""
+        if not keys:
+            return
+        current=read(self.state/'registry.json',{})
+        for key in keys:
+            e,now=registry[key],current.get(key)
+            if now and now.get('released_at')==e.get('released_at') and now.get('created_at')==e.get('created_at') \
+                    and not now.get('removed_at'):
+                for d in (now,e):
+                    if released is None:
+                        d.pop('released_at',None);d.pop('auto_released',None)
+                    else:
+                        d.update(released_at=released,auto_released=True)
+        atomic(self.state/'registry.json',current)
+
+    def kept_by_git(self, admin):
+        """State that lives only in the worktree's admin dir and goes with `worktree remove`: a
+        paused rebase/merge/bisect, worktree-only refs, or a lock the agent gave a reason for
+        (`worktree add --lock` alone writes "added with --lock" or nothing)."""
+        if any((admin/n).exists() for n in ('rebase-merge','rebase-apply','MERGE_HEAD','CHERRY_PICK_HEAD',
+                                             'REVERT_HEAD','BISECT_LOG','sequencer')):
+            return True
+        # Git creates refs/ empty in every worktree; only refs written into it matter.
+        if any(f.is_file() for f in (admin/'refs').rglob('*')):
+            return True
+        lock=admin/'locked'
+        return lock.is_file() and lock.read_text(errors='replace').strip() not in ('','added with --lock')
+
+    def last_git_activity(self, p, admin):
+        """Newest change to the worktree's top level, `.git` or its admin files (HEAD, index,
+        reflog, fetch)."""
+        files=[p,p/'.git']+[admin/n for n in ('HEAD','index','logs/HEAD','ORIG_HEAD','FETCH_HEAD')]
+        return max(f.stat().st_mtime for f in files if f.exists())
+
     def owner_git(self, p, args, input=None):
         """Git in an agent-writable repo runs as the worktree's owner: `status` executes
         repo-configured fsmonitor/clean filters, which must never run as root."""
         return run(self.as_owner(p)+['/usr/bin/git','-c','safe.directory=*','-c','core.fsmonitor=false','-C',p,*args],
-                   timeout=600,env={**os.environ,'HOME':'/nonexistent'},input=input)
+                   timeout=600,env={**os.environ,'HOME':'/nonexistent','GIT_OPTIONAL_LOCKS':'0'},input=input)
 
     def in_git(self, p):
         """True when the files of the worktree are all in Git: no changes (also hidden by

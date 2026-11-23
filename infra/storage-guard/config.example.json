@@ -11,6 +11,7 @@
   "notify_enabled": true,
   "inventory_max_age_seconds": 10800,
   "release_grace_hours": 1,
+  "idle_release_hours": 12,
   "sweep_batch_size": 8,
   "sweep_budget_seconds": 9000,
   "checkout_slots": 2,

@@ -299,6 +299,85 @@ class Safety(unittest.TestCase):
         self.assertFalse(w.exists())
         self.assertTrue((bare/'worktrees'/'w1').exists(),"the other session's live worktree stays registered")
 
+    def idle_worktree(self, hours_idle=13):
+        """A clean worktree whose HEAD is on the remote, in session dev-owner, last touched hours_idle ago."""
+        git=lambda *a,cwd:subprocess.run(['git','-c','user.name=t','-c','user.email=t@t','-c','init.defaultBranch=main',*a],cwd=cwd,check=True,capture_output=True)
+        remote=self.root/'remote.git';git('init','--bare',str(remote),cwd=self.root)
+        repo=self.root/'repo';git('clone',str(remote),str(repo),cwd=self.root);(repo/'a').write_text('a')
+        git('add','.',cwd=repo);git('commit','-m','a',cwd=repo);git('push','origin','HEAD',cwd=repo)
+        w=self.root/'_sessions'/'dev-owner'/'.worktrees'/'w';git('worktree','add','--detach',str(w),cwd=repo)
+        old=time.time()-hours_idle*3600
+        for f in [w,w/'.git',*(repo/'.git'/'worktrees'/'w').rglob('*')]:os.utime(f,(old,old))
+        registry={'dev-owner:'+str(w):dict(session='dev-owner',path=str(w),kind='discovered-review')}
+        guard.atomic(self.g.state/'registry.json',registry)
+        return w,registry
+
+    def test_idle_clean_worktree_is_released(self):
+        # Agents rarely release their worktrees: 45 clean, pushed ones (~180 GB) sat untouched
+        # for four days and the disk filled up.
+        w,registry=self.idle_worktree()
+        with patch.object(guard,'referenced',return_value=False):self.g.release_idle(registry,[])
+        e=guard.read(self.g.state/'registry.json')['dev-owner:'+str(w)]
+        self.assertTrue(e['auto_released'])
+        self.assertLess(e['released_at'],time.time()-self.g.c['release_grace_hours']*3600,'removed by this sweep, no extra grace')
+        self.assertEqual(registry['dev-owner:'+str(w)]['released_at'],e['released_at'],'the running sweep sees it too')
+
+    def test_busy_or_unfinished_worktree_is_not_released(self):
+        cases={'recent git activity':dict(hours=1),'process inside':dict(ref=True),
+               'uncommitted file':dict(dirty=True),'mounted':dict(mounted=True),
+               'lock with a reason':dict(admin=('locked','Active work; preserve')),
+               'paused rebase':dict(admin=('rebase-merge',None)),
+               'worktree-only ref':dict(admin=('refs/bisect','')),}
+        for why,c in cases.items():
+            with self.subTest(why):
+                self.tearDown();self.setUp()
+                w,registry=self.idle_worktree(c.get('hours',13))
+                if c.get('dirty'):(w/'new').write_text('work')
+                if c.get('admin'):
+                    name,text=c['admin'];f=self.root/'repo'/'.git'/'worktrees'/'w'/name
+                    if text is None:f.mkdir()
+                    elif text=='':f.mkdir(parents=True);(f/'bad').write_text('0'*40)
+                    else:f.write_text(text)
+                with patch.object(guard,'referenced',return_value=c.get('ref',False)):
+                    self.g.release_idle(registry,[str(w)] if c.get('mounted') else [])
+                self.assertNotIn('released_at',guard.read(self.g.state/'registry.json')['dev-owner:'+str(w)])
+
+    def test_default_lock_does_not_keep_an_idle_worktree(self):
+        w,registry=self.idle_worktree()
+        (self.root/'repo'/'.git'/'worktrees'/'w'/'locked').write_text('added with --lock\n')
+        with patch.object(guard,'referenced',return_value=False):self.g.release_idle(registry,[])
+        self.assertTrue(guard.read(self.g.state/'registry.json')['dev-owner:'+str(w)]['auto_released'])
+
+    def test_sweep_removes_an_idle_clean_worktree(self):
+        w,registry=self.idle_worktree()
+        guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[{'name':'dev-owner'}]})
+        with patch.object(guard,'referenced',return_value=False), \
+             patch.object(self.g,'archive',side_effect=AssertionError('in Git: no archive')):
+            self.g.sweep()
+        self.assertFalse(w.exists())
+        self.assertIn('removed_at',guard.read(self.g.state/'registry.json')['dev-owner:'+str(w)])
+
+    def test_auto_released_worktree_used_again_is_never_archived(self):
+        # Its agent came back: an auto-release must not turn into archive + removal under it.
+        w,registry=self.idle_worktree()
+        with patch.object(guard,'referenced',return_value=False):self.g.release_idle(registry,[])
+        (w/'new').write_text('work')
+        guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[{'name':'dev-owner'}]})
+        with patch.object(guard,'referenced',return_value=False), \
+             patch.object(self.g,'archive',side_effect=AssertionError('must not archive')):
+            self.g.sweep()
+        self.assertTrue((w/'new').exists())
+        e=guard.read(self.g.state/'registry.json')['dev-owner:'+str(w)]
+        self.assertNotIn('released_at',e);self.assertNotIn('auto_released',e)
+
+    def test_idle_check_does_not_touch_the_index(self):
+        # `git status` refreshes the index; the check itself must not look like activity.
+        w,registry=self.idle_worktree()
+        index=self.root/'repo'/'.git'/'worktrees'/'w'/'index';before=index.stat().st_mtime
+        (w/'a').touch()   # stat change git status would write back
+        self.g.in_git(w)
+        self.assertEqual(index.stat().st_mtime,before)
+
     def test_other_git_failure_is_kept_for_review(self):
         bare=self.root/'fivem'/'repo.git';(bare/'worktrees'/'w').mkdir(parents=True);(bare/'objects').mkdir()
         w=self.released('w')['w'];self.git(w,f'gitdir: {bare}/worktrees/w\n')   # registered, git just failed
