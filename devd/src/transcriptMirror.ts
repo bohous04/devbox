@@ -11,7 +11,8 @@
 // The mapped events go into a ThreadStore of its own (`_mirrors/<id>.sqlite`), so the snapshot, paging and SSE replay
 // work exactly like a chat thread's. Polling runs only while a client watches (SSE) and on the session's hook events.
 // Transcript content never goes to logs.
-import { closeSync, constants as C, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, constants as C, fstatSync, openSync, read as readFd, readSync } from "node:fs";
+import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { MirrorInfo, MirrorSendError } from "../../shared/mirror";
@@ -286,30 +287,33 @@ const runtimeLabel = (runtime: string): string => Object.values(AGENTS).find((a)
 
 // ── Reading the transcript ───────────────────────────────────────────────────────────
 
+const readFdAsync = promisify(readFd);
+
 export interface Chunk { lines: string[]; next: number; skipped: number }
 
 /** Complete lines from `offset` (at most `budget` bytes, or one line up to `lineCap`); an unfinished last line is left
  *  for the next read. A line longer than `lineCap` is skipped unparsed (`skipped` counts them). */
-export function readChunk(fd: number, offset: number, size: number, budget = CHUNK_BYTES, lineCap = LINE_CAP): Chunk {
-  const read = (at: number, n: number): Buffer => {
+export async function readChunk(fd: number, offset: number, size: number, budget = CHUNK_BYTES, lineCap = LINE_CAP): Promise<Chunk> {
+  // Async (the thread pool reads it): a transcript never mirrored before is read whole before an end.
+  const read = async (at: number, n: number): Promise<Buffer> => {
     const b = Buffer.alloc(n);
-    const got = readSync(fd, b, 0, n, at);
-    return b.subarray(0, got);
+    const { bytesRead } = await readFdAsync(fd, b, 0, n, at);
+    return b.subarray(0, bytesRead);
   };
   if (offset >= size) return { lines: [], next: offset, skipped: 0 };
-  let buf = read(offset, Math.min(size - offset, budget));
+  let buf = await read(offset, Math.min(size - offset, budget));
   let nl = buf.lastIndexOf(0x0a);
   if (nl === -1) {
     // One line longer than the budget: read it whole while it fits the cap.
     if (size - offset <= budget) return { lines: [], next: offset, skipped: 0 }; // still being written
-    buf = read(offset, Math.min(size - offset, lineCap + 1));
+    buf = await read(offset, Math.min(size - offset, lineCap + 1));
     nl = buf.indexOf(0x0a);
     if (nl === -1) {
       if (buf.length <= lineCap) return { lines: [], next: offset, skipped: 0 }; // still being written
       // Over the cap: find its end without keeping it.
       let at = offset + buf.length;
       while (at < size) {
-        const part = read(at, Math.min(size - at, 1024 * 1024));
+        const part = await read(at, Math.min(size - at, 1024 * 1024));
         const i = part.indexOf(0x0a);
         if (i !== -1) return { lines: [], next: at + i + 1, skipped: 1 };
         at += part.length;
@@ -867,7 +871,9 @@ export class TranscriptMirror {
         cur.headHash = head(cur.headLen);
       }
       for (;;) {
-        const chunk = readChunk(fd, cur.offset, st.size);
+        const chunk = await readChunk(fd, cur.offset, st.size);
+        // Released or ended while it read: the store is closed.
+        if (!current()) return;
         if (chunk.skipped > 0) this.log(`mirror ${id}: skipped ${chunk.skipped} transcript line(s) over ${LINE_CAP} bytes`);
         const mapped = mapClaudeLines(chunk.lines, cur.map, this.now());
         const advanced = chunk.next !== cur.offset;

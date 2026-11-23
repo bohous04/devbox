@@ -104,7 +104,13 @@ const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
  *  first start (`fresh`) uses it: a bridge with state already has its thread. */
 function takeResumeFile(path: string, harness: Harness, fresh: boolean): { thread: string | null; notice: string | null } {
   let text: string;
-  try { text = readFileSync(path, "utf8"); } catch { return { thread: null, notice: null }; }
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { thread: null, notice: null };
+    // Left in place: devd wrote it, and a file this bridge cannot read is one it cannot remove either.
+    return { thread: null, notice: `The ended session's conversation was not resumed: its resume file could not be read (${(e as Error).message})${fresh ? "; a new conversation starts" : ""}.` };
+  }
   rmSync(path, { force: true });
   if (!fresh) return { thread: null, notice: null };
   const [h, id] = text.trim().split(/\s+/);

@@ -110,21 +110,25 @@ test("a long tool input is clipped and a long result is cut to its byte budget",
   expect(tool.output!.length).toBeLessThan(16 * 1024 + 30);
 });
 
-test("readChunk returns complete lines only, reads a line longer than the budget whole, and skips one over the cap", () => {
+test("readChunk returns complete lines only, reads a line longer than the budget whole, and skips one over the cap, off the event loop", async () => {
   const dir = tmp("mirror-chunk-");
   const file = join(dir, "t.jsonl");
   writeFileSync(file, `{"a":1}\n${"y".repeat(30)}\n{"b":2}\n{"partial"`);
   const fd = openSync(file, "r");
   cleanups.push(() => closeSync(fd));
   const size = Buffer.byteLength(readFileSync(file));
-  const first = readChunk(fd, 0, size, 10, 100);
+  // An async read (the thread pool's), so a long transcript read before an end does not block devd's event loop.
+  const pending = readChunk(fd, 0, size, 10, 100);
+  expect(pending).toBeInstanceOf(Promise);
+  await pending;
+  const first = await readChunk(fd, 0, size, 10, 100);
   expect(first.lines).toEqual(['{"a":1}']);
-  const second = readChunk(fd, first.next, size, 10, 100);
+  const second = await readChunk(fd, first.next, size, 10, 100);
   expect(second.lines).toEqual(["y".repeat(30)]);
-  const rest = readChunk(fd, second.next, size, 1000, 100);
+  const rest = await readChunk(fd, second.next, size, 1000, 100);
   expect(rest.lines).toEqual(['{"b":2}']);
-  expect(readChunk(fd, rest.next, size, 1000, 100)).toEqual({ lines: [], next: rest.next, skipped: 0 });
-  const over = readChunk(fd, second.next - 31, size, 10, 20);
+  expect(await readChunk(fd, rest.next, size, 1000, 100)).toEqual({ lines: [], next: rest.next, skipped: 0 });
+  const over = await readChunk(fd, second.next - 31, size, 10, 20);
   expect(over).toEqual({ lines: [], next: second.next, skipped: 1 });
 });
 
