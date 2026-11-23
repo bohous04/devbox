@@ -24,7 +24,13 @@ Docker daemon or active session restart is needed to install this protection.
   The sweep runs daily and, under disk pressure (warn threshold or reserve), is also
   started by the 5-minute sample at most once an hour. It only removes explicitly
   released worktrees after their owning container no longer exists, or after a
-  release grace period (`release_grace_hours`, default 1) for a live owner. It requires
+  release grace period (`release_grace_hours`, default 1) for a live owner. A session
+  worktree (`.worktrees/`, `.claude/worktrees/`) its agent never released is released by
+  the sweep once it is in Git (see below), unreferenced and without Git activity for
+  `idle_release_hours` (default 12; audit `idle-worktree-released`), unless its Git dir
+  holds a paused rebase/merge/bisect, worktree-only refs or a lock with a stated reason.
+  Such an auto-released worktree is only ever removed in-Git, never archived: if it changed,
+  the release is dropped and the next sweep judges it again. It requires
   fresh inventory and no references/mounts (including container namespace aliases,
   checked by device/inode). A released worktree that is already in Git (clean, no
   untracked files, HEAD on a remote ref, ignored files only regenerable output such as
