@@ -28,7 +28,7 @@ final class MacChatLookTests: XCTestCase {
         super.setUp()
         MockURLProtocol.capturedRequests = []
         MockURLProtocol.handler = { req in
-            if req.httpMethod == "GET", req.url?.path == "/api/sessions/s1/thread", req.url?.query == nil {
+            if req.httpMethod == "GET", req.url?.path == "/api/sessions/s1/thread", req.url?.query == "limit=200" {
                 return .init(statusCode: 200, data: Data(#"{"lastSeq":5,"seenSeq":5,"runs":[],"items":[],"pending":[],"background":[],"native":null}"#.utf8))
             }
             return .init(statusCode: 204)
