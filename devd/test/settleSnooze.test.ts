@@ -15,7 +15,7 @@ import { EventBus } from "../src/eventBus";
 import { AUTO_END_HOLDS, AUTO_END_PER_TICK, AUTO_SETTLE_IDLE_MS, AUTO_SETTLE_TICK_MS, AUTO_SETTLE_SEEN_IDLE_MS, autoSettleDue, hubShelfDeps, resetDeps, untilReset, type ResetDeps } from "../src/sessionAttention";
 import { Inbox, SETTLE_END_GRACE_MS } from "../src/sessionInbox";
 import { ThreadStore } from "../src/threadStore";
-import type { BackgroundWork, BridgeEvent, InboxItem } from "../../shared/thread";
+import type { Attention, BackgroundWork, BridgeEvent, InboxItem } from "../../shared/thread";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -55,6 +55,8 @@ function setup(opts: {
   snoozedThrows?: boolean; activityThrows?: boolean; quietMs?: number; endFails?: string;
   /** git status of a session's worktree (null: unreadable); clean when not given. */
   changes?: Record<string, string[] | null>;
+  /** Runs while git status is being read (something happens during that await). */
+  onChanges?: (id: string) => void;
   /** The end waits for this (an end takes minutes: the storage guard backs the container up first). */
   endGate?: Promise<void>;
 } = {}) {
@@ -94,7 +96,10 @@ function setup(opts: {
       if (opts.endFails) throw new Error(opts.endFails);
       deleteSession(db, id);
     },
-    worktreeChanges: async (s) => (opts.changes && s.id in opts.changes ? opts.changes[s.id] : []),
+    worktreeChanges: async (s) => {
+      opts.onChanges?.(s.id);
+      return opts.changes && s.id in opts.changes ? opts.changes[s.id] : [];
+    },
   });
   const published: InboxItem[] = [];
   bus.subscribe(["inbox"], (_t, data) => published.push(data as InboxItem));
@@ -619,12 +624,17 @@ test("a failed end brings the session back out of Settled with the error, logged
 
 test("a settle pending over a devd restart ends when its time comes (armEnds)", async () => {
   const t = setup();
+  const tmux = getSession(t.db, TMUX.id)!;
+  t.hub.handle(tmux, "user_prompt_submit");
+  t.hub.handle(tmux, "stop"); // its state is known after the restart: done, not working
+  t.tick(2000);
+  t.hub.sweep();
   t.inbox.settle(TMUX.id, "manual");
   const restarted = fakeTimers(t.now);
   const ends: string[] = [];
   const inbox = new Inbox({
     db: t.db, sessions: () => listSessions(t.db), session: (id) => getSession(t.db, id), threads: t.threads,
-    chatLink: () => null, tmuxLive: () => null, bus: new EventBus(), now: t.now, coalesceMs: 0, timers: restarted.timers,
+    chatLink: () => null, tmuxLive: (id) => t.hub.liveSnapshot(id), bus: new EventBus(), now: t.now, coalesceMs: 0, timers: restarted.timers,
     end: async (id, reason) => { ends.push(`${id}:${reason}`); }, worktreeChanges: async () => [],
   });
   t.tick(SETTLE_END_GRACE_MS + 60_000); // devd was down past the grace
@@ -656,13 +666,148 @@ test("a session settled before settles ended (no end pending) is ended by the au
   expect((await t.inbox.autoSettle())).toContain(TMUX.id);
 });
 
-test("auto-settle starts at most AUTO_END_PER_TICK ends per tick", async () => {
-  const t = setup();
+test("auto-settle starts at most AUTO_END_PER_TICK ends per tick, counting the ones still pending or running", async () => {
+  let release!: () => void;
+  const t = setup({ endGate: new Promise<void>((r) => { release = r; }) });
   for (const n of [1, 2, 3]) insertSession(t.db, { ...TMUX, id: `dev-a-more-${n}`, container: `dev-a-more-${n}`, port_base: 40300 + 100 * n, created_at: T0, last_active_at: T0 });
   t.tick(AUTO_SETTLE_IDLE_MS);
   expect((await t.inbox.autoSettle())).toHaveLength(AUTO_END_PER_TICK);
+  // Their grace runs: the next tick starts none.
+  expect(await t.inbox.autoSettle()).toEqual([]);
+  t.tick(SETTLE_END_GRACE_MS);
+  t.timers.due();
+  await settled();
+  expect(t.ends).toHaveLength(AUTO_END_PER_TICK);
+  // Their ends run (minutes): still none.
+  expect(await t.inbox.autoSettle()).toEqual([]);
+  release();
+  await settled();
   expect((await t.inbox.autoSettle())).toHaveLength(AUTO_END_PER_TICK);
-  expect((await t.inbox.autoSettle())).toHaveLength(5 - 2 * AUTO_END_PER_TICK);
+});
+
+test("a due session past the per-tick cap still gets its hold rechecked: no stale Uncommitted changes chip", async () => {
+  const changes: Record<string, string[] | null> = { "dev-a-more-3": ["M a.ts"] };
+  const t = setup({ changes });
+  for (const n of [1, 2, 3]) insertSession(t.db, { ...TMUX, id: `dev-a-more-${n}`, container: `dev-a-more-${n}`, port_base: 40300 + 100 * n, created_at: T0 - 10 + n, last_active_at: T0 });
+  t.db.run("UPDATE sessions SET last_active_at=? WHERE id IN (?, ?)", [T0 + 30 * DAY, CHAT.id, TMUX.id]); // only the three are due
+  t.tick(AUTO_SETTLE_IDLE_MS);
+  expect(await t.inbox.autoSettle()).toEqual(["dev-a-more-1", "dev-a-more-2"]);
+  expect(t.inbox.item(getSession(t.db, "dev-a-more-3")!).autoEndHold).toBe(AUTO_END_HOLDS.dirty);
+  t.tick(SETTLE_END_GRACE_MS);
+  t.timers.due();
+  await settled();
+  // A fourth due one ahead of it takes the cap; the owner committed in dev-a-more-3 meanwhile.
+  insertSession(t.db, { ...TMUX, id: "dev-a-more-0", container: "dev-a-more-0", port_base: 40900, created_at: T0 - 20, last_active_at: T0 });
+  insertSession(t.db, { ...TMUX, id: "dev-a-more-00", container: "dev-a-more-00", port_base: 41000, created_at: T0 - 20, last_active_at: T0 });
+  changes["dev-a-more-3"] = [];
+  await t.inbox.autoSettle();
+  expect(t.inbox.item(getSession(t.db, "dev-a-more-3")!).autoEndHold).toBeNull();
+});
+
+test("a held quiet session keeps its chip while it stays dirty, also after a merged PR's settle was taken back", async () => {
+  const t = setup({ changes: { [TMUX.id]: ["M a.ts"] } });
+  t.inbox.settle(TMUX.id, "merged");
+  t.tick(SETTLE_END_GRACE_MS);
+  t.timers.due();
+  await settled();
+  expect(t.inbox.item(getSession(t.db, TMUX.id)!).autoEndHold).toBe(AUTO_END_HOLDS.dirty);
+  t.tick(AUTO_SETTLE_TICK_MS);
+  await t.inbox.autoSettle();
+  expect(t.inbox.item(getSession(t.db, TMUX.id)!).autoEndHold).toBe(AUTO_END_HOLDS.dirty);
+});
+
+test("a run that starts while the auto end reads git status cancels the end", async () => {
+  let t!: ReturnType<typeof setup>;
+  t = setup({ onChanges: (id) => { if (id === CHAT.id) t.feed(CHAT.id, [started("r9")]); } });
+  t.inbox.settle(CHAT.id, "idle");
+  t.tick(SETTLE_END_GRACE_MS);
+  t.timers.due();
+  await settled();
+  expect(t.ends).toEqual([]);
+  expect(t.inbox.item(getSession(t.db, CHAT.id)!).attention.section).toBe("working");
+});
+
+test("after a restart a pending end does not fire on a session that is busy or whose state is unknown; it is back, logged", async () => {
+  for (const kind of ["working", "unknown"] as const) {
+    const t = setup();
+    const target = kind === "working" ? CHAT.id : TMUX.id;
+    t.inbox.settle(target, "manual");
+    if (kind === "working") t.threads(CHAT.id).apply({ seq: 1, ts: 0, event: started("r1") }); // the hook devd missed while down
+    const restarted = fakeTimers(t.now);
+    const ends: string[] = [];
+    const logs: string[] = [];
+    const inbox = new Inbox({
+      db: t.db, sessions: () => listSessions(t.db), session: (id) => getSession(t.db, id), threads: t.threads,
+      chatLink: () => ({ status: "connected", since: 1 }), tmuxLive: () => null, bus: new EventBus(), now: t.now, coalesceMs: 0,
+      timers: restarted.timers, log: (m) => logs.push(m),
+      end: async (id, reason) => { ends.push(`${id}:${reason}`); }, worktreeChanges: async () => [],
+    });
+    t.tick(SETTLE_END_GRACE_MS + 60_000);
+    inbox.armEnds();
+    restarted.due();
+    await settled();
+    expect(ends).toEqual([]);
+    expect(getSessionAttention(t.db, target)).toMatchObject({ settled_at: null, end_at: null });
+    expect(logs.some((l) => l.includes(target) && l.includes("not ended"))).toBe(true);
+  }
+});
+
+test("an end that had started when devd went down resumes after the restart, whatever the state says now", async () => {
+  let release!: () => void;
+  const t = setup({ endGate: new Promise<void>((r) => { release = r; }) });
+  t.inbox.settle(TMUX.id, "manual");
+  t.tick(SETTLE_END_GRACE_MS);
+  t.timers.due();
+  await settled(); // the end runs (its container may be gone already) when devd goes down
+  expect(getSessionAttention(t.db, TMUX.id)!.end_started_at).not.toBeNull();
+  const restarted = fakeTimers(t.now);
+  const ends: string[] = [];
+  const inbox = new Inbox({
+    db: t.db, sessions: () => listSessions(t.db), session: (id) => getSession(t.db, id), threads: t.threads,
+    chatLink: () => null, tmuxLive: () => null, bus: new EventBus(), now: t.now, coalesceMs: 0, timers: restarted.timers,
+    end: async (id, reason) => { ends.push(`${id}:${reason}`); }, worktreeChanges: async () => [],
+  });
+  inbox.armEnds();
+  restarted.due();
+  await settled();
+  expect(ends).toEqual([`${TMUX.id}:manual`]);
+  release();
+});
+
+test("a settle the owner confirmed for a working agent still ends it", async () => {
+  const t = setup();
+  t.feed(CHAT.id, [started("r1")]);
+  t.inbox.settle(CHAT.id, "manual", { confirmed: true });
+  t.tick(SETTLE_END_GRACE_MS);
+  t.timers.due();
+  await settled();
+  expect(t.ends).toEqual([`${CHAT.id}:manual`]);
+});
+
+test("the auto clock of a snoozed session counts from when the snooze ended", () => {
+  const s = { ...TMUX, created_at: T0, last_active_at: T0 };
+  const idle: Attention = { section: "idle", reason: null, since: T0 };
+  const wake = T0 + 2 * DAY;
+  const row = { session_id: TMUX.id, settled_at: null, settled_reason: null, snooze_until: wake, snooze_kind: "time" as const, updated_at: T0, end_at: null, end_error: null };
+  const look = { seenAt: T0, stateKnown: true };
+  expect(autoSettleDue(idle, s, row, look, wake + 10 * 60_000)).toBe(false);
+  expect(autoSettleDue(idle, s, row, look, wake + AUTO_SETTLE_SEEN_IDLE_MS)).toBe(true);
+});
+
+test("while the end runs it cannot be taken back: unsettle and snooze refuse and leave end_at for a restart", async () => {
+  let release!: () => void;
+  const t = setup({ endGate: new Promise<void>((r) => { release = r; }) });
+  t.inbox.settle(TMUX.id, "manual");
+  t.tick(SETTLE_END_GRACE_MS);
+  t.timers.due();
+  await settled();
+  expect(t.inbox.unsettle(TMUX.id)).toBe(false);
+  expect(t.inbox.snooze(TMUX.id, t.now() + DAY, "time")).toBe(false);
+  t.inbox.activity(TMUX.id, "run");
+  expect(getSessionAttention(t.db, TMUX.id)!.end_at).not.toBeNull();
+  release();
+  await settled();
+  expect(t.inbox.unsettle(CHAT.id)).toBe(true);
 });
 
 test("the auto rule leaves a due session with uncommitted changes alive: its row says why, logged once, not every tick", async () => {

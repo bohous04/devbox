@@ -651,7 +651,7 @@ test("settling a working or waiting session ends it, so it asks first: 409 until
   expect(t.inbox.item(getSession(t.db, CHAT.id)!).attention.section).toBe("working");
   const ok = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/settle`, { confirm: true }));
   expect(ok.status).toBe(200);
-  expect(await ok.json()).toMatchObject({ attention: { section: "settled" }, endsAt: 1_000_000 + SETTLE_END_GRACE_MS });
+  expect(await ok.json()).toMatchObject({ attention: { section: "settled" }, endsAt: 1_000_000 + SETTLE_END_GRACE_MS, endsIn: SETTLE_END_GRACE_MS });
 
   const waiting = setup();
   waiting.feed(CHAT.id, [started("r1"), asked("r1", "q1")]);
@@ -700,6 +700,24 @@ test("a working session with uncommitted changes asks one question naming both",
     error: "agent-working",
     message: `${SETTLE_WORKING} Uncommitted changes stay on disk at /srv/_sessions/dev-a-chat. 1 unpushed commit stays on branch session/chat-1. End it?`,
   });
+});
+
+test("a snoozed session whose agent works still asks before a settle ends it (the shelf does not hide the run)", async () => {
+  const t = setup();
+  t.inbox.snooze(CHAT.id, 1_000_000 + 86_400_000, "time");
+  t.feed(CHAT.id, [started("r1")]);
+  expect(t.inbox.item(getSession(t.db, CHAT.id)!).attention.section).toBe("snoozed");
+  const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/settle`));
+  expect(r.status).toBe(409);
+  expect(((await r.json()) as { error: string }).error).toBe("agent-working");
+});
+
+test("unsettle while the end runs is 409 already-ending with devd's reason, not a 200 that changes nothing", async () => {
+  const t = setup();
+  t.inbox.unsettle = () => false; // the inbox says the end already runs
+  const r = await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/unsettle`));
+  expect(r.status).toBe(409);
+  expect(await r.json()).toEqual({ error: "already-ending", message: "The session is already ending; it can't be taken back." });
 });
 
 test("snooze until reset without the usage dependency is 503; settle and the thread routes still work", async () => {

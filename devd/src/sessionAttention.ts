@@ -106,7 +106,9 @@ export function autoSettleDue(base: Attention, s: SessionRow, row: SessionAttent
   if (base.section === "working" || base.reason === "request") return false;
   const seenIdle = base.section === "idle" && look.seenAt !== null && look.stateKnown;
   const quietFor = seenIdle ? AUTO_SETTLE_SEEN_IDLE_MS : AUTO_SETTLE_IDLE_MS;
-  const lastActivity = Math.max(base.since, s.last_active_at, s.created_at, ...(look.seenAt === null ? [] : [look.seenAt]), ...(row === null ? [] : [row.updated_at]));
+  const lastActivity = Math.max(base.since, s.last_active_at, s.created_at, ...(look.seenAt === null ? [] : [look.seenAt]), ...(row === null ? [] : [row.updated_at]),
+    // A snooze that ended is the session coming back: its quiet time counts from then, not from before it.
+    ...(row?.snooze_until != null ? [row.snooze_until] : []));
   return now - lastActivity >= quietFor;
 }
 

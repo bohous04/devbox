@@ -53,6 +53,9 @@ export class Inbox {
   private ending = new Map<string, InboxItem>();
   /** Why the auto rule leaves a due session alive (AUTO_END_HOLDS), shown on its row and logged once per change. */
   private holds = new Map<string, string>();
+  /** Settles the owner confirmed (devd's 409 question answered yes): their end goes ahead even while the agent works.
+   *  Kept in memory only: after a restart a busy session is not ended (runEnd). */
+  private confirmed = new Set<string>();
   private coalesceMs: number;
   private log: (msg: string) => void;
 
@@ -92,10 +95,11 @@ export class Inbox {
   item(s: SessionRow): InboxItem { return this.ending.get(s.id) ?? this.build(s).item; }
 
   /** Settle by hand (`manual`), by the idle rule (`idle`) or a merged PR (`merged`); ends a snooze. The session ends
-   *  SETTLE_END_GRACE_MS later unless unsettled before. */
-  settle(sessionId: string, reason: SettleReason): void {
+   *  SETTLE_END_GRACE_MS later unless unsettled before. `confirmed`: the owner said yes to ending it even busy. */
+  settle(sessionId: string, reason: SettleReason, o: { confirmed?: boolean } = {}): void {
     const now = this.now();
     this.holds.delete(sessionId);
+    if (o.confirmed) this.confirmed.add(sessionId); else this.confirmed.delete(sessionId);
     putSessionAttention(this.d.db, { session_id: sessionId, settled_at: now, settled_reason: reason, snooze_until: null, snooze_kind: null, updated_at: now, end_at: now + SETTLE_END_GRACE_MS, end_error: null });
     this.armEnd(sessionId, now + SETTLE_END_GRACE_MS, reason);
     this.changedSafe(sessionId);
@@ -103,36 +107,64 @@ export class Inbox {
 
   /** At startup: the settles whose end was pending when devd went down end when their time comes (at once if past). */
   armEnds(): void {
-    for (const p of pendingEnds(this.d.db)) this.armEnd(p.session_id, p.end_at, p.settled_reason);
+    for (const p of pendingEnds(this.d.db)) this.armEnd(p.session_id, p.end_at, p.settled_reason, p.end_started_at === null ? "resumed" : "started");
   }
 
-  private armEnd(sessionId: string, at: number, reason: SettleReason) {
+  /** `resumed`: armed at startup, when hooks devd missed while down may have left the state unknown; `started`: its
+   *  end had started running when devd went down, so it goes on (end() is safe to run again: a missing container,
+   *  worktree or archive is skipped). */
+  private armEnd(sessionId: string, at: number, reason: SettleReason, resumed: "no" | "resumed" | "started" = "no") {
     this.cancelEnd(sessionId);
     this.endTimers.set(sessionId, this.timers.set(() => {
       this.endTimers.delete(sessionId);
-      void this.runEnd(sessionId, reason);
+      void this.runEnd(sessionId, reason, resumed);
     }, Math.max(0, at - this.now())));
   }
+
+  /** Sessions whose end is pending (grace) or runs: the auto rule's per-tick cap counts them. */
+  private endsInFlight(): number { return this.endTimers.size + this.ending.size; }
+
+  /** Whether the session's end runs now (it cannot be taken back). */
+  isEnding(sessionId: string): boolean { return this.ending.has(sessionId); }
+
+  /** The session's own attention, before the settled or snoozed shelf: what its agent does now. */
+  liveAttention(s: SessionRow) { return this.base(s).item.attention; }
 
   private cancelEnd(sessionId: string) {
     const t = this.endTimers.get(sessionId);
     if (t !== undefined) { this.timers.clear(t); this.endTimers.delete(sessionId); }
   }
 
-  private async runEnd(sessionId: string, reason: SettleReason) {
+  private async runEnd(sessionId: string, reason: SettleReason, resumed: "no" | "resumed" | "started") {
     const s = this.d.session(sessionId);
-    if (s && reason !== "manual") {
+    if (s && reason !== "manual" && resumed !== "started") {
       // An automatic settle (the idle rule checked before it, a merged PR did not) never ends a session with work
       // nobody committed: it stays alive, its row says why.
       const hold = await this.autoEndHold(s);
       if (hold !== null) {
         const row = getSessionAttention(this.d.db, sessionId);
-        if (row) putSessionAttention(this.d.db, { ...row, settled_at: null, settled_reason: null, end_at: null, updated_at: this.now() });
+        if (row) putSessionAttention(this.d.db, { ...row, settled_at: null, settled_reason: null, end_at: null, end_started_at: null, updated_at: this.now() });
         this.changedSafe(sessionId);
         return;
       }
-      this.log(`inbox: auto end of ${sessionId} (settled: ${reason})`);
     }
+    // Re-read at the last moment: the awaits above let a run, an unsettle or a snooze in, and after a restart hooks
+    // devd missed while down may mean the agent works now.
+    if (s) {
+      const row = getSessionAttention(this.d.db, sessionId);
+      if (!row || row.end_at === null || row.settled_at === null) return; // taken back meanwhile
+      const why = resumed === "started" ? null : this.endBlock(s, resumed === "resumed");
+      if (why !== null) {
+        this.log(`inbox: ${sessionId} was due to end but is not ended: ${why}; it is back in the inbox`);
+        putSessionAttention(this.d.db, { ...row, settled_at: null, settled_reason: null, end_at: null, end_started_at: null, updated_at: this.now() });
+        this.confirmed.delete(sessionId);
+        this.changedSafe(sessionId);
+        return;
+      }
+      if (reason !== "manual") this.log(`inbox: auto end of ${sessionId} (settled: ${reason})`);
+      if (row.end_started_at == null) putSessionAttention(this.d.db, { ...row, end_started_at: this.now() });
+    }
+    this.confirmed.delete(sessionId);
     if (s) {
       const shown = this.build(s).item;
       this.ending.set(sessionId, { ...shown, attention: { ...shown.attention, section: "settled", reason: null }, endsAt: null, endError: null, ending: true, autoEndHold: null });
@@ -147,9 +179,23 @@ export class Inbox {
       this.log(`inbox: ending ${sessionId} after its settle failed, it is back in the inbox: ${msg}`);
       const row = getSessionAttention(this.d.db, sessionId);
       // The session is gone after all (ended meanwhile, its row deleted with it): nothing to bring back.
-      if (row) putSessionAttention(this.d.db, { ...row, settled_at: null, settled_reason: null, end_at: null, end_error: msg, updated_at: this.now() });
+      if (row) putSessionAttention(this.d.db, { ...row, settled_at: null, settled_reason: null, end_at: null, end_started_at: null, end_error: msg, updated_at: this.now() });
     }
     this.changedSafe(sessionId);
+  }
+
+  /** Why a pending end must not go ahead now, or null: the agent works or waits (unless the owner confirmed that),
+   *  or, `resumed` after a restart, a tmux session's state is unknown. */
+  private endBlock(s: SessionRow, resumed: boolean): string | null {
+    const a = this.base(s).item.attention;
+    if ((a.section === "working" || a.reason === "request") && !this.confirmed.has(s.id)) {
+      return a.reason === "request" ? "the agent waits for an answer" : "the agent works";
+    }
+    if (resumed && storedRuntime(s) === "tmux") {
+      const live = this.d.tmuxLive(s.id);
+      if (live === null || live.status === "unknown") return "its state is unknown after a devd restart";
+    }
+    return null;
   }
 
   /** Why the auto rule must not end `s` now (AUTO_END_HOLDS), or null. Logged when it changes, not every tick. */
@@ -178,20 +224,27 @@ export class Inbox {
     return true;
   }
 
-  /** Back into the inbox: ends a settle and a snooze. */
-  unsettle(sessionId: string): void {
+  /** Back into the inbox: ends a settle and a snooze. False while the end runs: it cannot be taken back, and end_at
+   *  stays so a restart resumes it. */
+  unsettle(sessionId: string): boolean {
+    if (this.ending.has(sessionId)) return false;
     const now = this.now();
     this.cancelEnd(sessionId);
     this.holds.delete(sessionId);
+    this.confirmed.delete(sessionId);
     putSessionAttention(this.d.db, { session_id: sessionId, settled_at: null, settled_reason: null, snooze_until: null, snooze_kind: null, updated_at: now, end_at: null, end_error: null });
     this.changedSafe(sessionId);
+    return true;
   }
 
-  /** Snooze until `until` (epoch ms); ends a settle. */
-  snooze(sessionId: string, until: number, kind: SnoozeKind): void {
+  /** Snooze until `until` (epoch ms); ends a settle. False while the end runs (see unsettle). */
+  snooze(sessionId: string, until: number, kind: SnoozeKind): boolean {
+    if (this.ending.has(sessionId)) return false;
     this.cancelEnd(sessionId);
+    this.confirmed.delete(sessionId);
     putSessionAttention(this.d.db, { session_id: sessionId, settled_at: null, settled_reason: null, snooze_until: until, snooze_kind: kind, updated_at: this.now(), end_at: null, end_error: null });
     this.changedSafe(sessionId);
+    return true;
   }
 
   /** The owner looked at the session: the auto-settle clock restarts, and a tmux session's current done or failed
@@ -207,6 +260,7 @@ export class Inbox {
 
   /** A new run unsettles; a request or a failure unsettles and wakes a snooze. */
   activity(sessionId: string, kind: Activity): void {
+    if (this.ending.has(sessionId)) return; // the end runs: its row must keep end_at for a restart
     const row = getSessionAttention(this.d.db, sessionId);
     if (!row) return;
     const wake = kind !== "run" && row.snooze_until !== null;
@@ -214,7 +268,7 @@ export class Inbox {
     if (row.settled_at !== null) this.cancelEnd(sessionId);
     this.holds.delete(sessionId);
     putSessionAttention(this.d.db, {
-      ...row, settled_at: null, settled_reason: null, end_at: null,
+      ...row, settled_at: null, settled_reason: null, end_at: null, end_started_at: null,
       ...(wake ? { snooze_until: null, snooze_kind: null } : {}), updated_at: this.now(),
     });
     this.changedSafe(sessionId);
@@ -226,21 +280,23 @@ export class Inbox {
   }
 
   /** The idle rule (index.ts runs it every AUTO_SETTLE_TICK_MS): settles, and so ends, the sessions that are due, at
-   *  most AUTO_END_PER_TICK per tick (an end is heavy: a backup, a container removal). A due session with
+   *  most AUTO_END_PER_TICK in flight (an end is heavy: a backup, a container removal). A due session with
    *  uncommitted changes, or whose worktree cannot be read, stays (autoEndHold). Returns the settled ids. */
   async autoSettle(): Promise<string[]> {
     const now = this.now();
     const settled: string[] = [];
     for (const s of this.d.sessions()) {
-      if (settled.length >= AUTO_END_PER_TICK) break;
       const live = storedRuntime(s) === "tmux" ? this.d.tmuxLive(s.id) : null;
       const stateKnown = storedRuntime(s) === "chat" || (live !== null && live.status !== "unknown");
       const look = { seenAt: getSeenAt(this.d.db, s.id), stateKnown };
       if (!autoSettleDue(this.base(s).item.attention, s, getSessionAttention(this.d.db, s.id), look, now)) {
-        this.setHold(s.id, null);
+        // Its clock restarted (a look, a merged PR's settle taken back): a hold still says why while it is true.
+        if (this.holds.has(s.id)) await this.autoEndHold(s);
         continue;
       }
       if (await this.autoEndHold(s) !== null) continue;
+      // Ends still in their grace or running count too: each backs up and removes a container.
+      if (this.endsInFlight() >= AUTO_END_PER_TICK) continue;
       // The session may have changed (a prompt, a settle by hand, an end) while git ran.
       const again = this.d.session(s.id);
       if (!again || !autoSettleDue(this.base(again).item.attention, again, getSessionAttention(this.d.db, s.id), look, this.now())) continue;
