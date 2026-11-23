@@ -86,7 +86,7 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
       if (n === null) return c.json({ error: `${key} must be a non-negative integer` }, 400);
       opts[key] = n;
     }
-    return c.json(r.store.snapshot(opts));
+    return c.json(r.store.snapshotWithTopic(opts));
   });
 
   app.post("/api/sessions/:id/thread/messages", async (c) => {

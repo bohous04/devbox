@@ -65,6 +65,10 @@ export interface ThreadSnapshot {
   /** The current harness's slash commands from the bridge's latest `commands.changed` (bridge 1.9.0+). Absent when it
    *  sent none (an older bridge, or a harness that runs none, such as Codex): then the app offers no "/" menu. */
   commands?: AgentCommand[];
+  /** The thread's title from its first user message with text (threadTitle, as the inbox `topic`); null before one.
+   *  Only on GET responses (thread, mirror, ended transcript), not on stream frames: a client that loaded only the
+   *  newest items (`limit`) names the thread with it. Absent from a devd that predates it. */
+  topic?: string | null;
 }
 
 /** `supported`: the levels the current model takes ([] = none, null = not known yet); `effective`: the level the agent

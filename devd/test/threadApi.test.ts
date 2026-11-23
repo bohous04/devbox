@@ -105,6 +105,17 @@ test("GET thread returns the snapshot, honours afterSeq and limit", async () => 
   expect(after.items.map((i) => i.text)).toEqual(["two"]);
 });
 
+test("GET thread names the thread's topic from its first user message, also when the tail leaves that message out", async () => {
+  const t = setup();
+  t.feed(CHAT.id, [started("r1"), { type: "message.final", runId: "r1", itemId: "u1", role: "user", text: "Fix the login form" }, said("r1", "m1", "one"), completed("r1")]);
+  const tail = (await (await t.a.fetch(req("GET", `/api/sessions/${CHAT.id}/thread?limit=1`))).json()) as ThreadSnapshot;
+  expect(tail.items.map((i) => i.text)).toEqual(["one"]);
+  expect(tail.topic).toBe("Fix the login form");
+  const empty = setup();
+  empty.feed(CHAT.id, [started("r1"), said("r1", "m1", "one")]);
+  expect(((await (await empty.a.fetch(req("GET", `/api/sessions/${CHAT.id}/thread`))).json()) as ThreadSnapshot).topic).toBeNull();
+});
+
 test("GET thread beforeSeq pages back and leaves the rest of the snapshot as it was", async () => {
   const t = setup();
   t.feed(CHAT.id, [started("r1"), said("r1", "m1", "one"), said("r1", "m2", "two"), said("r1", "m3", "three")]);
