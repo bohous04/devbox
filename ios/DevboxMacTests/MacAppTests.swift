@@ -166,6 +166,23 @@ final class MacAppTests: XCTestCase {
         XCTAssertNil(MacSidebarLayout.crossing(from: nil, down: true, list: groups, shelves: shelves))
     }
 
+    /// A measured height holds only for the rows it was measured with. A scroll view's content is never shorter
+    /// than its frame, so after a shelf closes (or rows leave it) the old measurement would hold the block at its open
+    /// height, headers on top of empty room: the block goes back to the estimate, and measures itself again from there.
+    func testShelvesShrinkWhenTheirRowsGo() {
+        let open = MacSidebarLayout.ShelfLayout(shelves: ["Working", "Settled"], rows: ["w1", "w2", "s1"])
+        let shut = MacSidebarLayout.ShelfLayout(shelves: ["Working", "Settled"], rows: [])
+        let measured = MacSidebarLayout.ShelfMeasure(layout: open, height: 230)
+        XCTAssertEqual(MacSidebarLayout.shelfContent(measured: measured, layout: open), 230, "the rows it was measured with")
+        XCTAssertEqual(MacSidebarLayout.shelfContent(measured: measured, layout: shut), MacSidebarLayout.estimatedContent(headers: 2, rows: 0),
+                       "closed: back to the two headers")
+        let fewer = MacSidebarLayout.ShelfLayout(shelves: ["Working", "Settled"], rows: ["w1", "s1"])
+        XCTAssertEqual(MacSidebarLayout.shelfContent(measured: measured, layout: fewer), MacSidebarLayout.estimatedContent(headers: 2, rows: 2),
+                       "a row left a shelf")
+        XCTAssertEqual(MacSidebarLayout.shelfContent(measured: nil, layout: open), MacSidebarLayout.estimatedContent(headers: 2, rows: 3),
+                       "not measured yet")
+    }
+
     /// The pinned block is as tall as its content, up to 45 % of the sidebar; it scrolls inside beyond that.
     func testPinnedBlockGrowsUpTo45PercentOfTheSidebar() {
         XCTAssertEqual(MacSidebarLayout.shelfHeight(content: 90, sidebar: 800, chrome: 90), 90)

@@ -74,6 +74,32 @@ final class MacScreenshotTests: XCTestCase {
         try shoot(name: "sidebar-short-window-light", look: "light", thread: nil, height: 420, inspect: Self.shelvesPinned(capped: true))
     }
 
+    /// Rows leaving the open shelves (here a search that keeps one settled row) shrink the shelves to what is left,
+    /// as closing a shelf does: a measured height is not kept past the rows it was measured with, since a scroll
+    /// view's content never reads shorter than its frame. A synthesized click on a header does not reach SwiftUI's
+    /// button offscreen, so the search stands in for the owner's open-then-close.
+    func testShelvesShrinkWhenRowsLeave() throws {
+        MacSidebarLayout.debugOpenShelves = ["Settled"]
+        for look in ["light", "dark"] {
+            try shoot(name: "sidebar-shelves-shrunk-\(look)", look: look, thread: nil, width: 1100, height: 820, sidebarOnly: true) { frame in
+                let shelves = try XCTUnwrap(Self.sidebarLists(in: frame).last, "no shelves list")
+                let window = try XCTUnwrap(frame.window)
+                func height() -> CGFloat { shelves.enclosingScrollView?.frame.height ?? 0 }
+                let open = height()
+                XCTAssertGreaterThan(open, MacSidebarLayout.estimatedContent(headers: 3, rows: 0) + 40, "Settled is open")
+                let search = try XCTUnwrap(Self.allViews(frame).first { ($0 as? NSTextField)?.placeholderString == "Search" }, "no search field")
+                window.makeFirstResponder(search)
+                let editor = try XCTUnwrap(window.firstResponder as? NSTextView, "the search field has no editor")
+                editor.insertText("footer logo", replacementRange: NSRange(location: NSNotFound, length: 0))
+                RunLoop.main.run(until: Date().addingTimeInterval(1.5))
+                XCTAssertLessThan(height(), open - 30, "the shelves shrank")
+                // As tall as what is left (Settled, its match and any note), not the open height: shelvesPinned
+                // checks the block against the list's own rows.
+                try Self.shelvesPinned()(frame)
+            }
+        }
+    }
+
     /// ↓ on the last row of the list goes on into the open Working shelf, and ↑ comes back, scrolled into view: real key
     /// events into the lists of a short window, where the list's last row is out of sight.
     func testArrowsCrossIntoThePinnedShelves() throws {

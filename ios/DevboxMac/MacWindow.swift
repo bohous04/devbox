@@ -170,8 +170,8 @@ struct MacInboxSidebar: View {
     /// The tools' and the footer's heights: the shelves leave the list room under the one and over the other.
     @State private var toolsHeight: CGFloat = 0
     @State private var footerHeight: CGFloat = 0
-    /// The pinned shelves' list height with all its rows, once it has measured itself (macOS 15+).
-    @State private var shelfContent: CGFloat?
+    /// The pinned shelves' list height with the rows it was measured with (macOS 15+); see `shelfContent`.
+    @State private var shelfMeasure: MacSidebarLayout.ShelfMeasure?
     /// Which of the two lists has the keyboard, so ↑/↓ can carry it across their seam.
     @FocusState private var focusedList: MacSidebarLayout.Part?
     /// Key, active or inactive: a tmux session in a window that becomes key again is being looked at.
@@ -360,7 +360,7 @@ struct MacInboxSidebar: View {
     @ViewBuilder
     private func shelves(_ pinned: [InboxView.Shelf], now: Int, seam: (list: [String], shelves: [String])) -> some View {
         if !pinned.isEmpty {
-            let estimate = MacSidebarLayout.estimatedContent(headers: pinned.count, rows: seam.shelves.count)
+            let layout = MacSidebarLayout.ShelfLayout(shelves: pinned.map(\.label), rows: seam.shelves)
             ScrollViewReader { proxy in
                 List(selection: $selection) {
                     ForEach(pinned, id: \.label) { group($0, now: now) }
@@ -371,10 +371,11 @@ struct MacInboxSidebar: View {
                 .onChange(of: focusedList) { _, part in reveal(in: part, .shelves, proxy) }
             }
             .scrollContentBackground(.hidden)
-            .modifier(MacListContentHeight(height: $shelfContent))
+            .modifier(MacListContentHeight { shelfMeasure = MacSidebarLayout.ShelfMeasure(layout: layout, height: $0) })
             // Measured afresh when shelves come back, not sized by the rows they had before.
-            .onDisappear { shelfContent = nil }
-            .frame(height: MacSidebarLayout.shelfHeight(content: shelfContent ?? estimate, sidebar: sidebarHeight,
+            .onDisappear { shelfMeasure = nil }
+            .frame(height: MacSidebarLayout.shelfHeight(content: MacSidebarLayout.shelfContent(measured: shelfMeasure, layout: layout),
+                                                        sidebar: sidebarHeight,
                                                         chrome: toolsHeight + footerHeight))
             .background(MacTone.sidebar)
             .overlay(alignment: .top) { Rectangle().fill(Theme.C.border).frame(height: 1 / 3).accessibilityHidden(true) }
@@ -509,8 +510,29 @@ enum MacSidebarLayout {
         return nil
     }
 
+    /// What the shelves' list shows: which shelves, and which of their rows (none of a shut one).
+    struct ShelfLayout: Equatable {
+        let shelves: [String]
+        let rows: [String]
+    }
+
+    /// The shelves' list height as measured, and for which layout.
+    struct ShelfMeasure: Equatable {
+        let layout: ShelfLayout
+        let height: CGFloat
+    }
+
+    /// The shelves' content height: as measured, while it shows the rows it was measured with; else the estimate.
+    /// A scroll view's content is never shorter than its frame, so a measurement cannot shrink the block: after a
+    /// shelf closed it still read the open height, and the block stayed tall with its headers over empty room. From
+    /// the estimate the list measures itself again, and grows if its rows are taller than estimated.
+    static func shelfContent(measured: ShelfMeasure?, layout: ShelfLayout) -> CGFloat {
+        if let measured, measured.layout == layout { return measured.height }
+        return estimatedContent(headers: layout.shelves.count, rows: layout.rows.count)
+    }
+
     /// The shelves' list height from its headers and visible rows, for before it has measured itself (its first
-    /// layout) and for macOS 14, which cannot measure a list. Off only at a non-default sidebar size.
+    /// layout or new rows) and for macOS 14, which cannot measure a list. Off only at a non-default sidebar size.
     static func estimatedContent(headers: Int, rows: Int) -> CGFloat {
         CGFloat(headers) * headerHeight + CGFloat(rows) * rowHeight + listPadding
     }
@@ -537,12 +559,12 @@ enum MacSidebarLayout {
 
 /// Reports a list's full height (its rows and its insets) on macOS 15+, which can read a scroll view's geometry.
 private struct MacListContentHeight: ViewModifier {
-    @Binding var height: CGFloat?
+    let measured: (CGFloat) -> Void
 
     func body(content: Content) -> some View {
         if #available(macOS 15, *) {
             content.onScrollGeometryChange(for: CGFloat.self) { $0.contentSize.height + $0.contentInsets.top + $0.contentInsets.bottom }
-                action: { _, new in height = new }
+                action: { _, new in measured(new) }
         } else {
             content
         }
