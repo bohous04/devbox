@@ -154,6 +154,8 @@ final class InboxSettleTests: XCTestCase {
         XCTAssertEqual(InboxView.keptWorktreeNote(kept),
                        "Uncommitted work from this session was kept on disk at /srv/_sessions/a. Continuing starts a new worktree without it.")
         XCTAssertNil(InboxView.keptWorktreeNote(try JSONDecoder().decode(EndedSession.self, from: Data((base + "}").utf8))))
+        let gone = try JSONDecoder().decode(EndedSession.self, from: Data((base + #","keptWorktree":"/srv/_sessions/a","keptWorktreeRemoved":true}"#).utf8))
+        XCTAssertEqual(InboxView.keptWorktreeNote(gone), "Uncommitted work from this session was kept at /srv/_sessions/a, since removed.")
     }
 
     /// devd's endsAt and endError decode; an older devd sends neither.

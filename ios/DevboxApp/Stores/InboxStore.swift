@@ -276,7 +276,10 @@ enum InboxView {
     /// What the transcript says about itself when it is not whole; nil when it is.
     /// Where the ended session's uncommitted work stayed (endedView.ts keptWorktreeNote); nil when the worktree went.
     static func keptWorktreeNote(_ e: EndedSession) -> String? {
-        e.keptWorktree.map { "Uncommitted work from this session was kept on disk at \($0). Continuing starts a new worktree without it." }
+        e.keptWorktree.map {
+            e.keptWorktreeRemoved ? "Uncommitted work from this session was kept at \($0), since removed."
+                : "Uncommitted work from this session was kept on disk at \($0). Continuing starts a new worktree without it."
+        }
     }
 
     static func transcriptNote(_ t: EndedSession.TranscriptState) -> String? {

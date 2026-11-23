@@ -1447,6 +1447,8 @@ struct EndedSession: Decodable, Equatable, Identifiable {
     /// Where the session's worktree stayed on disk because it held uncommitted work when it ended; nil when it was
     /// removed (or from an older devd). Continue starts a new worktree, so the transcript says where this one is.
     var keptWorktree: String? = nil
+    /// The kept worktree is no longer on disk (removed since): the transcript says it was kept, not where it is.
+    var keptWorktreeRemoved: Bool = false
 
     enum TranscriptState: String, Decodable {
         case complete, truncated, missing
@@ -1454,7 +1456,7 @@ struct EndedSession: Decodable, Equatable, Identifiable {
         init(from decoder: Decoder) throws { self = try tolerant(decoder, unknown: .unknown) }
     }
 
-    private enum K: String, CodingKey { case id, sessionId, runtime, title, project, repo, agent, branch, topic, lastText, endedAt, continueMode, transcript, keptWorktree }
+    private enum K: String, CodingKey { case id, sessionId, runtime, title, project, repo, agent, branch, topic, lastText, endedAt, continueMode, transcript, keptWorktree, keptWorktreeRemoved }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: K.self)
@@ -1472,6 +1474,7 @@ struct EndedSession: Decodable, Equatable, Identifiable {
         continueMode = try c.decode(ContinueMode.self, forKey: .continueMode)
         transcript = try c.decodeIfPresent(TranscriptState.self, forKey: .transcript) ?? .complete
         keptWorktree = try c.decodeIfPresent(String.self, forKey: .keptWorktree)
+        keptWorktreeRemoved = try c.decodeIfPresent(Bool.self, forKey: .keptWorktreeRemoved) ?? false
     }
 }
 

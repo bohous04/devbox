@@ -82,6 +82,7 @@ export function toEnded(r: EndedRow): EndedSession {
     id: r.id, sessionId: r.session_id, runtime: r.runtime, title: r.title, folder: r.folder, project: r.project, repo: r.repo,
     agent: r.agent, branch: r.branch, topic: r.topic, lastText: r.last_text, endedAt: r.ended_at, continueMode: continueMode(r),
     transcript: r.transcript, keptWorktree: r.kept_worktree,
+    keptWorktreeRemoved: r.kept_worktree === null ? false : !existsSync(r.kept_worktree),
   };
 }
 
@@ -127,6 +128,12 @@ export function recordEnded(db: Database, s: SessionRow, archiveDir: string | nu
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)`).run(row.id, row.session_id, row.folder, row.project, row.repo, row.agent, row.runtime, row.title,
     row.branch, row.topic, row.last_text, row.ended_at, row.archive_dir, row.store_file, row.native_harness, row.native_thread, row.transcript, row.kept_worktree);
   return toEnded(row);
+}
+
+/** Whether this session (`s`, by its id and creation: ids are reused) already has an ended row: an end resumed
+ *  after a restart, whose first run listed the transcript before devd went down. */
+export function endedAlready(db: Database, s: SessionRow): boolean {
+  return db.query(`SELECT 1 FROM ended_sessions WHERE session_id=? AND ended_at >= ?`).get(s.id, s.created_at) !== null;
 }
 
 /** Visible transcripts, newest first. */

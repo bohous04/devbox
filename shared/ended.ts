@@ -30,6 +30,9 @@ export interface EndedSession {
    *  session ended; null when it was removed. Continue does not reuse it (a new session gets its own worktree), so
    *  the transcript view says where that work is. Optional: older devd does not send it. */
   keptWorktree?: string | null;
+  /** The kept worktree is no longer on disk (someone removed it since): the view says it was kept, not where it is.
+   *  Optional: older devd does not send it. */
+  keptWorktreeRemoved?: boolean;
 }
 
 /** SSE `inbox-ended` when a transcript was hidden or purged. */

@@ -46,6 +46,7 @@ test("an open request in a transcript will never be answered; a transcript that 
   expect(transcriptNote("truncated")).toContain("may be missing");
   expect(transcriptNote("missing")).toBe("This session ended without a transcript.");
   expect(keptWorktreeNote({ keptWorktree: "/srv/_sessions/dev-a-b" })).toBe("Uncommitted work from this session was kept on disk at /srv/_sessions/dev-a-b. Continuing starts a new worktree without it.");
+  expect(keptWorktreeNote({ keptWorktree: "/srv/_sessions/dev-a-b", keptWorktreeRemoved: true })).toBe("Uncommitted work from this session was kept at /srv/_sessions/dev-a-b, since removed.");
   expect(keptWorktreeNote({ keptWorktree: null })).toBeNull();
   expect(keptWorktreeNote({})).toBeNull();
   expect(canContinue(ended("e", 1, { transcript: "missing" }))).toBe(false);
