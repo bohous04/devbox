@@ -51,6 +51,8 @@ struct EndedTranscriptScreen: View {
             if e.transcript == .missing { thread = .empty } else {
                 let t: ThreadSnapshot = try await client.get("/api/ended/\(pathSegment(endedId))/transcript?limit=\(ThreadView.pageSize)")
                 hasOlder = ThreadView.hasOlder(t)
+                rowBase = 0
+                olderError = nil
                 thread = t
             }
             ended = e

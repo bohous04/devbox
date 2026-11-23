@@ -470,6 +470,11 @@ final class ThreadStore: ObservableObject {
     /// The newest `ThreadView.pageSize` items (`loadOlder` pages back). A tmux session the list named goes straight to
     /// its mirror; otherwise /thread answers 409 not-a-chat-session for one.
     private func load() async {
+        let started = ContinuousClock.now
+        defer {
+            // Opening speed, from the store's side: the click's request(s) to rows built. Counts only, never content.
+            Self.logger.info("thread load: \(self.thread?.items.count ?? -1) items, tmux \(self.isTmux), \(ContinuousClock.now - started, privacy: .public)")
+        }
         if runtime == .tmux {
             isTmux = true
             return await loadMirror()
