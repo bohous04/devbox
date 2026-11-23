@@ -18,6 +18,8 @@ struct EndedTranscriptScreen: View {
     @State private var loadingOlder = false
     @State private var olderError: String?
     @State private var rowBase = 0
+    /// The transcript the screen loaded last: a page back asked for another one (the Mac reuses the screen) is dropped.
+    @State private var loadedFor: String?
 
     private var starting: Bool { continues.running.contains(endedId) }
 
@@ -45,6 +47,7 @@ struct EndedTranscriptScreen: View {
     }
 
     private func load() async {
+        loadedFor = endedId
         do {
             let e: EndedSession = try await client.get("/api/ended/\(pathSegment(endedId))")
             // A session that ended without a transcript has nothing to fetch (devd answers 410).
@@ -63,11 +66,12 @@ struct EndedTranscriptScreen: View {
 
     private func loadOlder() async {
         guard hasOlder, !loadingOlder, let cur = thread, let before = ThreadView.olderBeforeSeq(cur) else { return }
+        let asked = endedId
         loadingOlder = true
         defer { loadingOlder = false }
         do {
             let page: ThreadSnapshot = try await client.get("/api/ended/\(pathSegment(endedId))/transcript?beforeSeq=\(before)&limit=\(ThreadView.pageSize)")
-            guard let cur = thread else { return }
+            guard loadedFor == asked, let cur = thread else { return }
             // A transcript gets no live updates: nothing is held, and everything new goes in front.
             let more = ThreadView.hasOlder(page)
             let next = ThreadView.prependOlder(cur, page.items, more: more)
@@ -90,12 +94,16 @@ struct EndedTranscriptScreen: View {
         }
     }
 
-    private func conversation(_ e: EndedSession, _ t: ThreadSnapshot) -> some View {
+    private func layout(_ t: ThreadSnapshot) -> [ThreadDisplayRow] {
         // A transcript takes no answers: an open request shows as it was left, without its form.
         var shown = t
         shown.pending = []
-        let (chat, partialRun) = ThreadView.tailView(ThreadStore.chatRows(shown, idBase: rowBase), hasOlder: hasOlder)
-        let rows = WorkGroups.rows(chat, runs: shown.runs, partialRun: partialRun)
+        let (chat, partialRun) = ThreadView.tailView(ThreadStore.chatRows(shown, idBase: rowBase), hasOlder: hasOlder, runs: shown.runs, pending: [])
+        return WorkGroups.rows(chat, runs: shown.runs, partialRun: partialRun)
+    }
+
+    private func conversation(_ e: EndedSession, _ t: ThreadSnapshot) -> some View {
+        let rows = layout(t)
         let turnStarts = WorkGroups.turnStarts(rows)
         return ScrollViewReader { proxy in ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
@@ -107,10 +115,11 @@ struct EndedTranscriptScreen: View {
                 }
                 if hasOlder {
                     OlderItemsButton(loading: loadingOlder, error: olderError) {
-                        let first = rows.first?.id
+                        // Keep the row that was first where it was (or its run's fold).
+                        let first = rows.first
                         Task {
                             await loadOlder()
-                            if let first { proxy.scrollTo(first, anchor: .top) }
+                            if let first, let t = thread, let id = WorkGroups.anchor(for: first, in: layout(t)) { proxy.scrollTo(id, anchor: .top) }
                         }
                     }
                 }

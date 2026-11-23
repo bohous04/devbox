@@ -190,7 +190,8 @@ enum ThreadView {
     /// changes nothing (dashboard parity, where a state updater may run twice). The rest of the thread stays.
     static func prependOlder(_ t: ThreadSnapshot, _ older: [ThreadItem], held: Held = Held(), more: Bool) -> ThreadSnapshot {
         let id = { (x: ThreadItem) in
-            x.itemId.map { "id:\(heldKey(x.runId, $0)):\(x.kind)" } ?? "seq:\(x.seq):\(x.runId ?? ""):\(x.kind)"
+            // Without an item id, the text tells apart two notices at one seq (a bridge restart's and devd's own).
+            x.itemId.map { "id:\(heldKey(x.runId, $0)):\(x.kind)" } ?? "seq:\(x.seq):\(x.runId ?? ""):\(x.kind):\(x.text)"
         }
         let loaded = Set(t.items.map(id))
         let page = older.filter { !loaded.contains(id($0)) }.map { it in it.itemId.flatMap { held.items[heldKey(it.runId, $0)] } ?? it }
@@ -215,14 +216,19 @@ enum ThreadView {
         return n
     }
 
-    /// What a thread loaded only to some point back shows. The oldest loaded run may have begun before that point: it
-    /// and the notices among its items are left out until the user loads further back, so the thread starts at the
-    /// first run it holds whole (its prompt, and a fold that counts all its work). When no other run is loaded (one
-    /// long run fills the page), its rows stay but it is `partialRun`: it must not fold (WorkGroups.rows).
-    static func tailView(_ rows: [ChatRow], hasOlder: Bool) -> (rows: [ChatRow], partialRun: String?) {
-        guard hasOlder, let head = rows.first(where: { $0.item.runId != nil })?.item.runId else { return (rows, nil) }
-        guard let cut = rows.firstIndex(where: { $0.item.runId != nil && $0.item.runId != head }) else { return (rows, head) }
-        return (Array(rows[cut...]), nil)
+    /// What a thread loaded only to some point back shows (threadView.ts tailView). The oldest loaded run (head) may
+    /// have begun before that point. It is whole when its prompt (its first item) is loaded. Otherwise, when it ended
+    /// with nothing open, it is left out until the user loads further back, with all its rows (a prompt queued while it
+    /// ran sits among them, devd inserts it at queue time) and the notices before the next run, so the thread starts at
+    /// a whole run. A head run that still runs or waits (queued, an open request: its form must show) or the only run
+    /// loaded stays, as `partialRun`: it must not fold (WorkGroups.rows), since a fold of part of it would undercount.
+    static func tailView(_ rows: [ChatRow], hasOlder: Bool, runs: [RunRow], pending: [PendingRequest]) -> (rows: [ChatRow], partialRun: String?) {
+        guard hasOlder, let first = rows.first(where: { $0.item.runId != nil }), let head = first.item.runId, first.item.kind != .user else {
+            return (rows, nil)
+        }
+        let settled = runs.first { $0.runId == head }.map { isTerminal($0.status) } == true && !pending.contains { $0.runId == head }
+        guard settled, let cut = rows.firstIndex(where: { $0.item.runId != nil && $0.item.runId != head }) else { return (rows, head) }
+        return (rows.enumerated().filter { $0.offset >= cut && $0.element.item.runId != head }.map(\.element), nil)
     }
 
     // MARK: - Private
@@ -573,6 +579,11 @@ final class ThreadStore: ObservableObject {
     private func loaded(_ s: ThreadSnapshot) {
         held = ThreadView.Held()
         hasOlder = ThreadView.hasOlder(s)
+        // A prompt with text is loaded, so the thread has a topic: none means an older devd (it ships with the apps, so a
+        // deploy in progress). Said, not hidden: the header names the repo until the thread's start is loaded.
+        if hasOlder, s.topic == nil, s.items.contains(where: { $0.kind == .user && !$0.text.isEmpty }) {
+            Self.logger.error("devd sent no thread topic: the header names the repo until the thread's start is loaded")
+        }
         setThread(s)
     }
 
@@ -703,7 +714,7 @@ final class ThreadStore: ObservableObject {
     }
 
     private func setThread(_ t: ThreadSnapshot) {
-        let (shown, partialRun) = ThreadView.tailView(Self.chatRows(t, idBase: rowBase), hasOlder: hasOlder)
+        let (shown, partialRun) = ThreadView.tailView(Self.chatRows(t, idBase: rowBase), hasOlder: hasOlder, runs: t.runs, pending: t.pending)
         rows = shown
         display = WorkGroups.rows(rows, runs: t.runs, partialRun: partialRun)
         changesAnchor = ChangesView.anchor(rows, runs: t.runs)

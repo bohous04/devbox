@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import type { EndedSession } from "../../../shared/ended";
@@ -48,15 +48,20 @@ function Transcript({ id }: { id: string }) {
     return () => { alive = false; };
   }, [id, navigate]);
 
+  // The transcript a page back was asked for: its answer is dropped if the page opened another one meanwhile.
+  const opened = useRef(0);
+  useEffect(() => { opened.current++; }, [id]);
   const loadOlder = async () => {
+    const asked = opened.current;
     const beforeSeq = thread ? olderBeforeSeq(thread) : null;
     if (beforeSeq === null) { setMore(false); return; }
     const page = await api.endedTranscript(id, { beforeSeq, limit: THREAD_PAGE });
+    if (opened.current !== asked) return;
     // A transcript gets no live updates: nothing is held.
     setThread((cur) => (cur ? prependOlder(cur, page.items, emptyHeld(), hasOlderThan(page)) : cur));
     setMore(hasOlderThan(page));
   };
-  const view = thread ? tailView(thread.items.filter((i) => !isHousekeepingNotice(i)), more) : null;
+  const view = thread ? tailView(thread.items.filter((i) => !isHousekeepingNotice(i)), more, thread.runs, thread.pending) : null;
 
   const title = ended ? endedTitle(ended) : null;
   useEffect(() => { document.title = `devbox · ${title ?? id}`; }, [id, title]);

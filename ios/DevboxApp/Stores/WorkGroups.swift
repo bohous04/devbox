@@ -80,6 +80,14 @@ enum WorkGroups {
         return out
     }
 
+    /// After older items went in front, the row showing what `old` showed: the same row, else the fold its run became
+    /// (a run whole only now folds its work). nil when neither is there.
+    static func anchor(for old: ThreadDisplayRow, in rows: [ThreadDisplayRow]) -> String? {
+        if rows.contains(where: { $0.id == old.id }) { return old.id }
+        if case .item(let r, _) = old, let run = r.item.runId, rows.contains(where: { $0.id == "work:\(run)" }) { return "work:\(run)" }
+        return nil
+    }
+
     /// "45s" · "2m 14s" · "1h 5m".
     static func shortDuration(_ ms: Int) -> String {
         let s = max(0, Int((Double(ms) / 1000).rounded()))

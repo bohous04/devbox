@@ -1,4 +1,4 @@
-import type { AgentCommand, LoggedEvent, RunRow, ThreadEffort, ThreadItem, ThreadSnapshot } from "../../shared/thread";
+import type { AgentCommand, LoggedEvent, PendingRequest, RunRow, ThreadEffort, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
 export const emptyThread = (): ThreadSnapshot => ({
   lastSeq: 0, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: null, effort: null,
@@ -294,7 +294,8 @@ export function mergeLive(t: ThreadSnapshot, m: { afterSeq: number; snapshot: Th
  *  unknown tool, as applyThreadEvent shows one. Pure, and `held` is only read (a state updater may run twice): applying
  *  the same held entries again changes nothing. The rest of the thread stays: the stream keeps it. */
 export function prependOlder(t: ThreadSnapshot, older: ThreadItem[], held: Held, more: boolean): ThreadSnapshot {
-  const id = (x: ThreadItem) => (x.itemId !== null ? `id:${heldKey(x.runId, x.itemId)}:${x.kind}` : `seq:${x.seq}:${x.runId}:${x.kind}`);
+  // Without an item id, the text tells apart two notices at one seq (a bridge restart's and devd's own).
+  const id = (x: ThreadItem) => (x.itemId !== null ? `id:${heldKey(x.runId, x.itemId)}:${x.kind}` : `seq:${x.seq}:${x.runId}:${x.kind}:${x.text}`);
   const loaded = new Set(t.items.map(id));
   const page = older.filter((it) => !loaded.has(id(it))).map((it) => (it.itemId !== null && held.items[heldKey(it.runId, it.itemId)]) || it);
   const items = [...page, ...t.items];
@@ -311,13 +312,19 @@ export function prependOlder(t: ThreadSnapshot, older: ThreadItem[], held: Held,
 }
 
 /** What a thread loaded only to some point back shows (`items` without housekeeping notices). The oldest loaded run
- *  may have begun before that point: it and the notices among its items are left out until the user loads further
- *  back, so the thread starts at the first run it holds whole (its prompt, and a fold that counts all its work). When
- *  no other run is loaded (one long run fills the page), its items stay but it is `partialRun`: it must not fold, since
- *  a fold of part of a run would undercount its work. */
-export function tailView(items: ThreadItem[], hasOlder: boolean): { items: ThreadItem[]; partialRun: string | null } {
-  const head = items.find((it) => it.runId !== null)?.runId ?? null;
-  if (!hasOlder || head === null) return { items, partialRun: null };
+ *  (head) may have begun before that point. It is whole when its prompt (its first item) is loaded. Otherwise, when it
+ *  ended with nothing open, it is left out until the user loads further back, with all its items (a prompt queued while
+ *  it ran sits among them, devd inserts it at queue time) and the notices before the next run, so the thread starts at
+ *  a whole run (its prompt, and a fold that counts all its work). A head run that still runs or waits (queued, an open
+ *  request: its form must show) or the only run loaded stays, as `partialRun`: it must not fold, since a fold of part
+ *  of a run would undercount its work. */
+export function tailView(items: ThreadItem[], hasOlder: boolean, runs: RunRow[], pending: PendingRequest[]): { items: ThreadItem[]; partialRun: string | null } {
+  const first = items.find((it) => it.runId !== null);
+  const head = first?.runId ?? null;
+  if (!hasOlder || head === null || first!.kind === "user") return { items, partialRun: null };
+  const run = runs.find((r) => r.runId === head);
+  const settled = run !== undefined && TERMINAL.has(run.status) && !pending.some((p) => p.runId === head);
   const cut = items.findIndex((it) => it.runId !== null && it.runId !== head);
-  return cut === -1 ? { items, partialRun: head } : { items: items.slice(cut), partialRun: null };
+  if (!settled || cut === -1) return { items, partialRun: head };
+  return { items: items.filter((it, i) => i >= cut && it.runId !== head), partialRun: null };
 }

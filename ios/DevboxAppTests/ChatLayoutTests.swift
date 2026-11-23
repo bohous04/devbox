@@ -98,14 +98,51 @@ final class ChatLayoutTests: XCTestCase {
 
     /// threadView.test.ts "tailView": a cut thread starts at its first whole run; a run that fills the page stays.
     func testTailViewStartsAtTheFirstWholeRun() {
+        let done = [run("r1", .completed), run("r2", .completed)]
         let rows = chatRows([item(1, "r1", .tool), item(2, nil, .notice), item(3, "r1", .assistant), item(4, "r2", .user), item(5, "r2", .tool)])
-        XCTAssertEqual(ThreadView.tailView(rows, hasOlder: true).rows.map(\.item.seq), [4, 5])
-        XCTAssertNil(ThreadView.tailView(rows, hasOlder: true).partialRun)
-        XCTAssertEqual(ThreadView.tailView(rows, hasOlder: false).rows.map(\.item.seq), [1, 2, 3, 4, 5])
+        XCTAssertEqual(ThreadView.tailView(rows, hasOlder: true, runs: done, pending: []).rows.map(\.item.seq), [4, 5])
+        XCTAssertNil(ThreadView.tailView(rows, hasOlder: true, runs: done, pending: []).partialRun)
+        XCTAssertEqual(ThreadView.tailView(rows, hasOlder: false, runs: done, pending: []).rows.map(\.item.seq), [1, 2, 3, 4, 5])
         let one = chatRows([item(1, "r1", .tool), item(2, "r1", .tool)])
-        XCTAssertEqual(ThreadView.tailView(one, hasOlder: true).rows.map(\.item.seq), [1, 2])
-        XCTAssertEqual(ThreadView.tailView(one, hasOlder: true).partialRun, "r1")
-        XCTAssertNil(ThreadView.tailView(chatRows([item(1, nil, .notice)]), hasOlder: true).partialRun)
+        XCTAssertEqual(ThreadView.tailView(one, hasOlder: true, runs: done, pending: []).rows.map(\.item.seq), [1, 2])
+        XCTAssertEqual(ThreadView.tailView(one, hasOlder: true, runs: done, pending: []).partialRun, "r1")
+        XCTAssertNil(ThreadView.tailView(chatRows([item(1, nil, .notice)]), hasOlder: true, runs: done, pending: []).partialRun)
+        // Its prompt loaded: the oldest run is whole and stays.
+        let whole = chatRows([item(1, "r1", .user), item(2, "r1", .tool), item(3, "r2", .user)])
+        XCTAssertEqual(ThreadView.tailView(whole, hasOlder: true, runs: done, pending: []).rows.map(\.item.seq), [1, 2, 3])
+    }
+
+    /// threadView.test.ts: a running run, or one with an open request, is never left out, even when a prompt queued
+    /// while it ran (devd inserts it at queue time) follows; an ended one goes with all its items.
+    func testTailViewNeverDropsARunThatStillRunsOrWaits() {
+        let rows = chatRows([item(1, "r1", .tool), item(2, "r1", .request), item(3, "r2", .user), item(4, "r1", .tool)])
+        let running = ThreadView.tailView(rows, hasOlder: true, runs: [run("r1", .running, end: nil), run("r2", .queued, end: nil)], pending: [])
+        XCTAssertEqual(running.rows.map(\.item.seq), [1, 2, 3, 4])
+        XCTAssertEqual(running.partialRun, "r1")
+        let open = PendingRequest(requestId: "2", runId: "r1", kind: .question, prompt: "ok?", options: nil, multiSelect: nil, openedAt: 2)
+        XCTAssertEqual(ThreadView.tailView(rows, hasOlder: true, runs: [run("r1", .completed), run("r2", .completed)], pending: [open]).rows.count, 4)
+        XCTAssertEqual(ThreadView.tailView(rows, hasOlder: true, runs: [run("r1", .completed), run("r2", .running, end: nil)], pending: []).rows.map(\.item.seq), [3])
+    }
+
+    /// threadView.test.ts: two notices without an item id at one seq stay apart (by their text).
+    func testPrependOlderKeepsTwoNoticesAtOneSeq() {
+        var restarted = item(5, nil, .notice, text: "Agent bridge restarted (v2)")
+        restarted.itemId = nil
+        var own = item(5, nil, .notice, text: "Resumed the conversation")
+        own.itemId = nil
+        let t = ThreadSnapshot(lastSeq: 9, seenSeq: 0, runs: [], items: [own, item(6, "r2", .user, text: "t6")], pending: [], background: [], native: nil)
+        XCTAssertEqual(ThreadView.prependOlder(t, [item(4, "r1", .user, text: "t4"), restarted, own], more: false).items.map(\.text),
+                       ["t4", "Agent bridge restarted (v2)", "Resumed the conversation", "t6"])
+    }
+
+    /// After a page back, the screen scrolls to the row that was first: the same row, else the fold its run became.
+    func testScrollAnchorSurvivesARunFolding() {
+        let before = WorkGroups.rows(chatRows([item(1, "r1", .tool), item(2, "r1", .assistant)]), runs: [run("r1", .completed)], partialRun: "r1")
+        let first = try! XCTUnwrap(before.first)
+        let after = WorkGroups.rows([ChatRow(id: -1, item: item(0, "r1", .user), pending: nil, queued: false, critic: false)]
+                                    + chatRows([item(1, "r1", .tool), item(2, "r1", .assistant)]), runs: [run("r1", .completed)])
+        XCTAssertEqual(WorkGroups.anchor(for: first, in: after), "work:r1")
+        XCTAssertEqual(WorkGroups.anchor(for: first, in: before), first.id)
     }
 
     /// threadView.test.ts "prependOlder": the page goes in front, the boundary items already here are dropped.

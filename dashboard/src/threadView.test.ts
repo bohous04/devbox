@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import type { BridgeEvent, LoggedEvent, ThreadItem, ThreadSnapshot } from "../../shared/thread";
+import type { BridgeEvent, LoggedEvent, RunRow, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 import fixture from "../../shared/fixtures/thread-events.json";
 import { activeRun, applyCommands, applyLive, emptyHeld, mergeLive, applyEffort, applyNotice, applyThreadEvent, composerErrorText, criticRunIds, emptyThread, hasOlderThan, mergeSnapshot, olderBeforeSeq, prependOlder, queuedRunIds, seenToPost, tailView, THREAD_PAGE } from "./threadView";
 
@@ -117,14 +117,33 @@ test("mergeSnapshot keeps the topic the GET named (stream frames carry none)", (
   expect("topic" in mergeSnapshot(emptyThread(), { afterSeq: 0, snapshot: emptyThread() })).toBe(false);
 });
 
+const run_ = (runId: string, status: RunRow["status"]): RunRow =>
+  ({ runId, origin: "user", status, harness: null, nativeThreadId: null, model: null, queuedAt: null, startedAt: 1, endedAt: null, endedSeq: null, usage: null, error: null });
+
 test("tailView starts a cut thread at its first whole run; a run that fills the page stays, unfolded", () => {
   const items = [it_(1, "r1", "tool"), it_(2, null, "notice"), it_(3, "r1", "assistant"), it_(4, "r2", "user"), it_(5, "r2", "tool")];
-  expect(tailView(items, true)).toEqual({ items: items.slice(3), partialRun: null });
+  const runs = [run_("r1", "completed"), run_("r2", "completed")];
+  expect(tailView(items, true, runs, [])).toEqual({ items: items.slice(3), partialRun: null });
   // All of it loaded: nothing is cut.
-  expect(tailView(items, false)).toEqual({ items, partialRun: null });
+  expect(tailView(items, false, runs, [])).toEqual({ items, partialRun: null });
   const one = [it_(1, "r1", "tool"), it_(2, "r1", "tool")];
-  expect(tailView(one, true)).toEqual({ items: one, partialRun: "r1" });
-  expect(tailView([it_(1, null, "notice")], true)).toEqual({ items: [it_(1, null, "notice")], partialRun: null });
+  expect(tailView(one, true, runs, [])).toEqual({ items: one, partialRun: "r1" });
+  expect(tailView([it_(1, null, "notice")], true, runs, [])).toEqual({ items: [it_(1, null, "notice")], partialRun: null });
+});
+
+test("tailView keeps the oldest run when its prompt is loaded: it is whole", () => {
+  const items = [it_(1, "r1", "user"), it_(2, "r1", "tool"), it_(3, "r2", "user")];
+  expect(tailView(items, true, [run_("r1", "completed"), run_("r2", "completed")], [])).toEqual({ items, partialRun: null });
+});
+
+test("tailView never drops a running run, nor one with an open request, even when a queued prompt follows", () => {
+  // r1 runs (started before the window); the user queued r2, whose prompt devd inserts at queue time, among r1's items.
+  const items = [it_(1, "r1", "tool"), it_(2, "r1", "request", "q1"), it_(3, "r2", "user"), it_(4, "r1", "tool")];
+  expect(tailView(items, true, [run_("r1", "running"), run_("r2", "queued")], [])).toEqual({ items, partialRun: "r1" });
+  const pending = [{ requestId: "q1", runId: "r1", kind: "question" as const, prompt: "ok?", openedAt: 2 }];
+  expect(tailView(items, true, [run_("r1", "completed"), run_("r2", "completed")], pending)).toEqual({ items, partialRun: "r1" });
+  // r1 ended with nothing open: all its items go, also those after r2's prompt, so no part of it is left out of place.
+  expect(tailView(items, true, [run_("r1", "completed"), run_("r2", "running")], [])).toEqual({ items: [it_(3, "r2", "user")], partialRun: null });
 });
 
 const finished = (seq: number, itemId: string, output: string): LoggedEvent =>
@@ -170,4 +189,12 @@ test("prependOlder never doubles an item the page repeats: the loaded copy keeps
   const t: ThreadSnapshot = { ...emptyThread(), lastSeq: 12, items: [live, it_(12, "r1", "assistant")] };
   const n = prependOlder(t, [it_(3, "r1", "user"), { ...live, status: "streaming", output: undefined }], emptyHeld(), false);
   expect(n.items.map((i) => `${i.itemId}:${i.output ?? ""}`)).toEqual(["i3:", "t1:new", "i12:"]);
+});
+
+test("prependOlder keeps two notices without item id at the same seq apart (by their text)", () => {
+  const restarted = { ...it_(5, null, "notice", null), text: "Agent bridge restarted (v2)" };
+  const own = { ...it_(5, null, "notice", null), text: "Resumed the conversation" };
+  const t: ThreadSnapshot = { ...emptyThread(), lastSeq: 9, items: [own, it_(6, "r2", "user")] };
+  expect(prependOlder(t, [it_(4, "r1", "user"), restarted, own], emptyHeld(), false).items.map((i) => i.text))
+    .toEqual(["t4", "Agent bridge restarted (v2)", "Resumed the conversation", "t6"]);
 });

@@ -253,11 +253,11 @@ struct ChatScreen: View {
                     }
                     if store.hasOlder {
                         OlderItemsButton(loading: store.loadingOlder, error: store.olderError) {
-                            // Older rows go in above: keep the row that was first where it was.
-                            let first = store.display.first?.id
+                            // Older rows go in above: keep the row that was first where it was (or its run's fold).
+                            let first = store.display.first
                             Task {
                                 await store.loadOlder()
-                                if let first { proxy.scrollTo(first, anchor: .top) }
+                                if let first, let id = WorkGroups.anchor(for: first, in: store.display) { proxy.scrollTo(id, anchor: .top) }
                             }
                         }
                     }

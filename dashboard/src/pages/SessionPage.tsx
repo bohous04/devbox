@@ -85,12 +85,17 @@ function ChatPage({ id }: { id: string }) {
     return () => { alive = false; };
   }, [id]);
 
+  // The session a page back was asked for: its answer is dropped if the page opened another one meanwhile.
+  const opened = useRef(0);
+  useEffect(() => { opened.current++; }, [id]);
   const loadOlder = async () => {
+    const asked = opened.current;
     const t = threadRef.current;
     const beforeSeq = t ? olderBeforeSeq(t) : null;
     if (beforeSeq === null) { setMore(false); return; }
     const opts = { beforeSeq, limit: THREAD_PAGE };
     const page = mirrorRef.current !== null ? (await api.mirror(id, opts)).snapshot : await api.thread(id, opts);
+    if (opened.current !== asked) return;
     const older = hasOlderThan(page);
     // Read, not consumed (prependOlder is pure): entries already applied apply again as no-ops.
     const h = held.current;
@@ -217,7 +222,11 @@ function ChatPage({ id }: { id: string }) {
   const heading = threadHeading(id, session, thread?.items, more ? { topic: thread?.topic } : undefined);
   // The tooltip's whole first message is known only when the thread's start is loaded.
   const firstMessage = more ? undefined : thread?.items.find((i) => i.kind === "user" && i.text !== "")?.text;
-  const view = useMemo(() => (thread ? tailView(thread.items.filter((i) => !isHousekeepingNotice(i)), more) : null), [thread, more]);
+  // An older devd sends no topic: say so once rather than quietly naming the thread "repo #n" (devd and the dashboard
+  // ship together, so this is a deploy in progress).
+  const noTopic = more && thread !== null && !("topic" in thread);
+  useEffect(() => { if (noTopic) console.warn("devd sent no thread topic: the heading names the repo until the thread's start is loaded"); }, [noTopic]);
+  const view = useMemo(() => (thread ? tailView(thread.items.filter((i) => !isHousekeepingNotice(i)), more, thread.runs, thread.pending) : null), [thread, more]);
   useEffect(() => { document.title = `devbox · ${heading ?? id}`; }, [id, heading]);
   const place = session ? `${session.project} / ${session.repo}` : null;
 
