@@ -119,6 +119,12 @@ export interface InboxItem {
    *  unlike lastText. null for tmux sessions, an empty thread, or a first message with nothing that reads as words.
    *  Optional: older devd does not send it. */
   topic?: string | null;
+  /** A settle ends the session: when (epoch ms), while its undo grace runs; null when no end is pending. Optional:
+   *  older devd does not send it. */
+  endsAt?: number | null;
+  /** Why the last end after a settle failed: the session is back in the inbox. null when none failed. Optional: older
+   *  devd does not send it. */
+  endError?: string | null;
 }
 
 /** Bridge housekeeping that once went into threads as notices: a restart (resumed, nothing to act on) and devd's

@@ -245,6 +245,17 @@ export function openDb(path: string): Database {
   db.run(`CREATE TABLE IF NOT EXISTS session_attention (
     session_id TEXT PRIMARY KEY, settled_at INTEGER, settled_reason TEXT,
     snooze_until INTEGER, snooze_kind TEXT, updated_at INTEGER NOT NULL)`);
+  // A settle ends the session (sessionInbox.ts): end_at is when, after the undo grace; end_error the last end that
+  // failed. Rows settled before then stay alive until the auto rule ends them: their clock starts at this migration
+  // (updated_at), so the first deploy does not end every one of them at once.
+  const attentionCols = (db.query("PRAGMA table_info(session_attention)").all() as { name: string }[]).map((c) => c.name);
+  if (!attentionCols.includes("end_at")) {
+    db.transaction(() => {
+      db.run(`ALTER TABLE session_attention ADD COLUMN end_at INTEGER`);
+      db.run(`ALTER TABLE session_attention ADD COLUMN end_error TEXT`);
+      db.query(`UPDATE session_attention SET updated_at=? WHERE settled_at IS NOT NULL`).run(Date.now());
+    })();
+  }
   // When the owner last looked at a session, despite the table's name for chat sessions too (POST /api/sessions/:id/seen
   // for tmux, /thread/seen for chat). The auto-settle clock counts it (autoSettleDue). For tmux it is also the seen
   // marker: a done or failed state that began at or before it is seen (tmuxAttention); chat's marker is the thread
@@ -1178,17 +1189,23 @@ export type SnoozeKind = "time" | "reset";
 export interface SessionAttentionRow {
   session_id: string; settled_at: number | null; settled_reason: SettleReason | null;
   snooze_until: number | null; snooze_kind: SnoozeKind | null; updated_at: number;
+  /** When the settle ends the session (null: no end pending); the last end's error (null: none). */
+  end_at: number | null; end_error: string | null;
 }
 export function getSessionAttention(db: Database, sessionId: string): SessionAttentionRow | null {
   return (db.query(`SELECT * FROM session_attention WHERE session_id=?`).get(sessionId) as SessionAttentionRow | null) ?? null;
+}
+/** Sessions with an end pending (a settle within its grace, or one devd went down during). */
+export function pendingEnds(db: Database): { session_id: string; end_at: number; settled_reason: SettleReason }[] {
+  return db.query(`SELECT session_id, end_at, settled_reason FROM session_attention WHERE end_at IS NOT NULL`).all() as { session_id: string; end_at: number; settled_reason: SettleReason }[];
 }
 /** Sessions whose snooze ends after `now`. */
 export function snoozedSessionIds(db: Database, now: number): string[] {
   return (db.query(`SELECT session_id FROM session_attention WHERE snooze_until > ?`).all(now) as { session_id: string }[]).map((r) => r.session_id);
 }
 export function putSessionAttention(db: Database, r: SessionAttentionRow): void {
-  db.query(`INSERT OR REPLACE INTO session_attention (session_id,settled_at,settled_reason,snooze_until,snooze_kind,updated_at)
-    VALUES (?,?,?,?,?,?)`).run(r.session_id, r.settled_at, r.settled_reason, r.snooze_until, r.snooze_kind, r.updated_at);
+  db.query(`INSERT OR REPLACE INTO session_attention (session_id,settled_at,settled_reason,snooze_until,snooze_kind,updated_at,end_at,end_error)
+    VALUES (?,?,?,?,?,?,?,?)`).run(r.session_id, r.settled_at, r.settled_reason, r.snooze_until, r.snooze_kind, r.updated_at, r.end_at, r.end_error);
 }
 
 /** When the owner last looked at the session (tmux_seen); null = never. */

@@ -7,7 +7,7 @@ import { AgentDisconnected, CommandFailed, CommandTimeout, type BridgeLinks } fr
 import { SwitchRefused, type ChatSwitch, type SwitchRequest } from "./chatSwitch";
 import { getSession, type SessionRow } from "./db";
 import type { BusTopic, EventBus } from "./eventBus";
-import { REQUEST_OPEN, type ResetTarget } from "./sessionAttention";
+import { REQUEST_OPEN, SETTLE_REQUEST_OPEN, SETTLE_WORKING, type ResetTarget } from "./sessionAttention";
 import type { Inbox } from "./sessionInbox";
 import { storedRuntime } from "./sessions";
 import { threadImageByName, threadImageFile } from "./threadImages";
@@ -254,11 +254,24 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
     return c.body(null, 204);
   });
   /** Each answers the session's new inbox item. */
-  app.post("/api/sessions/:id/settle", (c) => {
+  /** Settling ends the session (after the inbox's undo grace). One whose agent works or waits for an answer is 409
+   *  (agent-working, request-open) with the question to ask, until the body says `{confirm: true}`. */
+  app.post("/api/sessions/:id/settle", async (c) => {
     const r = anySession(c, c.req.param("id"));
     if ("res" in r) return r.res;
-    const open = requestOpen(c, r.s);
-    if (open) return open;
+    const text = await c.req.text();
+    let confirm = false;
+    if (text.trim() !== "") {
+      let body: unknown = null;
+      try { body = JSON.parse(text); } catch { /* refused below */ }
+      if (!isRecord(body) || Object.keys(body).some((k) => k !== "confirm") || (body.confirm !== undefined && body.confirm !== true)) {
+        return c.json({ error: "body must be empty or {confirm: true}" }, 400);
+      }
+      confirm = body.confirm === true;
+    }
+    const attention = d.inbox.item(r.s).attention;
+    if (!confirm && attention.reason === "request") return c.json({ error: "request-open", message: SETTLE_REQUEST_OPEN }, 409);
+    if (!confirm && attention.section === "working") return c.json({ error: "agent-working", message: SETTLE_WORKING }, 409);
     d.inbox.settle(r.s.id, "manual");
     return c.json(d.inbox.item(r.s));
   });

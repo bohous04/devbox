@@ -41,6 +41,7 @@ function setup(opts: { link?: LinkState | null; now?: () => number; coalesceMs?:
     db, sessions: () => listSessions(db), session: (id) => getSession(db, id), threads,
     chatLink: () => link, tmuxLive: (id) => hub.liveSnapshot(id), bus,
     now: opts.now ?? (() => 1_000_000), coalesceMs: opts.coalesceMs,
+    end: async () => {},
   });
   const published: InboxItem[] = [];
   bus.subscribe(["inbox"], (_t, data) => published.push(data as InboxItem));
@@ -76,7 +77,7 @@ test("chat item: attention from the thread and the link, lastText is the newest 
   const it = t.inbox.item(getSession(t.db, BASE.id)!);
   expect(it).toEqual({
     sessionId: BASE.id, runtime: "chat", title: "a/chat", project: "a", repo: "chat", agent: "claude", branch: null,
-    attention: { section: "needs_you", reason: "completed", since: 3000 }, lastText: `${"x".repeat(LAST_TEXT_MAX)}…`, topic: null,
+    attention: { section: "needs_you", reason: "completed", since: 3000 }, lastText: `${"x".repeat(LAST_TEXT_MAX)}…`, topic: null, endsAt: null, endError: null,
   });
 });
 
@@ -242,6 +243,7 @@ test("a broken chat store is one needs-you item, logged once per message, not a 
     db: t.db, sessions: () => listSessions(t.db), session: (id) => getSession(t.db, id),
     threads: () => { throw new Error("disk I/O error"); },
     chatLink: () => null, tmuxLive: () => null, bus: t.bus, now: () => 42, log: (m) => logs.push(m),
+    end: async () => {},
   });
   const items = inbox.list();
   inbox.list();
@@ -264,6 +266,7 @@ test("T11: a broken store keeps the time it broke, is published once, and its re
     threads: (id) => { if (broken) throw new Error("disk I/O error"); return t.threads(id); },
     chatLink: () => null, tmuxLive: () => null, bus: t.bus, now: () => now, log: (m) => logs.push(m), coalesceMs: 0,
     timers: { set: (fn) => pending.push(fn), clear: () => {} },
+    end: async () => {},
   });
   inbox.changed(BASE.id);
   now = 1042;
@@ -293,6 +296,7 @@ test("T11: a removed session leaves no re-check timer behind", () => {
     db: t.db, sessions: () => listSessions(t.db), session: (id) => getSession(t.db, id), threads: t.threads,
     chatLink: () => null, tmuxLive: () => null, bus: t.bus, now: () => now, coalesceMs: 0,
     timers: { set: (fn) => { pending.set(++next, fn); return next; }, clear: (h) => { pending.delete(h as number); } },
+    end: async () => {},
   });
   chat(t, BASE, [started("r1"), said("r1", "done"), completed("r1")]);
   inbox.changed(BASE.id);

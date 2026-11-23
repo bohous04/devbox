@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,8 +12,8 @@ import {
   getSeenAt, putSessionAttention, type SessionRow,
 } from "../src/db";
 import { EventBus } from "../src/eventBus";
-import { AUTO_SETTLE_IDLE_MS, AUTO_SETTLE_SEEN_IDLE_MS, autoSettleDue, hubShelfDeps, resetDeps, untilReset, type ResetDeps } from "../src/sessionAttention";
-import { Inbox } from "../src/sessionInbox";
+import { AUTO_END_PER_TICK, AUTO_SETTLE_IDLE_MS, AUTO_SETTLE_SEEN_IDLE_MS, autoSettleDue, hubShelfDeps, resetDeps, untilReset, type ResetDeps } from "../src/sessionAttention";
+import { Inbox, SETTLE_END_GRACE_MS } from "../src/sessionInbox";
 import { ThreadStore } from "../src/threadStore";
 import type { BackgroundWork, BridgeEvent, InboxItem } from "../../shared/thread";
 
@@ -50,7 +51,7 @@ function fakeTimers(clock: () => number) {
 }
 
 /** A hub, a chat hub and an inbox over one clock, wired like index.ts. Chat events are stamped with that clock. */
-function setup(opts: { snoozedThrows?: boolean; activityThrows?: boolean; quietMs?: number } = {}) {
+function setup(opts: { snoozedThrows?: boolean; activityThrows?: boolean; quietMs?: number; endFails?: string } = {}) {
   let now = T0;
   const clock = () => now;
   const timers = fakeTimers(clock);
@@ -65,6 +66,8 @@ function setup(opts: { snoozedThrows?: boolean; activityThrows?: boolean; quietM
     return s;
   };
   const notified: string[] = [];
+  /** The ends the inbox started ("id:reason"); a successful one deletes the session, as end() does. */
+  const ends: string[] = [];
   const bus = new EventBus();
   let inbox: Inbox; // assigned below: the hub and the inbox refer to each other, as in index.ts
   const shelf = hubShelfDeps({
@@ -78,7 +81,12 @@ function setup(opts: { snoozedThrows?: boolean; activityThrows?: boolean; quietM
   inbox = new Inbox({
     db, sessions: () => listSessions(db), session: (id) => getSession(db, id), threads,
     chatLink: () => ({ status: "connected", since: 1 }), tmuxLive: (id) => hub.liveSnapshot(id), bus,
-    now: () => now, coalesceMs: 0, timers: timers.timers,
+    now: () => now, coalesceMs: 0, timers: timers.timers, log: (m) => logs.push(m),
+    end: async (id, reason) => {
+      ends.push(`${id}:${reason}`);
+      if (opts.endFails) throw new Error(opts.endFails);
+      deleteSession(db, id);
+    },
   });
   const published: InboxItem[] = [];
   bus.subscribe(["inbox"], (_t, data) => published.push(data as InboxItem));
@@ -93,7 +101,7 @@ function setup(opts: { snoozedThrows?: boolean; activityThrows?: boolean; quietM
   insertSession(db, { ...CHAT, created_at: T0, last_active_at: T0 });
   insertSession(db, { ...TMUX, created_at: T0, last_active_at: T0 });
   const section = (id: string) => inbox.item(getSession(db, id)!).attention.section;
-  return { db, hub, inbox, threads, feed, notified, published, section, timers, logs, tick: (ms: number) => { now += ms; }, now: () => now };
+  return { db, hub, inbox, threads, feed, notified, published, section, timers, logs, ends, tick: (ms: number) => { now += ms; }, now: () => now };
 }
 
 // --- manual settle ---
@@ -175,8 +183,8 @@ test("after a devd restart every snooze still ending later gets its timer, stopp
   t.db.run("UPDATE sessions SET status='stopped' WHERE id=?", [TMUX.id]);
   const until = t.now() + DAY;
   // Rows a previous devd wrote: one still running, one already over.
-  putSessionAttention(t.db, { session_id: TMUX.id, settled_at: null, settled_reason: null, snooze_until: until, snooze_kind: "time", updated_at: 1 });
-  putSessionAttention(t.db, { session_id: CHAT.id, settled_at: null, settled_reason: null, snooze_until: t.now() - 1, snooze_kind: "time", updated_at: 1 });
+  putSessionAttention(t.db, { session_id: TMUX.id, settled_at: null, settled_reason: null, snooze_until: until, snooze_kind: "time", updated_at: 1, end_at: null, end_error: null });
+  putSessionAttention(t.db, { session_id: CHAT.id, settled_at: null, settled_reason: null, snooze_until: t.now() - 1, snooze_kind: "time", updated_at: 1, end_at: null, end_error: null });
   t.inbox.armSnoozes();
   t.timers.due(); // the coalesce window (0 ms)
   expect(t.timers.pending()).toEqual([until + 1]);
@@ -304,6 +312,7 @@ test("auto-settle: a tmux session seen once, whose finish devd missed while down
   const inbox = new Inbox({
     db: t.db, sessions: () => [tmux], session: (id) => getSession(t.db, id), threads: t.threads,
     chatLink: () => null, tmuxLive: (id) => restarted.liveSnapshot(id), bus: new EventBus(), now: t.now, coalesceMs: 0,
+    end: async () => {},
   });
   expect(restarted.liveSnapshot(TMUX.id)?.status).toBe("unknown");
   expect(inbox.item(tmux).attention.section).toBe("idle");
@@ -539,4 +548,127 @@ test("until-reset finds a chat Codex session's account in its thread", () => {
   const d = resetDeps({ db: t.db, threads: t.threads, codexAccounts: { list: () => ({ accounts: [{ id: "cx-1", usage: view }] }) } });
   expect(untilReset(codex, d, NOW)).toEqual({ resetsAt: NOW + 1000 });
   expect(untilReset({ ...codex, runtime: "tmux" }, d, NOW)).toEqual({ reason: "The account of this session is not known" });
+});
+
+// --- settle ends the session (after SETTLE_END_GRACE_MS, unless undone) ---
+
+/** Lets the end's promise and its handlers run. */
+const settled = () => new Promise((r) => setTimeout(r, 0));
+
+test("a settle ends the session once the grace has passed, and says when in the item", async () => {
+  const t = setup();
+  t.inbox.settle(TMUX.id, "manual");
+  expect(t.published.at(-1)).toMatchObject({ sessionId: TMUX.id, attention: { section: "settled" }, endsAt: T0 + SETTLE_END_GRACE_MS, endError: null });
+  t.tick(SETTLE_END_GRACE_MS - 1);
+  t.timers.due();
+  expect(t.ends).toEqual([]);
+  t.tick(1);
+  t.timers.due();
+  await settled();
+  expect(t.ends).toEqual([`${TMUX.id}:manual`]);
+  expect(getSession(t.db, TMUX.id)).toBeNull();
+});
+
+test("unsettle within the grace keeps the session: no end", async () => {
+  const t = setup();
+  t.inbox.settle(CHAT.id, "manual");
+  t.tick(SETTLE_END_GRACE_MS - 1);
+  t.inbox.unsettle(CHAT.id);
+  expect(getSessionAttention(t.db, CHAT.id)).toMatchObject({ settled_at: null, end_at: null });
+  t.tick(SETTLE_END_GRACE_MS);
+  t.timers.due();
+  await settled();
+  expect(t.ends).toEqual([]);
+  expect(t.inbox.item(getSession(t.db, CHAT.id)!)).toMatchObject({ endsAt: null });
+});
+
+test("a new run within the grace unsettles and so keeps the session", async () => {
+  const t = setup();
+  t.inbox.settle(CHAT.id, "manual");
+  t.feed(CHAT.id, [started("r1")]);
+  t.tick(SETTLE_END_GRACE_MS);
+  t.timers.due();
+  await settled();
+  expect(t.ends).toEqual([]);
+});
+
+test("a failed end brings the session back out of Settled with the error, logged", async () => {
+  const t = setup({ endFails: "docker is stuck" });
+  t.inbox.settle(TMUX.id, "manual");
+  t.tick(SETTLE_END_GRACE_MS);
+  t.timers.due();
+  await settled();
+  const item = t.inbox.item(getSession(t.db, TMUX.id)!);
+  expect(item.attention.section).not.toBe("settled");
+  expect(item).toMatchObject({ endsAt: null, endError: "docker is stuck" });
+  expect(t.published.at(-1)).toMatchObject({ sessionId: TMUX.id, endError: "docker is stuck" });
+  expect(t.logs.some((l) => l.includes(TMUX.id) && l.includes("docker is stuck"))).toBe(true);
+  // The next settle tries again and clears the error.
+  t.inbox.settle(TMUX.id, "manual");
+  expect(t.inbox.item(getSession(t.db, TMUX.id)!)).toMatchObject({ endError: null });
+});
+
+test("a settle pending over a devd restart ends when its time comes (armEnds)", async () => {
+  const t = setup();
+  t.inbox.settle(TMUX.id, "manual");
+  const restarted = fakeTimers(t.now);
+  const ends: string[] = [];
+  const inbox = new Inbox({
+    db: t.db, sessions: () => listSessions(t.db), session: (id) => getSession(t.db, id), threads: t.threads,
+    chatLink: () => null, tmuxLive: () => null, bus: new EventBus(), now: t.now, coalesceMs: 0, timers: restarted.timers,
+    end: async (id, reason) => { ends.push(`${id}:${reason}`); },
+  });
+  t.tick(SETTLE_END_GRACE_MS + 60_000); // devd was down past the grace
+  inbox.armEnds();
+  restarted.due();
+  await settled();
+  expect(ends).toEqual([`${TMUX.id}:manual`]);
+});
+
+test("auto-settle ends the session (reason idle), logged, and never one that works", async () => {
+  const t = setup();
+  t.feed(CHAT.id, [started("r1")]); // working
+  t.tick(AUTO_SETTLE_IDLE_MS);
+  expect(t.inbox.autoSettle()).toEqual([TMUX.id]);
+  t.tick(SETTLE_END_GRACE_MS);
+  t.timers.due();
+  await settled();
+  expect(t.ends).toEqual([`${TMUX.id}:idle`]);
+  expect(t.logs.some((l) => l.includes(TMUX.id) && l.includes("auto"))).toBe(true);
+});
+
+test("a session settled before settles ended (no end pending) is ended by the auto rule, counted from the migration", async () => {
+  const t = setup();
+  // What a settle before this change left: settled, no end; the migration stamped updated_at with its time.
+  putSessionAttention(t.db, { session_id: TMUX.id, settled_at: T0, settled_reason: "manual", snooze_until: null, snooze_kind: null, updated_at: T0 + 10 * DAY, end_at: null, end_error: null });
+  t.tick(10 * DAY + AUTO_SETTLE_IDLE_MS - 1);
+  expect(t.inbox.autoSettle()).not.toContain(TMUX.id);
+  t.tick(1);
+  expect(t.inbox.autoSettle()).toContain(TMUX.id);
+});
+
+test("auto-settle starts at most AUTO_END_PER_TICK ends per tick", () => {
+  const t = setup();
+  for (const n of [1, 2, 3]) insertSession(t.db, { ...TMUX, id: `dev-a-more-${n}`, container: `dev-a-more-${n}`, port_base: 40300 + 100 * n, created_at: T0, last_active_at: T0 });
+  t.tick(AUTO_SETTLE_IDLE_MS);
+  expect(t.inbox.autoSettle()).toHaveLength(AUTO_END_PER_TICK);
+  expect(t.inbox.autoSettle()).toHaveLength(AUTO_END_PER_TICK);
+  expect(t.inbox.autoSettle()).toHaveLength(5 - 2 * AUTO_END_PER_TICK);
+});
+
+test("the migration adds the end columns and restarts the auto clock of sessions already settled, not of others", () => {
+  const dir = mkdtempSync(join(tmpdir(), "settle-mig-"));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "devd.db");
+  const old = new Database(path);
+  old.run(`CREATE TABLE session_attention (session_id TEXT PRIMARY KEY, settled_at INTEGER, settled_reason TEXT,
+    snooze_until INTEGER, snooze_kind TEXT, updated_at INTEGER NOT NULL)`);
+  old.run(`INSERT INTO session_attention VALUES ('dev-settled', 5, 'manual', NULL, NULL, 5), ('dev-snoozed', NULL, NULL, 99, 'time', 5)`);
+  old.close();
+  const before = Date.now();
+  const db = openDb(path);
+  cleanups.push(() => db.close());
+  expect(getSessionAttention(db, "dev-settled")).toMatchObject({ settled_at: 5, end_at: null, end_error: null });
+  expect(getSessionAttention(db, "dev-settled")!.updated_at).toBeGreaterThanOrEqual(before);
+  expect(getSessionAttention(db, "dev-snoozed")!.updated_at).toBe(5);
 });

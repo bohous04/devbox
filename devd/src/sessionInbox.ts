@@ -3,15 +3,17 @@ import type { InboxItem, InboxRemoved, InboxSection } from "../../shared/thread"
 import { threadTitle } from "../../shared/threadTitle";
 import type { AgentLiveSnapshot } from "./agentEvents";
 import { chatAttention, lastEndedRun, tmuxAttention, WORKING_GRACE_MS, type LinkState, type PrHold } from "./attention";
-import { getSessionAttention, getSeenAt, putSessionAttention, setSeenAt, snoozedSessionIds, type SessionRow, type SettleReason, type SnoozeKind } from "./db";
+import { getSessionAttention, getSeenAt, pendingEnds, putSessionAttention, setSeenAt, snoozedSessionIds, type SessionAttentionRow, type SessionRow, type SettleReason, type SnoozeKind } from "./db";
 import type { EventBus } from "./eventBus";
-import { autoSettleDue, shelve, snoozeActive, type Activity } from "./sessionAttention";
+import { AUTO_END_PER_TICK, autoSettleDue, shelve, snoozeActive, type Activity } from "./sessionAttention";
 import { storedRuntime } from "./sessions";
 import type { ThreadStore } from "./threadStore";
 
 /** `lastText` is a preview line in the inbox, not the message: longer texts are clipped. */
 export const LAST_TEXT_MAX = 200;
 export const INBOX_COALESCE_MS = 250;
+/** A settle ends the session this long after it, so an undo (unsettle) can still take it back. */
+export const SETTLE_END_GRACE_MS = 8_000;
 
 const SECTION_ORDER: Record<InboxSection, number> = { needs_you: 0, working: 1, idle: 2, snoozed: 3, settled: 4 };
 /** setTimeout's longest delay; a snooze that ends later is re-checked at this distance until it ends. */
@@ -25,6 +27,9 @@ export function sortInbox(items: InboxItem[]): InboxItem[] {
     return a.attention.section === "needs_you" ? a.attention.since - b.attention.since : b.attention.since - a.attention.since;
   });
 }
+
+const endFields = (row: SessionAttentionRow | null): Pick<InboxItem, "endsAt" | "endError"> =>
+  ({ endsAt: row?.end_at ?? null, endError: row?.end_error ?? null });
 
 const clip = (t: string) => (t.length > LAST_TEXT_MAX ? `${t.slice(0, LAST_TEXT_MAX)}…` : t);
 
@@ -41,6 +46,8 @@ export class Inbox {
   private broken = new Map<string, { msg: string; since: number }>();
   /** Each chat session's topic once known: it never changes, so the store is read only while it is still null. */
   private topics = new Map<string, string>();
+  /** The timers of the settles whose end is pending, per session. */
+  private endTimers = new Map<string, unknown>();
   private coalesceMs: number;
   private log: (msg: string) => void;
 
@@ -62,6 +69,9 @@ export class Inbox {
     log?: (msg: string) => void;
     /** The coalesce and re-check timers (tests drive them by hand). */
     timers?: { set: (fn: () => void, ms: number) => unknown; clear: (handle: unknown) => void };
+    /** Ends a settled session once its grace has passed (index.ts: endSessionKeepingWork, so a dirty worktree stays).
+     *  A rejection brings the session back out of Settled with the error. */
+    end: (id: string, reason: SettleReason) => Promise<void>;
   }) {
     this.coalesceMs = d.coalesceMs ?? INBOX_COALESCE_MS;
     this.timers = d.timers ?? { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) };
@@ -72,11 +82,45 @@ export class Inbox {
 
   item(s: SessionRow): InboxItem { return this.build(s).item; }
 
-  /** Settle by hand (`manual`) or by the idle rule (`idle`); ends a snooze. */
+  /** Settle by hand (`manual`), by the idle rule (`idle`) or a merged PR (`merged`); ends a snooze. The session ends
+   *  SETTLE_END_GRACE_MS later unless unsettled before. */
   settle(sessionId: string, reason: SettleReason): void {
     const now = this.now();
-    putSessionAttention(this.d.db, { session_id: sessionId, settled_at: now, settled_reason: reason, snooze_until: null, snooze_kind: null, updated_at: now });
+    putSessionAttention(this.d.db, { session_id: sessionId, settled_at: now, settled_reason: reason, snooze_until: null, snooze_kind: null, updated_at: now, end_at: now + SETTLE_END_GRACE_MS, end_error: null });
+    this.armEnd(sessionId, now + SETTLE_END_GRACE_MS, reason);
     this.changedSafe(sessionId);
+  }
+
+  /** At startup: the settles whose end was pending when devd went down end when their time comes (at once if past). */
+  armEnds(): void {
+    for (const p of pendingEnds(this.d.db)) this.armEnd(p.session_id, p.end_at, p.settled_reason);
+  }
+
+  private armEnd(sessionId: string, at: number, reason: SettleReason) {
+    this.cancelEnd(sessionId);
+    this.endTimers.set(sessionId, this.timers.set(() => {
+      this.endTimers.delete(sessionId);
+      void this.runEnd(sessionId, reason);
+    }, Math.max(0, at - this.now())));
+  }
+
+  private cancelEnd(sessionId: string) {
+    const t = this.endTimers.get(sessionId);
+    if (t !== undefined) { this.timers.clear(t); this.endTimers.delete(sessionId); }
+  }
+
+  private async runEnd(sessionId: string, reason: SettleReason) {
+    if (reason !== "manual") this.log(`inbox: auto end of ${sessionId} (settled: ${reason})`);
+    try {
+      await this.d.end(sessionId, reason);
+    } catch (e) {
+      const msg = (e as Error).message;
+      this.log(`inbox: ending ${sessionId} after its settle failed, it is back in the inbox: ${msg}`);
+      const row = getSessionAttention(this.d.db, sessionId);
+      // The session is gone after all (ended meanwhile, its row deleted with it): nothing to bring back.
+      if (row) putSessionAttention(this.d.db, { ...row, settled_at: null, settled_reason: null, end_at: null, end_error: msg, updated_at: this.now() });
+      this.changedSafe(sessionId);
+    }
   }
 
   /** Settles unless the session is busy (an active run, holding work, a pending request): the merged-PR rule settles
@@ -93,13 +137,15 @@ export class Inbox {
   /** Back into the inbox: ends a settle and a snooze. */
   unsettle(sessionId: string): void {
     const now = this.now();
-    putSessionAttention(this.d.db, { session_id: sessionId, settled_at: null, settled_reason: null, snooze_until: null, snooze_kind: null, updated_at: now });
+    this.cancelEnd(sessionId);
+    putSessionAttention(this.d.db, { session_id: sessionId, settled_at: null, settled_reason: null, snooze_until: null, snooze_kind: null, updated_at: now, end_at: null, end_error: null });
     this.changedSafe(sessionId);
   }
 
   /** Snooze until `until` (epoch ms); ends a settle. */
   snooze(sessionId: string, until: number, kind: SnoozeKind): void {
-    putSessionAttention(this.d.db, { session_id: sessionId, settled_at: null, settled_reason: null, snooze_until: until, snooze_kind: kind, updated_at: this.now() });
+    this.cancelEnd(sessionId);
+    putSessionAttention(this.d.db, { session_id: sessionId, settled_at: null, settled_reason: null, snooze_until: until, snooze_kind: kind, updated_at: this.now(), end_at: null, end_error: null });
     this.changedSafe(sessionId);
   }
 
@@ -120,8 +166,9 @@ export class Inbox {
     if (!row) return;
     const wake = kind !== "run" && row.snooze_until !== null;
     if (row.settled_at === null && !wake) return;
+    if (row.settled_at !== null) this.cancelEnd(sessionId);
     putSessionAttention(this.d.db, {
-      ...row, settled_at: null, settled_reason: null,
+      ...row, settled_at: null, settled_reason: null, end_at: null,
       ...(wake ? { snooze_until: null, snooze_kind: null } : {}), updated_at: this.now(),
     });
     this.changedSafe(sessionId);
@@ -132,11 +179,13 @@ export class Inbox {
     for (const id of snoozedSessionIds(this.d.db, this.now())) this.changedSafe(id);
   }
 
-  /** The idle rule (index.ts runs it every AUTO_SETTLE_TICK_MS): settles every session that is due. Returns their ids. */
+  /** The idle rule (index.ts runs it every AUTO_SETTLE_TICK_MS): settles, and so ends, the sessions that are due, at
+   *  most AUTO_END_PER_TICK per tick (an end is heavy: a backup, a container removal). Returns their ids. */
   autoSettle(): string[] {
     const now = this.now();
     const settled: string[] = [];
     for (const s of this.d.sessions()) {
+      if (settled.length >= AUTO_END_PER_TICK) break;
       const live = storedRuntime(s) === "tmux" ? this.d.tmuxLive(s.id) : null;
       const stateKnown = storedRuntime(s) === "chat" || (live !== null && live.status !== "unknown");
       const look = { seenAt: getSeenAt(this.d.db, s.id), stateKnown };
@@ -158,7 +207,7 @@ export class Inbox {
     const attention = shelve(b.item.attention, row, now);
     const snoozeEnd = attention.until ?? null;
     const recheckAt = b.recheckAt === null ? snoozeEnd : snoozeEnd === null ? b.recheckAt : Math.min(b.recheckAt, snoozeEnd);
-    return { item: { ...b.item, attention }, recheckAt };
+    return { item: { ...b.item, attention, ...endFields(row) }, recheckAt };
   }
 
   /** The session's item without its shelf. */

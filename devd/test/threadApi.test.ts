@@ -7,8 +7,8 @@ import { AgentEventHub } from "../src/agentEvents";
 import { AgentDisconnected, CommandFailed, CommandTimeout } from "../src/bridgeLink";
 import { getSession, getSeenAt, insertSession, listSessions, openDb, type SessionRow } from "../src/db";
 import { EventBus } from "../src/eventBus";
-import { Inbox } from "../src/sessionInbox";
-import type { ResetTarget } from "../src/sessionAttention";
+import { Inbox, SETTLE_END_GRACE_MS } from "../src/sessionInbox";
+import { SETTLE_REQUEST_OPEN, SETTLE_WORKING, type ResetTarget } from "../src/sessionAttention";
 import { ThreadStore } from "../src/threadStore";
 import { stageThreadImage } from "../src/threadImages";
 import { png } from "./helpers/images";
@@ -58,7 +58,7 @@ function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown
   const inbox = new Inbox({
     db, sessions: () => listSessions(db), session: (id) => getSession(db, id), threads,
     chatLink: () => ({ status: "connected", since: 1 }), tmuxLive: (id) => hub.liveSnapshot(id), bus,
-    now: () => 1_000_000, coalesceMs: 0,
+    now: () => 1_000_000, coalesceMs: 0, end: async () => {},
   });
   const ending = new Set<string>();
   const a = createApp({
@@ -629,15 +629,37 @@ test("GET snooze-reset tells when the active limit resets, or why snoozing until
   expect(await (await t.a.fetch(req("GET", `/api/sessions/${CHAT.id}/snooze-reset`))).json()).toEqual({ reason: "Mistral Vibe has no usage limit devbox can read" });
 });
 
-test("settle and snooze refuse a session with an open request: 409 request-open; nothing is written", async () => {
+test("snooze refuses a session with an open request: 409 request-open; nothing is written", async () => {
   const t = setup();
   t.feed(CHAT.id, [started("r1"), asked("r1", "q1")]);
-  for (const [path, body] of [["settle", undefined], ["snooze", { until: 2_000_000 }]] as const) {
-    const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/${path}`, body));
+  {
+    const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/snooze`, { until: 2_000_000 }));
     expect(r.status).toBe(409);
     expect(await r.json()).toEqual({ error: "request-open", message: "Answer the open request first: a session waiting for you cannot be settled or snoozed" });
   }
   expect(t.inbox.item(getSession(t.db, CHAT.id)!).attention.section).toBe("needs_you");
+});
+
+test("settling a working or waiting session ends it, so it asks first: 409 until {confirm: true}", async () => {
+  const t = setup();
+  t.feed(CHAT.id, [started("r1")]);
+  const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/settle`));
+  expect(r.status).toBe(409);
+  expect(await r.json()).toEqual({ error: "agent-working", message: SETTLE_WORKING });
+  expect(t.inbox.item(getSession(t.db, CHAT.id)!).attention.section).toBe("working");
+  const ok = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/settle`, { confirm: true }));
+  expect(ok.status).toBe(200);
+  expect(await ok.json()).toMatchObject({ attention: { section: "settled" }, endsAt: 1_000_000 + SETTLE_END_GRACE_MS });
+
+  const waiting = setup();
+  waiting.feed(CHAT.id, [started("r1"), asked("r1", "q1")]);
+  const w = await waiting.a.fetch(req("POST", `/api/sessions/${CHAT.id}/settle`));
+  expect(w.status).toBe(409);
+  expect(await w.json()).toEqual({ error: "request-open", message: SETTLE_REQUEST_OPEN });
+  expect((await waiting.a.fetch(req("POST", `/api/sessions/${CHAT.id}/settle`, { confirm: true }))).status).toBe(200);
+  // A done or idle session settles without asking; a body other than {confirm: true} is refused.
+  expect((await waiting.a.fetch(req("POST", `/api/sessions/${TMUX.id}/settle`))).status).toBe(200);
+  expect((await waiting.a.fetch(req("POST", `/api/sessions/${TMUX.id}/settle`, { confirm: "yes" }))).status).toBe(400);
 });
 
 test("snooze until reset without the usage dependency is 503; settle and the thread routes still work", async () => {

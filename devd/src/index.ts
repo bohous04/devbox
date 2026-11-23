@@ -20,7 +20,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { LiveActivities } from "./liveActivities";
 import { AgentEventHub, STUCK_MS, stuckText, type NotifyExtra } from "./agentEvents";
-import { endFinishedRuns } from "./autoEnd";
+import { endFinishedRuns, endSessionKeepingWork } from "./autoEnd";
 import { createApp, reportFirstPromptFailed, reportPrunedFirstPrompts, type ApiDeps } from "./api";
 import { loadCatalog, mergeAccess, readAccessFile, type Access, type DbEntry, type ServerRef } from "./prodDb";
 import { listSshKeys, readOpField, readSshKey } from "./op";
@@ -458,6 +458,16 @@ const inbox: Inbox = new Inbox({
   tmuxLive: (id) => agentEvents.liveSnapshot(id),
   prHold: (id) => prWatch.hold(id),
   bus,
+  // A settle ends the session, keeping a worktree with work in it (autoEnd.ts): nobody confirmed deleting that.
+  end: async (id, reason) => {
+    const s = getSession(db, id);
+    if (!s) throw new Error(`session ${id} no longer exists`);
+    try { await endSessionKeepingWork({ db, end: (i, soloAction, opts) => mgr.end(i, soloAction, opts) }, s, `settled-${reason}`); }
+    catch (e) {
+      notify(`${s.project}/${s.repo}`, `Ending the settled session failed, it is back in the inbox: ${(e as Error).message}`);
+      throw e;
+    }
+  },
 });
 // PR watch (prWatch.ts): the PR of each session's pushed branch, GitHub through the host's `gh`, Gitea through its API.
 const prWatch: PrWatch = new PrWatch({
@@ -1367,6 +1377,8 @@ setInterval(() => {
 }, 5_000);
 // Snoozes a previous devd set still end with an inbox update; then settle quiet sessions (24 h once seen, else 7 days; sessionAttention.ts).
 try { inbox.armSnoozes(); } catch (e) { console.error("inbox: snooze timers not armed:", e); }
+// Settles whose end was pending when devd went down end now (or when their grace runs out).
+try { inbox.armEnds(); } catch (e) { console.error("inbox: pending ends not armed:", e); }
 setInterval(guardedTick("auto-settle", async () => { inbox.autoSettle(); }), AUTO_SETTLE_TICK_MS);
 // Ended transcripts are kept 30 days (endedSessions.ts); a failed removal is logged there and retried on the next run.
 const purgeEndedTick = () => {
