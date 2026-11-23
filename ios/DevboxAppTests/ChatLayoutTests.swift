@@ -36,6 +36,66 @@ final class ChatLayoutTests: XCTestCase {
         XCTAssertEqual(shape(rows), ["1", "2", "3", "work[4]", "5*"])
     }
 
+    private func finished(_ seq: Int, _ itemId: String, _ output: String) -> LoggedEvent {
+        LoggedEvent(seq: seq, ts: seq, event: .toolFinished(runId: "r1", itemId: itemId, isError: false, output: output))
+    }
+
+    private func row(_ i: ThreadItem) -> String { "\(i.itemId ?? "-"):\(i.tool ?? ""):\(i.status.map { "\($0)" } ?? ""):\(i.output ?? "")" }
+
+    /// threadView.test.ts: a live finish of a tool whose start is not loaded is held, then lands on that tool when its
+    /// page loads (the page answered before the finish still had it running): one tool, finished.
+    func testHeldFinishLandsOnItsToolWhenThePageLoads() {
+        var t = ThreadSnapshot(lastSeq: 10, seenSeq: 0, runs: [], items: [item(10, "r1", .tool)], pending: [], background: [], native: nil)
+        var held = ThreadView.Held()
+        t = ThreadView.applyLive(t, finished(11, "t1", "ok"), more: true, held: &held)
+        XCTAssertEqual(t.lastSeq, 11)
+        XCTAssertEqual(t.items.map(\.seq), [10])
+        var running = item(4, "r1", .tool, tool: "Bash")
+        running.itemId = "t1"
+        running.status = .streaming
+        t = ThreadView.prependOlder(t, [running, item(10, "r1", .tool)], held: held, more: true)
+        XCTAssertEqual(t.items.map(row), ["t1:Bash:done:ok", "10::done:"])
+        XCTAssertEqual(ThreadView.prependOlder(t, [], held: held, more: false), t, "applying it again changes nothing")
+        var whole = ThreadView.Held()
+        XCTAssertEqual(ThreadView.applyLive(ThreadSnapshot(lastSeq: 1, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: nil),
+                                            finished(2, "t9", "x"), more: false, held: &whole).items.first?.tool, "(unknown)")
+    }
+
+    /// threadView.test.ts: a replayed item from before the window is held, not appended; the page brings it once.
+    func testReplayedItemFromBeforeTheWindowIsHeld() {
+        let t = ThreadSnapshot(lastSeq: 10, seenSeq: 0, runs: [], items: [item(10, "r1", .tool)], pending: [], background: [], native: nil)
+        var t1 = item(4, "r1", .tool, tool: "Bash")
+        t1.itemId = "t1"
+        t1.output = "ok"
+        var held = ThreadView.Held()
+        let merged = ThreadView.mergeLive(t, ThreadSnapshotFrame(afterSeq: 10, snapshot: ThreadSnapshot(lastSeq: 12, seenSeq: 0, runs: [],
+            items: [t1, item(12, "r1", .assistant)], pending: [], background: [], native: nil)), more: true, held: &held)
+        XCTAssertEqual(merged.items.map(\.seq), [10, 12])
+        var stale = t1
+        stale.output = nil
+        stale.status = .streaming
+        let n = ThreadView.prependOlder(merged, [stale], held: held, more: false)
+        XCTAssertEqual(n.items.map(row), ["t1:Bash:done:ok", "10::done:", "12::done:"])
+    }
+
+    /// threadView.test.ts: a finish whose start never comes (trimmed log) shows as an unknown tool once nothing older
+    /// is left; and a page never doubles an item already loaded.
+    func testNeverStartedFinishAndNoDoubles() {
+        var held = ThreadView.Held()
+        let t = ThreadView.applyLive(ThreadSnapshot(lastSeq: 10, seenSeq: 0, runs: [], items: [item(10, "r1", .tool)], pending: [], background: [], native: nil),
+                                     finished(11, "gone", "x"), more: true, held: &held)
+        XCTAssertFalse(ThreadView.prependOlder(t, [item(2, "r1", .user)], held: held, more: true).items.contains { $0.tool == "(unknown)" })
+        XCTAssertEqual(ThreadView.prependOlder(t, [item(2, "r1", .user)], held: held, more: false).items.map { $0.tool ?? "\($0.kind)" },
+                       ["user", "tool", "(unknown)"])
+        var live = item(9, "r1", .tool)
+        live.itemId = "t1"
+        live.output = "new"
+        var stale = live
+        stale.output = nil
+        let loaded = ThreadSnapshot(lastSeq: 12, seenSeq: 0, runs: [], items: [live, item(12, "r1", .assistant)], pending: [], background: [], native: nil)
+        XCTAssertEqual(ThreadView.prependOlder(loaded, [item(3, "r1", .user), stale], more: false).items.map(row), ["3::done:", "t1::done:new", "12::done:"])
+    }
+
     /// threadView.test.ts "tailView": a cut thread starts at its first whole run; a run that fills the page stays.
     func testTailViewStartsAtTheFirstWholeRun() {
         let rows = chatRows([item(1, "r1", .tool), item(2, nil, .notice), item(3, "r1", .assistant), item(4, "r2", .user), item(5, "r2", .tool)])
@@ -56,7 +116,7 @@ final class ChatLayoutTests: XCTestCase {
         t.topic = "Fix it"
         XCTAssertEqual(ThreadView.olderBeforeSeq(t), 6)
         XCTAssertNil(ThreadView.olderBeforeSeq(.empty))
-        let n = ThreadView.prependOlder(t, [item(3, "r1", .user), item(5, "r1", .tool), notice])
+        let n = ThreadView.prependOlder(t, [item(3, "r1", .user), item(5, "r1", .tool), notice], more: true)
         XCTAssertEqual(n.items.map { "\($0.seq):\($0.itemId ?? "-")" }, ["3:3", "5:5", "5:notice:1", "6:6"])
         XCTAssertEqual(n.lastSeq, 9)
         XCTAssertEqual(n.topic, "Fix it")

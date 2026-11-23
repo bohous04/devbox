@@ -14,7 +14,7 @@ import { EmptyState, RowsSkeleton } from "../components/primitives";
 import { SettleProblem } from "../components/SettleProblem";
 import { threadHeading } from "../inboxView";
 import { useStore } from "../store";
-import { activeRun, applyCommands, applyEffort, applyNotice, applyThreadEvent, criticRunIds, hasOlderThan, mergeSnapshot, olderBeforeSeq, prependOlder, queuedRunIds, seenToPost, tailView, THREAD_PAGE } from "../threadView";
+import { activeRun, applyCommands, applyEffort, applyNotice, applyLive, criticRunIds, emptyHeld, hasOlderThan, type Held, mergeLive, olderBeforeSeq, prependOlder, queuedRunIds, seenToPost, tailView, THREAD_PAGE } from "../threadView";
 import { FOCUS_LOOK_GAP_MS } from "../inboxSettle";
 import { useEventStream } from "../useEventStream";
 import { useTmuxSeen } from "../useSettler";
@@ -33,6 +33,11 @@ function ChatPage({ id }: { id: string }) {
   const [thread, setThread] = useState<ThreadSnapshot | null>(null);
   // Only the newest THREAD_PAGE items are loaded at first; true while older ones may be left (OlderItems).
   const [more, setMore] = useState(false);
+  const moreRef = useRef(more);
+  moreRef.current = more;
+  // Live updates of items older than the loaded window (threadView Held), until their page loads. A ref: the state
+  // updaters below set it, and their result does not depend on it being rendered.
+  const held = useRef<Held>(emptyHeld());
   const [loadErr, setLoadErr] = useState<{ status: number; message: string } | null>(null);
   const [seenErr, setSeenErr] = useState<string | null>(null);
   const [{ tab }, setTabState] = useState<TabState>(UNSETTLED);
@@ -55,7 +60,7 @@ function ChatPage({ id }: { id: string }) {
   useEffect(() => {
     let alive = true;
     // The tab too: another session's (now often a remembered Terminal) must not carry over to this one.
-    setThread(null); setMore(false); setLoadErr(null); setMirror(null); setSendLock(null); setMirrorFailed(false); setTabState(UNSETTLED);
+    setThread(null); setMore(false); held.current = emptyHeld(); setLoadErr(null); setMirror(null); setSendLock(null); setMirrorFailed(false); setTabState(UNSETTLED);
     const failed = (e: unknown) => { if (alive) setLoadErr({ status: e instanceof ApiError ? e.status : 0, message: (e as Error).message }); };
     const tail = { limit: THREAD_PAGE };
     const loadMirror = () => api.mirror(id, tail).then((m) => {
@@ -86,8 +91,11 @@ function ChatPage({ id }: { id: string }) {
     if (beforeSeq === null) { setMore(false); return; }
     const opts = { beforeSeq, limit: THREAD_PAGE };
     const page = mirrorRef.current !== null ? (await api.mirror(id, opts)).snapshot : await api.thread(id, opts);
-    setThread((cur) => (cur ? prependOlder(cur, page.items) : cur));
-    setMore(hasOlderThan(page));
+    const older = hasOlderThan(page);
+    // Read, not consumed (prependOlder is pure): entries already applied apply again as no-ops.
+    const h = held.current;
+    setThread((cur) => (cur ? prependOlder(cur, page.items, h, older) : cur));
+    setMore(older);
   };
 
   const { paused, badFrame } = useEventStream({
@@ -101,8 +109,19 @@ function ChatPage({ id }: { id: string }) {
       setMirror(info);
     },
     afterSeq: () => threadRef.current!.lastSeq,
-    onSnapshot: (m) => setThread((t) => (t ? mergeSnapshot(t, m) : t)),
-    onThread: (e) => setThread((t) => (t ? applyThreadEvent(t, e) : t)),
+    // Held state goes in by key, so an updater run twice (StrictMode) holds the same thing once.
+    onSnapshot: (m) => setThread((t) => {
+      if (!t) return t;
+      const r = mergeLive(t, m, moreRef.current, held.current);
+      held.current = r.held;
+      return r.thread;
+    }),
+    onThread: (e) => setThread((t) => {
+      if (!t) return t;
+      const r = applyLive(t, e, moreRef.current, held.current);
+      held.current = r.held;
+      return r.thread;
+    }),
     onNotice: (item) => setThread((t) => (t ? applyNotice(t, item) : t)),
     onEffort: (effort) => setThread((t) => (t ? applyEffort(t, effort) : t)),
     onCommands: (commands) => setThread((t) => (t ? applyCommands(t, commands) : t)),

@@ -143,15 +143,75 @@ enum ThreadView {
     /// of the event before it, so two items can share a seq and `beforeSeq = seq` would skip the older one.
     static func olderBeforeSeq(_ t: ThreadSnapshot) -> Int? { t.items.first.map { $0.seq + 1 } }
 
-    /// Puts a page of older items (asked with `olderBeforeSeq`) in front of the thread. Items at the boundary seq that
-    /// are already here come back in the page too and are dropped. The rest of the thread stays: the stream keeps it.
-    static func prependOlder(_ t: ThreadSnapshot, _ older: [ThreadItem]) -> ThreadSnapshot {
-        let edge = t.items.first?.seq
-        let here = { (it: ThreadItem) in
-            it.seq == edge && t.items.contains { $0.seq == it.seq && $0.runId == it.runId && $0.itemId == it.itemId && $0.kind == it.kind }
+    /// Live updates of items older than the loaded window, kept until a page back loads those items (threadView.ts
+    /// Held). `items`: whole items a stream replay sent that began before the window; `finishes`: tool.finished events
+    /// whose tool.started is not loaded. Either would otherwise be appended at the thread's end, out of place
+    /// ("(unknown)" for a finish), and come back a second time with the older page.
+    struct Held: Equatable {
+        var items: [String: ThreadItem] = [:]
+        var finishes: [String: LoggedEvent] = [:]
+    }
+
+    private static func heldKey(_ runId: String?, _ itemId: String) -> String { "\(runId ?? "")\u{0}\(itemId)" }
+
+    /// `apply` for a thread that may have older items left (`more`): a tool.finished whose start is not loaded is held
+    /// (its seq still counts as applied); everything else applies as usual.
+    static func applyLive(_ t: ThreadSnapshot, _ e: LoggedEvent, more: Bool, held: inout Held) -> ThreadSnapshot {
+        if more, e.seq > t.lastSeq, case let .toolFinished(runId, itemId, _, _) = e.event, findItem(t, runId, itemId) == nil {
+            held.finishes[heldKey(runId, itemId)] = e
+            var n = t
+            n.lastSeq = e.seq
+            return n
+        }
+        return apply(t, e)
+    }
+
+    /// `mergeSnapshot` for a thread that may have older items left (`more`): a replayed item that began before the
+    /// loaded window and is not loaded is held, not appended at the end.
+    static func mergeLive(_ t: ThreadSnapshot, _ m: ThreadSnapshotFrame, more: Bool, held: inout Held) -> ThreadSnapshot {
+        guard more, let edge = t.items.first?.seq else { return mergeSnapshot(t, m) }
+        let outside = { (it: ThreadItem) in
+            it.itemId != nil && it.seq < edge && !t.items.contains { $0.runId == it.runId && $0.itemId == it.itemId }
+        }
+        var rest = m.snapshot
+        rest.items = []
+        for it in m.snapshot.items {
+            if outside(it) { held.items[heldKey(it.runId, it.itemId!)] = it } else { rest.items.append(it) }
+        }
+        return mergeSnapshot(t, ThreadSnapshotFrame(afterSeq: m.afterSeq, snapshot: rest))
+    }
+
+    /// Puts a page of older items (asked with `olderBeforeSeq`) in front of the thread; `more`: the page says older
+    /// ones are still left. An item is never there twice: one already loaded keeps its place and its (live) state, and
+    /// the page's copy is dropped (items without an item id: those at the boundary seq, which the page repeats). A held
+    /// item replaces the page's older copy, then held finishes apply to the items they finish. Once nothing older is
+    /// left, a held item or finish whose item is still missing never had its start in the log: the item is appended, a
+    /// finish shows as an unknown tool, as `apply` shows one. `held` is only read: applying the same entries again
+    /// changes nothing (dashboard parity, where a state updater may run twice). The rest of the thread stays.
+    static func prependOlder(_ t: ThreadSnapshot, _ older: [ThreadItem], held: Held = Held(), more: Bool) -> ThreadSnapshot {
+        let id = { (x: ThreadItem) in
+            x.itemId.map { "id:\(heldKey(x.runId, $0)):\(x.kind)" } ?? "seq:\(x.seq):\(x.runId ?? ""):\(x.kind)"
+        }
+        let loaded = Set(t.items.map(id))
+        let page = older.filter { !loaded.contains(id($0)) }.map { it in it.itemId.flatMap { held.items[heldKey(it.runId, $0)] } ?? it }
+        var items = page + t.items
+        let at = { (items: [ThreadItem], runId: String?, itemId: String) in items.firstIndex { $0.runId == runId && $0.itemId == itemId } }
+        if !more {
+            for it in held.items.values.sorted(by: { $0.seq < $1.seq }) where at(items, it.runId, it.itemId!) == nil { items.append(it) }
+        }
+        for e in held.finishes.values.sorted(by: { $0.seq < $1.seq }) {
+            guard case let .toolFinished(runId, itemId, isError, output) = e.event else { continue }
+            if let idx = at(items, runId, itemId) {
+                items[idx].output = output
+                items[idx].isError = isError
+                items[idx].status = .done
+            } else if !more {
+                items.append(ThreadItem(seq: e.seq, runId: runId, itemId: itemId, kind: .tool, text: "", tool: "(unknown)",
+                                        output: output, isError: isError, status: .done, ts: e.ts))
+            }
         }
         var n = t
-        n.items = older.filter { !here($0) } + t.items
+        n.items = items
         return n
     }
 
@@ -409,6 +469,8 @@ final class ThreadStore: ObservableObject {
     private var rowBase = 0
     /// What the session list said the session runs (`start`): it picks the route without the /thread probe.
     private var runtime: InboxItem.Runtime?
+    /// Live updates of items older than the loaded window, until their page loads (ThreadView.Held).
+    private var held = ThreadView.Held()
 
     /// `restored`: the thread as the Mac app saved it at quit; `start` then streams from its seq instead of loading it.
     init(sessionId: String, client: DevdClient, restored: ThreadSnapshot? = nil, endingRetry: Duration = .seconds(20),
@@ -452,10 +514,10 @@ final class ThreadStore: ObservableObject {
             if isTmux {
                 let m: MirrorResponse = try await client.get("\(base)/mirror?afterSeq=\(t.lastSeq)")
                 applyMirror(m.mirror)
-                update(ThreadView.mergeSnapshot(t, ThreadSnapshotFrame(afterSeq: t.lastSeq, snapshot: m.snapshot)))
+                update(ThreadView.mergeLive(t, ThreadSnapshotFrame(afterSeq: t.lastSeq, snapshot: m.snapshot), more: hasOlder, held: &held))
             } else {
                 let s: ThreadSnapshot = try await client.get("\(base)/thread?afterSeq=\(t.lastSeq)")
-                update(ThreadView.mergeSnapshot(t, ThreadSnapshotFrame(afterSeq: t.lastSeq, snapshot: s)))
+                update(ThreadView.mergeLive(t, ThreadSnapshotFrame(afterSeq: t.lastSeq, snapshot: s), more: hasOlder, held: &held))
             }
         } catch {
             // The stream's own replay (afterSeq) still catches up; the failure is shown, not hidden.
@@ -509,6 +571,7 @@ final class ThreadStore: ObservableObject {
     }
 
     private func loaded(_ s: ThreadSnapshot) {
+        held = ThreadView.Held()
         hasOlder = ThreadView.hasOlder(s)
         setThread(s)
     }
@@ -524,9 +587,15 @@ final class ThreadStore: ObservableObject {
                 ? (try await client.get("\(base)/mirror?\(query)") as MirrorResponse).snapshot
                 : try await client.get("\(base)/thread?\(query)")
             guard let cur = thread else { return }
-            let next = ThreadView.prependOlder(cur, page.items)
-            rowBase -= ThreadView.shownItems(next).count - ThreadView.shownItems(cur).count
-            hasOlder = ThreadView.hasOlder(page)
+            let more = ThreadView.hasOlder(page)
+            let next = ThreadView.prependOlder(cur, page.items, held: held, more: more)
+            if !more { held = ThreadView.Held() } // all applied, or appended as never started
+            // Only what went in front moves the ids down (held items or unknown finishes appended at the end do not).
+            let front = cur.items.first.flatMap { f in
+                next.items.firstIndex { $0.seq == f.seq && $0.runId == f.runId && $0.itemId == f.itemId && $0.kind == f.kind }
+            } ?? 0
+            rowBase -= next.items.prefix(front).filter { !ThreadView.isHousekeeping($0) }.count
+            hasOlder = more
             olderError = nil
             setThread(next)
         } catch {
@@ -597,8 +666,9 @@ final class ThreadStore: ObservableObject {
         let data = Data(e.data.utf8)
         do {
             switch e.name {
-            case "thread-snapshot": update(ThreadView.mergeSnapshot(t, try JSONDecoder().decode(ThreadSnapshotFrame.self, from: data)))
-            case "thread": update(ThreadView.apply(t, try JSONDecoder().decode(LoggedEvent.self, from: data)))
+            case "thread-snapshot":
+                update(ThreadView.mergeLive(t, try JSONDecoder().decode(ThreadSnapshotFrame.self, from: data), more: hasOlder, held: &held))
+            case "thread": update(ThreadView.applyLive(t, try JSONDecoder().decode(LoggedEvent.self, from: data), more: hasOlder, held: &held))
             case "thread-notice": update(ThreadView.applyNotice(t, try JSONDecoder().decode(ThreadItem.self, from: data)))
             case "thread-effort": update(ThreadView.applyEffort(t, try JSONDecoder().decode(ThreadEffort?.self, from: data)))
             case "thread-commands": update(ThreadView.applyCommands(t, ThreadView.commands(from: data)))

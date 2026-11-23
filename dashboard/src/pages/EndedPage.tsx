@@ -9,7 +9,7 @@ import { MessageList } from "../components/chat/MessageList";
 import { OlderItems } from "../components/chat/OlderItems";
 import { EmptyState, RowsSkeleton } from "../components/primitives";
 import { canContinue, continueInFlight, continueLabel, continueOnce, endedTitle, transcriptNote } from "../endedView";
-import { criticRunIds, hasOlderThan, olderBeforeSeq, prependOlder, tailView, THREAD_PAGE } from "../threadView";
+import { criticRunIds, emptyHeld, hasOlderThan, olderBeforeSeq, prependOlder, tailView, THREAD_PAGE } from "../threadView";
 
 const NOTHING_QUEUED = new Set<string>();
 const noAnswer = async () => { throw new Error("a transcript takes no answers"); };
@@ -52,7 +52,8 @@ function Transcript({ id }: { id: string }) {
     const beforeSeq = thread ? olderBeforeSeq(thread) : null;
     if (beforeSeq === null) { setMore(false); return; }
     const page = await api.endedTranscript(id, { beforeSeq, limit: THREAD_PAGE });
-    setThread((cur) => (cur ? prependOlder(cur, page.items) : cur));
+    // A transcript gets no live updates: nothing is held.
+    setThread((cur) => (cur ? prependOlder(cur, page.items, emptyHeld(), hasOlderThan(page)) : cur));
     setMore(hasOlderThan(page));
   };
   const view = thread ? tailView(thread.items.filter((i) => !isHousekeepingNotice(i)), more) : null;

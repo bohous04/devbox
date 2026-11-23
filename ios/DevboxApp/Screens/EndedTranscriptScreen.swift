@@ -68,9 +68,11 @@ struct EndedTranscriptScreen: View {
         do {
             let page: ThreadSnapshot = try await client.get("/api/ended/\(pathSegment(endedId))/transcript?beforeSeq=\(before)&limit=\(ThreadView.pageSize)")
             guard let cur = thread else { return }
-            let next = ThreadView.prependOlder(cur, page.items)
+            // A transcript gets no live updates: nothing is held, and everything new goes in front.
+            let more = ThreadView.hasOlder(page)
+            let next = ThreadView.prependOlder(cur, page.items, more: more)
             rowBase -= ThreadView.shownItems(next).count - ThreadView.shownItems(cur).count
-            hasOlder = ThreadView.hasOlder(page)
+            hasOlder = more
             olderError = nil
             thread = next
         } catch {

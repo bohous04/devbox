@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import type { BridgeEvent, LoggedEvent, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 import fixture from "../../shared/fixtures/thread-events.json";
-import { activeRun, applyCommands, applyEffort, applyNotice, applyThreadEvent, composerErrorText, criticRunIds, emptyThread, hasOlderThan, mergeSnapshot, olderBeforeSeq, prependOlder, queuedRunIds, seenToPost, tailView, THREAD_PAGE } from "./threadView";
+import { activeRun, applyCommands, applyLive, emptyHeld, mergeLive, applyEffort, applyNotice, applyThreadEvent, composerErrorText, criticRunIds, emptyThread, hasOlderThan, mergeSnapshot, olderBeforeSeq, prependOlder, queuedRunIds, seenToPost, tailView, THREAD_PAGE } from "./threadView";
 
 /** The shared cases (also run by ios/DevboxAppTests/ThreadStoreTests.swift): each starts from an empty thread. */
 type Step = { event: LoggedEvent } | { snapshot: { afterSeq: number; snapshot: ThreadSnapshot } } | { notice: ThreadItem };
@@ -105,7 +105,7 @@ test("prependOlder puts the older page in front and drops the boundary items alr
   // A devd notice took the seq of the event before it: both sit at seq 5, the notice already loaded.
   const t: ThreadSnapshot = { ...emptyThread(), lastSeq: 9, topic: "Fix it", items: [it_(5, null, "notice", "notice:1"), it_(6, "r2", "user")] };
   const older = [it_(3, "r1", "user"), it_(5, "r1", "tool"), it_(5, null, "notice", "notice:1")];
-  const n = prependOlder(t, older);
+  const n = prependOlder(t, older, emptyHeld(), true);
   expect(n.items.map((i) => `${i.seq}:${i.itemId}`)).toEqual(["3:i3", "5:i5", "5:notice:1", "6:i6"]);
   expect(n.lastSeq).toBe(9);
   expect(n.topic).toBe("Fix it");
@@ -125,4 +125,49 @@ test("tailView starts a cut thread at its first whole run; a run that fills the 
   const one = [it_(1, "r1", "tool"), it_(2, "r1", "tool")];
   expect(tailView(one, true)).toEqual({ items: one, partialRun: "r1" });
   expect(tailView([it_(1, null, "notice")], true)).toEqual({ items: [it_(1, null, "notice")], partialRun: null });
+});
+
+const finished = (seq: number, itemId: string, output: string): LoggedEvent =>
+  ({ seq, ts: seq, event: { type: "tool.finished", runId: "r1", itemId, isError: false, output } });
+
+test("a live finish of a tool whose start is not loaded is held, then lands on that tool when its page loads: one tool, finished", () => {
+  // Loaded window: seq 10 on; tool t1 started at seq 4, before it.
+  let t: ThreadSnapshot = { ...emptyThread(), lastSeq: 10, items: [it_(10, "r1", "tool")] };
+  let held = emptyHeld();
+  ({ thread: t, held } = applyLive(t, finished(11, "t1", "ok"), true, held));
+  expect(t.lastSeq).toBe(11);
+  expect(t.items.map((i) => i.itemId)).toEqual(["i10"]);
+  expect(t.items.some((i) => i.tool === "(unknown)")).toBe(false);
+  // The page was answered before the finish: its copy of t1 is still running.
+  const page = [{ ...it_(4, "r1", "tool", "t1"), tool: "Bash", status: "streaming" as const }, it_(10, "r1", "tool")];
+  t = prependOlder(t, page, held, true);
+  expect(t.items.map((i) => `${i.itemId}:${i.tool ?? ""}:${i.status ?? ""}:${i.output ?? ""}`)).toEqual(["t1:Bash:done:ok", "i10:::"]);
+  // Applying the held finish again (an updater run twice, a later page) changes nothing.
+  expect(prependOlder(t, [], held, false)).toEqual(t);
+  // Not loaded but the thread is whole: applies as before.
+  expect(applyLive({ ...emptyThread(), lastSeq: 1 }, finished(2, "t9", "x"), false, emptyHeld()).thread.items[0]!.tool).toBe("(unknown)");
+});
+
+test("a replayed item from before the window is held, not appended at the end; the page brings it to its place once", () => {
+  const t: ThreadSnapshot = { ...emptyThread(), lastSeq: 10, items: [it_(10, "r1", "tool")] };
+  const t1 = { ...it_(4, "r1", "tool", "t1"), tool: "Bash", status: "done" as const, output: "ok" };
+  const r = mergeLive(t, { afterSeq: 10, snapshot: { ...emptyThread(), lastSeq: 12, items: [t1, it_(12, "r1", "assistant")] } }, true, emptyHeld());
+  expect(r.thread.items.map((i) => i.seq)).toEqual([10, 12]);
+  const n = prependOlder(r.thread, [{ ...t1, status: "streaming", output: undefined }], r.held, false);
+  expect(n.items.map((i) => `${i.seq}:${i.status ?? ""}:${i.output ?? ""}`)).toEqual(["4:done:ok", "10::", "12::"]);
+});
+
+test("a finish whose start never comes (trimmed log) shows as an unknown tool once nothing older is left", () => {
+  const t: ThreadSnapshot = { ...emptyThread(), lastSeq: 10, items: [it_(10, "r1", "tool")] };
+  const { thread, held } = applyLive(t, finished(11, "gone", "x"), true, emptyHeld());
+  expect(prependOlder(thread, [it_(2, "r1", "user")], held, true).items.some((i) => i.tool === "(unknown)")).toBe(false);
+  const done = prependOlder(thread, [it_(2, "r1", "user")], held, false);
+  expect(done.items.map((i) => i.tool ?? i.kind)).toEqual(["user", "tool", "(unknown)"]);
+});
+
+test("prependOlder never doubles an item the page repeats: the loaded copy keeps its place and state", () => {
+  const live = { ...it_(9, "r1", "tool", "t1"), status: "done" as const, output: "new" };
+  const t: ThreadSnapshot = { ...emptyThread(), lastSeq: 12, items: [live, it_(12, "r1", "assistant")] };
+  const n = prependOlder(t, [it_(3, "r1", "user"), { ...live, status: "streaming", output: undefined }], emptyHeld(), false);
+  expect(n.items.map((i) => `${i.itemId}:${i.output ?? ""}`)).toEqual(["i3:", "t1:new", "i12:"]);
 });
