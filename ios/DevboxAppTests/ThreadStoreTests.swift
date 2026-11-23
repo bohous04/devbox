@@ -336,7 +336,7 @@ final class ThreadStoreLiveTests: XCTestCase {
     func testResumeAfterBackgroundFetchesAfterSeqThenResubscribes() async throws {
         MockURLProtocol.handler = { req in
             switch (req.url?.path, req.url?.query) {
-            case ("/api/sessions/s1/thread", nil): return .init(statusCode: 200, data: self.snapshot(lastSeq: 5, seenSeq: 5))
+            case ("/api/sessions/s1/thread", "limit=200"): return .init(statusCode: 200, data: self.snapshot(lastSeq: 5, seenSeq: 5))
             case ("/api/sessions/s1/thread", "afterSeq=5"):
                 let items = #"[{"seq":7,"runId":"r1","itemId":"m1","kind":"assistant","text":"done while away","status":"done","ts":3}]"#
                 return .init(statusCode: 200, data: self.snapshot(lastSeq: 7, seenSeq: 5, items: items))
@@ -358,7 +358,7 @@ final class ThreadStoreLiveTests: XCTestCase {
         XCTAssertEqual(paths, ["/api/stream?session=s1&afterSeq=5", "/api/stream?session=s1&afterSeq=7"])
         // Opening and coming back each post seen (a look), the second after the catch-up fetch.
         try await waitUntil { self.requests.filter { $0 == "POST /api/sessions/s1/thread/seen" }.count == 2 }
-        XCTAssertEqual(requests.filter { $0.hasPrefix("GET") }, ["GET /api/sessions/s1/thread", "GET /api/sessions/s1/thread?afterSeq=5"])
+        XCTAssertEqual(requests.filter { $0.hasPrefix("GET") }, ["GET /api/sessions/s1/thread?limit=200", "GET /api/sessions/s1/thread?afterSeq=5"])
         XCTAssertEqual(requests.last, "POST /api/sessions/s1/thread/seen")
         store.stop()
     }
@@ -368,7 +368,7 @@ final class ThreadStoreLiveTests: XCTestCase {
         let gate = DispatchSemaphore(value: 0)
         MockURLProtocol.handler = { req in
             switch (req.url?.path, req.url?.query) {
-            case ("/api/sessions/s1/thread", nil): return .init(statusCode: 200, data: self.snapshot(lastSeq: 5, seenSeq: 5))
+            case ("/api/sessions/s1/thread", "limit=200"): return .init(statusCode: 200, data: self.snapshot(lastSeq: 5, seenSeq: 5))
             case ("/api/sessions/s1/thread", "afterSeq=5"):
                 _ = gate.wait(timeout: .now() + 3)
                 return .init(statusCode: 200, data: self.snapshot(lastSeq: 5, seenSeq: 5))
