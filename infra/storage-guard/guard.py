@@ -35,19 +35,31 @@ def run(args, timeout=300, **kw):
     return p.stdout
 
 
-def inspect_existing(ids):
+def inspect_existing(ids, attempts=3):
     """`docker inspect --size` over a `docker ps` snapshot. With ~70 containers the
     call takes tens of seconds, so short-lived ones (`docker run --rm`, CI jobs)
-    vanish mid-way; Docker still prints the rest and exits 1. Only that case is
-    tolerated — any other error still fails the run."""
+    vanish mid-way; Docker still prints the rest and exits 1. Likewise a file deleted
+    inside a running container while Docker sums its writable layer fails just that
+    container (snapshotter.Usage ... no such file or directory); it is measured again.
+    Only these cases are tolerated — any other error still fails the run."""
     if not ids:
         return []
     p = subprocess.run([DOCKER, 'inspect', '--size', *ids], capture_output=True, timeout=900)
+    found = json.loads(p.stdout or b'[]')
     if p.returncode:
         errors = [l for l in p.stderr.decode(errors='replace').splitlines() if l.strip()]
-        if not errors or not all(re.match(r'(error: |Error: )?no such object: ', l, re.I) for l in errors):
+        gone = [l for l in errors if re.match(r'(error: |Error: )?no such object: ', l, re.I)]
+        raced = [l for l in errors if re.search(r'snapshotter\.Usage failed for .*: no such file or directory$', l)]
+        if not errors or len(gone) + len(raced) != len(errors) or (raced and attempts <= 1):
             raise RuntimeError(f'docker inspect failed (rc={p.returncode}): ' + '\n'.join(errors)[-800:])
-    return json.loads(p.stdout or b'[]')
+        if raced:
+            found += inspect_existing([i for i in ids if not any(c['Id'].startswith(i) for c in found)], attempts - 1)
+    return found
+
+
+def running(name):
+    p = subprocess.run([DOCKER, 'inspect', '-f', '{{.State.Running}}', name], capture_output=True)
+    return p.returncode == 0 and p.stdout.strip() == b'true'
 
 
 def atomic(path, data, mode=0o600):
@@ -376,8 +388,7 @@ class Guard:
             except RuntimeError:
                 # A container can stop/disappear while the inventory traverses
                 # another session. This expected race must not discard all rows.
-                current=subprocess.run([DOCKER,'inspect','-f','{{.State.Running}}',name],capture_output=True)
-                if current.returncode==0 and current.stdout.strip()==b'true':
+                if running(name):
                     raise
                 row['running']=False
                 self.audit('session-stopped-during-inventory',name=name)
@@ -1220,8 +1231,14 @@ class Guard:
         ids=run([DOCKER,'ps','--format','{{.Names}}']).decode().splitlines()
         for name in [None]+[n for n in ids if n.startswith('dind-dev-')]:
             prefix=[DOCKER] if name is None else [DOCKER,'exec',name,'docker']
-            run(prefix+['image','prune','--all','--force','--filter','label=devbox.disposable=true','--filter','until=168h'],timeout=600)
-            run(prefix+['builder','prune','--force','--filter','until=168h','--keep-storage','2GB'],timeout=600)
+            try:
+                run(prefix+['image','prune','--all','--force','--filter','label=devbox.disposable=true','--filter','until=168h'],timeout=600)
+                run(prefix+['builder','prune','--force','--filter','until=168h','--keep-storage','2GB'],timeout=600)
+            except RuntimeError:
+                # A session ended between `docker ps` and the exec; the next run covers the rest.
+                if name is None or running(name):
+                    raise
+                self.audit('session-stopped-during-maintenance',name=name)
         self.audit('disposable-docker-maintenance')
 
 

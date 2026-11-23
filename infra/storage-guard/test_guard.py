@@ -912,6 +912,48 @@ class InspectExisting(unittest.TestCase):
     def test_no_ids_skips_docker(self):
         with patch.object(guard.subprocess,'run',side_effect=AssertionError('called')):
             self.assertEqual(guard.inspect_existing([]),[])
+    def test_file_deleted_while_sizing_is_measured_again(self):
+        race=b'Error response from daemon: snapshotter.Usage failed for 2f48: lstat /var/lib/containerd/x/fs/tmp/claude-cwd: no such file or directory\n'
+        a,b={'Id':'aaaa1111','Name':'/dev-a'},{'Id':'bbbb2222','Name':'/dev-b'}
+        calls=[]
+        def run(args,**kw):
+            calls.append(args[3:])
+            return self.proc(1,json.dumps([a]).encode(),race) if len(calls)==1 else self.proc(0,json.dumps([b]).encode(),b'')
+        with patch.object(guard.subprocess,'run',side_effect=run):
+            self.assertEqual([c['Name'] for c in guard.inspect_existing(['aaaa','bbbb'])],['/dev-a','/dev-b'])
+        self.assertEqual(calls,[['aaaa','bbbb'],['bbbb']])
+    def test_size_that_keeps_failing_still_fails(self):
+        race=b'Error response from daemon: snapshotter.Usage failed for 2f48: lstat /x: no such file or directory\n'
+        with patch.object(guard.subprocess,'run',return_value=self.proc(1,b'[]',race)) as run:
+            with self.assertRaises(RuntimeError):guard.inspect_existing(['aaaa'])
+        self.assertEqual(run.call_count,3)
+
+
+class DockerMaintenance(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        cfg=json.loads((HERE/'config.example.json').read_text())
+        cfg.update(root=self.tmp.name,state_dir=self.tmp.name+'/state')
+        self.g=guard.Guard(cfg)
+    def tearDown(self):self.tmp.cleanup()
+    def fake(self,running):
+        def run(args,timeout=300,**kw):
+            if args[1:2]==['ps']:return b'dind-dev-a\ndind-dev-b\n'
+            if args[1:3]==['exec','dind-dev-a']:raise RuntimeError('docker exec failed (rc=1): container is not running')
+            return b''
+        def sub(args,**kw):
+            return SimpleNamespace(returncode=0,stdout=b'true\n' if running else b'false\n',stderr=b'')
+        return patch.object(guard,'run',side_effect=run),patch.object(guard.subprocess,'run',side_effect=sub)
+    def test_sidecar_stopped_mid_run_is_skipped(self):
+        r,s=self.fake(running=False)
+        with r as run,s:self.g.docker_maintenance()
+        self.assertTrue(any(c.args[0][1:3]==['exec','dind-dev-b'] for c in run.call_args_list))
+        actions=[json.loads(l)['action'] for l in (self.g.state/'actions.jsonl').read_text().splitlines()]
+        self.assertIn('session-stopped-during-maintenance',actions)
+        self.assertIn('disposable-docker-maintenance',actions)
+    def test_failure_in_a_running_sidecar_still_fails(self):
+        r,s=self.fake(running=True)
+        with r,s,self.assertRaises(RuntimeError):self.g.docker_maintenance()
 
 
 if __name__=='__main__':unittest.main()
