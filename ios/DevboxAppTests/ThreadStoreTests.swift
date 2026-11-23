@@ -437,6 +437,82 @@ final class ThreadStoreLiveTests: XCTestCase {
         store.stop()
     }
 
+    /// One long session as devd stores it: run r1 (its prompt, seq 1, then 59 tool calls), run r2 (its prompt, seq 61,
+    /// 189 tool calls, its answer at 251).
+    private func longThread(_ seqs: ClosedRange<Int>) -> String {
+        let items = seqs.map { seq -> String in
+            let run = seq <= 60 ? "r1" : "r2"
+            let (kind, text) = seq == 1 ? ("user", "Fix the login form") : seq == 61 ? ("user", "Now run the tests") : seq == 251 ? ("assistant", "Done") : ("tool", "")
+            let tool = kind == "tool" ? #","tool":"Bash""# : ""
+            return #"{"seq":\#(seq),"runId":"\#(run)","itemId":"i\#(seq)","kind":"\#(kind)","text":"\#(text)"\#(tool),"status":"done","ts":\#(seq)}"#
+        }
+        return "[\(items.joined(separator: ","))]"
+    }
+
+    private let longRuns = #"[{"runId":"r1","origin":"user","status":"completed","harness":null,"nativeThreadId":null,"model":null,"queuedAt":null,"startedAt":1,"endedAt":2,"endedSeq":60,"usage":null,"error":null},"#
+        + #"{"runId":"r2","origin":"user","status":"completed","harness":null,"nativeThreadId":null,"model":null,"queuedAt":null,"startedAt":3,"endedAt":4,"endedSeq":252,"usage":null,"error":null}]"#
+
+    /// A long thread opens with its newest items only, starting at the first run it holds whole and named by devd's
+    /// topic; loading older items puts them in front without changing the ids of the rows already shown.
+    func testLongThreadLoadsItsTailAndPagesBack() async throws {
+        MockURLProtocol.handler = { req in
+            guard req.url?.path == "/api/sessions/s1/thread" else { return .init(statusCode: 204) }
+            let q = req.url?.query ?? ""
+            let range: ClosedRange<Int> = q == "limit=200" ? 52...251 : q == "beforeSeq=53&limit=200" ? 1...52 : 0...0
+            guard range != 0...0 else { return .init(statusCode: 500) }
+            var body = String(decoding: self.snapshot(lastSeq: 252, seenSeq: 252, items: self.longThread(range), runs: self.longRuns), as: UTF8.self)
+            body.removeLast()
+            return .init(statusCode: 200, data: Data((body + #","topic":"Fix the login form"}"#).utf8))
+        }
+        let store = ThreadStore(sessionId: "s1", client: client(), connect: { _, _ in AsyncThrowingStream { _ in } })
+        await store.start(runtime: .chat)
+        XCTAssertEqual(requests.first, "GET /api/sessions/s1/thread?limit=200")
+        XCTAssertTrue(store.hasOlder)
+        XCTAssertEqual(store.title, "Fix the login form", "devd's topic: the first message is not loaded")
+        // r1's last tool calls (52…60) wait for the rest of r1: the thread starts at r2's prompt.
+        XCTAssertEqual(store.rows.first?.item.seq, 61)
+        let r2Prompt = try XCTUnwrap(store.rows.first?.id)
+        let answerId = try XCTUnwrap(store.rows.last?.id)
+
+        await store.loadOlder()
+        XCTAssertTrue(requests.contains("GET /api/sessions/s1/thread?beforeSeq=53&limit=200"))
+        XCTAssertFalse(store.hasOlder, "a short page: nothing older is left")
+        XCTAssertEqual(store.thread?.items.map(\.seq), Array(1...251), "seq 52 came back in the page and is not doubled")
+        XCTAssertEqual(store.rows.first?.item.seq, 1)
+        XCTAssertEqual(store.rows.first { $0.item.seq == 61 }?.id, r2Prompt)
+        XCTAssertEqual(store.rows.last?.id, answerId)
+        XCTAssertEqual(store.display.compactMap { if case .work(let w) = $0 { return w.items.count } else { return nil } }, [59, 189])
+        XCTAssertEqual(store.title, "Fix the login form")
+        store.stop()
+    }
+
+    /// The session list says tmux: the store goes to the mirror's tail without asking /thread first. When devd says
+    /// it is not a tmux session (the list was behind), it asks as for an unknown runtime.
+    func testKnownTmuxSessionSkipsTheThreadProbe() async throws {
+        MockURLProtocol.handler = { req in
+            switch req.url?.path {
+            case "/api/sessions/s1/mirror": return .init(statusCode: 200, data: self.mirrorBody(lastSeq: 4))
+            case "/api/sessions/s2/mirror": return .init(statusCode: 409, data: Data(#"{"error":"not-a-tmux-session"}"#.utf8))
+            case "/api/sessions/s2/thread": return .init(statusCode: 200, data: self.snapshot(lastSeq: 3, seenSeq: 3))
+            default: return .init(statusCode: 204)
+            }
+        }
+        let store = ThreadStore(sessionId: "s1", client: client(), connect: { _, _ in AsyncThrowingStream { _ in } })
+        await store.start(runtime: .tmux)
+        XCTAssertEqual(requests, ["GET /api/sessions/s1/mirror?limit=200"])
+        XCTAssertTrue(store.isTmux)
+        XCTAssertEqual(store.thread?.lastSeq, 4)
+        store.stop()
+
+        MockURLProtocol.capturedRequests = []
+        let moved = ThreadStore(sessionId: "s2", client: client(), connect: { _, _ in AsyncThrowingStream { _ in } })
+        await moved.start(runtime: .tmux)
+        XCTAssertEqual(Array(requests.prefix(2)), ["GET /api/sessions/s2/mirror?limit=200", "GET /api/sessions/s2/thread?limit=200"])
+        XCTAssertFalse(moved.isTmux)
+        XCTAssertEqual(moved.thread?.lastSeq, 3)
+        moved.stop()
+    }
+
     private func mirrorBody(lastSeq: Int, sendBlock: String = "null", activity: String = "idle") -> Data {
         let info = #"{"state":"live","agent":"Claude Code","conversationId":"c1","activity":"\#(activity)","terminalPrompt":null,"sendBlock":\#(sendBlock)}"#
         return Data(#"{"mirror":\#(info),"snapshot":\#(String(decoding: snapshot(lastSeq: lastSeq), as: UTF8.self))}"#.utf8)

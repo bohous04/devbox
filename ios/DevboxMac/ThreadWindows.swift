@@ -136,7 +136,8 @@ final class ThreadWindows {
 
     private func save(_ threadId: String) {
         // A tmux session's mirror is not kept: restored, it would stream from the chat thread's route, which refuses it.
-        guard let store = stores[threadId], !store.isTmux, let thread = store.thread else { return }
+        // Nor is a thread loaded only to some point back: restored, it would read as the whole thread (no older pages).
+        guard let store = stores[threadId], !store.isTmux, !store.hasOlder, let thread = store.thread else { return }
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try JSONEncoder().encode(thread).write(to: file(threadId), options: .atomic)

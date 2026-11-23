@@ -12,6 +12,12 @@ struct EndedTranscriptScreen: View {
     @State private var thread: ThreadSnapshot?
     @State private var loadError: String?
     @State private var startError: String?
+    /// Only the newest ThreadView.pageSize items load at first (as ThreadStore): older ones go in front on request,
+    /// their rows' ids counting down from `rowBase` so the rows already shown keep theirs.
+    @State private var hasOlder = false
+    @State private var loadingOlder = false
+    @State private var olderError: String?
+    @State private var rowBase = 0
 
     private var starting: Bool { continues.running.contains(endedId) }
 
@@ -43,11 +49,30 @@ struct EndedTranscriptScreen: View {
             let e: EndedSession = try await client.get("/api/ended/\(pathSegment(endedId))")
             // A session that ended without a transcript has nothing to fetch (devd answers 410).
             if e.transcript == .missing { thread = .empty } else {
-                thread = try await client.get("/api/ended/\(pathSegment(endedId))/transcript") as ThreadSnapshot
+                let t: ThreadSnapshot = try await client.get("/api/ended/\(pathSegment(endedId))/transcript?limit=\(ThreadView.pageSize)")
+                hasOlder = ThreadView.hasOlder(t)
+                thread = t
             }
             ended = e
         } catch {
             loadError = errorText(error)
+        }
+    }
+
+    private func loadOlder() async {
+        guard hasOlder, !loadingOlder, let cur = thread, let before = ThreadView.olderBeforeSeq(cur) else { return }
+        loadingOlder = true
+        defer { loadingOlder = false }
+        do {
+            let page: ThreadSnapshot = try await client.get("/api/ended/\(pathSegment(endedId))/transcript?beforeSeq=\(before)&limit=\(ThreadView.pageSize)")
+            guard let cur = thread else { return }
+            let next = ThreadView.prependOlder(cur, page.items)
+            rowBase -= ThreadView.shownItems(next).count - ThreadView.shownItems(cur).count
+            hasOlder = ThreadView.hasOlder(page)
+            olderError = nil
+            thread = next
+        } catch {
+            olderError = errorText(error)
         }
     }
 
@@ -65,15 +90,25 @@ struct EndedTranscriptScreen: View {
         // A transcript takes no answers: an open request shows as it was left, without its form.
         var shown = t
         shown.pending = []
-        let rows = WorkGroups.rows(ThreadStore.chatRows(shown), runs: shown.runs)
+        let (chat, partialRun) = ThreadView.tailView(ThreadStore.chatRows(shown, idBase: rowBase), hasOlder: hasOlder)
+        let rows = WorkGroups.rows(chat, runs: shown.runs, partialRun: partialRun)
         let turnStarts = WorkGroups.turnStarts(rows)
-        return ScrollView {
+        return ScrollViewReader { proxy in ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
                 if let note = InboxView.transcriptNote(e.transcript) {
                     Text(note).font(.subheadline).foregroundStyle(Theme.C.mutedForeground)
                         .padding(.horizontal, 12).padding(.vertical, 8)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Theme.C.muted.opacity(0.5), in: RoundedRectangle(cornerRadius: Theme.R.md))
+                }
+                if hasOlder {
+                    OlderItemsButton(loading: loadingOlder, error: olderError) {
+                        let first = rows.first?.id
+                        Task {
+                            await loadOlder()
+                            if let first { proxy.scrollTo(first, anchor: .top) }
+                        }
+                    }
                 }
                 if rows.isEmpty, e.transcript != .missing { EmptyState("No messages — the session ended before anything was said.", systemImage: "bubble.left") }
                 ForEach(rows) { row in
@@ -93,6 +128,7 @@ struct EndedTranscriptScreen: View {
             .frame(maxWidth: .infinity)
         }
         .defaultScrollAnchor(.bottom)
+        }
         .safeAreaInset(edge: .bottom) {
             VStack(alignment: .leading, spacing: 6) {
                 Group {

@@ -28,6 +28,46 @@ final class ChatLayoutTests: XCTestCase {
         }
     }
 
+    /// A run only partly loaded (ThreadView.tailView) stays expanded; the others still fold (workGroups.test.ts).
+    func testPartlyLoadedRunDoesNotFold() {
+        let items = [item(1, "a", .tool, tool: "Bash"), item(2, "a", .assistant), item(3, "b", .user), item(4, "b", .tool, tool: "Bash"),
+                     item(5, "b", .assistant)]
+        let rows = WorkGroups.rows(chatRows(items), runs: [run("a", .completed), run("b", .completed)], partialRun: "a")
+        XCTAssertEqual(shape(rows), ["1", "2", "3", "work[4]", "5*"])
+    }
+
+    /// threadView.test.ts "tailView": a cut thread starts at its first whole run; a run that fills the page stays.
+    func testTailViewStartsAtTheFirstWholeRun() {
+        let rows = chatRows([item(1, "r1", .tool), item(2, nil, .notice), item(3, "r1", .assistant), item(4, "r2", .user), item(5, "r2", .tool)])
+        XCTAssertEqual(ThreadView.tailView(rows, hasOlder: true).rows.map(\.item.seq), [4, 5])
+        XCTAssertNil(ThreadView.tailView(rows, hasOlder: true).partialRun)
+        XCTAssertEqual(ThreadView.tailView(rows, hasOlder: false).rows.map(\.item.seq), [1, 2, 3, 4, 5])
+        let one = chatRows([item(1, "r1", .tool), item(2, "r1", .tool)])
+        XCTAssertEqual(ThreadView.tailView(one, hasOlder: true).rows.map(\.item.seq), [1, 2])
+        XCTAssertEqual(ThreadView.tailView(one, hasOlder: true).partialRun, "r1")
+        XCTAssertNil(ThreadView.tailView(chatRows([item(1, nil, .notice)]), hasOlder: true).partialRun)
+    }
+
+    /// threadView.test.ts "prependOlder": the page goes in front, the boundary items already here are dropped.
+    func testPrependOlderDropsTheBoundaryItemsAlreadyHere() {
+        var notice = item(5, nil, .notice)
+        notice.itemId = "notice:1"
+        var t = ThreadSnapshot(lastSeq: 9, seenSeq: 0, runs: [], items: [notice, item(6, "r2", .user)], pending: [], background: [], native: nil)
+        t.topic = "Fix it"
+        XCTAssertEqual(ThreadView.olderBeforeSeq(t), 6)
+        XCTAssertNil(ThreadView.olderBeforeSeq(.empty))
+        let n = ThreadView.prependOlder(t, [item(3, "r1", .user), item(5, "r1", .tool), notice])
+        XCTAssertEqual(n.items.map { "\($0.seq):\($0.itemId ?? "-")" }, ["3:3", "5:5", "5:notice:1", "6:6"])
+        XCTAssertEqual(n.lastSeq, 9)
+        XCTAssertEqual(n.topic, "Fix it")
+        XCTAssertFalse(ThreadView.hasOlder(t))
+        XCTAssertTrue(ThreadView.hasOlder(ThreadSnapshot(lastSeq: 0, seenSeq: 0, runs: [], items: (1...ThreadView.pageSize).map { item($0, "r", .tool) },
+                                                         pending: [], background: [], native: nil)))
+        // Stream frames carry no topic: a merge keeps the one the GET named.
+        let merged = ThreadView.mergeSnapshot(t, ThreadSnapshotFrame(afterSeq: 9, snapshot: .empty))
+        XCTAssertEqual(merged.topic, "Fix it")
+    }
+
     func testFinishedRunFoldsItsToolsAndProseAboveTheAnswer() {
         let items = [
             item(1, "a", .user), item(2, "a", .assistant), item(3, "a", .tool, tool: "Bash"),
