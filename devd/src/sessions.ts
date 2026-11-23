@@ -1590,8 +1590,11 @@ export class SessionManager {
       catch (e) {
         // The backup stops the container before archiving: a failed end must not leave the row saying "running"
         // (a resumed end's session was skipped by startup recovery, so nothing else would correct it).
-        if (s.host !== "instabox" && getSession(this.d.db, id) && await containerState(s.container) !== "running") {
-          updateSession(this.d.db, id, { status: "stopped" });
+        // Only a container docker reports as exited: "missing" is also any failed inspect (docker down, a timeout).
+        // Reading it must not replace the end's own error.
+        if (s.host !== "instabox" && getSession(this.d.db, id)) {
+          try { if (await containerState(s.container) === "exited") updateSession(this.d.db, id, { status: "stopped" }); }
+          catch (inspectErr) { console.error(`after the failed end of ${id}, reading its container failed:`, inspectErr); }
         }
         throw e;
       }

@@ -94,10 +94,12 @@ test("sessions with an end cut short (any end, or a started settle) are not for 
 
 // Review of #145 (M4): the backup stops the container before archiving. When the end then fails — above all a resumed
 // one, which startup recovery left alone — the row must not keep saying "running" over a stopped container.
-test("a failed end leaves a stopped container's session stopped, and a running one running", async () => {
-  for (const state of ["exited", "running"]) {
+test("a failed end leaves a stopped container's session stopped; a running or unreadable one stays running", async () => {
+  // "unreadable": docker inspect itself fails (docker down, a timeout) — that says nothing about the container.
+  for (const state of ["exited", "running", "unreadable"]) {
     const bin = mkdtempSync(join(tmpdir(), "fake-docker-"));
-    writeFileSync(join(bin, "docker"), `#!/usr/bin/env bash\n[ "$1" = inspect ] && echo ${state}\nexit 0\n`);
+    writeFileSync(join(bin, "docker"), state === "unreadable" ? "#!/usr/bin/env bash\n[ \"$1\" = inspect ] && exit 1\nexit 0\n"
+      : `#!/usr/bin/env bash\n[ "$1" = inspect ] && echo ${state}\nexit 0\n`);
     chmodSync(join(bin, "docker"), 0o755);
     const orig = process.env.PATH;
     process.env.PATH = `${bin}:${orig}`;
@@ -110,7 +112,7 @@ test("a failed end leaves a stopped container's session stopped, and a running o
         preserveForEnd: async () => { throw new Error("backup before ending failed: x"); },
       });
       await expect(mgr.end("dev-a-b")).rejects.toThrow("backup before ending failed");
-      expect(getSession(db, "dev-a-b")?.status).toBe(state === "running" ? "running" : "stopped");
+      expect(getSession(db, "dev-a-b")?.status).toBe(state === "exited" ? "stopped" : "running");
       db.close();
     } finally { process.env.PATH = orig; }
   }
