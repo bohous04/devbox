@@ -214,6 +214,7 @@ export interface ApiDeps { mgr: SessionManager; db: Database; cfg: DevConfig; ro
   bus?: ThreadApiDeps["bus"];
   inbox?: ThreadApiDeps["inbox"];
   untilReset?: ThreadApiDeps["untilReset"];
+  worktree?: ThreadApiDeps["worktree"];
   bridgeVersion?: ThreadApiDeps["bridgeVersion"];
   switcher?: ThreadApiDeps["switcher"];
   /** The Chat view of tmux sessions (transcriptMirror.ts); without it its routes are not registered. */
@@ -403,7 +404,7 @@ export function createApp(d: ApiDeps): Hono {
   if (d.mirror) registerMirrorRoutes(app, d.mirror);
   if (d.bus) registerEndedRoutes(app, { db: d.db, bus: d.bus });
   registerThreadRoutes(app, d.links && d.threads && d.bus && d.inbox && d.bridgeVersion
-    ? { db: d.db, root: d.root, mgr: d.mgr, links: d.links, threads: d.threads, bus: d.bus, inbox: d.inbox, bridgeVersion: d.bridgeVersion, switcher: d.switcher, untilReset: d.untilReset } : null);
+    ? { db: d.db, root: d.root, mgr: d.mgr, links: d.links, threads: d.threads, bus: d.bus, inbox: d.inbox, bridgeVersion: d.bridgeVersion, switcher: d.switcher, untilReset: d.untilReset, worktree: d.worktree } : null);
 
   // The git proxy MUST be registered first: further down the file is a catch-all that
   // serves the dashboard SPA, and Hono matches in registration order — otherwise requests

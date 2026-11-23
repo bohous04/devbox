@@ -255,7 +255,7 @@ function setup(opts: { dbPath?: string; seed?: boolean; dir?: string; now?: numb
     db, sessions: () => listSessions(db), session: (id) => getSession(db, id), threads,
     chatLink: () => ({ status: "connected", since: 1 }), tmuxLive: (id) => hub.liveSnapshot(id), bus: new EventBus(),
     prHold: (id) => watch.hold(id), now: () => now, coalesceMs: 0,
-    timers: { set: () => 0, clear: () => {} }, end: async () => {},
+    timers: { set: () => 0, clear: () => {} }, end: async () => {}, worktreeChanges: async () => [],
   });
   const prs = new Map<string, PrState>();
   const heads = new Map<string, string | null>();

@@ -92,7 +92,7 @@ const THREAD = "0b1c2d3e-0000-4000-8000-000000000001";
 const IMG = "00000000-0000-4000-8000-000000000000.png";
 const AT = Date.parse("2026-11-20T10:15:00Z");
 
-async function ending(o: { runtime?: "chat" | "tmux"; store?: boolean; truncated?: boolean; prepare?: (root: string) => void } = {}) {
+async function ending(o: { runtime?: "chat" | "tmux"; store?: boolean; truncated?: boolean; prepare?: (root: string) => void; keepWorktree?: boolean } = {}) {
   const bin = mkdtempSync(join(tmpdir(), "fake-docker-"));
   writeFileSync(join(bin, "docker"), "#!/usr/bin/env bash\necho \"$@\" >> \"$(dirname \"$0\")/calls\"\nexit 0\n");
   chmodSync(join(bin, "docker"), 0o755);
@@ -115,6 +115,7 @@ async function ending(o: { runtime?: "chat" | "tmux"; store?: boolean; truncated
     insertSession(db, {
       id: "dev-a-b", folder: "acme", project: "a", repo: "b", container: "dev-a-b", port_base: 41500,
       status: "running", solo: 0, created_at: 0, last_active_at: 0, important: 0, runtime,
+      ...(o.keepWorktree ? { worktree: join(root, "_sessions", "dev-a-b") } : {}),
     });
     o.prepare?.(root);
     const order: string[] = [];
@@ -132,7 +133,7 @@ async function ending(o: { runtime?: "chat" | "tmux"; store?: boolean; truncated
       notify: (_t, m) => { notices.push(m); },
     });
     let error: unknown = null;
-    try { await mgr.end("dev-a-b"); } catch (e) { error = e; }
+    try { await mgr.end("dev-a-b", "keep", o.keepWorktree ? { keepWorktree: true } : {}); } catch (e) { error = e; }
     return { db, root, order, ended, notices, error, dir: join(root, "_chat-archive", "dev-a-b-20261120-101500") };
   } finally {
     process.env.PATH = orig;
@@ -151,6 +152,16 @@ test("end() keeps the thread, its images and the Claude jsonl as an ended transc
   expect(t.ended.map((e) => [e.id, e.topic, e.runtime, e.transcript])).toEqual([["dev-a-b-20261120-101500", "Tidy the readme", "chat", "complete"]]);
   expect(listEnded(t.db)).toEqual(t.ended);
   expect(t.notices).toEqual([]);
+});
+
+test("an end that keeps the worktree (uncommitted work) records where, so the transcript view can say it", async () => {
+  const kept = await ending({ keepWorktree: true, prepare: (root) => mkdirSync(join(root, "_sessions", "dev-a-b"), { recursive: true }) });
+  expect(kept.error).toBeNull();
+  expect(kept.ended.map((e) => e.keptWorktree)).toEqual([join(kept.root, "_sessions", "dev-a-b")]);
+  expect(existsSync(join(kept.root, "_sessions", "dev-a-b"))).toBe(true);
+  expect(listEnded(kept.db)[0]!.keptWorktree).toBe(join(kept.root, "_sessions", "dev-a-b"));
+  const plain = await ending();
+  expect(plain.ended.map((e) => e.keptWorktree)).toEqual([null]);
 });
 
 test("a tmux session's cut-short last read marks its transcript truncated", async () => {

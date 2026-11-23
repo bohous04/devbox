@@ -37,7 +37,7 @@ import { switchAgent, type SwitchAgentDeps } from "./agentSwitch";
 import { giteaTokensByHost, loadConfig, loadSecrets, materializeGiteaTokens, materializeMcpServers, readKeyFile, resolveAccountPool, resolveInstaboxSettings, saveGiteaTokens, writeKeyFile, type Secrets } from "./config";
 import { createConfigRepo } from "./configrepo";
 import { createGiteaApi } from "./gitea";
-import { giteaAuthEnv, githubAuthEnv, sshRemote } from "./git";
+import { giteaAuthEnv, githubAuthEnv, sshRemote, unpushedCommits, worktreeChanges } from "./git";
 import {
   activeLeases, diskHistoryEnds, failRunningCloneJobs, getSession, getSessionPr, type SessionRow, insertDiskTotal, lastMetricTs, listAccounts, listSessions, logEvent,
   getRepoAgent, applyPendingRestore, checkpointFully, savePendingFirstTurn, prunePendingFirstTurns, getPendingFirstTurn, deletePendingFirstTurn, getBridgeSecret, chatSessionsWithoutBridgeSecret, openDb, startCheckpointer, pruneAccountLeases, pruneCriticReviews, pruneDiskStats, pruneEvents, pruneNotifyLog, prunePushAlerts,
@@ -468,6 +468,7 @@ const inbox: Inbox = new Inbox({
       throw e;
     }
   },
+  worktreeChanges: (s) => (s.worktree ? worktreeChanges(s.worktree) : Promise.resolve([])),
 });
 // PR watch (prWatch.ts): the PR of each session's pushed branch, GitHub through the host's `gh`, Gitea through its API.
 const prWatch: PrWatch = new PrWatch({
@@ -1154,6 +1155,9 @@ const apiDeps: ApiDeps = {
   links: bridgeLinks, threads: threadStore, bus, inbox, switcher: chatSwitch, bridgeVersion: (id) => chatSwitch.bridgeVersion(id),
   mirror: transcriptMirror,
   untilReset: (s) => untilReset(s, resetDeps({ db, threads: threadStore, codexAccounts }), Date.now()),
+  worktree: async (s) => s.worktree
+    ? { changes: await worktreeChanges(s.worktree), unpushed: await unpushedCommits(s.worktree) }
+    : { changes: [], unpushed: null },
   codexUsage: { view: () => buildCodexView(db) },
   codexAccounts,
   codexSessionAccounts: new CodexSessionAccounts({
@@ -1379,7 +1383,7 @@ setInterval(() => {
 try { inbox.armSnoozes(); } catch (e) { console.error("inbox: snooze timers not armed:", e); }
 // Settles whose end was pending when devd went down end now (or when their grace runs out).
 try { inbox.armEnds(); } catch (e) { console.error("inbox: pending ends not armed:", e); }
-setInterval(guardedTick("auto-settle", async () => { inbox.autoSettle(); }), AUTO_SETTLE_TICK_MS);
+setInterval(guardedTick("auto-settle", async () => { await inbox.autoSettle(); }), AUTO_SETTLE_TICK_MS);
 // Ended transcripts are kept 30 days (endedSessions.ts); a failed removal is logged there and retried on the next run.
 const purgeEndedTick = () => {
   for (const id of purgeEnded(db, Date.now(), (m) => console.error(m))) bus.publish("inbox-ended", { id, removed: true });

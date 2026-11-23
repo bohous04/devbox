@@ -30,7 +30,8 @@ const completed = (runId: string): BridgeEvent => ({ type: "run.completed", runI
 const said = (runId: string, itemId: string, text: string): BridgeEvent => ({ type: "message.final", runId, itemId, role: "assistant", text });
 const asked = (runId: string, requestId: string): BridgeEvent => ({ type: "request.opened", runId, requestId, kind: "question", prompt: "Which one?" });
 
-function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown>; untilReset?: (s: SessionRow) => ResetTarget; noUntilReset?: boolean; bridgeVersion?: string | null } = {}) {
+function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown>; untilReset?: (s: SessionRow) => ResetTarget; noUntilReset?: boolean; bridgeVersion?: string | null;
+  worktree?: (s: SessionRow) => Promise<{ changes: string[] | null; unpushed: number | null }> } = {}) {
   const db = openDb(":memory:");
   for (const r of [CHAT, CHAT2, TMUX]) insertSession(db, r);
   const dir = mkdtempSync(join(tmpdir(), "thread-api-"));
@@ -58,7 +59,7 @@ function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown
   const inbox = new Inbox({
     db, sessions: () => listSessions(db), session: (id) => getSession(db, id), threads,
     chatLink: () => ({ status: "connected", since: 1 }), tmuxLive: (id) => hub.liveSnapshot(id), bus,
-    now: () => 1_000_000, coalesceMs: 0, end: async () => {},
+    now: () => 1_000_000, coalesceMs: 0, end: async () => {}, worktreeChanges: async () => [],
   });
   const ending = new Set<string>();
   const a = createApp({
@@ -67,6 +68,7 @@ function setup(opts: { sendError?: Error; open?: (t: unknown) => Promise<unknown
     root: dir, tree: async () => [], listener: {} as never, notify: () => {}, stats: () => ({ sessions: [], disk: {} }),
     cloneQueue: {} as never, configRepo: { read: () => ({ version: 1, settings: { autoStopHours: 4, portRangeStart: 40100, portsPerSession: 10, diskWarnPercent: 80 }, folders: {} }) } as never, dashboardDir: dir, agentEvents: hub,
     links, threads, bus, inbox, bridgeVersion: () => (opts.bridgeVersion === undefined ? "1.4.0" : opts.bridgeVersion), untilReset: opts.noUntilReset ? undefined : opts.untilReset ?? (() => ({ reason: "No usage limit is active on this account" })),
+    worktree: opts.worktree ?? (async () => ({ changes: [], unpushed: 0 })),
   } as never);
   /** Applies events to a session's store and publishes them like index.ts does (store first, then the bus). */
   const feed = (id: string, events: BridgeEvent[]) => {
@@ -645,7 +647,7 @@ test("settling a working or waiting session ends it, so it asks first: 409 until
   t.feed(CHAT.id, [started("r1")]);
   const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/settle`));
   expect(r.status).toBe(409);
-  expect(await r.json()).toEqual({ error: "agent-working", message: SETTLE_WORKING });
+  expect(await r.json()).toEqual({ error: "agent-working", message: `${SETTLE_WORKING} End it?` });
   expect(t.inbox.item(getSession(t.db, CHAT.id)!).attention.section).toBe("working");
   const ok = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/settle`, { confirm: true }));
   expect(ok.status).toBe(200);
@@ -655,11 +657,49 @@ test("settling a working or waiting session ends it, so it asks first: 409 until
   waiting.feed(CHAT.id, [started("r1"), asked("r1", "q1")]);
   const w = await waiting.a.fetch(req("POST", `/api/sessions/${CHAT.id}/settle`));
   expect(w.status).toBe(409);
-  expect(await w.json()).toEqual({ error: "request-open", message: SETTLE_REQUEST_OPEN });
+  expect(await w.json()).toEqual({ error: "request-open", message: `${SETTLE_REQUEST_OPEN} End it?` });
   expect((await waiting.a.fetch(req("POST", `/api/sessions/${CHAT.id}/settle`, { confirm: true }))).status).toBe(200);
   // A done or idle session settles without asking; a body other than {confirm: true} is refused.
   expect((await waiting.a.fetch(req("POST", `/api/sessions/${TMUX.id}/settle`))).status).toBe(200);
   expect((await waiting.a.fetch(req("POST", `/api/sessions/${TMUX.id}/settle`, { confirm: "yes" }))).status).toBe(400);
+});
+
+test("settling a session with uncommitted changes asks first, naming where they stay and the unpushed commits", async () => {
+  const seen: string[] = [];
+  const t = setup({ worktree: async (s) => { seen.push(s.id); return { changes: ["M a.ts", "?? b.ts"], unpushed: 3 }; } });
+  t.db.run("UPDATE sessions SET worktree=?, branch=? WHERE id=?", ["/srv/_sessions/dev-a-tmux", "session/tmux-1", TMUX.id]);
+  const r = await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/settle`));
+  expect(r.status).toBe(409);
+  expect(await r.json()).toEqual({
+    error: "uncommitted-changes",
+    message: "Uncommitted changes stay on disk at /srv/_sessions/dev-a-tmux. 3 unpushed commits stay on branch session/tmux-1. End it?",
+  });
+  expect((await t.a.fetch(req("POST", `/api/sessions/${TMUX.id}/settle`, { confirm: true }))).status).toBe(200);
+  // A session without a worktree of its own (a shared workspace) has nothing an end deletes: git is not asked.
+  expect((await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/settle`))).status).toBe(200);
+  expect(seen).toEqual([TMUX.id]);
+});
+
+test("an unreadable worktree asks too (unknown is not clean); a clean one with unpushed commits settles at once", async () => {
+  const unknown = setup({ worktree: async () => ({ changes: null, unpushed: null }) });
+  unknown.db.run("UPDATE sessions SET worktree=? WHERE id=?", ["/srv/_sessions/dev-a-tmux", TMUX.id]);
+  const r = await unknown.a.fetch(req("POST", `/api/sessions/${TMUX.id}/settle`));
+  expect(r.status).toBe(409);
+  expect(await r.json()).toEqual({ error: "uncommitted-changes", message: "Its worktree could not be read, so it stays on disk at /srv/_sessions/dev-a-tmux. End it?" });
+  const clean = setup({ worktree: async () => ({ changes: [], unpushed: 2 }) });
+  clean.db.run("UPDATE sessions SET worktree=? WHERE id=?", ["/srv/_sessions/dev-a-tmux", TMUX.id]);
+  expect((await clean.a.fetch(req("POST", `/api/sessions/${TMUX.id}/settle`))).status).toBe(200);
+});
+
+test("a working session with uncommitted changes asks one question naming both", async () => {
+  const t = setup({ worktree: async () => ({ changes: ["M a.ts"], unpushed: 1 }) });
+  t.db.run("UPDATE sessions SET worktree=?, branch=? WHERE id=?", ["/srv/_sessions/dev-a-chat", "session/chat-1", CHAT.id]);
+  t.feed(CHAT.id, [started("r1")]);
+  const r = await t.a.fetch(req("POST", `/api/sessions/${CHAT.id}/settle`));
+  expect(await r.json()).toEqual({
+    error: "agent-working",
+    message: `${SETTLE_WORKING} Uncommitted changes stay on disk at /srv/_sessions/dev-a-chat. 1 unpushed commit stays on branch session/chat-1. End it?`,
+  });
 });
 
 test("snooze until reset without the usage dependency is 503; settle and the thread routes still work", async () => {

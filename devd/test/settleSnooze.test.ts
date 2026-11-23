@@ -12,7 +12,7 @@ import {
   getSeenAt, putSessionAttention, type SessionRow,
 } from "../src/db";
 import { EventBus } from "../src/eventBus";
-import { AUTO_END_PER_TICK, AUTO_SETTLE_IDLE_MS, AUTO_SETTLE_SEEN_IDLE_MS, autoSettleDue, hubShelfDeps, resetDeps, untilReset, type ResetDeps } from "../src/sessionAttention";
+import { AUTO_END_HOLDS, AUTO_END_PER_TICK, AUTO_SETTLE_IDLE_MS, AUTO_SETTLE_TICK_MS, AUTO_SETTLE_SEEN_IDLE_MS, autoSettleDue, hubShelfDeps, resetDeps, untilReset, type ResetDeps } from "../src/sessionAttention";
 import { Inbox, SETTLE_END_GRACE_MS } from "../src/sessionInbox";
 import { ThreadStore } from "../src/threadStore";
 import type { BackgroundWork, BridgeEvent, InboxItem } from "../../shared/thread";
@@ -51,7 +51,13 @@ function fakeTimers(clock: () => number) {
 }
 
 /** A hub, a chat hub and an inbox over one clock, wired like index.ts. Chat events are stamped with that clock. */
-function setup(opts: { snoozedThrows?: boolean; activityThrows?: boolean; quietMs?: number; endFails?: string } = {}) {
+function setup(opts: {
+  snoozedThrows?: boolean; activityThrows?: boolean; quietMs?: number; endFails?: string;
+  /** git status of a session's worktree (null: unreadable); clean when not given. */
+  changes?: Record<string, string[] | null>;
+  /** The end waits for this (an end takes minutes: the storage guard backs the container up first). */
+  endGate?: Promise<void>;
+} = {}) {
   let now = T0;
   const clock = () => now;
   const timers = fakeTimers(clock);
@@ -84,9 +90,11 @@ function setup(opts: { snoozedThrows?: boolean; activityThrows?: boolean; quietM
     now: () => now, coalesceMs: 0, timers: timers.timers, log: (m) => logs.push(m),
     end: async (id, reason) => {
       ends.push(`${id}:${reason}`);
+      await opts.endGate;
       if (opts.endFails) throw new Error(opts.endFails);
       deleteSession(db, id);
     },
+    worktreeChanges: async (s) => (opts.changes && s.id in opts.changes ? opts.changes[s.id] : []),
   });
   const published: InboxItem[] = [];
   bus.subscribe(["inbox"], (_t, data) => published.push(data as InboxItem));
@@ -298,7 +306,7 @@ test("auto-settle: idle that was never seen, or whose agent state devd does not 
   }
 });
 
-test("auto-settle: a tmux session seen once, whose finish devd missed while down (state unknown), is not settled after 24 h", () => {
+test("auto-settle: a tmux session seen once, whose finish devd missed while down (state unknown), is not settled after 24 h", async () => {
   const t = setup();
   const tmux = getSession(t.db, TMUX.id)!;
   t.hub.handle(tmux, "user_prompt_submit");
@@ -312,17 +320,17 @@ test("auto-settle: a tmux session seen once, whose finish devd missed while down
   const inbox = new Inbox({
     db: t.db, sessions: () => [tmux], session: (id) => getSession(t.db, id), threads: t.threads,
     chatLink: () => null, tmuxLive: (id) => restarted.liveSnapshot(id), bus: new EventBus(), now: t.now, coalesceMs: 0,
-    end: async () => {},
+    end: async () => {}, worktreeChanges: async () => [],
   });
   expect(restarted.liveSnapshot(TMUX.id)?.status).toBe("unknown");
   expect(inbox.item(tmux).attention.section).toBe("idle");
   t.tick(AUTO_SETTLE_SEEN_IDLE_MS + DAY);
-  expect(inbox.autoSettle()).toEqual([]);
+  expect(await inbox.autoSettle()).toEqual([]);
   t.tick(AUTO_SETTLE_IDLE_MS);
-  expect(inbox.autoSettle()).toEqual([TMUX.id]);
+  expect(await inbox.autoSettle()).toEqual([TMUX.id]);
 });
 
-test("auto-settle: a seen quiet session after 24 h, an unseen completion after 7 days (reason idle), not before", () => {
+test("auto-settle: a seen quiet session after 24 h, an unseen completion after 7 days (reason idle), not before", async () => {
   const t = setup();
   t.feed(CHAT.id, [started("r1"), completed("r1")]); // unseen: needs-you
   const tmux = getSession(t.db, TMUX.id)!;
@@ -332,17 +340,17 @@ test("auto-settle: a seen quiet session after 24 h, an unseen completion after 7
   t.hub.sweep();
   t.inbox.seen(TMUX.id); // done and seen: idle
   t.tick(AUTO_SETTLE_SEEN_IDLE_MS - 1);
-  expect(t.inbox.autoSettle()).toEqual([]);
+  expect((await t.inbox.autoSettle())).toEqual([]);
   t.tick(1);
-  expect(t.inbox.autoSettle()).toEqual([TMUX.id]);
+  expect((await t.inbox.autoSettle())).toEqual([TMUX.id]);
   expect(getSessionAttention(t.db, TMUX.id)?.settled_reason).toBe("idle");
   t.tick(AUTO_SETTLE_IDLE_MS - AUTO_SETTLE_SEEN_IDLE_MS - 2000 - 1);
-  expect(t.inbox.autoSettle()).toEqual([]);
+  expect((await t.inbox.autoSettle())).toEqual([]);
   t.tick(1);
-  expect(t.inbox.autoSettle()).toEqual([CHAT.id]);
+  expect((await t.inbox.autoSettle())).toEqual([CHAT.id]);
   expect(t.section(CHAT.id)).toBe("settled");
   expect(getSessionAttention(t.db, CHAT.id)?.settled_reason).toBe("idle");
-  expect(t.inbox.autoSettle()).toEqual([]); // already settled
+  expect((await t.inbox.autoSettle())).toEqual([]); // already settled
 });
 
 test("auto-settle counts a look as activity: idle at the look + 24 h, not before", () => {
@@ -353,7 +361,7 @@ test("auto-settle counts a look as activity: idle at the look + 24 h, not before
   expect(autoSettleDue(idle, s, null, look, 3 * DAY + AUTO_SETTLE_SEEN_IDLE_MS)).toBe(true);
 });
 
-test("a chat Done last active 3 days ago and seen now settles at now + 24 h, not minutes after the look", () => {
+test("a chat Done last active 3 days ago and seen now settles at now + 24 h, not minutes after the look", async () => {
   const t = setup();
   t.feed(CHAT.id, [started("r1"), completed("r1")]);
   t.tick(3 * DAY);
@@ -363,12 +371,12 @@ test("a chat Done last active 3 days ago and seen now settles at now + 24 h, not
   t.inbox.seen(CHAT.id);
   expect(t.section(CHAT.id)).toBe("idle");
   t.tick(AUTO_SETTLE_SEEN_IDLE_MS - 1);
-  expect(t.inbox.autoSettle()).not.toContain(CHAT.id);
+  expect((await t.inbox.autoSettle())).not.toContain(CHAT.id);
   t.tick(1);
-  expect(t.inbox.autoSettle()).toContain(CHAT.id);
+  expect((await t.inbox.autoSettle())).toContain(CHAT.id);
 });
 
-test("a tmux Done last active 3 days ago and seen now settles at now + 24 h, not minutes after the look", () => {
+test("a tmux Done last active 3 days ago and seen now settles at now + 24 h, not minutes after the look", async () => {
   const t = setup();
   const tmux = getSession(t.db, TMUX.id)!;
   t.hub.handle(tmux, "user_prompt_submit");
@@ -380,23 +388,23 @@ test("a tmux Done last active 3 days ago and seen now settles at now + 24 h, not
   t.inbox.seen(TMUX.id);
   expect(t.section(TMUX.id)).toBe("idle");
   t.tick(AUTO_SETTLE_SEEN_IDLE_MS - 1);
-  expect(t.inbox.autoSettle()).not.toContain(TMUX.id);
+  expect((await t.inbox.autoSettle())).not.toContain(TMUX.id);
   t.tick(1);
-  expect(t.inbox.autoSettle()).toContain(TMUX.id);
+  expect((await t.inbox.autoSettle())).toContain(TMUX.id);
 });
 
-test("auto-settle counts idle time from the last activity of the session, not from an old attention", () => {
+test("auto-settle counts idle time from the last activity of the session, not from an old attention", async () => {
   const t = setup();
   t.db.run("UPDATE sessions SET last_active_at=? WHERE id=?", [T0 + 3 * DAY, TMUX.id]);
   t.tick(AUTO_SETTLE_IDLE_MS);
-  expect(t.inbox.autoSettle()).toEqual([CHAT.id]); // idle since T0
+  expect((await t.inbox.autoSettle())).toEqual([CHAT.id]); // idle since T0
   t.tick(3 * DAY - 1);
-  expect(t.inbox.autoSettle()).toEqual([]);
+  expect((await t.inbox.autoSettle())).toEqual([]);
   t.tick(1);
-  expect(t.inbox.autoSettle()).toEqual([TMUX.id]);
+  expect((await t.inbox.autoSettle())).toEqual([TMUX.id]);
 });
 
-test("a pending request, an active run, holding work or a snooze block auto-settle", () => {
+test("a pending request, an active run, holding work or a snooze block auto-settle", async () => {
   const cases: ((t: ReturnType<typeof setup>) => void)[] = [
     (t) => t.feed(CHAT.id, [started("r1"), asked("r1", "q1")]),
     (t) => t.feed(CHAT.id, [started("r1")]),
@@ -408,16 +416,16 @@ test("a pending request, an active run, holding work or a snooze block auto-sett
     t.db.run("UPDATE sessions SET last_active_at=? WHERE id=?", [T0 + 30 * DAY, TMUX.id]); // only CHAT is old
     arrange(t);
     t.tick(AUTO_SETTLE_IDLE_MS + DAY);
-    expect(t.inbox.autoSettle()).toEqual([]);
+    expect((await t.inbox.autoSettle())).toEqual([]);
   }
 });
 
-test("a tmux session waiting for permission is not auto-settled", () => {
+test("a tmux session waiting for permission is not auto-settled", async () => {
   const t = setup();
   t.hub.handle(getSession(t.db, TMUX.id)!, "permission_request");
   t.db.run("UPDATE sessions SET last_active_at=? WHERE id=?", [T0 + 30 * DAY, CHAT.id]);
   t.tick(AUTO_SETTLE_IDLE_MS + DAY);
-  expect(t.inbox.autoSettle()).toEqual([]);
+  expect((await t.inbox.autoSettle())).toEqual([]);
 });
 
 test("an ended session's settle state is deleted with it", () => {
@@ -601,6 +609,7 @@ test("a failed end brings the session back out of Settled with the error, logged
   const item = t.inbox.item(getSession(t.db, TMUX.id)!);
   expect(item.attention.section).not.toBe("settled");
   expect(item).toMatchObject({ endsAt: null, endError: "docker is stuck" });
+  t.timers.due(); // the ending item went out a moment ago: this one is coalesced behind it
   expect(t.published.at(-1)).toMatchObject({ sessionId: TMUX.id, endError: "docker is stuck" });
   expect(t.logs.some((l) => l.includes(TMUX.id) && l.includes("docker is stuck"))).toBe(true);
   // The next settle tries again and clears the error.
@@ -616,7 +625,7 @@ test("a settle pending over a devd restart ends when its time comes (armEnds)", 
   const inbox = new Inbox({
     db: t.db, sessions: () => listSessions(t.db), session: (id) => getSession(t.db, id), threads: t.threads,
     chatLink: () => null, tmuxLive: () => null, bus: new EventBus(), now: t.now, coalesceMs: 0, timers: restarted.timers,
-    end: async (id, reason) => { ends.push(`${id}:${reason}`); },
+    end: async (id, reason) => { ends.push(`${id}:${reason}`); }, worktreeChanges: async () => [],
   });
   t.tick(SETTLE_END_GRACE_MS + 60_000); // devd was down past the grace
   inbox.armEnds();
@@ -629,7 +638,7 @@ test("auto-settle ends the session (reason idle), logged, and never one that wor
   const t = setup();
   t.feed(CHAT.id, [started("r1")]); // working
   t.tick(AUTO_SETTLE_IDLE_MS);
-  expect(t.inbox.autoSettle()).toEqual([TMUX.id]);
+  expect((await t.inbox.autoSettle())).toEqual([TMUX.id]);
   t.tick(SETTLE_END_GRACE_MS);
   t.timers.due();
   await settled();
@@ -642,18 +651,90 @@ test("a session settled before settles ended (no end pending) is ended by the au
   // What a settle before this change left: settled, no end; the migration stamped updated_at with its time.
   putSessionAttention(t.db, { session_id: TMUX.id, settled_at: T0, settled_reason: "manual", snooze_until: null, snooze_kind: null, updated_at: T0 + 10 * DAY, end_at: null, end_error: null });
   t.tick(10 * DAY + AUTO_SETTLE_IDLE_MS - 1);
-  expect(t.inbox.autoSettle()).not.toContain(TMUX.id);
+  expect((await t.inbox.autoSettle())).not.toContain(TMUX.id);
   t.tick(1);
-  expect(t.inbox.autoSettle()).toContain(TMUX.id);
+  expect((await t.inbox.autoSettle())).toContain(TMUX.id);
 });
 
-test("auto-settle starts at most AUTO_END_PER_TICK ends per tick", () => {
+test("auto-settle starts at most AUTO_END_PER_TICK ends per tick", async () => {
   const t = setup();
   for (const n of [1, 2, 3]) insertSession(t.db, { ...TMUX, id: `dev-a-more-${n}`, container: `dev-a-more-${n}`, port_base: 40300 + 100 * n, created_at: T0, last_active_at: T0 });
   t.tick(AUTO_SETTLE_IDLE_MS);
-  expect(t.inbox.autoSettle()).toHaveLength(AUTO_END_PER_TICK);
-  expect(t.inbox.autoSettle()).toHaveLength(AUTO_END_PER_TICK);
-  expect(t.inbox.autoSettle()).toHaveLength(5 - 2 * AUTO_END_PER_TICK);
+  expect((await t.inbox.autoSettle())).toHaveLength(AUTO_END_PER_TICK);
+  expect((await t.inbox.autoSettle())).toHaveLength(AUTO_END_PER_TICK);
+  expect((await t.inbox.autoSettle())).toHaveLength(5 - 2 * AUTO_END_PER_TICK);
+});
+
+test("the auto rule leaves a due session with uncommitted changes alive: its row says why, logged once, not every tick", async () => {
+  const t = setup({ changes: { [TMUX.id]: ["M a.ts", "?? b.ts"] } });
+  t.tick(AUTO_SETTLE_IDLE_MS);
+  expect(await t.inbox.autoSettle()).toEqual([CHAT.id]);
+  expect(t.inbox.item(getSession(t.db, TMUX.id)!)).toMatchObject({ autoEndHold: AUTO_END_HOLDS.dirty, attention: { section: "idle" } });
+  expect(await t.inbox.autoSettle()).toEqual([]);
+  t.tick(AUTO_SETTLE_TICK_MS);
+  expect(await t.inbox.autoSettle()).toEqual([]);
+  expect(t.logs.filter((l) => l.includes(TMUX.id) && l.includes("stays"))).toHaveLength(1);
+  expect(t.published.some((i) => i.sessionId === TMUX.id && i.autoEndHold === AUTO_END_HOLDS.dirty)).toBe(true);
+  // Activity clears the hold: the session is not due any more.
+  t.inbox.settle(TMUX.id, "manual");
+  expect(t.inbox.item(getSession(t.db, TMUX.id)!).autoEndHold).toBeNull();
+});
+
+test("the auto rule does not end a session whose worktree state is unknown (unknown is not clean)", async () => {
+  const t = setup({ changes: { [TMUX.id]: null, [CHAT.id]: null } });
+  t.tick(AUTO_SETTLE_IDLE_MS);
+  expect(await t.inbox.autoSettle()).toEqual([]);
+  expect(t.inbox.item(getSession(t.db, TMUX.id)!).autoEndHold).toBe(AUTO_END_HOLDS.unknown);
+  t.timers.due();
+  await settled();
+  expect(t.ends).toEqual([]);
+});
+
+test("a merged PR's settle (not checked by the idle rule) still keeps a session with uncommitted changes alive", async () => {
+  const t = setup({ changes: { [TMUX.id]: ["M a.ts"] } });
+  t.inbox.settle(TMUX.id, "merged");
+  t.tick(SETTLE_END_GRACE_MS);
+  t.timers.due();
+  await settled();
+  expect(t.ends).toEqual([]);
+  expect(t.inbox.item(getSession(t.db, TMUX.id)!)).toMatchObject({ autoEndHold: AUTO_END_HOLDS.dirty, endsAt: null });
+  expect(t.inbox.item(getSession(t.db, TMUX.id)!).attention.section).not.toBe("settled");
+});
+
+test("a manual settle ends a dirty session too (the owner confirmed; the end keeps the worktree)", async () => {
+  const t = setup({ changes: { [TMUX.id]: ["M a.ts"] } });
+  t.inbox.settle(TMUX.id, "manual");
+  t.tick(SETTLE_END_GRACE_MS);
+  t.timers.due();
+  await settled();
+  expect(t.ends).toEqual([`${TMUX.id}:manual`]);
+});
+
+test("while the end runs the row sits in Settled as ending (not undoable), then it goes; a failed end comes back with its error", async () => {
+  let release!: () => void;
+  const t = setup({ endGate: new Promise<void>((r) => { release = r; }) });
+  t.inbox.settle(TMUX.id, "manual");
+  t.tick(SETTLE_END_GRACE_MS);
+  t.timers.due();
+  await settled();
+  expect(t.ends).toEqual([`${TMUX.id}:manual`]);
+  const during = t.inbox.list().find((i) => i.sessionId === TMUX.id)!;
+  expect(during).toMatchObject({ ending: true, endsAt: null, attention: { section: "settled" } });
+  expect(t.published.at(-1)).toMatchObject({ sessionId: TMUX.id, ending: true });
+  // devd's session lookup leaves an ending session out (mgr.isEnding): the inbox still shows it.
+  expect(t.inbox.item(getSession(t.db, TMUX.id)!).ending).toBe(true);
+  release();
+  await settled();
+  expect(t.inbox.list().some((i) => i.sessionId === TMUX.id)).toBe(false);
+  t.timers.due();
+  expect(t.published.at(-1) as unknown).toEqual({ sessionId: TMUX.id, removed: true });
+
+  const f = setup({ endFails: "docker rm failed" });
+  f.inbox.settle(CHAT.id, "manual");
+  f.tick(SETTLE_END_GRACE_MS);
+  f.timers.due();
+  await settled();
+  expect(f.inbox.item(getSession(f.db, CHAT.id)!)).toMatchObject({ ending: false, endError: "docker rm failed" });
 });
 
 test("the migration adds the end columns and restarts the auto clock of sessions already settled, not of others", () => {

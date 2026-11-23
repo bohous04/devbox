@@ -7,7 +7,7 @@ import { AgentDisconnected, CommandFailed, CommandTimeout, type BridgeLinks } fr
 import { SwitchRefused, type ChatSwitch, type SwitchRequest } from "./chatSwitch";
 import { getSession, type SessionRow } from "./db";
 import type { BusTopic, EventBus } from "./eventBus";
-import { REQUEST_OPEN, SETTLE_REQUEST_OPEN, SETTLE_WORKING, type ResetTarget } from "./sessionAttention";
+import { REQUEST_OPEN, settleConfirmation, type ResetTarget } from "./sessionAttention";
 import type { Inbox } from "./sessionInbox";
 import { storedRuntime } from "./sessions";
 import { threadImageByName, threadImageFile } from "./threadImages";
@@ -34,6 +34,9 @@ export interface ThreadApiDeps {
   untilReset?: (s: SessionRow) => ResetTarget;
   /** The session's bridge version from its latest handshake (chatSwitch.ts); null before one or for a 1.0.0 bridge. */
   bridgeVersion: (sessionId: string) => string | null;
+  /** The session worktree's uncommitted changes (null: unreadable) and unpushed commits (null: unknown), for the
+   *  settle's question; a session without a worktree of its own has none to lose. Without it settle answers 503. */
+  worktree?: (s: SessionRow) => Promise<{ changes: string[] | null; unpushed: number | null }>;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -254,8 +257,9 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
     return c.body(null, 204);
   });
   /** Each answers the session's new inbox item. */
-  /** Settling ends the session (after the inbox's undo grace). One whose agent works or waits for an answer is 409
-   *  (agent-working, request-open) with the question to ask, until the body says `{confirm: true}`. */
+  /** Settling ends the session (after the inbox's undo grace). One whose agent works or waits for an answer, or whose
+   *  worktree has uncommitted changes, is 409 (settleConfirmation) with the question to ask, until the body says
+   *  `{confirm: true}`. The end keeps such a worktree on disk (endSessionKeepingWork). */
   app.post("/api/sessions/:id/settle", async (c) => {
     const r = anySession(c, c.req.param("id"));
     if ("res" in r) return r.res;
@@ -269,9 +273,12 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
       }
       confirm = body.confirm === true;
     }
-    const attention = d.inbox.item(r.s).attention;
-    if (!confirm && attention.reason === "request") return c.json({ error: "request-open", message: SETTLE_REQUEST_OPEN }, 409);
-    if (!confirm && attention.section === "working") return c.json({ error: "agent-working", message: SETTLE_WORKING }, 409);
+    if (!confirm) {
+      if (!d.worktree) return c.json({ error: "the worktree check is not configured" }, 503);
+      const w = r.s.worktree ? await d.worktree(r.s) : { changes: [], unpushed: null };
+      const ask = settleConfirmation({ attention: d.inbox.item(r.s).attention, worktree: r.s.worktree ?? null, ...w, branch: r.s.branch ?? null });
+      if (ask) return c.json(ask, 409);
+    }
     d.inbox.settle(r.s.id, "manual");
     return c.json(d.inbox.item(r.s));
   });

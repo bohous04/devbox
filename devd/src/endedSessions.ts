@@ -23,6 +23,7 @@ export interface EndedRow {
   /** "" with transcript `missing` when end() archived nothing. */
   archive_dir: string; store_file: string; native_harness: string | null; native_thread: string | null; hidden_at: number | null;
   transcript: TranscriptState;
+  kept_worktree: string | null;
 }
 
 const clip = (t: string, max: number) => (t.length > max ? `${t.slice(0, max)}…` : t);
@@ -80,7 +81,7 @@ export function toEnded(r: EndedRow): EndedSession {
   return {
     id: r.id, sessionId: r.session_id, runtime: r.runtime, title: r.title, folder: r.folder, project: r.project, repo: r.repo,
     agent: r.agent, branch: r.branch, topic: r.topic, lastText: r.last_text, endedAt: r.ended_at, continueMode: continueMode(r),
-    transcript: r.transcript,
+    transcript: r.transcript, keptWorktree: r.kept_worktree,
   };
 }
 
@@ -97,7 +98,7 @@ function archivedStoreFile(archiveDir: string, sessionId: string): string | null
  *  (TranscriptMirror.finalRefresh). Seals the store for read-only use (ThreadStore.sealArchive). Throws when the
  *  archived store cannot be read. */
 export function recordEnded(db: Database, s: SessionRow, archiveDir: string | null, endedAt: number,
-  o: { id?: string; truncated?: boolean } = {}): EndedSession | null {
+  o: { id?: string; truncated?: boolean; keptWorktree?: string | null } = {}): EndedSession | null {
   const file = archiveDir === null ? null : archivedStoreFile(archiveDir, s.id);
   const runtime = s.runtime === "chat" ? "chat" : "tmux";
   if (file === null && runtime !== "tmux") return null;
@@ -120,11 +121,11 @@ export function recordEnded(db: Database, s: SessionRow, archiveDir: string | nu
     agent: s.agent!, runtime, title: s.name || `${s.project}/${s.repo}`, branch: s.branch ?? null,
     topic: first === null ? null : threadTitle(first), last_text: last === null ? null : clip(last, LAST_TEXT_MAX), ended_at: endedAt,
     archive_dir: archiveDir ?? "", store_file: file ?? "", native_harness: native?.harness ?? null, native_thread: native?.nativeThreadId ?? null, hidden_at: null,
-    transcript: file === null ? "missing" : o.truncated ? "truncated" : "complete",
+    transcript: file === null ? "missing" : o.truncated ? "truncated" : "complete", kept_worktree: o.keptWorktree ?? null,
   };
-  db.query(`INSERT OR REPLACE INTO ended_sessions (id,session_id,folder,project,repo,agent,runtime,title,branch,topic,last_text,ended_at,archive_dir,store_file,native_harness,native_thread,hidden_at,transcript)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)`).run(row.id, row.session_id, row.folder, row.project, row.repo, row.agent, row.runtime, row.title,
-    row.branch, row.topic, row.last_text, row.ended_at, row.archive_dir, row.store_file, row.native_harness, row.native_thread, row.transcript);
+  db.query(`INSERT OR REPLACE INTO ended_sessions (id,session_id,folder,project,repo,agent,runtime,title,branch,topic,last_text,ended_at,archive_dir,store_file,native_harness,native_thread,hidden_at,transcript,kept_worktree)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)`).run(row.id, row.session_id, row.folder, row.project, row.repo, row.agent, row.runtime, row.title,
+    row.branch, row.topic, row.last_text, row.ended_at, row.archive_dir, row.store_file, row.native_harness, row.native_thread, row.transcript, row.kept_worktree);
   return toEnded(row);
 }
 

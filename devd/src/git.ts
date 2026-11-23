@@ -561,6 +561,18 @@ export async function worktreeChanges(dir: string): Promise<string[] | null> {
   return r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
 }
 
+/** Commits on the worktree's HEAD that no remote branch has; null when git could not say. They survive an end: the
+ *  branch stays (devd deletes branches only right after a clone, trackRemote). */
+export async function unpushedCommits(dir: string): Promise<number | null> {
+  const r = await sh(dir, "git", "-C", dir, "-c", `safe.directory=${dir}`, "rev-list", "--count", "HEAD", "--not", "--remotes");
+  if (r.code !== 0) {
+    console.error(`git rev-list ${dir} failed: ${r.stderr.trim()}`);
+    return null;
+  }
+  const n = Number(r.stdout.trim());
+  return Number.isSafeInteger(n) ? n : null;
+}
+
 export async function removeWorktree(bare: string, dest: string): Promise<void> {
   // `--force`: the worktree of a running session contains uncommitted changes and git would otherwise
   // refuse to delete it. Ending a session is a conscious user step (F9 → End), so here

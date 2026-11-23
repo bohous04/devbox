@@ -21,15 +21,42 @@ export const AUTO_SETTLE_SEEN_IDLE_MS = 86_400_000;
 export const AUTO_SETTLE_TICK_MS = 10 * 60_000;
 /** The most sessions one tick settles (and so ends): an end backs up and removes a container. */
 export const AUTO_END_PER_TICK = 2;
+/** What the row of a session the auto rule leaves alive says: an end deletes uncommitted and untracked changes, and
+ *  an unreadable worktree may hold some (unknown is not clean). Unpushed commits do not hold it: they stay on the
+ *  branch, which devd never deletes. */
+export const AUTO_END_HOLDS = { dirty: "Uncommitted changes", unknown: "Worktree state unknown" } as const;
 
 /** What the AgentEventHub reports for the shelves: a new run (prompt), a request (question, approval), a failure. */
 export type Activity = "run" | "request" | "failure";
 
 /** Settling or snoozing a session that waits for the user would hide the question it asks. */
 export const REQUEST_OPEN = "Answer the open request first: a session waiting for you cannot be settled or snoozed";
-/** Settling ends the session: one whose agent works or waits for an answer is settled only once the owner confirms. */
-export const SETTLE_WORKING = "The agent is still working. End it?";
-export const SETTLE_REQUEST_OPEN = "The agent is waiting for your answer. End it?";
+/** Settling ends the session: one whose agent works or waits for an answer, or whose worktree has changes nobody
+ *  committed, is settled only once the owner confirms (POST settle answers 409 with the question). */
+export const SETTLE_WORKING = "The agent is still working.";
+export const SETTLE_REQUEST_OPEN = "The agent is waiting for your answer.";
+
+/** What a settle needs confirmed, as devd's 409: the most pressing reason's code and one question naming every
+ *  reason; null when it settles at once. Unpushed commits are said, never asked about: they stay on the branch. */
+export function settleConfirmation(o: {
+  attention: Attention; worktree: string | null; changes: string[] | null; unpushed: number | null; branch: string | null;
+}): { error: "request-open" | "agent-working" | "uncommitted-changes"; message: string } | null {
+  const parts: string[] = [];
+  let error: "request-open" | "agent-working" | "uncommitted-changes" | null = null;
+  if (o.attention.reason === "request") { parts.push(SETTLE_REQUEST_OPEN); error = "request-open"; }
+  else if (o.attention.section === "working") { parts.push(SETTLE_WORKING); error = "agent-working"; }
+  if (o.worktree !== null && (o.changes === null || o.changes.length > 0)) {
+    parts.push(o.changes === null
+      ? `Its worktree could not be read, so it stays on disk at ${o.worktree}.`
+      : `Uncommitted changes stay on disk at ${o.worktree}.`);
+    error ??= "uncommitted-changes";
+  }
+  if (error === null) return null;
+  if (o.unpushed !== null && o.unpushed > 0) {
+    parts.push(`${o.unpushed} unpushed commit${o.unpushed === 1 ? " stays" : "s stay"} on branch ${o.branch ?? "(unknown)"}.`);
+  }
+  return { error, message: `${parts.join(" ")} End it?` };
+}
 
 /** The AgentEventHub's shelf deps over the inbox. Neither may fail the hook or bridge event it is called from:
  *  - an unsettle/wake that cannot be written is logged; the session stays on its shelf until unsettled (S5-R16),

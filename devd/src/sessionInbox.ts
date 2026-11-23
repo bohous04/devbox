@@ -5,7 +5,7 @@ import type { AgentLiveSnapshot } from "./agentEvents";
 import { chatAttention, lastEndedRun, tmuxAttention, WORKING_GRACE_MS, type LinkState, type PrHold } from "./attention";
 import { getSessionAttention, getSeenAt, pendingEnds, putSessionAttention, setSeenAt, snoozedSessionIds, type SessionAttentionRow, type SessionRow, type SettleReason, type SnoozeKind } from "./db";
 import type { EventBus } from "./eventBus";
-import { AUTO_END_PER_TICK, autoSettleDue, shelve, snoozeActive, type Activity } from "./sessionAttention";
+import { AUTO_END_HOLDS, AUTO_END_PER_TICK, autoSettleDue, shelve, snoozeActive, type Activity } from "./sessionAttention";
 import { storedRuntime } from "./sessions";
 import type { ThreadStore } from "./threadStore";
 
@@ -48,6 +48,11 @@ export class Inbox {
   private topics = new Map<string, string>();
   /** The timers of the settles whose end is pending, per session. */
   private endTimers = new Map<string, unknown>();
+  /** Sessions whose end runs now (minutes: the storage guard backs the container up first), with the item they show
+   *  meanwhile: in Settled, `ending`. Kept here because devd's session list leaves ending sessions out. */
+  private ending = new Map<string, InboxItem>();
+  /** Why the auto rule leaves a due session alive (AUTO_END_HOLDS), shown on its row and logged once per change. */
+  private holds = new Map<string, string>();
   private coalesceMs: number;
   private log: (msg: string) => void;
 
@@ -72,6 +77,9 @@ export class Inbox {
     /** Ends a settled session once its grace has passed (index.ts: endSessionKeepingWork, so a dirty worktree stays).
      *  A rejection brings the session back out of Settled with the error. */
     end: (id: string, reason: SettleReason) => Promise<void>;
+    /** The session worktree's uncommitted and untracked changes (git status), [] for none or no worktree of its own,
+     *  null when they could not be read. The auto rule ends only a session with none: an end deletes them. */
+    worktreeChanges: (s: SessionRow) => Promise<string[] | null>;
   }) {
     this.coalesceMs = d.coalesceMs ?? INBOX_COALESCE_MS;
     this.timers = d.timers ?? { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) };
@@ -80,12 +88,14 @@ export class Inbox {
 
   now() { return this.d.now?.() ?? Date.now(); }
 
-  item(s: SessionRow): InboxItem { return this.build(s).item; }
+  /** A session whose end runs shows its `ending` item, whatever its own state says meanwhile. */
+  item(s: SessionRow): InboxItem { return this.ending.get(s.id) ?? this.build(s).item; }
 
   /** Settle by hand (`manual`), by the idle rule (`idle`) or a merged PR (`merged`); ends a snooze. The session ends
    *  SETTLE_END_GRACE_MS later unless unsettled before. */
   settle(sessionId: string, reason: SettleReason): void {
     const now = this.now();
+    this.holds.delete(sessionId);
     putSessionAttention(this.d.db, { session_id: sessionId, settled_at: now, settled_reason: reason, snooze_until: null, snooze_kind: null, updated_at: now, end_at: now + SETTLE_END_GRACE_MS, end_error: null });
     this.armEnd(sessionId, now + SETTLE_END_GRACE_MS, reason);
     this.changedSafe(sessionId);
@@ -110,17 +120,51 @@ export class Inbox {
   }
 
   private async runEnd(sessionId: string, reason: SettleReason) {
-    if (reason !== "manual") this.log(`inbox: auto end of ${sessionId} (settled: ${reason})`);
+    const s = this.d.session(sessionId);
+    if (s && reason !== "manual") {
+      // An automatic settle (the idle rule checked before it, a merged PR did not) never ends a session with work
+      // nobody committed: it stays alive, its row says why.
+      const hold = await this.autoEndHold(s);
+      if (hold !== null) {
+        const row = getSessionAttention(this.d.db, sessionId);
+        if (row) putSessionAttention(this.d.db, { ...row, settled_at: null, settled_reason: null, end_at: null, updated_at: this.now() });
+        this.changedSafe(sessionId);
+        return;
+      }
+      this.log(`inbox: auto end of ${sessionId} (settled: ${reason})`);
+    }
+    if (s) {
+      const shown = this.build(s).item;
+      this.ending.set(sessionId, { ...shown, attention: { ...shown.attention, section: "settled", reason: null }, endsAt: null, endError: null, ending: true, autoEndHold: null });
+      this.changedSafe(sessionId);
+    }
     try {
       await this.d.end(sessionId, reason);
+      this.ending.delete(sessionId);
     } catch (e) {
+      this.ending.delete(sessionId);
       const msg = (e as Error).message;
       this.log(`inbox: ending ${sessionId} after its settle failed, it is back in the inbox: ${msg}`);
       const row = getSessionAttention(this.d.db, sessionId);
       // The session is gone after all (ended meanwhile, its row deleted with it): nothing to bring back.
       if (row) putSessionAttention(this.d.db, { ...row, settled_at: null, settled_reason: null, end_at: null, end_error: msg, updated_at: this.now() });
-      this.changedSafe(sessionId);
     }
+    this.changedSafe(sessionId);
+  }
+
+  /** Why the auto rule must not end `s` now (AUTO_END_HOLDS), or null. Logged when it changes, not every tick. */
+  private async autoEndHold(s: SessionRow): Promise<string | null> {
+    const changes = await this.d.worktreeChanges(s);
+    const hold = changes === null ? AUTO_END_HOLDS.unknown : changes.length > 0 ? AUTO_END_HOLDS.dirty : null;
+    this.setHold(s.id, hold, changes === null ? "its worktree state could not be read" : `${changes.length} uncommitted change(s) in ${s.worktree}`);
+    return hold;
+  }
+
+  private setHold(sessionId: string, hold: string | null, why = "") {
+    if ((this.holds.get(sessionId) ?? null) === hold) return;
+    if (hold === null) this.holds.delete(sessionId); else this.holds.set(sessionId, hold);
+    if (hold !== null) this.log(`inbox: ${sessionId} is due to settle and end, but stays: ${why}`);
+    this.changedSafe(sessionId);
   }
 
   /** Settles unless the session is busy (an active run, holding work, a pending request): the merged-PR rule settles
@@ -138,6 +182,7 @@ export class Inbox {
   unsettle(sessionId: string): void {
     const now = this.now();
     this.cancelEnd(sessionId);
+    this.holds.delete(sessionId);
     putSessionAttention(this.d.db, { session_id: sessionId, settled_at: null, settled_reason: null, snooze_until: null, snooze_kind: null, updated_at: now, end_at: null, end_error: null });
     this.changedSafe(sessionId);
   }
@@ -167,6 +212,7 @@ export class Inbox {
     const wake = kind !== "run" && row.snooze_until !== null;
     if (row.settled_at === null && !wake) return;
     if (row.settled_at !== null) this.cancelEnd(sessionId);
+    this.holds.delete(sessionId);
     putSessionAttention(this.d.db, {
       ...row, settled_at: null, settled_reason: null, end_at: null,
       ...(wake ? { snooze_until: null, snooze_kind: null } : {}), updated_at: this.now(),
@@ -180,8 +226,9 @@ export class Inbox {
   }
 
   /** The idle rule (index.ts runs it every AUTO_SETTLE_TICK_MS): settles, and so ends, the sessions that are due, at
-   *  most AUTO_END_PER_TICK per tick (an end is heavy: a backup, a container removal). Returns their ids. */
-  autoSettle(): string[] {
+   *  most AUTO_END_PER_TICK per tick (an end is heavy: a backup, a container removal). A due session with
+   *  uncommitted changes, or whose worktree cannot be read, stays (autoEndHold). Returns the settled ids. */
+  async autoSettle(): Promise<string[]> {
     const now = this.now();
     const settled: string[] = [];
     for (const s of this.d.sessions()) {
@@ -189,14 +236,24 @@ export class Inbox {
       const live = storedRuntime(s) === "tmux" ? this.d.tmuxLive(s.id) : null;
       const stateKnown = storedRuntime(s) === "chat" || (live !== null && live.status !== "unknown");
       const look = { seenAt: getSeenAt(this.d.db, s.id), stateKnown };
-      if (!autoSettleDue(this.base(s).item.attention, s, getSessionAttention(this.d.db, s.id), look, now)) continue;
+      if (!autoSettleDue(this.base(s).item.attention, s, getSessionAttention(this.d.db, s.id), look, now)) {
+        this.setHold(s.id, null);
+        continue;
+      }
+      if (await this.autoEndHold(s) !== null) continue;
+      // The session may have changed (a prompt, a settle by hand, an end) while git ran.
+      const again = this.d.session(s.id);
+      if (!again || !autoSettleDue(this.base(again).item.attention, again, getSessionAttention(this.d.db, s.id), look, this.now())) continue;
       this.settle(s.id, "idle");
       settled.push(s.id);
     }
     return settled;
   }
 
-  list(): InboxItem[] { return sortInbox(this.d.sessions().map((s) => this.item(s))); }
+  list(): InboxItem[] {
+    const live = this.d.sessions().filter((s) => !this.ending.has(s.id)).map((s) => this.item(s));
+    return sortInbox([...live, ...this.ending.values()]);
+  }
 
   /** `recheckAt`: when the item changes without an event: the end of a snooze, or of the WORKING_GRACE_MS a chat
    *  run that just ended still counts as working. */
@@ -207,7 +264,7 @@ export class Inbox {
     const attention = shelve(b.item.attention, row, now);
     const snoozeEnd = attention.until ?? null;
     const recheckAt = b.recheckAt === null ? snoozeEnd : snoozeEnd === null ? b.recheckAt : Math.min(b.recheckAt, snoozeEnd);
-    return { item: { ...b.item, attention, ...endFields(row) }, recheckAt };
+    return { item: { ...b.item, attention, ...endFields(row), ending: false, autoEndHold: this.holds.get(s.id) ?? null }, recheckAt };
   }
 
   /** The session's item without its shelf. */
@@ -285,7 +342,16 @@ export class Inbox {
 
   private publish(sessionId: string) {
     const s = this.d.session(sessionId);
+    const ending = this.ending.get(sessionId);
+    if (ending) {
+      const json = JSON.stringify(ending);
+      if (this.lastPublished.get(sessionId) === json) return;
+      this.lastPublished.set(sessionId, json);
+      this.d.bus.publish("inbox", ending);
+      return;
+    }
     if (!s) {
+      this.holds.delete(sessionId);
       this.lastPublished.delete(sessionId);
       this.broken.delete(sessionId);
       this.topics.delete(sessionId);
