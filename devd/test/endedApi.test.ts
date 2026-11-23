@@ -86,6 +86,8 @@ test("GET transcript is the thread snapshot shape, with paging; an unknown id is
   expect(snap.lastSeq).toBe(4);
   const last = (await (await t.a.fetch(new Request(`http://x/api/ended/${ID}/transcript?limit=1`))).json()) as ThreadSnapshot;
   expect(last.items.map((i) => i.kind)).toEqual(["assistant"]);
+  // The tail leaves the first message out: the topic still names the transcript.
+  expect(last.topic).toBe("Make the header sticky");
   expect((await t.a.fetch(new Request(`http://x/api/ended/${ID}/transcript?limit=x`))).status).toBe(400);
   expect((await t.a.fetch(new Request("http://x/api/ended/nope/transcript"))).status).toBe(404);
 });

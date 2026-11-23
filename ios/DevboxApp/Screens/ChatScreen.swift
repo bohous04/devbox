@@ -162,7 +162,7 @@ struct ChatScreen: View {
         }
         .onChange(of: store.isTmux) { storePendingTab() }
         .onChange(of: sessionCreatedAt) { storePendingTab() }
-        .task { await store.start() }
+        .task { await store.start(runtime: live.live?.sessions.first(where: { $0.id == sessionId })?.runtime) }
         .onAppear { visible = true }
         .onDisappear {
             visible = false
@@ -250,6 +250,16 @@ struct ChatScreen: View {
                     if t.items.isEmpty {
                         EmptyState(store.isTmux ? "No messages yet — the agent's conversation in the terminal shows up here."
                                    : "No messages yet — write the first message below.", systemImage: "bubble.left")
+                    }
+                    if store.hasOlder {
+                        OlderItemsButton(loading: store.loadingOlder, error: store.olderError) {
+                            // Older rows go in above: keep the row that was first where it was (or its run's fold).
+                            let first = store.display.first
+                            Task {
+                                await store.loadOlder()
+                                if let first, let id = WorkGroups.anchor(for: first, in: store.display) { proxy.scrollTo(id, anchor: .top) }
+                            }
+                        }
                     }
                     let turnStarts = WorkGroups.turnStarts(store.display)
                     ForEach(store.display) { row in

@@ -166,6 +166,8 @@ const CHAT: SessionRow = { ...TMUX, id: "dev-a-chat", container: "dev-a-chat", r
 interface Pane {
   sid: string | null; status?: string; agent?: string; inMode?: boolean; sendResult?: string; noPane?: boolean;
   codexHome?: string; home?: string; homes?: Record<string, string>; codexOpen?: string[]; pid?: number; start?: string;
+  /** Holds every pane read until it settles: a slow `docker exec`. */
+  gate?: Promise<void>;
 }
 
 function setup(pane: Pane, isEnding: (id: string) => boolean = () => false, o: { finalReadMs?: number } = {}) {
@@ -182,6 +184,7 @@ function setup(pane: Pane, isEnding: (id: string) => boolean = () => false, o: {
     calls.push({ cmd, stdin });
     const ok = (stdout: string): ExecResult => ({ code: 0, stdout, stderr: "", timedOut: false });
     if (cmd[3] === MIRROR_LOCATE) {
+      await pane.gate;
       if (pane.noPane) return ok(locateOut({ pane: null }));
       const agent = pane.agent ?? "claude";
       const pid = pane.pid ?? 20;
@@ -454,6 +457,47 @@ test("routes: the stream replays the snapshot, then sends live events and the in
   t.mirror.release(TMUX.id);
   for (;;) { if ((await reader.read()).done) break; }
   ctrl.abort();
+});
+
+test("routes: once the mirror has read the pane, GET answers the stored tail at once; the stream brings what the read found", async () => {
+  const pane: Pane = { sid: SID };
+  const t = setup(pane);
+  t.write(SID, fixtureLines().slice(0, 7));
+  await t.mirror.refresh(TMUX.id);
+  const stored = t.mirror.store(TMUX.id).snapshot();
+  t.write(SID, fixtureLines().slice(7));
+  let open!: () => void;
+  pane.gate = new Promise((r) => { open = r; });
+  const a = app(t);
+  const late = Symbol("late");
+  const got = await Promise.race([a.request(`/api/sessions/${TMUX.id}/mirror?limit=2`), Bun.sleep(1_000).then(() => late)]);
+  if (got === late) throw new Error("GET waited for the pane read");
+  const body = await (got as Response).json() as MirrorResponse;
+  expect(body.snapshot.lastSeq).toBe(stored.lastSeq);
+  expect(body.snapshot.items.map(brief)).toEqual(stored.items.slice(-2).map(brief));
+  expect(body.snapshot.topic).toBe("List the files in the repository");
+  expect(body.mirror.state).toBe("live");
+  // The client streams from the seq it got; the read GET started (still held) delivers the rest.
+  const ctrl = new AbortController();
+  const res = await a.request(`/api/sessions/${TMUX.id}/mirror/stream?afterSeq=${body.snapshot.lastSeq}`, { signal: ctrl.signal });
+  const reader = res.body!.getReader();
+  const dec = new TextDecoder();
+  let text = "";
+  await (async () => { while (!text.includes("event: mirror")) text += dec.decode((await reader.read()).value); })();
+  expect(text).not.toContain("There are two entries");
+  open();
+  while (!text.includes("There are two entries")) text += dec.decode((await reader.read()).value);
+  ctrl.abort();
+});
+
+test("routes: a mirror that never read its pane (devd just started) still reads it before the first GET answers", async () => {
+  const t = setup({ sid: SID });
+  t.write(SID, fixtureLines());
+  const body = await (await app(t).request(`/api/sessions/${TMUX.id}/mirror?limit=1`)).json() as MirrorResponse;
+  // Not the default "no-pane" info a store read alone would give.
+  expect(body.mirror).toMatchObject({ state: "live", conversationId: SID });
+  expect(body.snapshot.items).toHaveLength(1);
+  expect(body.snapshot.lastSeq).toBeGreaterThan(1);
 });
 
 test("applyBatch saves the cursor with the events", () => {

@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { parseCommands } from "../../shared/commands";
 import { parseEffortState } from "../../shared/effort";
+import { threadTitle } from "../../shared/threadTitle";
 import type { AgentCommand, BackgroundWork, Capabilities, LoggedEvent, PendingRequest, RunRow, ThreadEffort, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
 const TERMINAL: ReadonlySet<string> = new Set(["completed", "interrupted", "failed"]);
@@ -416,6 +417,13 @@ export class ThreadStore {
       also();
     })();
     this.onNotice(item);
+  }
+
+  /** What the GET routes answer (thread, mirror, ended transcript): the snapshot plus the thread's `topic`, so a client
+   *  that loaded only the newest items still names the thread as the inbox does. Stream frames go without it. */
+  snapshotWithTopic(opts: { afterSeq?: number; beforeSeq?: number; limit?: number } = {}): ThreadSnapshot {
+    const first = this.firstUserText();
+    return { ...this.snapshot(opts), topic: first === null ? null : threadTitle(first) };
   }
 
   /** Without `limit` all items; with it the newest `limit` ones, oldest first. `beforeSeq` keeps only items

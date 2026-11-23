@@ -47,13 +47,19 @@ export function registerMirrorRoutes(app: Hono, mirror: TranscriptMirror): void 
       if (n === null) return c.json({ error: `${key} must be a non-negative integer` }, 400);
       opts[key] = n;
     }
-    await mirror.refresh(id);
-    // The session may have started ending while the pane was read.
-    const after = session(c, id);
-    if (after) return after;
+    // A pane read is a docker exec (~0.5 s): the answer does not wait for it once the mirror has read the pane before.
+    // What this read finds reaches the client over the stream it opens next (a replay from the seq answered here, or a
+    // live frame). The first read since devd started is awaited: without it the info would be a made-up "no-pane".
+    const read = mirror.refresh(id);
+    if (!mirror.hasRead(id)) {
+      await read;
+      // The session may have started ending while the pane was read.
+      const after = session(c, id);
+      if (after) return after;
+    }
     const store = openStore(c, id);
     if (store instanceof Response) return store;
-    return c.json({ snapshot: store.snapshot(opts), mirror: mirror.info(id) } satisfies MirrorResponse);
+    return c.json({ snapshot: store.snapshotWithTopic(opts), mirror: mirror.info(id) } satisfies MirrorResponse);
   });
 
   app.post("/api/sessions/:id/mirror/messages", async (c) => {

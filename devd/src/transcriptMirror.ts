@@ -571,6 +571,9 @@ export class TranscriptMirror {
     return this.infos.get(id) ?? { state: "no-pane", agent: null, conversationId: null, activity: null, terminalPrompt: null, sendBlock: null };
   }
 
+  /** A read of the pane got as far as its info since devd started (or since release): `info` is what it found. */
+  hasRead(id: string): boolean { return this.infos.has(id); }
+
   /** A client watches the mirror (its SSE stream): poll while anyone does. Returns the unwatch function. */
   watch(id: string): () => void {
     let w = this.watchers.get(id);

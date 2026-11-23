@@ -32,8 +32,10 @@ enum ThreadView {
         for r in s.runs {
             if let idx = runs.firstIndex(where: { $0.runId == r.runId }) { runs[idx] = r } else { runs.append(r) }
         }
+        // Stream frames carry no topic (GET only), and the first message, which it names, never changes.
         return ThreadSnapshot(lastSeq: max(t.lastSeq, s.lastSeq), seenSeq: s.seenSeq, runs: runs, items: items,
-                              pending: s.pending, background: s.background, native: s.native, effort: s.effort, commands: s.commands)
+                              pending: s.pending, background: s.background, native: s.native, effort: s.effort, commands: s.commands,
+                              topic: t.topic)
     }
 
     /// A `thread-commands` frame's list; one of an unexpected shape is logged and read as none, as the snapshot reads it.
@@ -126,6 +128,126 @@ enum ThreadView {
     /// is open posts only when it is not seen yet. As the dashboard's `seenToPost`.
     static func seenToPost(_ t: ThreadSnapshot, look: Bool) -> Int? {
         look || t.lastSeq > t.seenSeq ? t.lastSeq : nil
+    }
+
+    // MARK: - Paging (dashboard/src/threadView.ts THREAD_PAGE, prependOlder, tailView)
+
+    /// How many items a thread opens with (its newest) and how many each step back adds: a long session's whole
+    /// history is megabytes (devd's `limit`/`beforeSeq`).
+    static let pageSize = 200
+
+    /// A page devd answered for `limit=pageSize`: a full one may have more before it.
+    static func hasOlder(_ page: ThreadSnapshot) -> Bool { page.items.count >= pageSize }
+
+    /// The `beforeSeq` for the page before the oldest loaded item: one past its seq, since a devd notice takes the seq
+    /// of the event before it, so two items can share a seq and `beforeSeq = seq` would skip the older one.
+    static func olderBeforeSeq(_ t: ThreadSnapshot) -> Int? { t.items.first.map { $0.seq + 1 } }
+
+    /// Live updates of items older than the loaded window, kept until a page back loads those items (threadView.ts
+    /// Held). `items`: whole items a stream replay sent that began before the window; `finishes`: tool.finished events
+    /// whose tool.started is not loaded. Either would otherwise be appended at the thread's end, out of place
+    /// ("(unknown)" for a finish), and come back a second time with the older page.
+    struct HeldItem: Equatable {
+        var item: ThreadItem
+        var atSeq: Int
+    }
+
+    struct Held: Equatable {
+        /// `atSeq`: the replay's seq, to tell whether a page answered later already has this state or a newer one.
+        var items: [String: HeldItem] = [:]
+        var finishes: [String: LoggedEvent] = [:]
+    }
+
+    private static func heldKey(_ runId: String?, _ itemId: String) -> String { "\(runId ?? "")\u{0}\(itemId)" }
+
+    /// `apply` for a thread that may have older items left (`more`): a tool.finished whose start is not loaded is held
+    /// (its seq still counts as applied); everything else applies as usual.
+    static func applyLive(_ t: ThreadSnapshot, _ e: LoggedEvent, more: Bool, held: inout Held) -> ThreadSnapshot {
+        if more, e.seq > t.lastSeq, case let .toolFinished(runId, itemId, _, _) = e.event, findItem(t, runId, itemId) == nil {
+            held.finishes[heldKey(runId, itemId)] = e
+            var n = t
+            n.lastSeq = e.seq
+            return n
+        }
+        return apply(t, e)
+    }
+
+    /// `mergeSnapshot` for a thread that may have older items left (`more`): a replayed item that began before the
+    /// loaded window and is not loaded is held, not appended at the end.
+    static func mergeLive(_ t: ThreadSnapshot, _ m: ThreadSnapshotFrame, more: Bool, held: inout Held) -> ThreadSnapshot {
+        guard more, let edge = t.items.first?.seq else { return mergeSnapshot(t, m) }
+        let outside = { (it: ThreadItem) in
+            it.itemId != nil && it.seq < edge && !t.items.contains { $0.runId == it.runId && $0.itemId == it.itemId }
+        }
+        var rest = m.snapshot
+        rest.items = []
+        for it in m.snapshot.items {
+            if outside(it) { held.items[heldKey(it.runId, it.itemId!)] = HeldItem(item: it, atSeq: m.snapshot.lastSeq) } else { rest.items.append(it) }
+        }
+        return mergeSnapshot(t, ThreadSnapshotFrame(afterSeq: m.afterSeq, snapshot: rest))
+    }
+
+    /// Puts a page of older items (asked with `olderBeforeSeq`) in front of the thread; `pageSeq`: the seq the page was
+    /// answered at (its lastSeq); `more`: the page says older ones are still left (threadView.ts prependOlder). An item
+    /// is never there twice: one already loaded keeps its place and its (live) state, and the page's copy is dropped
+    /// (items without an item id: those at the boundary seq, which the page repeats). The newest state of an item wins:
+    /// a held item replaces the page's copy only when it was held at a seq after `pageSeq`; held finishes apply to the
+    /// items they finish; an item still streaming whose run has ended since is done (as the run's end left it in devd).
+    /// Once nothing older is left, a held item or finish whose item is still missing never had its start in the log:
+    /// the item is appended, a finish shows as an unknown tool, as `apply` shows one. `held` is only read: applying
+    /// the same entries again changes nothing. The rest of the thread stays: the stream keeps it.
+    static func prependOlder(_ t: ThreadSnapshot, _ older: [ThreadItem], pageSeq: Int, held: Held = Held(), more: Bool) -> ThreadSnapshot {
+        let id = { (x: ThreadItem) in
+            // Without an item id, the text tells apart two notices at one seq (a bridge restart's and devd's own).
+            x.itemId.map { "id:\(heldKey(x.runId, $0)):\(x.kind)" } ?? "seq:\(x.seq):\(x.runId ?? ""):\(x.kind):\(x.text)"
+        }
+        let loaded = Set(t.items.map(id))
+        let ended = Set(t.runs.filter { isTerminal($0.status) }.map(\.runId))
+        let settle = { (it: ThreadItem) -> ThreadItem in
+            var it = it
+            if it.status == .streaming, let run = it.runId, ended.contains(run) { it.status = .done }
+            return it
+        }
+        let newer = { (it: ThreadItem) -> ThreadItem in
+            guard let key = it.itemId.map({ heldKey(it.runId, $0) }), let h = held.items[key], h.atSeq > pageSeq else { return it }
+            return h.item
+        }
+        var items = older.filter { !loaded.contains(id($0)) }.map { settle(newer($0)) } + t.items
+        let at = { (items: [ThreadItem], runId: String?, itemId: String) in items.firstIndex { $0.runId == runId && $0.itemId == itemId } }
+        if !more {
+            for h in held.items.values.sorted(by: { $0.item.seq < $1.item.seq }) where at(items, h.item.runId, h.item.itemId!) == nil {
+                items.append(settle(h.item))
+            }
+        }
+        for e in held.finishes.values.sorted(by: { $0.seq < $1.seq }) {
+            guard case let .toolFinished(runId, itemId, isError, output) = e.event else { continue }
+            if let idx = at(items, runId, itemId) {
+                items[idx].output = output
+                items[idx].isError = isError
+                items[idx].status = .done
+            } else if !more {
+                items.append(ThreadItem(seq: e.seq, runId: runId, itemId: itemId, kind: .tool, text: "", tool: "(unknown)",
+                                        output: output, isError: isError, status: .done, ts: e.ts))
+            }
+        }
+        var n = t
+        n.items = items
+        return n
+    }
+
+    /// What a thread loaded only to some point back shows (threadView.ts tailView). The oldest loaded run (head) may
+    /// have begun before that point. It is whole when its prompt (its first item) is loaded. Otherwise, when it ended
+    /// with nothing open, it is left out until the user loads further back, with all its rows (a prompt queued while it
+    /// ran sits among them, devd inserts it at queue time) and the notices before the next run, so the thread starts at
+    /// a whole run. A head run that still runs or waits (queued, an open request: its form must show) or the only run
+    /// loaded stays, as `partialRun`: it must not fold (WorkGroups.rows), since a fold of part of it would undercount.
+    static func tailView(_ rows: [ChatRow], hasOlder: Bool, runs: [RunRow], pending: [PendingRequest]) -> (rows: [ChatRow], partialRun: String?) {
+        guard hasOlder, let first = rows.first(where: { $0.item.runId != nil }), let head = first.item.runId, first.item.kind != .user else {
+            return (rows, nil)
+        }
+        let settled = runs.first { $0.runId == head }.map { isTerminal($0.status) } == true && !pending.contains { $0.runId == head }
+        guard settled, let cut = rows.firstIndex(where: { $0.item.runId != nil && $0.item.runId != head }) else { return (rows, head) }
+        return (rows.enumerated().filter { $0.offset >= cut && $0.element.item.runId != head }.map(\.element), nil)
     }
 
     // MARK: - Private
@@ -302,7 +424,8 @@ func chatErrorText(_ error: Error) -> String {
 /// `resume()` fetches the thread after its seq, merges it and resubscribes (plan review focus 3).
 /// One conversation row as the view shows it, its flags derived once per thread update.
 struct ChatRow: Identifiable, Equatable {
-    /// The item's position (items are append-only; an item id may repeat across kinds).
+    /// The item's position (an item id may repeat across kinds). Items are appended, and older ones put in front
+    /// count down from 0 (ThreadStore.loadOlder), so a row keeps its id as the thread grows either way.
     let id: Int
     let item: ThreadItem
     /// The open request this item asks, if any.
@@ -335,6 +458,11 @@ final class ThreadStore: ObservableObject {
     @Published private(set) var seenError: String?
     /// Where the changed-files card goes (under the latest finished answer); nil: no card.
     @Published private(set) var changesAnchor: ChangesAnchor?
+    /// Only the newest `ThreadView.pageSize` items load at first: true while older ones may be left on devd.
+    @Published private(set) var hasOlder = false
+    @Published private(set) var loadingOlder = false
+    /// The last `loadOlder` failure; the button stays to try again.
+    @Published private(set) var olderError: String?
     /// A short title from the first user message (`ThreadTitle`), worked out again only when that message changes.
     private(set) var title: String?
     private var titleSource: String?
@@ -362,6 +490,12 @@ final class ThreadStore: ObservableObject {
     private var wantsStream = false
     /// The seq last reported seen, so the same seq is not posted again.
     private var postedSeen = 0
+    /// The id of the first shown item's row: it goes down as older items go in front (ChatRow.id).
+    private var rowBase = 0
+    /// What the session list said the session runs (`start`): it picks the route without the /thread probe.
+    private var runtime: InboxItem.Runtime?
+    /// Live updates of items older than the loaded window, until their page loads (ThreadView.Held).
+    private var held = ThreadView.Held()
 
     /// `restored`: the thread as the Mac app saved it at quit; `start` then streams from its seq instead of loading it.
     init(sessionId: String, client: DevdClient, restored: ThreadSnapshot? = nil, endingRetry: Duration = .seconds(20),
@@ -375,10 +509,12 @@ final class ThreadStore: ObservableObject {
 
     private var base: String { "/api/sessions/\(pathSegment(sessionId))" }
 
-    /// Loads the thread (once) and opens the stream from its seq.
-    func start() async {
+    /// Loads the thread (once) and opens the stream from its seq. `runtime`: what the session list says the session
+    /// runs, when it is known; a tmux session then goes to its mirror without asking /thread first.
+    func start(runtime: InboxItem.Runtime? = nil) async {
         guard !ended else { return }
         wantsStream = true
+        if let runtime { self.runtime = runtime }
         if thread == nil { await load() }
         guard thread != nil, wantsStream else { return }
         openStream()
@@ -403,10 +539,10 @@ final class ThreadStore: ObservableObject {
             if isTmux {
                 let m: MirrorResponse = try await client.get("\(base)/mirror?afterSeq=\(t.lastSeq)")
                 applyMirror(m.mirror)
-                update(ThreadView.mergeSnapshot(t, ThreadSnapshotFrame(afterSeq: t.lastSeq, snapshot: m.snapshot)))
+                update(ThreadView.mergeLive(t, ThreadSnapshotFrame(afterSeq: t.lastSeq, snapshot: m.snapshot), more: hasOlder, held: &held))
             } else {
                 let s: ThreadSnapshot = try await client.get("\(base)/thread?afterSeq=\(t.lastSeq)")
-                update(ThreadView.mergeSnapshot(t, ThreadSnapshotFrame(afterSeq: t.lastSeq, snapshot: s)))
+                update(ThreadView.mergeLive(t, ThreadSnapshotFrame(afterSeq: t.lastSeq, snapshot: s), more: hasOlder, held: &held))
             }
         } catch {
             // The stream's own replay (afterSeq) still catches up; the failure is shown, not hidden.
@@ -418,9 +554,20 @@ final class ThreadStore: ObservableObject {
         if look { markSeen(look: true) }
     }
 
+    /// The newest `ThreadView.pageSize` items (`loadOlder` pages back). A tmux session the list named goes straight to
+    /// its mirror; otherwise /thread answers 409 not-a-chat-session for one.
     private func load() async {
+        let started = ContinuousClock.now
+        defer {
+            // Opening speed, from the store's side: the click's request(s) to rows built. Counts only, never content.
+            Self.logger.info("thread load: \(self.thread?.items.count ?? -1) items, tmux \(self.isTmux), \(ContinuousClock.now - started, privacy: .public)")
+        }
+        if runtime == .tmux {
+            isTmux = true
+            return await loadMirror()
+        }
         do {
-            setThread(try await client.get("\(base)/thread"))
+            loaded(try await client.get("\(base)/thread?limit=\(ThreadView.pageSize)"))
             loadError = nil
             isTmux = false
         } catch let e as DevdHTTPError where e.statusCode == 409 && e.serverMessage == "not-a-chat-session" {
@@ -433,12 +580,58 @@ final class ThreadStore: ObservableObject {
 
     private func loadMirror() async {
         do {
-            let m: MirrorResponse = try await client.get("\(base)/mirror")
+            let m: MirrorResponse = try await client.get("\(base)/mirror?limit=\(ThreadView.pageSize)")
             applyMirror(m.mirror)
-            setThread(m.snapshot)
+            loaded(m.snapshot)
             loadError = nil
+        } catch let e as DevdHTTPError where e.statusCode == 409 && e.serverMessage == "not-a-tmux-session" && runtime == .tmux {
+            // The list said tmux, devd says otherwise now: ask as for an unknown runtime.
+            Self.logger.notice("mirror refused a session the list named tmux; loading it as a chat thread")
+            runtime = nil
+            isTmux = false
+            await load()
         } catch {
             loadError = errorText(error)
+        }
+    }
+
+    private func loaded(_ s: ThreadSnapshot) {
+        held = ThreadView.Held()
+        hasOlder = ThreadView.hasOlder(s)
+        // A prompt with text is loaded, so the thread has a topic: none means an older devd (it ships with the apps, so a
+        // deploy in progress). Said, not hidden: the header names the repo until the thread's start is loaded.
+        if hasOlder, s.topic == nil, s.items.contains(where: { $0.kind == .user && !$0.text.isEmpty }) {
+            Self.logger.error("devd sent no thread topic: the header names the repo until the thread's start is loaded")
+        }
+        setThread(s)
+    }
+
+    /// The page before the oldest loaded item, put in front. The rows already shown keep their ids (rowBase).
+    func loadOlder() async {
+        guard hasOlder, !loadingOlder, let t = thread, let before = ThreadView.olderBeforeSeq(t) else { return }
+        loadingOlder = true
+        defer { loadingOlder = false }
+        let query = "beforeSeq=\(before)&limit=\(ThreadView.pageSize)"
+        do {
+            let page: ThreadSnapshot = isTmux
+                ? (try await client.get("\(base)/mirror?\(query)") as MirrorResponse).snapshot
+                : try await client.get("\(base)/thread?\(query)")
+            guard let cur = thread else { return }
+            let more = ThreadView.hasOlder(page)
+            // Read here, after the await: the held updates of every frame that arrived meanwhile are in (main actor).
+            let next = ThreadView.prependOlder(cur, page.items, pageSeq: page.lastSeq, held: held, more: more)
+            if !more { held = ThreadView.Held() } // all applied, or appended as never started
+            // Only what went in front moves the ids down (held items or unknown finishes appended at the end do not).
+            let front = cur.items.first.flatMap { f in
+                next.items.firstIndex { $0.seq == f.seq && $0.runId == f.runId && $0.itemId == f.itemId && $0.kind == f.kind }
+            } ?? 0
+            rowBase -= next.items.prefix(front).filter { !ThreadView.isHousekeeping($0) }.count
+            hasOlder = more
+            olderError = nil
+            setThread(next)
+        } catch {
+            Self.logger.error("loading older items failed: \(String(describing: error), privacy: .public)")
+            olderError = errorText(error)
         }
     }
 
@@ -504,8 +697,9 @@ final class ThreadStore: ObservableObject {
         let data = Data(e.data.utf8)
         do {
             switch e.name {
-            case "thread-snapshot": update(ThreadView.mergeSnapshot(t, try JSONDecoder().decode(ThreadSnapshotFrame.self, from: data)))
-            case "thread": update(ThreadView.apply(t, try JSONDecoder().decode(LoggedEvent.self, from: data)))
+            case "thread-snapshot":
+                update(ThreadView.mergeLive(t, try JSONDecoder().decode(ThreadSnapshotFrame.self, from: data), more: hasOlder, held: &held))
+            case "thread": update(ThreadView.applyLive(t, try JSONDecoder().decode(LoggedEvent.self, from: data), more: hasOlder, held: &held))
             case "thread-notice": update(ThreadView.applyNotice(t, try JSONDecoder().decode(ThreadItem.self, from: data)))
             case "thread-effort": update(ThreadView.applyEffort(t, try JSONDecoder().decode(ThreadEffort?.self, from: data)))
             case "thread-commands": update(ThreadView.applyCommands(t, ThreadView.commands(from: data)))
@@ -527,27 +721,34 @@ final class ThreadStore: ObservableObject {
     }
 
     /// The thread's rows as the screen draws them; also an ended session's transcript (EndedTranscriptScreen).
-    static func chatRows(_ t: ThreadSnapshot) -> [ChatRow] {
+    static func chatRows(_ t: ThreadSnapshot, idBase: Int = 0) -> [ChatRow] {
         let queued = Set(ThreadView.queuedRunIds(t))
         let critic = Set(ThreadView.criticRunIds(t))
         let open = Dictionary(t.pending.map { ($0.requestId, $0) }, uniquingKeysWith: { a, _ in a })
         let failed = Set(t.runs.filter { $0.status == .failed }.map(\.runId))
         return ThreadView.shownItems(t).enumerated().map { i, it in
-            ChatRow(id: i, item: it, pending: it.itemId.flatMap { open[$0] },
+            ChatRow(id: idBase + i, item: it, pending: it.itemId.flatMap { open[$0] },
                     queued: it.runId.map(queued.contains) ?? false, critic: it.runId.map(critic.contains) ?? false,
                     failedRun: it.kind == .notice && it.runId.map(failed.contains) == true)
         }
     }
 
     private func setThread(_ t: ThreadSnapshot) {
-        rows = Self.chatRows(t)
-        display = WorkGroups.rows(rows, runs: t.runs)
+        let (shown, partialRun) = ThreadView.tailView(Self.chatRows(t, idBase: rowBase), hasOlder: hasOlder, runs: t.runs, pending: t.pending)
+        rows = shown
+        display = WorkGroups.rows(rows, runs: t.runs, partialRun: partialRun)
         changesAnchor = ChangesView.anchor(rows, runs: t.runs)
-        // As devd's topic: an attachment-only first message (empty text) names nothing; the next one does.
-        let first = t.items.first(where: { $0.kind == .user && !$0.text.isEmpty })?.text
-        if first != titleSource {
-            titleSource = first
-            title = first.flatMap(ThreadTitle.from)
+        if hasOlder {
+            // The first message may not be loaded: devd's topic (from the GET) names the thread; nil from an older devd.
+            titleSource = nil
+            title = t.topic
+        } else {
+            // As devd's topic: an attachment-only first message (empty text) names nothing; the next one does.
+            let first = t.items.first(where: { $0.kind == .user && !$0.text.isEmpty })?.text
+            if first != titleSource {
+                titleSource = first
+                title = first.flatMap(ThreadTitle.from)
+            }
         }
         switchKey = ThreadView.switchKey(t)
         thread = t

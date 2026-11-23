@@ -162,12 +162,16 @@ export const plainPreview = (t: string): string => t.replace(/`+/g, "").replace(
 /** The thread page's heading, by the same chain with the topic from the thread it holds (as devd works it out:
  *  the first user message with text). null while a session without a name has its thread loading: the crumb
  *  stands in, so the heading does not change from "repo #n" to the topic as it arrives. */
-export function threadHeading(id: string, session: { name?: string | null; project: string; repo: string } | undefined, items: ThreadItem[] | undefined): string | null {
+export function threadHeading(id: string, session: { name?: string | null; project: string; repo: string } | undefined, items: ThreadItem[] | undefined,
+  /** Only the newest items are loaded (threadView tailView): the first message may not be among them, so the topic is
+   *  devd's (the GET's `topic`; absent from an older devd, then none). */
+  cut?: { topic?: string | null }): string | null {
   if (!session) return id;
   const name = session.name?.trim() || null;
   if (!name && items === undefined) return null;
   const first = items?.find((i) => i.kind === "user" && i.text !== "")?.text;
-  return sessionTitle({ sessionId: id, name, project: session.project, repo: session.repo, topic: first === undefined ? null : threadTitle(first) });
+  const topic = cut ? cut.topic ?? null : first === undefined ? null : threadTitle(first);
+  return sessionTitle({ sessionId: id, name, project: session.project, repo: session.repo, topic });
 }
 
 /** What a session is called, in the inbox and the thread header alike: a custom name, else devd's `topic` (from the

@@ -1181,6 +1181,9 @@ struct ThreadSnapshot: Codable, Equatable {
     /// The current harness's slash commands (bridge 1.9.0+, shared/thread.ts `commands`): nil when it sent none (an
     /// older bridge, or Codex), and then the composer offers no `/`.
     var commands: [AgentCommand]? = nil
+    /// The thread's title from its first user message (shared/thread.ts `topic`): only on GET responses, so a thread
+    /// loaded only to some point back is still named as the inbox names it. nil from a devd that predates it.
+    var topic: String? = nil
 
     static let empty = ThreadSnapshot(lastSeq: 0, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: nil)
 }
@@ -1212,6 +1215,7 @@ extension ThreadSnapshot {
             modelsLogger.error("unreadable command list from devd, read as none: \(String(describing: error), privacy: .public)")
             commands = nil
         }
+        topic = try c.decodeIfPresent(String.self, forKey: .topic)
     }
 }
 

@@ -430,6 +430,16 @@ export interface SelfUpdateStatus {
   fetchError: string | null;
 }
 
+/** devd's paging of a thread snapshot (threadStore.ts snapshot): newest `limit` items, `beforeSeq` back, `afterSeq` on. */
+export interface ThreadPage { afterSeq?: number; beforeSeq?: number; limit?: number }
+
+function pageQuery(opts: ThreadPage | undefined): string {
+  const q = new URLSearchParams();
+  for (const key of ["afterSeq", "beforeSeq", "limit"] as const) if (opts?.[key] !== undefined) q.set(key, String(opts[key]));
+  const qs = q.toString();
+  return qs ? `?${qs}` : "";
+}
+
 export const api = {
   health: () => j<{ ok: boolean; version: string; commit: string | null }>("/api/health"),
   hardware: () => j<HardwareSnapshot>("/api/hardware"),
@@ -581,13 +591,7 @@ export const api = {
   setName: (id: string, name: string) => j<void>(`/api/sessions/${id}/name`, post({ name })),
   // Chat sessions (devd/src/threadApi.ts). Commands answer 202; 409 agent-disconnected / command-failed and
   // 504 agent-timeout come back as ApiError with the body (see composerErrorText in threadView.ts).
-  thread: (id: string, opts?: { afterSeq?: number; limit?: number }) => {
-    const q = new URLSearchParams();
-    if (opts?.afterSeq !== undefined) q.set("afterSeq", String(opts.afterSeq));
-    if (opts?.limit !== undefined) q.set("limit", String(opts.limit));
-    const qs = q.toString();
-    return j<ThreadSnapshot>(`/api/sessions/${encodeURIComponent(id)}/thread${qs ? `?${qs}` : ""}`);
-  },
+  thread: (id: string, opts?: ThreadPage) => j<ThreadSnapshot>(`/api/sessions/${encodeURIComponent(id)}/thread${pageQuery(opts)}`),
   sendMessage: (id: string, text: string, attachments: string[] = []) => j<{ queued: true }>(`/api/sessions/${encodeURIComponent(id)}/thread/messages`,
     post(attachments.length > 0 ? { text, attachments: attachments.map((path) => ({ path })) } : { text })),
   /** A chat image into the session's own inbox dir; its container path goes with the message (sendMessage). */
@@ -600,7 +604,7 @@ export const api = {
     j<SessionFileDiff>(`/api/sessions/${encodeURIComponent(id)}/changes/diff?path=${encodeURIComponent(path)}`),
   /** The Chat view of a tmux session (devd/src/mirrorApi.ts): its Claude transcript as a thread, plus what devd knows
    *  about the pane. A refused message is a 409 {error, message} (mirrorSendLock in mirrorView.ts). */
-  mirror: (id: string) => j<MirrorResponse>(`/api/sessions/${encodeURIComponent(id)}/mirror`),
+  mirror: (id: string, opts?: ThreadPage) => j<MirrorResponse>(`/api/sessions/${encodeURIComponent(id)}/mirror${pageQuery(opts)}`),
   sendMirrorMessage: (id: string, text: string) => j<{ sent: true }>(`/api/sessions/${encodeURIComponent(id)}/mirror/messages`, post({ text })),
   interrupt: (id: string) => j<void>(`/api/sessions/${encodeURIComponent(id)}/thread/interrupt`, { method: "POST" }),
   answerRequest: (id: string, requestId: string, answer: string) =>
@@ -620,7 +624,7 @@ export const api = {
   // Ended sessions' read-only transcripts (devd/src/endedApi.ts): listed in the inbox's Settled shelf.
   ended: () => j<{ items: EndedSession[] }>("/api/ended"),
   endedSession: (id: string) => j<EndedSession>(`/api/ended/${encodeURIComponent(id)}`),
-  endedTranscript: (id: string) => j<ThreadSnapshot>(`/api/ended/${encodeURIComponent(id)}/transcript`),
+  endedTranscript: (id: string, opts?: ThreadPage) => j<ThreadSnapshot>(`/api/ended/${encodeURIComponent(id)}/transcript${pageQuery(opts)}`),
   hideEnded: (id: string) => j<void>(`/api/ended/${encodeURIComponent(id)}/hide`, { method: "POST" }),
   /** A new session in the same repo; the answer names the mode devd used and the session to open. */
   continueEnded: (id: string) => j<ContinueResult>(`/api/ended/${encodeURIComponent(id)}/continue`, { method: "POST" }),

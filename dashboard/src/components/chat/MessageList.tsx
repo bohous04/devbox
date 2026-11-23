@@ -182,13 +182,18 @@ function WorkGroup({ row }: { row: WorkRow }) {
 
 /** The thread: user and assistant messages, tool calls (a finished run's folded under one line), requests (open
  *  ones as a form) and notices. */
-export function MessageList({ sessionId, endedId = null, items, runs, pending, queued, critic, onAnswer, onLayout }: {
+/** A row's identity across loads (unlike its index, which grows as older items go in front). */
+export const rowKey = (it: ThreadItem) => `item:${it.seq}:${it.runId}:${it.itemId}:${it.kind}`;
+
+export function MessageList({ sessionId, endedId = null, items, partialRun = null, runs, pending, queued, critic, onAnswer, onLayout }: {
   /** For the user's images (attachmentUrl). */
   sessionId: string;
   /** The thread is this ended session's read-only transcript: images from its archive, no changes card (the session
    *  id may belong to a later session by now). */
   endedId?: string | null;
   items: ThreadItem[];
+  /** A run only partly loaded (threadView tailView): it does not fold. */
+  partialRun?: string | null;
   /** Which runs ended and when: their work folds. */
   runs: RunRow[];
   pending: PendingRequest[];
@@ -200,7 +205,7 @@ export function MessageList({ sessionId, endedId = null, items, runs, pending, q
   /** Content that loads on its own (the changes card) grew: the page re-pins its end if the user is there. */
   onLayout?: () => void;
 }) {
-  const rows = threadRows(items, runs);
+  const rows = threadRows(items, runs, partialRun);
   const anchor = endedId === null ? changesAnchor(items, runs) : null;
   // A notice is a run's failure only when that run failed (run.failed); "event for unknown run" also carries a runId.
   const failed = new Set(runs.filter((r) => r.status === "failed").map((r) => r.runId));
@@ -208,14 +213,15 @@ export function MessageList({ sessionId, endedId = null, items, runs, pending, q
     <Transcript.Provider value={endedId}>
     <ol className="flex flex-col gap-4 sm:gap-5" aria-label="Conversation">
       {rows.map((row, i) => {
-        if (row.type === "work") return <li key={`work:${row.runId}`} className="min-w-0"><WorkGroup row={row} /></li>;
+        // data-row-key: what OlderItems keeps in place while older items go in above.
+        if (row.type === "work") return <li key={`work:${row.runId}`} data-row-key={`work:${row.runId}`} className="min-w-0"><WorkGroup row={row} /></li>;
         const it = row.item;
         const isQueued = it.runId !== null && queued.has(it.runId);
         // A tool right after another (a running run) sits close to it, like the rows of a fold.
         const toolRun = it.kind === "tool" && rows[i - 1]?.type === "item" && (rows[i - 1] as { item: ThreadItem }).item.kind === "tool";
         return (
           // A prompt opens a turn: a little more room above it, so prompt, work and answer read as one group.
-          <li key={`${it.seq}:${it.runId}:${it.itemId}:${i}`} className={cn("min-w-0", toolRun && "-mt-4", opensTurn(rows, i) && "sm:mt-3")}>
+          <li key={`${it.seq}:${it.runId}:${it.itemId}:${i}`} data-row-key={rowKey(it)} data-row-run={it.runId ?? undefined} className={cn("min-w-0", toolRun && "-mt-4", opensTurn(rows, i) && "sm:mt-3")}>
             {it.kind === "user" ? (
               it.runId !== null && critic.has(it.runId)
                 ? <CriticNote sessionId={sessionId} item={it} queued={isQueued} />

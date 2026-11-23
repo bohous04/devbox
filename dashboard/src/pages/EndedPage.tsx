@@ -1,14 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import type { EndedSession } from "../../../shared/ended";
-import type { ThreadSnapshot } from "../../../shared/thread";
+import { isHousekeepingNotice, type ThreadSnapshot } from "../../../shared/thread";
 import { Button } from "@/components/ui/button";
 import { api } from "../api";
 import { MessageList } from "../components/chat/MessageList";
+import { OlderItems } from "../components/chat/OlderItems";
 import { EmptyState, RowsSkeleton } from "../components/primitives";
 import { canContinue, continueInFlight, continueLabel, continueOnce, endedTitle, transcriptNote } from "../endedView";
-import { criticRunIds } from "../threadView";
+import { criticRunIds, emptyHeld, hasOlderThan, olderBeforeSeq, prependOlder, tailView, THREAD_PAGE } from "../threadView";
 
 const NOTHING_QUEUED = new Set<string>();
 const noAnswer = async () => { throw new Error("a transcript takes no answers"); };
@@ -19,6 +20,8 @@ function Transcript({ id }: { id: string }) {
   const navigate = useNavigate();
   const [ended, setEnded] = useState<EndedSession | null>(null);
   const [thread, setThread] = useState<ThreadSnapshot | null>(null);
+  // Only the newest THREAD_PAGE items are loaded at first; true while older ones may be left (OlderItems).
+  const [more, setMore] = useState(false);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   // A continue started before this page was (re)opened is still running: the button waits for it.
   const [starting, setStarting] = useState(() => continueInFlight(id));
@@ -28,8 +31,8 @@ function Transcript({ id }: { id: string }) {
     let alive = true;
     api.endedSession(id).then(
       // A transcript the session ended without has nothing to fetch (devd answers 410).
-      (e) => (e.transcript === "missing" ? Promise.resolve(null) : api.endedTranscript(id)).then((t) => {
-        if (alive) { setEnded(e); setThread(t ?? { lastSeq: 0, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: null, effort: null }); }
+      (e) => (e.transcript === "missing" ? Promise.resolve(null) : api.endedTranscript(id, { limit: THREAD_PAGE })).then((t) => {
+        if (alive) { setEnded(e); setThread(t ?? { lastSeq: 0, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: null, effort: null }); setMore(t !== null && hasOlderThan(t)); }
       }),
     ).catch((e) => { if (alive) setLoadErr((e as Error).message); });
     return () => { alive = false; };
@@ -44,6 +47,21 @@ function Transcript({ id }: { id: string }) {
     );
     return () => { alive = false; };
   }, [id, navigate]);
+
+  // The transcript a page back was asked for: its answer is dropped if the page opened another one meanwhile.
+  const opened = useRef(0);
+  useEffect(() => { opened.current++; }, [id]);
+  const loadOlder = async () => {
+    const asked = opened.current;
+    const beforeSeq = thread ? olderBeforeSeq(thread) : null;
+    if (beforeSeq === null) { setMore(false); return; }
+    const page = await api.endedTranscript(id, { beforeSeq, limit: THREAD_PAGE });
+    if (opened.current !== asked) return;
+    // A transcript gets no live updates: nothing is held.
+    setThread((cur) => (cur ? prependOlder(cur, page, emptyHeld(), hasOlderThan(page)) : cur));
+    setMore(hasOlderThan(page));
+  };
+  const view = thread ? tailView(thread.items.filter((i) => !isHousekeepingNotice(i)), more, thread.runs, thread.pending) : null;
 
   const title = ended ? endedTitle(ended) : null;
   useEffect(() => { document.title = `devbox · ${title ?? id}`; }, [id, title]);
@@ -88,8 +106,11 @@ function Transcript({ id }: { id: string }) {
             )}
             {ended.transcript === "missing" ? null : thread.items.length === 0
               ? <EmptyState title="No messages" hint="The session ended before anything was said." />
-              : <MessageList sessionId={ended.sessionId} endedId={ended.id} items={thread.items} runs={thread.runs} pending={[]}
-                  queued={NOTHING_QUEUED} critic={criticRunIds(thread)} onAnswer={noAnswer} />}
+              : <>
+                <OlderItems firstSeq={thread.items[0]?.seq} more={more} load={loadOlder} />
+                <MessageList sessionId={ended.sessionId} endedId={ended.id} items={view!.items} partialRun={view!.partialRun} runs={thread.runs} pending={[]}
+                  queued={NOTHING_QUEUED} critic={criticRunIds(thread)} onAnswer={noAnswer} />
+              </>}
           </div>
           <div className="sticky bottom-16 z-10 -mx-4 -mb-8 mt-8 bg-[var(--dock)] px-4 pb-3 pt-3 [--dock:var(--background)] before:pointer-events-none before:absolute before:inset-x-0 before:-top-8 before:h-8 before:bg-gradient-to-t before:from-[var(--dock)] before:to-transparent sm:-mx-6 sm:px-6 lg:bottom-0 lg:-mx-10 lg:-mb-10 lg:px-10 lg:pb-5 dark:[--dock:color-mix(in_oklab,var(--muted)_35%,var(--background))]">
             <div className="mx-auto flex w-full max-w-[42rem] flex-col gap-2 rounded-xl border border-border bg-card/60 px-4 py-3 sm:flex-row sm:items-center">

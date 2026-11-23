@@ -46,9 +46,11 @@ enum WorkGroups {
 
     /// The thread's rows. A run folds only once it ended and only when it called a tool; a running run stays
     /// expanded (its last message may still turn out to be prose before the next tool). The fold sits where its first
-    /// item was; user messages, requests and notices never fold.
-    static func rows(_ rows: [ChatRow], runs: [RunRow]) -> [ThreadDisplayRow] {
-        let endedRuns = Dictionary(runs.filter { ended.contains($0.status) }.map { ($0.runId, $0) }, uniquingKeysWith: { a, _ in a })
+    /// item was; user messages, requests and notices never fold. `partialRun`: a run only partly loaded
+    /// (ThreadView.tailView), which stays expanded, since its fold would undercount its work.
+    static func rows(_ rows: [ChatRow], runs: [RunRow], partialRun: String? = nil) -> [ThreadDisplayRow] {
+        let endedRuns = Dictionary(runs.filter { ended.contains($0.status) && $0.runId != partialRun }.map { ($0.runId, $0) },
+                                   uniquingKeysWith: { a, _ in a })
         var answer: [String: Int] = [:]
         var withTools: Set<String> = []
         for (i, r) in rows.enumerated() {
@@ -76,6 +78,14 @@ enum WorkGroups {
             }
         }
         return out
+    }
+
+    /// After older items went in front, the row showing what `old` showed: the same row, else the fold its run became
+    /// (a run whole only now folds its work). nil when neither is there.
+    static func anchor(for old: ThreadDisplayRow, in rows: [ThreadDisplayRow]) -> String? {
+        if rows.contains(where: { $0.id == old.id }) { return old.id }
+        if case .item(let r, _) = old, let run = r.item.runId, rows.contains(where: { $0.id == "work:\(run)" }) { return "work:\(run)" }
+        return nil
     }
 
     /// "45s" · "2m 14s" · "1h 5m".

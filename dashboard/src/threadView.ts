@@ -1,4 +1,4 @@
-import type { AgentCommand, LoggedEvent, RunRow, ThreadEffort, ThreadItem, ThreadSnapshot } from "../../shared/thread";
+import type { AgentCommand, LoggedEvent, PendingRequest, RunRow, ThreadEffort, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 
 export const emptyThread = (): ThreadSnapshot => ({
   lastSeq: 0, seenSeq: 0, runs: [], items: [], pending: [], background: [], native: null, effort: null,
@@ -194,6 +194,8 @@ export function mergeSnapshot(t: ThreadSnapshot, m: { afterSeq: number; snapshot
   return {
     lastSeq: Math.max(t.lastSeq, s.lastSeq), seenSeq: s.seenSeq, items, runs, pending: s.pending, background: s.background, native: s.native, effort: s.effort,
     ...(s.commands ? { commands: s.commands } : {}),
+    // Stream frames carry no topic (GET only), and the first message, which it names, never changes.
+    ...(t.topic !== undefined ? { topic: t.topic } : {}),
   };
 }
 
@@ -241,4 +243,101 @@ export function composerErrorText(status: number, body: unknown): string {
  *  open posts only when it is not seen yet. */
 export function seenToPost(t: ThreadSnapshot, look: boolean): number | null {
   return look || t.lastSeq > t.seenSeq ? t.lastSeq : null;
+}
+
+/** How many items a thread opens with (its newest) and how many each step back adds: a long session's whole history
+ *  is megabytes (devd's `limit`/`beforeSeq`). The Apple apps use the same number (ThreadView.pageSize). */
+export const THREAD_PAGE = 200;
+
+/** A page devd answered for `limit=THREAD_PAGE`: a full one may have more before it. */
+export const hasOlderThan = (page: ThreadSnapshot): boolean => page.items.length >= THREAD_PAGE;
+
+/** The `beforeSeq` for the page before the oldest loaded item: one past its seq, since a devd notice takes the seq of
+ *  the event before it, so two items can share a seq and `beforeSeq = seq` would skip the older one. null when the
+ *  thread has no items. */
+export const olderBeforeSeq = (t: ThreadSnapshot): number | null => (t.items[0] ? t.items[0].seq + 1 : null);
+
+/** Live updates of items older than the loaded window, kept until a page back loads those items. Keyed by run and item
+ *  id (heldKey). `items`: whole items a stream replay sent (they changed after the client's seq, but began before the
+ *  window); `finishes`: tool.finished events whose tool.started is not loaded. Either would otherwise be appended at the
+ *  thread's end, out of place ("(unknown)" for a finish), and then come back a second time with the older page. */
+export interface Held { items: Record<string, { item: ThreadItem; atSeq: number }>; finishes: Record<string, LoggedEvent> }
+export const emptyHeld = (): Held => ({ items: {}, finishes: {} });
+const heldKey = (runId: string | null, itemId: string) => `${runId ?? ""}\u0000${itemId}`;
+
+/** applyThreadEvent for a thread that may have older items left (`more`): a tool.finished whose start is not loaded is
+ *  held (its seq still counts as applied); everything else applies as usual. */
+export function applyLive(t: ThreadSnapshot, e: LoggedEvent, more: boolean, held: Held): { thread: ThreadSnapshot; held: Held } {
+  const ev = e.event;
+  if (more && e.seq > t.lastSeq && ev.type === "tool.finished" && findItem(t, ev.runId, ev.itemId) < 0) {
+    return { thread: { ...t, lastSeq: e.seq }, held: { ...held, finishes: { ...held.finishes, [heldKey(ev.runId, ev.itemId)]: e } } };
+  }
+  return { thread: applyThreadEvent(t, e), held };
+}
+
+/** mergeSnapshot for a thread that may have older items left (`more`): a replayed item that began before the loaded
+ *  window and is not loaded is held, not appended at the end. */
+export function mergeLive(t: ThreadSnapshot, m: { afterSeq: number; snapshot: ThreadSnapshot }, more: boolean, held: Held): { thread: ThreadSnapshot; held: Held } {
+  const edge = t.items[0]?.seq;
+  if (!more || edge === undefined) return { thread: mergeSnapshot(t, m), held };
+  const outside = (it: ThreadItem) => it.itemId !== null && it.seq < edge && !t.items.some((x) => x.runId === it.runId && x.itemId === it.itemId);
+  const items = { ...held.items };
+  // atSeq: the replay's seq, to tell whether a page answered later already has this state or a newer one.
+  for (const it of m.snapshot.items) if (outside(it)) items[heldKey(it.runId, it.itemId!)] = { item: it, atSeq: m.snapshot.lastSeq };
+  return { thread: mergeSnapshot(t, { ...m, snapshot: { ...m.snapshot, items: m.snapshot.items.filter((it) => !outside(it)) } }), held: { ...held, items } };
+}
+
+/** Puts a page of older items (asked with `olderBeforeSeq`) in front of the thread; `more`: the page says older ones
+ *  are still left. An item is never there twice: one already loaded keeps its place and its (live) state, and the page's
+ *  copy is dropped (items without an item id: those at the boundary seq, which the page repeats). The newest state of
+ *  an item wins: a held item replaces the page's copy only when it was held at a seq after the one the page was answered
+ *  at (`page.lastSeq`); held finishes apply to the items they finish; an item still streaming whose run has ended since
+ *  is done (as the run's end left it in devd). Once nothing older is left, a held item or finish whose item is still
+ *  missing never had its start in the log: the item is appended, a finish shows as an unknown tool, as applyThreadEvent
+ *  shows one. Pure, and `held` is only read (a state updater may run twice): applying the same held entries again
+ *  changes nothing. The rest of the thread stays: the stream keeps it. */
+export function prependOlder(t: ThreadSnapshot, page: { items: ThreadItem[]; lastSeq: number }, held: Held, more: boolean): ThreadSnapshot {
+  // Without an item id, the text tells apart two notices at one seq (a bridge restart's and devd's own).
+  const id = (x: ThreadItem) => (x.itemId !== null ? `id:${heldKey(x.runId, x.itemId)}:${x.kind}` : `seq:${x.seq}:${x.runId}:${x.kind}:${x.text}`);
+  const loaded = new Set(t.items.map(id));
+  const newer = (it: ThreadItem) => {
+    const h = it.itemId !== null ? held.items[heldKey(it.runId, it.itemId)] : undefined;
+    return h !== undefined && h.atSeq > page.lastSeq ? h.item : it;
+  };
+  const ended = new Set(t.runs.filter((r) => TERMINAL.has(r.status)).map((r) => r.runId));
+  const settle = (it: ThreadItem) => (it.status === "streaming" && it.runId !== null && ended.has(it.runId) ? { ...it, status: "done" as const } : it);
+  const items = [...page.items.filter((it) => !loaded.has(id(it))).map((it) => settle(newer(it))), ...t.items];
+  const at = (runId: string | null, itemId: string) => items.findIndex((x) => x.runId === runId && x.itemId === itemId);
+  if (!more) for (const { item } of Object.values(held.items)) if (at(item.runId, item.itemId!) < 0) items.push(settle(item));
+  for (const e of Object.values(held.finishes)) {
+    if (e.event.type !== "tool.finished") continue;
+    const { runId, itemId, output, isError } = e.event;
+    const idx = at(runId, itemId);
+    if (idx >= 0) items[idx] = { ...items[idx]!, output, isError, status: "done" };
+    else if (!more) items.push({ seq: e.seq, runId, itemId, kind: "tool", text: "", tool: "(unknown)", output, isError, status: "done", ts: e.ts });
+  }
+  return { ...t, items };
+}
+
+/** The state updater for a page back: it reads the held updates when it runs, after any stream frame queued before
+ *  it (one may have held a finish of an item on this page), not when the page arrived. */
+export const olderUpdate = (page: { items: ThreadItem[]; lastSeq: number }, more: boolean, held: () => Held) =>
+  (cur: ThreadSnapshot | null): ThreadSnapshot | null => (cur ? prependOlder(cur, page, held(), more) : cur);
+
+/** What a thread loaded only to some point back shows (`items` without housekeeping notices). The oldest loaded run
+ *  (head) may have begun before that point. It is whole when its prompt (its first item) is loaded. Otherwise, when it
+ *  ended with nothing open, it is left out until the user loads further back, with all its items (a prompt queued while
+ *  it ran sits among them, devd inserts it at queue time) and the notices before the next run, so the thread starts at
+ *  a whole run (its prompt, and a fold that counts all its work). A head run that still runs or waits (queued, an open
+ *  request: its form must show) or the only run loaded stays, as `partialRun`: it must not fold, since a fold of part
+ *  of a run would undercount its work. */
+export function tailView(items: ThreadItem[], hasOlder: boolean, runs: RunRow[], pending: PendingRequest[]): { items: ThreadItem[]; partialRun: string | null } {
+  const first = items.find((it) => it.runId !== null);
+  const head = first?.runId ?? null;
+  if (!hasOlder || head === null || first!.kind === "user") return { items, partialRun: null };
+  const run = runs.find((r) => r.runId === head);
+  const settled = run !== undefined && TERMINAL.has(run.status) && !pending.some((p) => p.runId === head);
+  const cut = items.findIndex((it) => it.runId !== null && it.runId !== head);
+  if (!settled || cut === -1) return { items, partialRun: head };
+  return { items: items.filter((it, i) => i >= cut && it.runId !== head), partialRun: null };
 }

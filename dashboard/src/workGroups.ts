@@ -22,10 +22,11 @@ export function opensTurn(rows: ThreadRow[], i: number): boolean {
 
 /** The thread's rows. A run folds only once it ended and only when it called a tool; a running run stays expanded
  *  (its last message may still turn out to be prose before the next tool). The fold sits where its first item was;
- *  user messages, requests and notices never fold. */
-export function threadRows(all: ThreadItem[], runs: RunRow[]): ThreadRow[] {
+ *  user messages, requests and notices never fold. `partialRun`: a run only partly loaded, which stays expanded. */
+export function threadRows(all: ThreadItem[], runs: RunRow[], partialRun: string | null = null): ThreadRow[] {
   const items = all.filter((i) => !isHousekeepingNotice(i));
-  const ended = new Map(runs.filter((r) => ENDED.has(r.status)).map((r) => [r.runId, r]));
+  // A run only partly loaded (threadView tailView) does not fold: its fold would undercount the work.
+  const ended = new Map(runs.filter((r) => ENDED.has(r.status) && r.runId !== partialRun).map((r) => [r.runId, r]));
   const answer = new Map<string, number>();
   const withTools = new Set<string>();
   items.forEach((it, i) => {

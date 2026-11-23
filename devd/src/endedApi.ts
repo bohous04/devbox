@@ -46,7 +46,7 @@ export function registerEndedRoutes(app: Hono, d: EndedApiDeps): void {
       if (e instanceof TranscriptGone) return c.json({ error: e.message }, 410);
       throw e;
     }
-    try { return c.json(store.snapshot(opts)); } finally { store.close(); }
+    try { return c.json(store.snapshotWithTopic(opts)); } finally { store.close(); }
   });
 
   // The transcript's images by the name in their `/inbox/<session>/<name>` path; uuid names, cached for good.
