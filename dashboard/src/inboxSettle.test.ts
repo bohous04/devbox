@@ -21,7 +21,7 @@ function fakeApi() {
   return {
     calls, errors,
     api: {
-      settle: (id: string, confirm: boolean) => answer(confirm ? "settle!" : "settle", id).then(() => ({ ...item(id, { section: "settled", reason: null, since: 1 }), endsAt: 8_000 })),
+      settle: (id: string, confirm: boolean) => answer(confirm ? "settle!" : "settle", id).then(() => ({ ...item(id, { section: "settled", reason: null, since: 1 }), endsAt: 8_000, endsIn: 7_000 })),
       unsettle: (id: string) => answer("unsettle", id).then(() => item(id, { section: "idle", reason: null, since: 1 })),
       seen: (id: string) => answer("seen", id),
     },
@@ -193,6 +193,25 @@ test("hold keeps the notice while the pointer or the keyboard is on it, but neve
   expect(t.delays()).toEqual([5_000]);
   t.fire();
   expect(s.state.notice).toBeNull();
+});
+
+test("the notice's bound is devd's endsIn from the answer, not endsAt against this device's clock", async () => {
+  const t = fakeTimers();
+  // This device's clock is far off devd's: endsAt (8000, devd's clock) would read as long past.
+  const s = new Settler(fakeApi().api, 5_000, t.timers, undefined, () => 5_000_000);
+  await s.settle(done("a"));
+  s.hold(true);
+  expect(t.delays()).toEqual([7_000]);
+});
+
+test("an undo devd refuses because the end already runs says devd's reason", async () => {
+  const f = fakeApi();
+  const s = new Settler(f.api);
+  await s.settle(done("a"));
+  f.errors.push(Object.assign(new Error("already-ending"), { status: 409, body: { error: "already-ending", message: "The session is already ending; it can't be taken back." } }));
+  expect(await s.undo()).toBeNull();
+  expect(s.state.notice).toBeNull();
+  expect(s.state.problem).toBe("Couldn't undo the settle of “a”: The session is already ending; it can't be taken back.");
 });
 
 test("an undo ends the notice's timer", async () => {

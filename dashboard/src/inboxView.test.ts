@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Attention, InboxItem } from "../../shared/thread";
-import { asks, badgeSlots, branchLabel, groupInbox, snoozeEnd, inboxHref, inboxList, metaTail, secondLine, mixedAgents, plainPreview, projectBadge, reasonLabel, reasonStatus, rowStatus, rowTitle, statusParts, shelfBlock, shortAgo, snoozeTimes, splitNeedsYou, threadHeading, upsertInbox } from "./inboxView";
+import { asks, badgeSlots, branchLabel, canEnd, groupInbox, snoozeEnd, inboxHref, inboxList, metaTail, secondLine, mixedAgents, plainPreview, projectBadge, reasonLabel, reasonStatus, rowStatus, rowTitle, statusParts, shelfBlock, shortAgo, snoozeTimes, splitNeedsYou, threadHeading, upsertInbox } from "./inboxView";
 
 const item = (sessionId: string, attention: Attention, runtime: InboxItem["runtime"] = "chat"): InboxItem => ({
   sessionId, runtime, title: sessionId, project: "p", repo: "r", agent: "claude", attention, lastText: null,
@@ -65,6 +65,13 @@ test("snoozeTimes: one hour from now, and the next 9:00 local time (today before
   expect(snoozeTimes(late)).toEqual({ hour: late.getTime() + 3_600_000, morning: { at: new Date(2026, 10, 20, 9, 0).getTime(), label: "Tomorrow 9:00" } });
   expect(snoozeTimes(new Date(2026, 10, 30, 9, 0)).morning).toEqual({ at: new Date(2026, 11, 1, 9, 0).getTime(), label: "Tomorrow 9:00" });
   expect(snoozeTimes(new Date(2026, 10, 19, 6, 15)).morning).toEqual({ at: new Date(2026, 10, 19, 9, 0).getTime(), label: "9:00" });
+});
+
+test("canEnd: a settled session still alive (settled before settles ended) offers its end directly", () => {
+  expect(canEnd(item("a", { section: "settled", reason: null, since: 1 }))).toBe(true);
+  expect(canEnd({ ...item("a", { section: "settled", reason: null, since: 1 }), endsAt: 9_000 })).toBe(false); // its grace runs
+  expect(canEnd({ ...item("a", { section: "settled", reason: null, since: 1 }), ending: true })).toBe(false);
+  expect(canEnd(item("a", { section: "idle", reason: null, since: 1 }))).toBe(false); // the row's own settle
 });
 
 test("rowStatus: an ending session says Ending…, a quiet one the auto rule keeps alive says why", () => {

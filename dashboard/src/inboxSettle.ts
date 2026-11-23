@@ -99,8 +99,9 @@ export class Settler {
    *  comes back stale. Held (no timer) while the pointer or the keyboard is on the notice. */
   private timer: unknown = null;
   private held = false;
-  /** When the notice's session ends (its item's endsAt): an undo after it cannot take the settle back, so the notice
-   *  goes then even while held. null: devd did not say (an older devd). */
+  /** When the notice's session ends, on this device's clock: now + devd's endsIn when the settle answered (devd's
+   *  endsAt is on devd's clock). An undo after it cannot take the settle back, so the notice goes then even while
+   *  held. null: devd did not say (an older devd). */
   private endsAt: number | null = null;
   /** Seen posts per finish ("id@since"): a failed one is tried once more, a done one never again. */
   private seenAttempts = new Map<string, number>();
@@ -155,7 +156,7 @@ export class Settler {
     try { next = await settleAsking(this.api.settle, item.sessionId, this.ask); }
     catch (e) { this.set({ problem: `Couldn't settle “${title}”: ${failureText(e)}` }); return null; }
     if (next === null) return null;
-    this.endsAt = next.endsAt ?? null;
+    this.endsAt = next.endsIn == null ? null : this.now() + next.endsIn;
     this.set({ notice: { sessionId: item.sessionId, title, id: this.nextId++ } });
     return next;
   }
@@ -166,7 +167,12 @@ export class Settler {
     if (!undone) return null;
     this.set({ notice: null });
     try { return await this.api.unsettle(undone.sessionId); }
-    catch (e) { this.set({ problem: `Couldn't undo the settle of “${undone.title}”: ${failureText(e)}` }); return null; }
+    catch (e) {
+      // 409 already-ending: the end already runs; devd's message says so better than its code.
+      const message = ((e as { body?: unknown }).body as { message?: unknown } | null | undefined)?.message;
+      this.set({ problem: `Couldn't undo the settle of “${undone.title}”: ${typeof message === "string" ? message : failureText(e)}` });
+      return null;
+    }
   }
 
   /** A seen failure outside `seen` (the inbox could not be read), under `key` so a dismissal holds for it too. */

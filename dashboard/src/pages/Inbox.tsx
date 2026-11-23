@@ -14,7 +14,7 @@ import { agoLabel } from "../format";
 import { profileFor } from "../newSession";
 import { endedHref, endedMetaTail, endedSecondLine, endedTitle, settledShelf, upsertEnded } from "../endedView";
 import { claimsUndo, failureText, focusOwnsUndo, settleKey, settleShortcut } from "../inboxSettle";
-import { badgeSlots, groupInbox, inboxHref, inboxList, metaTail, mixedAgents, projectBadge, reasonLabel, rowStatus, rowTitle, secondLine, shelfBlock, shortAgo, snoozeEnd, snoozeTimes, statusParts, upsertInbox, type StatusTone } from "../inboxView";
+import { badgeSlots, canEnd, groupInbox, inboxHref, inboxList, metaTail, mixedAgents, projectBadge, reasonLabel, rowStatus, rowTitle, secondLine, shelfBlock, shortAgo, snoozeEnd, snoozeTimes, statusParts, upsertInbox, type StatusTone } from "../inboxView";
 import { cn } from "@/lib/utils";
 import { useNow } from "../store";
 import { useEventStream } from "../useEventStream";
@@ -66,7 +66,10 @@ function RowMenu({ item, label, onItem, setError, className }: {
         {item.ending ? (
           <DropdownMenuItem disabled>Ending… its transcript replaces it when done</DropdownMenuItem>
         ) : section === "settled" || section === "snoozed" ? (
-          <DropdownMenuItem onSelect={() => run(api.unsettle(item.sessionId))}>Back to the inbox</DropdownMenuItem>
+          <>
+            {canEnd(item) && <DropdownMenuItem onSelect={() => settle(item)}>Settle and end</DropdownMenuItem>}
+            <DropdownMenuItem onSelect={() => run(api.unsettle(item.sessionId))}>Back to the inbox</DropdownMenuItem>
+          </>
         ) : (
           <>
             <DropdownMenuItem onSelect={() => settle(item)}>

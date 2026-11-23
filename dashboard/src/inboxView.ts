@@ -30,6 +30,12 @@ export function shelfBlock(i: InboxItem): string | null {
   return i.attention.reason === "request" ? "Answer the open request first" : null;
 }
 
+/** A settled session still alive (settled before settles ended the session, or its end failed and devd brought it
+ *  back settled): its menu offers the end itself, not only the way back. Not while its grace or its end runs. */
+export function canEnd(i: InboxItem): boolean {
+  return i.attention.section === "settled" && i.endsAt == null && !i.ending;
+}
+
 /** An SSE `inbox` event carries one session's current item: it replaces that session's row. A removal drops it. */
 export function upsertInbox(items: InboxItem[], next: InboxItem | InboxRemoved): InboxItem[] {
   if ("removed" in next) return items.filter((i) => i.sessionId !== next.sessionId);
