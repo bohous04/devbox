@@ -17,6 +17,7 @@ import { IBX_PATHS, toRemoteRunOpts } from "./instabox/runOpts";
 import { BRIDGE_SECRET_ENV, newBridgeSecret } from "../../image/agent-bridge/src/binding";
 import type { DevConfig, Settings } from "./config";
 import { deleteGitStat, deleteSession, getRepoAgent, setBridgeSecret, getSession, insertSession, listSessions, logEvent, releaseLeasesForSession, setAutoEnd, setRepoAgent, setSessionAgent, setSessionBranch, updateSession, type AgentName, type SessionRow, type SessionRuntime } from "./db";
+import { deleteEndInFlight, putEndInFlight } from "./endsInFlight";
 import { containerEnv, containerMountDestinations, containerState, execInContainer, removeContainer, runContainer, startContainer, stopContainer, type RunOpts } from "./docker";
 import { dockerArgv } from "./dockerTarget";
 import { inspectCanonicalWorkspace, removeStoppedWorkspaceContainer, type CanonicalWorkspaceContainer } from "./canonicalWorkspace";
@@ -1583,6 +1584,26 @@ export class SessionManager {
     return this.locked([id], "end", async () => {
       const s = getSession(this.d.db, id);
       if (!s) throw new Error(`Unknown session ${id}`);
+      // Written down for the next devd: a restart mid-end (a deploy) leaves it behind and startup finishes it (endsInFlight.ts).
+      putEndInFlight(this.d.db, id, soloAction, opts.keepWorktree ?? false, this.now());
+      try { await this.endLocked(s, soloAction, opts); }
+      catch (e) {
+        // The backup stops the container before archiving: a failed end must not leave the row saying "running"
+        // (a resumed end's session was skipped by startup recovery, so nothing else would correct it).
+        // Only a container docker reports as exited: "missing" is also any failed inspect (docker down, a timeout).
+        // Reading it must not replace the end's own error.
+        if (s.host !== "instabox" && getSession(this.d.db, id)) {
+          try { if (await containerState(s.container) === "exited") updateSession(this.d.db, id, { status: "stopped" }); }
+          catch (inspectErr) { console.error(`after the failed end of ${id}, reading its container failed:`, inspectErr); }
+        }
+        throw e;
+      }
+      finally { deleteEndInFlight(this.d.db, id); }
+    });
+  }
+
+  private async endLocked(s: SessionRow, soloAction: "keep" | "delete", opts: { keepWorktree?: boolean }) {
+      const id = s.id;
       // Sharing belongs to the session, not the container — it ends with it (end/delete), but survives
       // stop/restart (that goes through stop(), not end()).
       this.revokeShares(id);
@@ -1640,6 +1661,5 @@ export class SessionManager {
       }
       deleteSession(this.d.db, id);
       logEvent(this.d.db, id, "end", { soloAction: s.solo === 1 ? soloAction : undefined, ...(keepRemote ? { retainedRemoteWorkspace: true } : {}) });
-    });
   }
 }

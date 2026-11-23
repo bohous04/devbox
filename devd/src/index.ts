@@ -1,5 +1,6 @@
 import { launchAgentStatus, updateLaunchAgent } from "./agentUpkeep";
 import { preserveForEnd, STORAGE_GUARD } from "./storageGuard";
+import { endingIds, resumeEnds } from "./endsInFlight";
 import type { UpkeepProvider, AgentUpkeepResult } from "../../shared/agentUpkeep";
 import { startMysqlProxy } from "./mysqlProxy";
 import { effectiveServer } from "./prodDb";
@@ -1317,8 +1318,10 @@ const shareServer = startShareServer(() => Bun.serve({ hostname: "127.0.0.1", po
 shareListenerUp = shareServer !== null;
 // Docker may still be starting when systemd brings devd up. Restore only rows
 // that were running, with bounded retries, without replacing live tmux sessions.
+// A session whose end a restart cut short is not brought back: its end is finished below (resumeEnds, armEnds).
+const ending = endingIds(db);
 const startupRecovery = startRecovery({
-  ids: listSessions(db).filter(s => s.status === "running").map(s => s.id),
+  ids: listSessions(db).filter(s => s.status === "running" && !ending.has(s.id)).map(s => s.id),
   recover: async id => {
     await mgr.recoverAfterRestart(id);
     inbox.changedSafe(id);
@@ -1383,6 +1386,9 @@ setInterval(() => {
 try { inbox.armSnoozes(); } catch (e) { console.error("inbox: snooze timers not armed:", e); }
 // Settles whose end was pending when devd went down end now (or when their grace runs out).
 try { inbox.armEnds(); } catch (e) { console.error("inbox: pending ends not armed:", e); }
+// Every other end a restart cut short (F9, `dev end`, the dashboard, cron) is finished the way it was asked for.
+try { resumeEnds({ db, end: (id, soloAction, opts) => mgr.end(id, soloAction, opts), notify }); }
+catch (e) { console.error("ends cut short by the restart not resumed:", e); }
 setInterval(guardedTick("auto-settle", async () => { await inbox.autoSettle(); }), AUTO_SETTLE_TICK_MS);
 // Ended transcripts are kept 30 days (endedSessions.ts); a failed removal is logged there and retried on the next run.
 const purgeEndedTick = () => {

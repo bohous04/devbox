@@ -12,4 +12,5 @@ Environment=DEVBOX_REPO_DIR=__REPO__
 # systemd services get no HOME, so a private repo would fail at `git fetch`.
 Environment=HOME=/root
 Nice=10
-TimeoutStartSec=2h
+# Covers the wait for end backups (15 min), an image build (90 min) and the health checks.
+TimeoutStartSec=3h
