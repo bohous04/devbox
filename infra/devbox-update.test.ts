@@ -28,7 +28,7 @@ function fixture() {
 }
 
 /** Real git; bun/docker/systemctl/timedatectl are recorded and succeed unless told otherwise. */
-function deps(over: Partial<Deps> & { ci?: CiState; healthyCommit?: () => string | null; fail?: RegExp; backups?: string[] } = {}) {
+function deps(over: Partial<Deps> & { ci?: CiState; healthyCommit?: () => string | null; fail?: RegExp; backups?: string[]; onBackupLook?: () => void } = {}) {
   const calls: string[] = [], notes: string[] = [], states: DeployState[] = [];
   const d: Deps = {
     run: async (cmd, opts) => {
@@ -36,8 +36,8 @@ function deps(over: Partial<Deps> & { ci?: CiState; healthyCommit?: () => string
       const line = cmd.join(" ");
       calls.push(line);
       if (over.fail?.test(line)) return { code: 1, stdout: "", stderr: "boom" };
-      // pgrep: one entry of `backups` per look (the running prepare-end processes), then none (exit 1).
-      if (cmd[0] === "pgrep") { const b = over.backups?.shift() ?? ""; return { code: b ? 0 : 1, stdout: b, stderr: "" }; }
+      // One entry of `backups` per look (the running end-backup units), then none.
+      if (cmd[0] === "systemctl" && cmd[1] === "list-units") { over.onBackupLook?.(); return { code: 0, stdout: over.backups?.shift() ?? "", stderr: "" }; }
       if (cmd[0] === "docker" && cmd[1] === "run") return { code: 0, stdout: "2.1.316 (Claude Code)\n", stderr: "" };
       if (cmd[0] === "timedatectl") return { code: 0, stdout: "Europe/Prague\n", stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
@@ -98,24 +98,36 @@ test("a devd change restarts devd and requires the new commit in /api/health", a
 });
 
 // 2026-11-23: a deploy restarted devd under four ends' backups and killed them (prepare-end ran in devd's cgroup).
-// Backups now run in their own units, but a devd from before that still owns them: the restart waits for them.
-test("the restart waits for running end backups, logging what it waits for", async () => {
-  const f = fixture(); f.push({ "devd/src/api.ts": "x" });
-  const log: string[] = [];
-  const t = deps({ healthyCommit: () => f.head(), backups: ["101 devbox-storage prepare-end dev-a\n102 devbox-storage prepare-end dev-b\n", "102 devbox-storage prepare-end dev-b\n"], log: (l) => log.push(l) });
+// Backups now run in their own units and survive a restart, but the rest of the end is then only resumed: a deploy
+// waits a short while for them. Before the merge (review of #145): a run killed while waiting has changed nothing,
+// and the new dashboard is not served against the old devd meanwhile.
+const unit = (id: string) => `devbox-storage-end-${id}.service loaded activating start /usr/local/bin/devbox-storage prepare-end dev-x\n`;
+test("a deploy that restarts devd first waits for running end backups, before it merges anything", async () => {
+  const f = fixture(); const before = f.head(); f.push({ "devd/src/api.ts": "x" });
+  const log: string[] = [], headsWhileWaiting: string[] = [];
+  const t = deps({ healthyCommit: () => f.head(), backups: [unit("aaaaaaaaaaaa") + unit("bbbbbbbbbbbb"), unit("bbbbbbbbbbbb")],
+    log: (l) => log.push(l), onBackupLook: () => headsWhileWaiting.push(f.head()) });
   expect((await update(t.d, cfg(f.server))).kind).toBe("deployed");
-  expect(t.calls.filter((c) => c.startsWith("pgrep") || c === "systemctl restart devd")).toEqual([
-    "pgrep -af devbox-storage prepare-end", "pgrep -af devbox-storage prepare-end", "pgrep -af devbox-storage prepare-end", "systemctl restart devd"]);
+  expect(headsWhileWaiting).toEqual([before, before, before]);
+  expect(t.calls.filter((c) => c.includes("list-units")).length).toBe(3);
   expect(log.filter((l) => l.startsWith("waiting"))).toEqual([
-    "waiting for 2 end backups before restarting devd: dev-a, dev-b", "waiting for 1 end backup before restarting devd: dev-b"]);
+    "waiting for 2 end backups before deploying: devbox-storage-end-aaaaaaaaaaaa.service, devbox-storage-end-bbbbbbbbbbbb.service",
+    "waiting for 1 end backup before deploying: devbox-storage-end-bbbbbbbbbbbb.service"]);
 });
 
-test("the wait for end backups is bounded: past it devd restarts anyway and says how many were still running", async () => {
+test("a deploy that does not restart devd does not wait for end backups", async () => {
+  const f = fixture(); f.push({ "dashboard/src/x.ts": "x" });
+  const t = deps({ backups: [unit("aaaaaaaaaaaa")] });
+  expect((await update(t.d, cfg(f.server))).kind).toBe("deployed");
+  expect(t.calls.some((c) => c.includes("list-units"))).toBe(false);
+});
+
+test("the wait for end backups is bounded: past it the deploy goes on and says how many were still running", async () => {
   const f = fixture(); f.push({ "devd/src/api.ts": "x" });
-  const t = deps({ healthyCommit: () => f.head(), backups: Array(10_000).fill("101 devbox-storage prepare-end dev-a\n"), sleep: () => Bun.sleep(1) });
+  const t = deps({ healthyCommit: () => f.head(), backups: Array(10_000).fill(unit("aaaaaaaaaaaa")), sleep: () => Bun.sleep(1) });
   expect((await update(t.d, cfg(f.server))).kind).toBe("deployed");
   expect(t.calls).toContain("systemctl restart devd");
-  expect(t.notes.some((n) => n.includes("1 end backup still running (dev-a)"))).toBe(true);
+  expect(t.notes.some((n) => n.includes("1 end backup still running (devbox-storage-end-aaaaaaaaaaaa.service)"))).toBe(true);
 });
 
 test("unhealthy after restart: rolls back to the previous commit and restarts again", async () => {
