@@ -76,6 +76,17 @@ struct SettingsScreen: View {
                     .buttonStyle(DevboxButtonStyle(variant: .outline))
                     .disabled(isTesting || keychainUnavailable)
 
+                    #if os(macOS)
+                    // In the Settings window a toolbar item lands among the Connection/General tabs and
+                    // looks like a third tab, so on the Mac Save sits with the form instead.
+                    Button { save() } label: {
+                        Text("Save").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(DevboxButtonStyle())
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(keychainUnavailable)
+                    #endif
+
                     if let testResult {
                         testResultLabel(testResult)
                             .font(Theme.F.meta)
@@ -97,12 +108,14 @@ struct SettingsScreen: View {
         .scrollDismissesKeyboard(.interactively)
         .background(Theme.C.background)
         .navigationTitle("Settings")
+        #if os(iOS)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") { save() }
                     .disabled(keychainUnavailable)
             }
         }
+        #endif
         .alert("Save failed", isPresented: Binding(
             get: { saveError != nil },
             set: { isPresented in if !isPresented { saveError = nil } }
