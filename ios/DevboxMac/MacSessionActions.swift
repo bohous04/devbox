@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// The terminal's F9 menu (cli/src/manager-view.ts `exitMenuOptions`, run by `handleExit` in cli/src/main.ts) in the
-/// sidebar row's context menu: Rename, Change Agent, Change Account and End. "Back to session" and "Just detach" are
+/// sidebar row's context menu: Rename, Change Agent and Change Account (End is the row's settle). "Back to session" and "Just detach" are
 /// about the terminal tab and have no place here. What the menu offers is decided here, apart from the views, so the
 /// rules are tested on their own.
 enum MacSessionMenu {
@@ -443,11 +443,7 @@ struct MacSessionMenuItems: View {
                 }
             }
         }
-        Divider()
-        Button("End Session…", role: .destructive) {
-            if let end = menu.end, let session { actions.requestEnd(item, end, worktree: session.worktree != nil) }
-        }
-        .disabled(menu.end == nil)
+        // No End here: settling ends a session (the owner's one action for it), from the row's ✓, ⌘⇧S or its menu.
     }
 }
 

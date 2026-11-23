@@ -60,7 +60,7 @@ struct MacSettleNotice: View {
         HStack(spacing: 6) {
             Image(systemName: "checkmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(InboxTone.doneIcon)
                 .accessibilityHidden(true)
-            Text("Settled").foregroundStyle(Theme.C.foreground)
+            Text("Settled · ending").foregroundStyle(Theme.C.foreground)
             Text(notice.title).foregroundStyle(Theme.C.mutedForeground).lineLimit(1).truncationMode(.tail)
             Spacer(minLength: 6)
             Button(action: undo) {
@@ -79,13 +79,12 @@ struct MacSettleNotice: View {
             .accessibilityLabel("Undo settle")
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Settled \(notice.title)")
+        .accessibilityLabel("Settled \(notice.title), the session ends")
     }
 }
 
 /// ⌘⇧S in the key window: settles its sidebar's selected row. `block`: why it cannot now (the menu item is disabled).
 struct MacSettleAction {
-    let block: String?
     let settle: () -> Void
 }
 

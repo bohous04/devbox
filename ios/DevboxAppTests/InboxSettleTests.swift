@@ -82,16 +82,41 @@ final class InboxSettleTests: XCTestCase {
         XCTAssertTrue(later.hasPrefix("Snoozed, Bump, until "), later)
     }
 
-    /// Settle: every row in the list and in Working, except one waiting on an answer, which says why.
-    func testSettleIsBlockedOnlyByAnOpenRequest() throws {
-        XCTAssertEqual(InboxSettler.block(try item("a", "needs_you", reason: "request")), "Answer the open request first")
-        XCTAssertNil(InboxSettler.block(try item("a", "needs_you", reason: "failed")))
-        XCTAssertNil(InboxSettler.block(try item("a", "needs_you", reason: "completed")))
-        XCTAssertNil(InboxSettler.block(try item("a", "idle", reason: nil)))
+    /// Settling ends the session: one waiting on an answer or still working asks first; the others settle at once.
+    /// Every row in the list and in Working can be settled.
+    func testSettleAsksFirstForAWaitingOrWorkingSession() throws {
+        XCTAssertEqual(InboxView.settleQuestion(try item("a", "needs_you", reason: "request")), "The agent is waiting for your answer. End it?")
+        XCTAssertEqual(InboxView.settleQuestion(try item("a", "working", reason: "running")), "The agent is still working. End it?")
+        XCTAssertNil(InboxView.settleQuestion(try item("a", "needs_you", reason: "failed")))
+        XCTAssertNil(InboxView.settleQuestion(try item("a", "needs_you", reason: "completed")))
+        XCTAssertNil(InboxView.settleQuestion(try item("a", "idle", reason: nil)))
         XCTAssertFalse(InboxSettler.canSettle(try item("a", "settled", reason: "completed")), "already settled")
         XCTAssertFalse(InboxSettler.canSettle(try item("a", "snoozed", reason: "completed")), "snoozed: unsnooze first")
         XCTAssertTrue(InboxSettler.canSettle(try item("a", "idle", reason: nil)))
         XCTAssertTrue(InboxSettler.canSettle(try item("a", "working", reason: "running")))
+    }
+
+    /// The undo notice goes after its lifetime, and never after devd ends the session (endsAt): an undo then is too
+    /// late. With VoiceOver it stays until the next action, but not past the end either.
+    func testTheNoticeNeverOutlivesTheSessionsEnd() {
+        let five = Duration.seconds(5)
+        XCTAssertEqual(InboxSettler.noticeLifetime(five, endsAt: nil, now: 0, voiceOver: false), five)
+        XCTAssertEqual(InboxSettler.noticeLifetime(five, endsAt: 8_000, now: 1_000, voiceOver: false), five)
+        XCTAssertEqual(InboxSettler.noticeLifetime(five, endsAt: 4_000, now: 1_000, voiceOver: false), .milliseconds(3_000))
+        XCTAssertEqual(InboxSettler.noticeLifetime(five, endsAt: 8_000, now: 1_000, voiceOver: true), .milliseconds(7_000))
+        XCTAssertNil(InboxSettler.noticeLifetime(five, endsAt: nil, now: 0, voiceOver: true), "kept until the next action")
+        XCTAssertEqual(InboxSettler.noticeLifetime(five, endsAt: 500, now: 1_000, voiceOver: false), .zero)
+    }
+
+    /// devd's endsAt and endError decode; an older devd sends neither.
+    func testEndFieldsDecode() throws {
+        let json = #"{"sessionId":"a","runtime":"chat","title":"t","project":"p","repo":"r","agent":"claude","attention":{"section":"settled","since":1},"endsAt":9000,"endError":null}"#
+        let i = try JSONDecoder().decode(InboxItem.self, from: Data(json.utf8))
+        XCTAssertEqual(i.endsAt, 9_000)
+        XCTAssertNil(i.endError)
+        XCTAssertNil(try item("b", "idle", reason: nil).endsAt)
+        let failed = try JSONDecoder().decode(InboxItem.self, from: Data(json.replacingOccurrences(of: #""endError":null"#, with: #""endError":"docker is stuck""#).utf8))
+        XCTAssertTrue(InboxRow.spoken(failed, now: 0, title: "t", detail: "", showAgent: false).hasSuffix(". Couldn't end the session: docker is stuck"))
     }
 
     /// A tmux session is marked seen while it shows a finish or a failure; not while it waits on an answer, works or
@@ -231,19 +256,34 @@ final class InboxSettleTests: XCTestCase {
         XCTAssertNotNil(seen.notice, "without VoiceOver another action leaves it to its time")
     }
 
-    /// devd's refusal is said, not swallowed; the row stays and no undo is offered. The client's own check says why
-    /// without asking devd.
+    /// devd's refusal is said, not swallowed; no undo is offered.
     func testARefusedSettleIsShown() async throws {
         let store = try await fixtureStore()
         let settler = InboxSettler()
-        await settler.settle(try row(store, "dev-acme-billing"), in: store, checked: false)
+        await settler.settle(try item("dev-gone", "idle", reason: nil), in: store)
         XCTAssertNil(settler.notice)
-        XCTAssertEqual(settler.problem?.hasPrefix("Couldn't settle “Run the invoice table migration”"), true, settler.problem ?? "nil")
-        XCTAssertEqual(try row(store, "dev-acme-billing").attention.section, .needsYou)
+        XCTAssertEqual(settler.problem?.hasPrefix("Couldn't settle “Title of dev-gone”"), true, settler.problem ?? "nil")
+    }
 
-        settler.dismissProblem()
-        await settler.settle(try row(store, "dev-acme-billing"), in: store)
-        XCTAssertEqual(settler.problem, "Couldn't settle “Run the invoice table migration”: Answer the open request first")
+    /// A session waiting on an answer is settled (and so ended) only once the owner confirms: first the question, then
+    /// devd's settle with {confirm: true}. Cancelling leaves the row as it was.
+    func testSettlingAWaitingSessionAsksFirst() async throws {
+        let store = try await fixtureStore()
+        let settler = InboxSettler(lifetime: .seconds(60), voiceOver: { false })
+        let waiting = try row(store, "dev-acme-billing")
+        await settler.settle(waiting, in: store)
+        XCTAssertEqual(settler.confirming?.question, "The agent is waiting for your answer. End it?")
+        XCTAssertNil(settler.notice)
+        XCTAssertEqual(try row(store, "dev-acme-billing").attention.section, .needsYou)
+        settler.cancelConfirm()
+        XCTAssertNil(settler.confirming)
+
+        await settler.settle(waiting, in: store)
+        await settler.confirm(try XCTUnwrap(settler.confirming), in: store)
+        XCTAssertNil(settler.confirming)
+        XCTAssertNil(settler.problem)
+        XCTAssertEqual(settler.notice?.sessionId, "dev-acme-billing")
+        XCTAssertEqual(try row(store, "dev-acme-billing").attention.section, .settled)
     }
 
     /// Seen posts once per finish of a tmux session. A failed post is shown and tried once more; a failure the owner

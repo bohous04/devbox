@@ -5,7 +5,7 @@ import Foundation
 /// yet seen, one running, one waiting on CI and one queued, idle ones (two tmux) and the shelves (a settled failure
 /// among them), as devd groups them. Times are relative to launch, so the labels read the same on every run.
 /// Every name here is invented. The release notes session has no branch recorded (a row from an older devd).
-/// Settle, unsettle and seen answer as devd does: settle refuses a row with an open request, unsettle brings back
+/// Settle, unsettle and seen answer as devd does: settle asks first ({confirm: true}) for a row that waits or works, unsettle brings back
 /// the row as listed, and seen takes tmux sessions only.
 enum InboxFixtures {
     static let routes: [String: FixtureMode.Responder] = {
@@ -16,7 +16,7 @@ enum InboxFixtures {
         for row in items(now: Date()) {
             let id = row["sessionId"] as! String
             let base = "POST /api/sessions/\(id)"
-            routes["\(base)/settle"] = { _ in settle(id) }
+            routes["\(base)/settle"] = { request in settle(id, confirmed: FixtureMode.body(of: request).map { String(decoding: $0, as: UTF8.self).contains(#""confirm":true"#) } ?? false) }
             routes["\(base)/unsettle"] = { _ in .json(listed(id)) }
             routes["\(base)/seen"] = { _ in
                 listed(id)["runtime"] as? String == "tmux" ? FixtureResponse(status: 204)
@@ -28,15 +28,21 @@ enum InboxFixtures {
 
     private static func listed(_ id: String) -> [String: Any] { items(now: Date()).first { $0["sessionId"] as? String == id }! }
 
-    private static func settle(_ id: String) -> FixtureResponse {
+    /// devd's settle: it ends the session after its grace (endsAt), and asks first for one that waits or works.
+    private static func settle(_ id: String, confirmed: Bool) -> FixtureResponse {
         var row = listed(id)
         var attention = row["attention"] as! [String: Any]
-        if attention["reason"] as? String == "request" {
-            return FixtureResponse(status: 409, body: Data(#"{"error":"request-open","message":"Answer the open request first."}"#.utf8))
+        if !confirmed, attention["reason"] as? String == "request" {
+            return FixtureResponse(status: 409, body: Data(#"{"error":"request-open","message":"The agent is waiting for your answer. End it?"}"#.utf8))
         }
+        if !confirmed, attention["section"] as? String == "working" {
+            return FixtureResponse(status: 409, body: Data(#"{"error":"agent-working","message":"The agent is still working. End it?"}"#.utf8))
+        }
+        let now = Int(Date().timeIntervalSince1970 * 1000)
         attention["section"] = "settled"
-        attention["since"] = Int(Date().timeIntervalSince1970 * 1000)
+        attention["since"] = now
         row["attention"] = attention
+        row["endsAt"] = now + 8_000
         return .json(row)
     }
 

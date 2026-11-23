@@ -1382,6 +1382,11 @@ struct InboxItem: Decodable, Equatable, Identifiable {
     /// A short title from the first user message (devd, shared/threadTitle.ts), stable for the thread's life; nil
     /// for tmux, an empty thread, or an older devd.
     let topic: String?
+    /// A settle ends the session: when (epoch ms), while devd's undo grace runs; nil when no end is pending or from an
+    /// older devd.
+    var endsAt: Int? = nil
+    /// Why the end after the last settle failed (the session is back in the inbox); nil when none failed.
+    var endError: String? = nil
 
     var id: String { sessionId }
 }

@@ -154,7 +154,10 @@ struct SessionDetailView: View {
                             .disabled(busy)
                     }
 
-                    actionButton(session.solo == 1 ? "Delete workspace…" : "End…", systemImage: "xmark.circle", variant: .destructive) {
+                    // Ending is the inbox's settle (the owner's one action for it): it ends after the undo grace and keeps
+                    // a worktree with work in it. A solo session's workspace delete is a different act and stays.
+                    actionButton(session.solo == 1 ? "Delete workspace…" : "Settle…", systemImage: session.solo == 1 ? "xmark.circle" : "checkmark",
+                                 variant: session.solo == 1 ? .destructive : .outline) {
                         showEndConfirm = true
                     }
                     .disabled(busy)
@@ -346,12 +349,12 @@ struct SessionDetailView: View {
             Button("Cancel", role: .cancel) {}
         }
         .confirmationDialog(
-            session.solo == 1 ? "Delete workspace" : "End session",
+            session.solo == 1 ? "Delete workspace" : "Settle and end this session?",
             isPresented: $showEndConfirm, titleVisibility: .visible
         ) {
-            Button(session.solo == 1 ? "Delete workspace" : "Yes, end it", role: .destructive) {
+            Button(session.solo == 1 ? "Delete workspace" : "Settle and End", role: .destructive) {
                 run {
-                    try await actions.end(session.id, soloAction: session.solo == 1 ? .delete : nil)
+                    if session.solo == 1 { try await actions.end(session.id, soloAction: .delete) } else { try await actions.settle(session.id) }
                     dismiss()
                 }
             }

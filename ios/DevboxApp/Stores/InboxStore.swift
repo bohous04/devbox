@@ -53,9 +53,20 @@ enum InboxView {
         return SnoozeTimes(hour: ms(now) + 3_600_000, morningAt: ms(at), morningLabel: today ? "9:00" : "Tomorrow 9:00")
     }
 
-    /// Why a row cannot be settled or snoozed (devd refuses it with 409 request-open), or nil.
+    /// Why a row cannot be snoozed (devd refuses it with 409 request-open), or nil.
     static func shelfBlock(_ i: InboxItem) -> String? {
         i.attention.reason == .request ? "Answer the open request first" : nil
+    }
+
+    /// A settle whose end failed (devd's endError): the session is back in the inbox.
+    static func endErrorText(_ error: String) -> String { "Couldn't end the session: \(error)" }
+
+    /// Settling ends the session: what to ask first when its agent waits for an answer or still works (devd's 409
+    /// request-open / agent-working until confirmed), or nil when it settles at once (inboxView.ts settleQuestion).
+    static func settleQuestion(_ i: InboxItem) -> String? {
+        if i.attention.reason == .request { return "The agent is waiting for your answer. End it?" }
+        if i.attention.section == .working { return "The agent is still working. End it?" }
+        return nil
     }
 
     static func reasonLabel(_ r: AttentionReason?) -> String {
@@ -465,8 +476,14 @@ final class InboxStore: ObservableObject {
     private struct SnoozeUntil: Encodable { let until: Int }
     private struct SnoozeUntilReset: Encodable { let untilReset = true }
     private struct Empty: Encodable {}
+    private struct Confirm: Encodable { let confirm = true }
 
-    func settle(_ id: String) async throws { apply(try await client.post("/api/sessions/\(pathSegment(id))/settle", body: Empty())) }
+    /// Ends the session after devd's undo grace. `confirm`: the owner agreed to end one whose agent waits or works
+    /// (devd refuses it with 409 otherwise).
+    func settle(_ id: String, confirm: Bool = false) async throws {
+        let path = "/api/sessions/\(pathSegment(id))/settle"
+        apply(confirm ? try await client.post(path, body: Confirm()) : try await client.post(path, body: Empty()))
+    }
     /// Back into the inbox: ends a settle and a snooze.
     func unsettle(_ id: String) async throws { apply(try await client.post("/api/sessions/\(pathSegment(id))/unsettle", body: Empty())) }
     func snooze(_ id: String, until: Int) async throws {

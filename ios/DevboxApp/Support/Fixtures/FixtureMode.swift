@@ -67,6 +67,22 @@ enum FixtureMode {
         return true
     }()
 
+    /// A request's body: URLSession hands a URLProtocol the body as a stream, not `httpBody`.
+    static func body(of request: URLRequest) -> Data? {
+        if let data = request.httpBody { return data }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let n = stream.read(&buffer, maxLength: buffer.count)
+            if n <= 0 { break }
+            data.append(buffer, count: n)
+        }
+        return data
+    }
+
     /// A client whose every request is answered by `FixtureURLProtocol`. The host is never resolved.
     static func client() -> DevdClient {
         let config = URLSessionConfiguration.ephemeral

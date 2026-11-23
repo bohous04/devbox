@@ -35,6 +35,13 @@ struct SessionActions {
         try await client.postVoid("/api/sessions/\(id)/end", body: EndBody(soloAction: soloAction))
     }
 
+    private struct ConfirmBody: Encodable { let confirm = true }
+
+    /// Settles the session, which ends it after devd's undo grace (the inbox's settle, confirmed: the caller asked).
+    func settle(_ id: String) async throws {
+        try await client.postVoid("/api/sessions/\(id)/settle", body: ConfirmBody())
+    }
+
     private struct ImportantBody: Encodable { let important: Bool }
 
     func setImportant(_ id: String, _ important: Bool) async throws {
