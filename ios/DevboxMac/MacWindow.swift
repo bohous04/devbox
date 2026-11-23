@@ -472,11 +472,14 @@ struct MacInboxSidebar: View {
                         .keyboardShortcut("s", modifiers: [.command, .shift])
                     Button("Snooze…") { actionsFor = item }
                         .disabled(InboxView.shelfBlock(item) != nil)
-                } else if MacSettler.canUnsettle(item) {
-                    Button("Back to the Inbox") {
-                        Task {
-                            do { try await store.unsettle(item.sessionId) } catch {
-                                state.settler.report("Couldn't bring back “\(InboxView.rowTitle(item))”: \(chatErrorText(error))")
+                } else {
+                    if MacSettler.canEnd(item) { Button("Settle and End") { settle(item) } }
+                    if MacSettler.canUnsettle(item) {
+                        Button("Back to the Inbox") {
+                            Task {
+                                do { try await store.unsettle(item.sessionId) } catch {
+                                    state.settler.report("Couldn't bring back “\(InboxView.rowTitle(item))”: \(chatErrorText(error))")
+                                }
                             }
                         }
                     }

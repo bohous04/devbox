@@ -147,6 +147,10 @@ class InboxSettler: ObservableObject {
     /// Whether a shelved row can go back to the inbox: not while its end runs (devd refuses it, session-ending).
     static func canUnsettle(_ i: InboxItem) -> Bool { !canSettle(i) && i.ending != true }
 
+    /// A settled session still alive (settled before settles ended the session): its menu offers the end itself.
+    /// Not while its grace or its end runs (inboxView.ts canEnd).
+    static func canEnd(_ i: InboxItem) -> Bool { i.attention.section == .settled && i.endsAt == nil && i.ending != true }
+
     /// A tmux session's finish or failure clears once the owner has looked at it (POST /seen). A chat session marks
     /// its thread seen itself (ThreadStore), and waiting, working or idle sessions have nothing to clear.
     static func wantsSeen(_ i: InboxItem?) -> Bool {
@@ -173,10 +177,11 @@ class InboxSettler: ObservableObject {
     }
 
     /// How long the undo notice shows: its lifetime (until the next action with VoiceOver, nil), never past the
-    /// session's end (`endsAt`), when an undo can no longer take the settle back.
-    static func noticeLifetime(_ lifetime: Duration, endsAt: Int?, now: Int, voiceOver: Bool) -> Duration? {
-        guard let endsAt else { return voiceOver ? nil : lifetime }
-        let left = Duration.milliseconds(max(0, endsAt - now))
+    /// session's end, when an undo can no longer take the settle back. `endsIn`: devd's ms to the end from the
+    /// settle's answer (devd's endsAt is on devd's clock, which this device's may not match).
+    static func noticeLifetime(_ lifetime: Duration, endsIn: Int?, voiceOver: Bool) -> Duration? {
+        guard let endsIn else { return voiceOver ? nil : lifetime }
+        let left = Duration.milliseconds(max(0, endsIn))
         return voiceOver ? left : min(lifetime, left)
     }
 
@@ -209,8 +214,8 @@ class InboxSettler: ObservableObject {
         let next = Notice(sessionId: item.sessionId, title: title)
         notice = next
         AccessibilityNotification.Announcement("Settled \(title), the session ends, \(undoHint)").post()
-        let endsAt = store.items?.first { $0.sessionId == item.sessionId }?.endsAt
-        guard let shown = Self.noticeLifetime(lifetime, endsAt: endsAt, now: Int(Date().timeIntervalSince1970 * 1000), voiceOver: voiceOver())
+        let endsIn = store.items?.first { $0.sessionId == item.sessionId }?.endsIn
+        guard let shown = Self.noticeLifetime(lifetime, endsIn: endsIn, voiceOver: voiceOver())
         else { return }
         Task { [weak self] in
             try? await Task.sleep(for: shown)

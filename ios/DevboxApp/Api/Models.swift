@@ -1390,6 +1390,8 @@ struct InboxItem: Decodable, Equatable, Identifiable {
     /// The settle's end runs now (minutes): the row sits in Settled, neither undoable nor continuable yet, until its
     /// transcript replaces it. nil from an older devd.
     var ending: Bool? = nil
+    /// Only in POST settle's answer: ms from devd's now to `endsAt`, which bounds the Undo without this device's clock.
+    var endsIn: Int? = nil
     /// Why devd's auto rule leaves this quiet session alive ("Uncommitted changes"); nil when nothing holds it.
     var autoEndHold: String? = nil
 

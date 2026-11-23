@@ -98,16 +98,32 @@ final class InboxSettleTests: XCTestCase {
         XCTAssertTrue(InboxSettler.canSettle(try item("a", "working", reason: "running")))
     }
 
-    /// The undo notice goes after its lifetime, and never after devd ends the session (endsAt): an undo then is too
-    /// late. With VoiceOver it stays until the next action, but not past the end either.
+    /// The undo notice goes after its lifetime, and never after devd ends the session: an undo then is too late. The
+    /// bound is devd's endsIn from the settle's answer, so this device's clock never enters it. With VoiceOver it stays
+    /// until the next action, but not past the end either.
     func testTheNoticeNeverOutlivesTheSessionsEnd() {
         let five = Duration.seconds(5)
-        XCTAssertEqual(InboxSettler.noticeLifetime(five, endsAt: nil, now: 0, voiceOver: false), five)
-        XCTAssertEqual(InboxSettler.noticeLifetime(five, endsAt: 8_000, now: 1_000, voiceOver: false), five)
-        XCTAssertEqual(InboxSettler.noticeLifetime(five, endsAt: 4_000, now: 1_000, voiceOver: false), .milliseconds(3_000))
-        XCTAssertEqual(InboxSettler.noticeLifetime(five, endsAt: 8_000, now: 1_000, voiceOver: true), .milliseconds(7_000))
-        XCTAssertNil(InboxSettler.noticeLifetime(five, endsAt: nil, now: 0, voiceOver: true), "kept until the next action")
-        XCTAssertEqual(InboxSettler.noticeLifetime(five, endsAt: 500, now: 1_000, voiceOver: false), .zero)
+        XCTAssertEqual(InboxSettler.noticeLifetime(five, endsIn: nil, voiceOver: false), five)
+        XCTAssertEqual(InboxSettler.noticeLifetime(five, endsIn: 7_000, voiceOver: false), five)
+        XCTAssertEqual(InboxSettler.noticeLifetime(five, endsIn: 3_000, voiceOver: false), .milliseconds(3_000))
+        XCTAssertEqual(InboxSettler.noticeLifetime(five, endsIn: 7_000, voiceOver: true), .milliseconds(7_000))
+        XCTAssertNil(InboxSettler.noticeLifetime(five, endsIn: nil, voiceOver: true), "kept until the next action")
+        XCTAssertEqual(InboxSettler.noticeLifetime(five, endsIn: 0, voiceOver: false), .zero)
+        let json = #"{"sessionId":"a","runtime":"chat","title":"t","project":"p","repo":"r","agent":"claude","attention":{"section":"settled","since":1},"endsAt":9000,"endsIn":7000}"#
+        XCTAssertEqual(try JSONDecoder().decode(InboxItem.self, from: Data(json.utf8)).endsIn, 7_000)
+    }
+
+    /// A settled session still alive (settled before settles ended it) offers its end itself; not while its grace or
+    /// its end runs, and not off the Settled shelf.
+    func testALegacySettledSessionOffersItsEnd() throws {
+        XCTAssertTrue(InboxSettler.canEnd(try item("a", "settled", reason: nil)))
+        var grace = try item("a", "settled", reason: nil)
+        grace.endsAt = 9_000
+        XCTAssertFalse(InboxSettler.canEnd(grace))
+        var ending = try item("a", "settled", reason: nil)
+        ending.ending = true
+        XCTAssertFalse(InboxSettler.canEnd(ending))
+        XCTAssertFalse(InboxSettler.canEnd(try item("a", "idle", reason: nil)))
     }
 
     /// While its end runs a settled row says Ending… and cannot go back; a quiet row the auto rule keeps alive says why,

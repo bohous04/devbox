@@ -43,6 +43,7 @@ enum InboxFixtures {
         attention["since"] = now
         row["attention"] = attention
         row["endsAt"] = now + 8_000
+        row["endsIn"] = 8_000
         return .json(row)
     }
 

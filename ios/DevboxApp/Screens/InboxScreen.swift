@@ -289,8 +289,13 @@ struct InboxScreen: View {
             Button { Task { await settler.settle(item, in: store) } } label: { Label("Settle and End", systemImage: "checkmark") }
             Button { actionsFor = item } label: { Label("Snooze…", systemImage: "alarm") }
                 .disabled(InboxView.shelfBlock(item) != nil)
-        } else if InboxSettler.canUnsettle(item) {
-            Button { unsettle(item) } label: { Label("Back to the inbox", systemImage: "arrow.uturn.backward") }
+        } else {
+            if InboxSettler.canEnd(item) {
+                Button { Task { await settler.settle(item, in: store) } } label: { Label("Settle and End", systemImage: "checkmark") }
+            }
+            if InboxSettler.canUnsettle(item) {
+                Button { unsettle(item) } label: { Label("Back to the inbox", systemImage: "arrow.uturn.backward") }
+            }
         }
     }
 
@@ -657,6 +662,7 @@ struct InboxRowActions: View {
                 if item.ending == true {
                     Text("Ending… its transcript replaces it when done.").foregroundStyle(Theme.C.mutedForeground)
                 } else if shelved {
+                    if InboxSettler.canEnd(item) { Button("Settle and End") { dismiss(); settle() } }
                     Button("Back to the inbox") { run { try await store.unsettle(item.sessionId) } }
                 } else {
                     Section {
