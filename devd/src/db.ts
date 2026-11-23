@@ -263,6 +263,10 @@ export function openDb(path: string): Database {
   // for tmux, /thread/seen for chat). The auto-settle clock counts it (autoSettleDue). For tmux it is also the seen
   // marker: a done or failed state that began at or before it is seen (tmuxAttention); chat's marker is the thread
   // store's seenSeq. Deleted with the session (deleteSession).
+  // Ends that are running (endsInFlight.ts): written when mgr.end starts, deleted when it finishes or fails. A row left
+  // behind means devd died mid-end; the next devd finishes it. Not deleted with the session: the end deletes it itself.
+  db.run(`CREATE TABLE IF NOT EXISTS ends_in_flight (
+    session_id TEXT PRIMARY KEY, solo_action TEXT NOT NULL, keep_worktree INTEGER NOT NULL, started_at INTEGER NOT NULL)`);
   db.run(`CREATE TABLE IF NOT EXISTS tmux_seen (session_id TEXT PRIMARY KEY, seen_at INTEGER NOT NULL)`);
   // Ended sessions whose transcript is kept (endedSessions.ts): listed in the inbox's Settled section until hidden, and
   // purged with their transcript 30 days after the end. Not tied to a sessions row: the id is reused by later sessions.
