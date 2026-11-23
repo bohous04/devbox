@@ -40,7 +40,10 @@ export async function preserveForEnd(container: string, exec: Exec = run, guardI
     if (r.code === 0) return;
     // The docker wrapper started the same unit between our check and our start: wait for it, then run once more.
     // A name that stays taken while nothing runs is a leftover unit, not a race: say so instead of spinning.
-    if (/already exists/i.test(r.stderr) && clash < 3) { await sleep(POLL_MS); continue; }
+    if (/already exists/i.test(r.stderr)) {
+      if (clash < 3) { await sleep(POLL_MS); continue; }
+      throw new Error(`backup before ending: ${unit} is held by a leftover unit; clear it with systemctl reset-failed ${unit}`);
+    }
     const journal = await exec(["journalctl", `_SYSTEMD_UNIT=${unit}.service`, "-n", "20", "-o", "cat", "--no-pager"], { timeoutMs: 15_000 });
     const why = journal.stdout.trim().split("\n").pop() || r.stderr.trim().split("\n").pop() || `rc=${r.code}`;
     throw new Error(`backup before ending failed (journalctl -u ${unit}): ${why}`);

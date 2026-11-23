@@ -64,3 +64,11 @@ test("a failed backup stops End with the guard's own last words from the unit's 
   await expect(preserveForEnd("dev-x", h.exec, () => true, noSleep))
     .rejects.toThrow(`backup before ending failed (journalctl -u ${UNIT}): devbox-storage: Source changed during backup; deletion denied`);
 });
+
+// Review of #145 (M5): a failed unit kept without --collect holds the name while nothing runs.
+test("a unit name that stays taken while nothing runs is named in the error, not blamed on the backup", async () => {
+  const h = host({ run: () => ok({ code: 1, stderr: `Failed to start transient service unit: Unit ${UNIT}.service already exists.` }) });
+  await expect(preserveForEnd("dev-x", h.exec, () => true, noSleep))
+    .rejects.toThrow(`backup before ending: ${UNIT} is held by a leftover unit; clear it with systemctl reset-failed ${UNIT}`);
+  expect(h.runs()).toHaveLength(4);
+});
