@@ -1,7 +1,8 @@
 import type { InboxItem } from "../../shared/thread";
-import { asks, rowTitle, shelfBlock } from "./inboxView";
+import { asks, rowTitle, settleQuestion } from "./inboxView";
 
-/** Settling from the inbox in one gesture (the row's ✓, E, ⌘⇧S), the "Settled · ⌘Z to undo" notice that follows it, and
+/** Settling from the inbox in one gesture (the row's ✓, E, ⌘⇧S), which ends the session after devd's undo grace, the
+ *  "Settled · ⌘Z to undo" notice that follows it (gone when the grace is), and
  *  the tmux seen marker: the web's MacSettler (ios/DevboxMac/MacSettle.swift), same rules. Failures are kept in
  *  `problem` for the page to show until dismissed, never dropped. */
 
@@ -51,7 +52,8 @@ export interface SettleState {
 }
 
 interface SettleApi {
-  settle: (id: string) => Promise<InboxItem>;
+  /** `confirm`: the owner agreed to end a session whose agent waits or works (settleQuestion). */
+  settle: (id: string, confirm: boolean) => Promise<InboxItem>;
   unsettle: (id: string) => Promise<InboxItem>;
   seen: (id: string) => Promise<void>;
 }
@@ -78,6 +80,9 @@ export class Settler {
    *  comes back stale. Held (no timer) while the pointer or the keyboard is on the notice. */
   private timer: unknown = null;
   private held = false;
+  /** When the notice's session ends (its item's endsAt): an undo after it cannot take the settle back, so the notice
+   *  goes then even while held. null: devd did not say (an older devd). */
+  private endsAt: number | null = null;
   /** Seen posts per finish ("id@since"): a failed one is tried once more, a done one never again. */
   private seenAttempts = new Map<string, number>();
   /** The failure `problem` shows when it is about seen, and the ones the owner dismissed (not raised again). */
@@ -86,7 +91,10 @@ export class Settler {
   /** Finishes with a post on its way: the window's focus and visibility events arrive together. */
   private seenInFlight = new Set<string>();
 
-  constructor(private api: SettleApi, private lifetime = 5_000, private timers: Timers = { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) }) {}
+  /** `ask`: the question before ending a waiting or working session; true to go ahead. */
+  constructor(private api: SettleApi, private lifetime = 5_000,
+    private timers: Timers = { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
+    private ask: (question: string) => Promise<boolean> = async (q) => window.confirm(q), private now: () => number = Date.now) {}
 
   subscribe = (fn: () => void): (() => void) => {
     this.listeners.add(fn);
@@ -104,11 +112,13 @@ export class Settler {
   private arm(id: number | null) {
     if (this.timer !== null) this.timers.clear(this.timer);
     this.timer = null;
-    if (id === null || this.held) return;
+    if (id === null) return;
+    const left = this.endsAt === null ? null : Math.max(0, this.endsAt - this.now());
+    if (this.held && left === null) return;
     this.timer = this.timers.set(() => {
       this.timer = null;
       if (this.state.notice?.id === id) this.set({ notice: null });
-    }, this.lifetime);
+    }, this.held ? left! : left === null ? this.lifetime : Math.min(this.lifetime, left));
   }
 
   /** The pointer or the keyboard is on the notice (true) or left it (false: a full lifetime from now). */
@@ -121,11 +131,12 @@ export class Settler {
   /** Settles the row and shows the notice; the session's new item, or null when it was refused (the reason shown). */
   async settle(item: InboxItem): Promise<InboxItem | null> {
     const title = rowTitle(item);
-    const block = shelfBlock(item);
-    if (block) { this.set({ problem: `Couldn't settle “${title}”: ${block}` }); return null; }
+    const question = settleQuestion(item);
+    if (question !== null && !(await this.ask(question))) return null;
     let next: InboxItem;
-    try { next = await this.api.settle(item.sessionId); }
+    try { next = await this.api.settle(item.sessionId, question !== null); }
     catch (e) { this.set({ problem: `Couldn't settle “${title}”: ${failureText(e)}` }); return null; }
+    this.endsAt = next.endsAt ?? null;
     this.set({ notice: { sessionId: item.sessionId, title, id: this.nextId++ } });
     return next;
   }

@@ -21,7 +21,7 @@ function fakeApi() {
   return {
     calls, errors,
     api: {
-      settle: (id: string) => answer("settle", id).then(() => item(id, { section: "settled", reason: null, since: 1 })),
+      settle: (id: string, confirm: boolean) => answer(confirm ? "settle!" : "settle", id).then(() => ({ ...item(id, { section: "settled", reason: null, since: 1 }), endsAt: 8_000 })),
       unsettle: (id: string) => answer("unsettle", id).then(() => item(id, { section: "idle", reason: null, since: 1 })),
       seen: (id: string) => answer("seen", id),
     },
@@ -95,13 +95,28 @@ test("settle: shows the undo notice; undo unsettles it once", async () => {
   expect(f.calls).toEqual(["settle a", "unsettle a"]);
 });
 
-test("settle: an open request is refused before devd, with the reason shown", async () => {
+test("settle: a session that waits for an answer or still works is ended only once the owner confirms", async () => {
+  for (const [attention, question] of [
+    [{ section: "needs_you", reason: "request", since: 1 }, "The agent is waiting for your answer. End it?"],
+    [{ section: "working", reason: "running", since: 1 }, "The agent is still working. End it?"],
+  ] as const) {
+    const f = fakeApi();
+    const asked: string[] = [];
+    let yes = false;
+    const s = new Settler(f.api, 5_000, undefined, async (q) => { asked.push(q); return yes; });
+    expect(await s.settle(item("q", attention))).toBeNull();
+    expect(f.calls).toEqual([]);
+    expect(s.state).toEqual({ notice: null, problem: null });
+    yes = true;
+    expect(await s.settle(item("q", attention))).not.toBeNull();
+    expect(f.calls).toEqual(["settle! q"]);
+    expect(asked).toEqual([question, question]);
+  }
+  // A finished session settles without a question.
   const f = fakeApi();
-  const s = new Settler(f.api);
-  expect(await s.settle(item("q", { section: "needs_you", reason: "request", since: 1 }))).toBeNull();
-  expect(f.calls).toEqual([]);
-  expect(s.state.problem).toBe("Couldn't settle “q”: Answer the open request first");
-  expect(s.state.notice).toBeNull();
+  const s = new Settler(f.api, 5_000, undefined, async () => { throw new Error("asked"); });
+  await s.settle(done("a"));
+  expect(f.calls).toEqual(["settle a"]);
 });
 
 test("settle and undo failures are shown, never dropped", async () => {
@@ -123,9 +138,11 @@ test("settle and undo failures are shown, never dropped", async () => {
 function fakeTimers() {
   let n = 0;
   const due = new Map<number, () => void>();
+  const delays = new Map<number, number>();
   return {
-    timers: { set: (fn: () => void) => { due.set(++n, fn); return n; }, clear: (h: unknown) => { due.delete(h as number); } },
+    timers: { set: (fn: () => void, ms: number) => { due.set(++n, fn); delays.set(n, ms); return n; }, clear: (h: unknown) => { due.delete(h as number); } },
     pending: () => due.size,
+    delays: () => [...due.keys()].map((k) => delays.get(k)),
     fire: () => { const all = [...due.values()]; due.clear(); for (const fn of all) fn(); },
   };
 }
@@ -141,14 +158,16 @@ test("the notice's timer lives in the settler: it ends the notice whatever page 
   expect(await s.undo()).toBeNull();
 });
 
-test("hold keeps the notice while the pointer or the keyboard is on it; letting go starts a full lifetime", async () => {
+test("hold keeps the notice while the pointer or the keyboard is on it, but never past the session's end", async () => {
   const t = fakeTimers();
-  const s = new Settler(fakeApi().api, 5_000, t.timers);
+  // The settle answers endsAt 8000: at 1000 the undo has 7000 ms left.
+  const s = new Settler(fakeApi().api, 5_000, t.timers, undefined, () => 1_000);
   await s.settle(done("a"));
+  expect(t.delays()).toEqual([5_000]);
   s.hold(true);
-  expect(t.pending()).toBe(0);
+  expect(t.delays()).toEqual([7_000]);
   s.hold(false);
-  expect(t.pending()).toBe(1);
+  expect(t.delays()).toEqual([5_000]);
   t.fire();
   expect(s.state.notice).toBeNull();
 });

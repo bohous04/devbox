@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Attention, InboxItem } from "../../shared/thread";
-import { asks, badgeSlots, branchLabel, groupInbox, snoozeEnd, inboxHref, inboxList, metaTail, secondLine, mixedAgents, plainPreview, projectBadge, reasonLabel, reasonStatus, rowStatus, rowTitle, statusParts, shelfBlock, shortAgo, snoozeTimes, splitNeedsYou, threadHeading, upsertInbox } from "./inboxView";
+import { asks, badgeSlots, settleQuestion, branchLabel, groupInbox, snoozeEnd, inboxHref, inboxList, metaTail, secondLine, mixedAgents, plainPreview, projectBadge, reasonLabel, reasonStatus, rowStatus, rowTitle, statusParts, shelfBlock, shortAgo, snoozeTimes, splitNeedsYou, threadHeading, upsertInbox } from "./inboxView";
 
 const item = (sessionId: string, attention: Attention, runtime: InboxItem["runtime"] = "chat"): InboxItem => ({
   sessionId, runtime, title: sessionId, project: "p", repo: "r", agent: "claude", attention, lastText: null,
@@ -67,7 +67,14 @@ test("snoozeTimes: one hour from now, and the next 9:00 local time (today before
   expect(snoozeTimes(new Date(2026, 10, 19, 6, 15)).morning).toEqual({ at: new Date(2026, 10, 19, 9, 0).getTime(), label: "9:00" });
 });
 
-test("shelfBlock: a session with an open request cannot be settled or snoozed", () => {
+test("settleQuestion: settling ends the session, so a waiting or working one asks first", () => {
+  expect(settleQuestion(item("a", { section: "needs_you", reason: "request", since: 1 }))).toBe("The agent is waiting for your answer. End it?");
+  expect(settleQuestion(item("a", { section: "working", reason: "running", since: 1 }))).toBe("The agent is still working. End it?");
+  expect(settleQuestion(item("a", { section: "needs_you", reason: "completed", since: 1 }))).toBeNull();
+  expect(settleQuestion(item("a", { section: "idle", reason: null, since: 1 }))).toBeNull();
+});
+
+test("shelfBlock: a session with an open request cannot be snoozed", () => {
   expect(shelfBlock(item("a", { section: "needs_you", reason: "request", since: 1 }))).toBe("Answer the open request first");
   expect(shelfBlock(item("a", { section: "needs_you", reason: "completed", since: 1 }))).toBeNull();
 });

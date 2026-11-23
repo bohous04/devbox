@@ -25,9 +25,17 @@ export function snoozeTimes(now: Date): { hour: number; morning: { at: number; l
   return { hour: now.getTime() + 3_600_000, morning: { at, label: today ? "9:00" : "Tomorrow 9:00" } };
 }
 
-/** Why a row cannot be settled or snoozed (devd refuses it with 409 request-open), or null. */
+/** Why a row cannot be snoozed (devd refuses it with 409 request-open), or null. */
 export function shelfBlock(i: InboxItem): string | null {
   return i.attention.reason === "request" ? "Answer the open request first" : null;
+}
+
+/** Settling ends the session: what to ask first when its agent waits for an answer or still works (devd's 409
+ *  request-open / agent-working until confirmed), or null when it settles at once. */
+export function settleQuestion(i: InboxItem): string | null {
+  if (i.attention.reason === "request") return "The agent is waiting for your answer. End it?";
+  if (i.attention.section === "working") return "The agent is still working. End it?";
+  return null;
 }
 
 /** An SSE `inbox` event carries one session's current item: it replaces that session's row. A removal drops it. */
