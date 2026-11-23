@@ -194,6 +194,8 @@ export function mergeSnapshot(t: ThreadSnapshot, m: { afterSeq: number; snapshot
   return {
     lastSeq: Math.max(t.lastSeq, s.lastSeq), seenSeq: s.seenSeq, items, runs, pending: s.pending, background: s.background, native: s.native, effort: s.effort,
     ...(s.commands ? { commands: s.commands } : {}),
+    // Stream frames carry no topic (GET only), and the first message, which it names, never changes.
+    ...(t.topic !== undefined ? { topic: t.topic } : {}),
   };
 }
 
@@ -241,4 +243,36 @@ export function composerErrorText(status: number, body: unknown): string {
  *  open posts only when it is not seen yet. */
 export function seenToPost(t: ThreadSnapshot, look: boolean): number | null {
   return look || t.lastSeq > t.seenSeq ? t.lastSeq : null;
+}
+
+/** How many items a thread opens with (its newest) and how many each step back adds: a long session's whole history
+ *  is megabytes (devd's `limit`/`beforeSeq`). The Apple apps use the same number (ThreadView.pageSize). */
+export const THREAD_PAGE = 200;
+
+/** A page devd answered for `limit=THREAD_PAGE`: a full one may have more before it. */
+export const hasOlderThan = (page: ThreadSnapshot): boolean => page.items.length >= THREAD_PAGE;
+
+/** The `beforeSeq` for the page before the oldest loaded item: one past its seq, since a devd notice takes the seq of
+ *  the event before it, so two items can share a seq and `beforeSeq = seq` would skip the older one. null when the
+ *  thread has no items. */
+export const olderBeforeSeq = (t: ThreadSnapshot): number | null => (t.items[0] ? t.items[0].seq + 1 : null);
+
+/** Puts a page of older items (asked with `olderBeforeSeq`) in front of the thread. Items at the boundary seq that are
+ *  already here come back in the page too and are dropped. Everything else (runs, pending…) stays: the stream keeps it. */
+export function prependOlder(t: ThreadSnapshot, older: ThreadItem[]): ThreadSnapshot {
+  const edge = t.items[0]?.seq;
+  const here = (it: ThreadItem) => it.seq === edge && t.items.some((x) => x.seq === it.seq && x.runId === it.runId && x.itemId === it.itemId && x.kind === it.kind);
+  return { ...t, items: [...older.filter((it) => !here(it)), ...t.items] };
+}
+
+/** What a thread loaded only to some point back shows (`items` without housekeeping notices). The oldest loaded run
+ *  may have begun before that point: it and the notices among its items are left out until the user loads further
+ *  back, so the thread starts at the first run it holds whole (its prompt, and a fold that counts all its work). When
+ *  no other run is loaded (one long run fills the page), its items stay but it is `partialRun`: it must not fold, since
+ *  a fold of part of a run would undercount its work. */
+export function tailView(items: ThreadItem[], hasOlder: boolean): { items: ThreadItem[]; partialRun: string | null } {
+  const head = items.find((it) => it.runId !== null)?.runId ?? null;
+  if (!hasOlder || head === null) return { items, partialRun: null };
+  const cut = items.findIndex((it) => it.runId !== null && it.runId !== head);
+  return cut === -1 ? { items, partialRun: head } : { items: items.slice(cut), partialRun: null };
 }

@@ -209,6 +209,9 @@ test("threadHeading: the thread page names the thread like its inbox row, the to
   expect(threadHeading("dev-p-r-14", session, undefined)).toBeNull();
   // Not a known session: its id.
   expect(threadHeading("dev-p-r-14", undefined, undefined)).toBe("dev-p-r-14");
+  // Only the tail loaded: its first prompt is not the thread's, devd's topic names it.
+  expect(threadHeading("dev-p-r-14", session, [user("Now run the tests", 9)], { topic: "Fix the login redirect" })).toBe("Fix the login redirect");
+  expect(threadHeading("dev-p-r-14", session, [user("Now run the tests", 9)], {})).toBe("r #14");
 });
 
 test("mixedAgents: a row names its agent only while the visible rows use more than one", () => {

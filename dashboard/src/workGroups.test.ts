@@ -82,3 +82,9 @@ test("opensTurn: a prompt after another row, not the first and not right after a
   const rows = [it(1, "user"), it(2, "assistant"), it(3, "user"), it(4, "notice"), it(5, "user")];
   expect(rows.map((_, i) => opensTurn(rows, i))).toEqual([false, false, true, false, false]);
 });
+
+test("threadRows: a run only partly loaded stays expanded, the others still fold", () => {
+  const items = [item("a", "tool"), item("a", "assistant"), item("b", "user"), item("b", "tool"), item("b", "assistant")];
+  const rows = threadRows(items, [run("a", "completed"), run("b", "completed")], "a");
+  expect(shape(rows)).toEqual(["tool", "assistant", "user", "work[tool]", "assistant"]);
+});

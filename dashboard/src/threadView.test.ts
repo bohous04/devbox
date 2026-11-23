@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import type { BridgeEvent, LoggedEvent, ThreadItem, ThreadSnapshot } from "../../shared/thread";
 import fixture from "../../shared/fixtures/thread-events.json";
-import { activeRun, applyCommands, applyEffort, applyNotice, applyThreadEvent, composerErrorText, criticRunIds, emptyThread, mergeSnapshot, queuedRunIds, seenToPost } from "./threadView";
+import { activeRun, applyCommands, applyEffort, applyNotice, applyThreadEvent, composerErrorText, criticRunIds, emptyThread, hasOlderThan, mergeSnapshot, olderBeforeSeq, prependOlder, queuedRunIds, seenToPost, tailView, THREAD_PAGE } from "./threadView";
 
 /** The shared cases (also run by ios/DevboxAppTests/ThreadStoreTests.swift): each starts from an empty thread. */
 type Step = { event: LoggedEvent } | { snapshot: { afterSeq: number; snapshot: ThreadSnapshot } } | { notice: ThreadItem };
@@ -88,4 +88,41 @@ test("seenToPost: a look always posts (it restarts the inbox's auto-settle clock
   expect(seenToPost(t, true)).toBe(5);
   expect(seenToPost(t, false)).toBeNull();
   expect(seenToPost({ ...t, seenSeq: 3 }, false)).toBe(5);
+});
+
+const it_ = (seq: number, runId: string | null, kind: ThreadItem["kind"], itemId: string | null = `i${seq}`): ThreadItem =>
+  ({ seq, runId, itemId, kind, text: `t${seq}`, ts: seq });
+
+test("paging back: a full page may have more, the next page is asked from one past the oldest seq", () => {
+  const t: ThreadSnapshot = { ...emptyThread(), lastSeq: 9, items: [it_(5, "r1", "user"), it_(6, "r1", "tool")] };
+  expect(olderBeforeSeq(t)).toBe(6);
+  expect(olderBeforeSeq(emptyThread())).toBeNull();
+  expect(hasOlderThan({ ...t, items: Array.from({ length: THREAD_PAGE }, (_, i) => it_(i + 1, "r", "tool")) })).toBe(true);
+  expect(hasOlderThan(t)).toBe(false);
+});
+
+test("prependOlder puts the older page in front and drops the boundary items already here", () => {
+  // A devd notice took the seq of the event before it: both sit at seq 5, the notice already loaded.
+  const t: ThreadSnapshot = { ...emptyThread(), lastSeq: 9, topic: "Fix it", items: [it_(5, null, "notice", "notice:1"), it_(6, "r2", "user")] };
+  const older = [it_(3, "r1", "user"), it_(5, "r1", "tool"), it_(5, null, "notice", "notice:1")];
+  const n = prependOlder(t, older);
+  expect(n.items.map((i) => `${i.seq}:${i.itemId}`)).toEqual(["3:i3", "5:i5", "5:notice:1", "6:i6"]);
+  expect(n.lastSeq).toBe(9);
+  expect(n.topic).toBe("Fix it");
+});
+
+test("mergeSnapshot keeps the topic the GET named (stream frames carry none)", () => {
+  const t: ThreadSnapshot = { ...emptyThread(), topic: "Fix it" };
+  expect(mergeSnapshot(t, { afterSeq: 0, snapshot: { ...emptyThread(), lastSeq: 2 } }).topic).toBe("Fix it");
+  expect("topic" in mergeSnapshot(emptyThread(), { afterSeq: 0, snapshot: emptyThread() })).toBe(false);
+});
+
+test("tailView starts a cut thread at its first whole run; a run that fills the page stays, unfolded", () => {
+  const items = [it_(1, "r1", "tool"), it_(2, null, "notice"), it_(3, "r1", "assistant"), it_(4, "r2", "user"), it_(5, "r2", "tool")];
+  expect(tailView(items, true)).toEqual({ items: items.slice(3), partialRun: null });
+  // All of it loaded: nothing is cut.
+  expect(tailView(items, false)).toEqual({ items, partialRun: null });
+  const one = [it_(1, "r1", "tool"), it_(2, "r1", "tool")];
+  expect(tailView(one, true)).toEqual({ items: one, partialRun: "r1" });
+  expect(tailView([it_(1, null, "notice")], true)).toEqual({ items: [it_(1, null, "notice")], partialRun: null });
 });

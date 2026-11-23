@@ -182,13 +182,15 @@ function WorkGroup({ row }: { row: WorkRow }) {
 
 /** The thread: user and assistant messages, tool calls (a finished run's folded under one line), requests (open
  *  ones as a form) and notices. */
-export function MessageList({ sessionId, endedId = null, items, runs, pending, queued, critic, onAnswer, onLayout }: {
+export function MessageList({ sessionId, endedId = null, items, partialRun = null, runs, pending, queued, critic, onAnswer, onLayout }: {
   /** For the user's images (attachmentUrl). */
   sessionId: string;
   /** The thread is this ended session's read-only transcript: images from its archive, no changes card (the session
    *  id may belong to a later session by now). */
   endedId?: string | null;
   items: ThreadItem[];
+  /** A run only partly loaded (threadView tailView): it does not fold. */
+  partialRun?: string | null;
   /** Which runs ended and when: their work folds. */
   runs: RunRow[];
   pending: PendingRequest[];
@@ -200,7 +202,7 @@ export function MessageList({ sessionId, endedId = null, items, runs, pending, q
   /** Content that loads on its own (the changes card) grew: the page re-pins its end if the user is there. */
   onLayout?: () => void;
 }) {
-  const rows = threadRows(items, runs);
+  const rows = threadRows(items, runs, partialRun);
   const anchor = endedId === null ? changesAnchor(items, runs) : null;
   // A notice is a run's failure only when that run failed (run.failed); "event for unknown run" also carries a runId.
   const failed = new Set(runs.filter((r) => r.status === "failed").map((r) => r.runId));

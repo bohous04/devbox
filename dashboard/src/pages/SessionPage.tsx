@@ -2,18 +2,19 @@ import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import { ArrowLeft, MessageSquare, SquareTerminal, X } from "lucide-react";
 import { Link, useLocation, useParams } from "react-router-dom";
 import type { MirrorInfo } from "../../../shared/mirror";
-import type { ThreadSnapshot } from "../../../shared/thread";
+import { isHousekeepingNotice, type ThreadSnapshot } from "../../../shared/thread";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, ApiError } from "../api";
 import { Composer } from "../components/chat/Composer";
 import { MessageList } from "../components/chat/MessageList";
+import { OlderItems } from "../components/chat/OlderItems";
 import { Switchers } from "../components/chat/Switchers";
 import { EmptyState, RowsSkeleton } from "../components/primitives";
 import { SettleProblem } from "../components/SettleProblem";
 import { threadHeading } from "../inboxView";
 import { useStore } from "../store";
-import { activeRun, applyCommands, applyEffort, applyNotice, applyThreadEvent, criticRunIds, mergeSnapshot, queuedRunIds, seenToPost } from "../threadView";
+import { activeRun, applyCommands, applyEffort, applyNotice, applyThreadEvent, criticRunIds, hasOlderThan, mergeSnapshot, olderBeforeSeq, prependOlder, queuedRunIds, seenToPost, tailView, THREAD_PAGE } from "../threadView";
 import { FOCUS_LOOK_GAP_MS } from "../inboxSettle";
 import { useEventStream } from "../useEventStream";
 import { useTmuxSeen } from "../useSettler";
@@ -30,6 +31,8 @@ function ChatPage({ id }: { id: string }) {
   const { live } = useStore();
   const session = live?.sessions.find((s) => s.id === id);
   const [thread, setThread] = useState<ThreadSnapshot | null>(null);
+  // Only the newest THREAD_PAGE items are loaded at first; true while older ones may be left (OlderItems).
+  const [more, setMore] = useState(false);
   const [loadErr, setLoadErr] = useState<{ status: number; message: string } | null>(null);
   const [seenErr, setSeenErr] = useState<string | null>(null);
   const [{ tab }, setTabState] = useState<TabState>(UNSETTLED);
@@ -47,23 +50,45 @@ function ChatPage({ id }: { id: string }) {
   // Set by the New session dialog (openedNotice), e.g. a pull conflict the agent was asked to resolve.
   const notice = (useLocation().state as { notice?: string | null } | null)?.notice ?? null;
 
+  // The runtime the session list names, read when the page opens: it decides the route without the /thread probe.
+  const knownRuntime = session?.runtime;
   useEffect(() => {
     let alive = true;
     // The tab too: another session's (now often a remembered Terminal) must not carry over to this one.
-    setThread(null); setLoadErr(null); setMirror(null); setSendLock(null); setMirrorFailed(false); setTabState(UNSETTLED);
+    setThread(null); setMore(false); setLoadErr(null); setMirror(null); setSendLock(null); setMirrorFailed(false); setTabState(UNSETTLED);
     const failed = (e: unknown) => { if (alive) setLoadErr({ status: e instanceof ApiError ? e.status : 0, message: (e as Error).message }); };
-    api.thread(id).then(
-      (t) => { if (alive) setThread(t); },
+    const tail = { limit: THREAD_PAGE };
+    const loadMirror = () => api.mirror(id, tail).then((m) => {
+      if (!alive) return;
+      setMirror(m.mirror); setThread(m.snapshot); setMore(hasOlderThan(m.snapshot));
+    }, (e2) => {
+      // The list said tmux, devd says it is a chat session now: its thread, by the probe.
+      if (knownRuntime === "tmux" && e2 instanceof ApiError && e2.status === 409 && e2.message === "not-a-tmux-session") { probe(); return; }
+      if (alive) setMirrorFailed(true);
+      failed(e2);
+    });
+    // Unknown runtime (the list not loaded yet, an older devd): /thread answers 409 for a tmux session.
+    const probe = () => api.thread(id, tail).then(
+      (t) => { if (alive) { setThread(t); setMore(hasOlderThan(t)); } },
       (e) => {
         if (!(e instanceof ApiError && e.status === 409 && e.message === "not-a-chat-session")) { failed(e); return; }
-        api.mirror(id).then((m) => {
-          if (!alive) return;
-          setMirror(m.mirror); setThread(m.snapshot);
-        }, (e2) => { if (alive) setMirrorFailed(true); failed(e2); });
+        void loadMirror();
       },
     );
+    if (knownRuntime === "tmux") void loadMirror();
+    else void probe();
     return () => { alive = false; };
   }, [id]);
+
+  const loadOlder = async () => {
+    const t = threadRef.current;
+    const beforeSeq = t ? olderBeforeSeq(t) : null;
+    if (beforeSeq === null) { setMore(false); return; }
+    const opts = { beforeSeq, limit: THREAD_PAGE };
+    const page = mirrorRef.current !== null ? (await api.mirror(id, opts)).snapshot : await api.thread(id, opts);
+    setThread((cur) => (cur ? prependOlder(cur, page.items) : cur));
+    setMore(hasOlderThan(page));
+  };
 
   const { paused, badFrame } = useEventStream({
     sessionId: id,
@@ -170,8 +195,10 @@ function ChatPage({ id }: { id: string }) {
   const title = session?.name?.trim() || (session ? `${session.project}/${session.repo}` : id);
   // The header names the thread like a breadcrumb: where it runs, then what it is called, as in the inbox
   // (threadHeading). null while the thread loads (no nickname): the crumb alone stands in.
-  const heading = threadHeading(id, session, thread?.items);
-  const firstMessage = thread?.items.find((i) => i.kind === "user" && i.text !== "")?.text;
+  const heading = threadHeading(id, session, thread?.items, more ? { topic: thread?.topic } : undefined);
+  // The tooltip's whole first message is known only when the thread's start is loaded.
+  const firstMessage = more ? undefined : thread?.items.find((i) => i.kind === "user" && i.text !== "")?.text;
+  const view = useMemo(() => (thread ? tailView(thread.items.filter((i) => !isHousekeepingNotice(i)), more) : null), [thread, more]);
   useEffect(() => { document.title = `devbox · ${heading ?? id}`; }, [id, heading]);
   const place = session ? `${session.project} / ${session.repo}` : null;
 
@@ -249,7 +276,10 @@ function ChatPage({ id }: { id: string }) {
           <div className="mx-auto w-full max-w-[42rem] flex-1">
             {thread.items.length === 0
               ? <EmptyState title="No messages yet" hint={mirrored ? "The agent's conversation in the terminal shows up here." : "Write the first message below."} />
-              : <MessageList sessionId={id} items={thread.items} runs={thread.runs} pending={thread.pending} queued={queuedRunIds(thread)} critic={criticRunIds(thread)} onAnswer={(rid, a) => api.answerRequest(id, rid, a)} onLayout={pinEnd} />}
+              : <>
+                <OlderItems firstSeq={thread.items[0]?.seq} more={more} load={loadOlder} />
+                <MessageList sessionId={id} items={view!.items} partialRun={view!.partialRun} runs={thread.runs} pending={thread.pending} queued={queuedRunIds(thread)} critic={criticRunIds(thread)} onAnswer={(rid, a) => api.answerRequest(id, rid, a)} onLayout={pinEnd} />
+              </>}
             {thread.background.length > 0 && (
               <p className="mt-3 text-xs text-muted-foreground">background: {thread.background.map((b) => b.label).join(", ")}</p>
             )}
