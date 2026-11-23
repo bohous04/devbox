@@ -192,6 +192,81 @@ class Safety(unittest.TestCase):
             return b''
         with patch.object(self.g,'borg',side_effect=borg2):
             with self.assertRaisesRegex(RuntimeError,'changed'):self.g.archive([own],'test',[shared])
+    def test_read_back_can_be_limited_to_what_removal_deletes(self):
+        own=self.root/'work';own.mkdir();(own/'f').write_text('one')
+        shared=self.root/'repo.git';shared.mkdir();(shared/'o').write_text('a')
+        calls=[]
+        def borg(args,allow_warning=False):
+            calls.append(args);return b''
+        with patch.object(self.g,'borg',side_effect=borg):
+            name,_=self.g.archive([own],'test',[shared],verify_only=[own])
+            self.g.archive([own],'test',[shared])
+        dest=self.cfg['borg_repo']+'::'+name
+        extracts=[a for a in calls if a[0]=='extract']
+        # pp: = literal path prefix; a pattern that matches nothing makes borg exit 1, which fails the archive.
+        self.assertEqual(extracts[0],['extract','--dry-run',dest,'pp:'+str(own.resolve()).lstrip('/')])
+        self.assertEqual(len(extracts[1]),3,'without verify_only the whole archive is read back')
+
+    def end_fixture(self):
+        """A stopped session whose workspace is a linked worktree of a shared bare repo."""
+        common=self.root/'repo.git';(common/'objects').mkdir(parents=True)
+        admin=common/'worktrees'/'dev-x';admin.mkdir(parents=True);(admin/'HEAD').write_text('ref: refs/heads/s\n')
+        ws=self.root/'_sessions'/'dev-x';ws.mkdir(parents=True);(ws/'.git').write_text(f'gitdir: {admin}\n')
+        c={'Id':'abc123456789ff','Name':'/dev-x','State':{'Running':False},
+           'Mounts':[{'Source':str(ws),'Destination':'/workspace'},{'Source':str(common),'Destination':str(common)}]}
+        return c,ws,common,admin
+
+    def run_prepare_end(self,c,tar_rc=0):
+        borg_calls=[];archived={}
+        class Proc:
+            def __init__(self,args,**k):
+                borg_calls.append(list(map(str,args)));self.stdout=open(os.devnull,'rb')
+            def wait(self,timeout=None):return 0
+            def poll(self):return 0
+            def kill(self):pass
+        def fake_sub_run(args,**k):
+            args=list(map(str,args))
+            if args[:2]==[guard.DOCKER,'inspect']:
+                return SimpleNamespace(returncode=0 if args[2]=='dev-x' else 1,stdout=json.dumps([c]).encode(),stderr=b'')
+            if args[0]=='tar':return SimpleNamespace(returncode=tar_rc,stdout=b'',stderr=b'')
+            borg_calls.append(args);return SimpleNamespace(returncode=0,stdout=b'',stderr=b'')
+        def fake_archive(paths,kind,shared=(),require_stable=True,verify_only=None):
+            archived.update(paths=paths,shared=shared,verify_only=verify_only)
+            return 'data-archive',{str(Path(p).resolve()):guard.signature(Path(p).resolve()) for p in paths}
+        def fake_borg(args,**k):
+            borg_calls.append(['borg',*args]);return b''
+        def fake_run(args,**k):
+            if list(map(str,args[:2]))==['/usr/bin/git','-c']:
+                return (str(Path(c['Mounts'][1]['Source']))+'\n').encode()
+            return b''
+        with patch.object(guard.subprocess,'run',side_effect=fake_sub_run),patch.object(guard.subprocess,'Popen',Proc), \
+             patch.object(guard,'run',side_effect=fake_run),patch.object(self.g,'archive',side_effect=fake_archive), \
+             patch.object(self.g,'borg',side_effect=fake_borg):
+            result=self.g.prepare_end('dev-x')
+        return result,archived,borg_calls
+
+    def test_end_reads_back_deleted_data_but_not_the_shared_git_store(self):
+        c,ws,common,admin=self.end_fixture()
+        _,archived,_=self.run_prepare_end(c)
+        self.assertIn(common/'objects',[Path(p) for p in archived['shared']],'shared store is still archived')
+        # End deletes the workspace and its worktree registration (git worktree remove); the
+        # objects stay on disk, so re-downloading them (28 GiB for the biggest repo) proves nothing.
+        self.assertEqual(sorted(map(str,archived['verify_only'])),sorted([str(ws),str(admin.resolve())]))
+
+    def test_end_rootfs_is_read_back_once_through_tar(self):
+        c,*_=self.end_fixture()
+        result,_,calls=self.run_prepare_end(c)
+        rootfs=[a for a in calls if any(x.endswith('::'+result['rootfs_archive']) for x in a)]
+        # create, then one authenticated read of every chunk piped through tar; a dry-run before it read it all again.
+        self.assertEqual([a[a.index('--lock-wait')+2] if '--lock-wait' in a else a[1] for a in rootfs],['create','extract'])
+        self.assertIn('--stdout',rootfs[1])
+
+    def test_end_rootfs_that_tar_cannot_decode_denies_removal(self):
+        c,*_=self.end_fixture()
+        with self.assertRaisesRegex(RuntimeError,'validation'):
+            self.run_prepare_end(c,tar_rc=2)
+        self.assertFalse((self.g.state/'prepared'/(c['Id']+'.json')).exists())
+
     @unittest.skipUnless(Path('/proc').is_dir(), 'Linux procfs integration test')
     def test_reference_scan_detects_open_file(self):
         p=self.root/'open';p.write_text('x')

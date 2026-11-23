@@ -124,6 +124,20 @@ def signature(path, hash_content=True):
     return sorted(out)
 
 
+def worktree_admin_dirs(paths, shared):
+    """Registration dirs (HEAD, index, reflog) of linked worktrees among `paths` that lie in
+    the archived `shared` Git store."""
+    shared = [Path(s).resolve() for s in shared]
+    out = []
+    for p in paths:
+        pointer = Path(p) / '.git'
+        text = pointer.read_text().strip() if pointer.is_file() else ''
+        admin = Path(text[8:]).resolve() if text.startswith('gitdir: ') else None
+        if admin and admin.is_dir() and any(admin == s or s in admin.parents for s in shared):
+            out.append(admin)
+    return out
+
+
 def beneath(path, root):
     p, r = Path(path).resolve(), Path(root).resolve()
     return p != r and r in p.parents
@@ -242,11 +256,13 @@ class Guard:
             raise RuntimeError(f'borg {args[0]} failed (rc={p.returncode}): ' + p.stderr.decode(errors='replace')[-800:])
         return p.stdout
 
-    def archive(self, paths, kind, shared=(), require_stable=True):
+    def archive(self, paths, kind, shared=(), require_stable=True, verify_only=None):
         """`shared` = Git common store of a repo other live sessions keep writing to
         (new objects, refs, their worktrees/*). It is archived, but not required to
         be stable: removal never deletes it, and requiring it would deny every End
-        while any sibling session commits. Only `paths` authorize deletion."""
+        while any sibling session commits. Only `paths` authorize deletion.
+        `verify_only` limits the full read-back to these archived paths (what the caller
+        deletes); None reads back the whole archive."""
         paths = [Path(p).resolve() for p in paths]
         shared = [Path(p).resolve() for p in shared if Path(p).resolve() not in paths]
         if not paths or any(p == Path('/') for p in paths + shared):
@@ -268,7 +284,9 @@ class Guard:
         # re-verified by signature below, so rc=1 is accepted in that case alone.
         create = ['create', '--compression', 'zstd,3', dest, *map(str, paths + shared)]
         self.borg(create, allow_warning=True) if shared or not require_stable else self.borg(create)
-        self.borg(['extract', '--dry-run', dest])
+        # pp: is a literal path prefix; one that matches nothing makes borg exit 1, which fails here.
+        check = [] if verify_only is None else ['pp:' + str(Path(p).resolve()).lstrip('/') for p in verify_only]
+        self.borg(['extract', '--dry-run', dest, *check])
         # require_stable=False: the caller re-checks every path against `before` itself and
         # deletes only the unchanged ones (a batch must not fail on one busy worktree).
         if require_stable and before != {str(p): signature(p) for p in paths}:
@@ -660,7 +678,11 @@ class Guard:
         paths, shared = self.managed_sources(c)
         if sidecar:
             paths += [Path(m['Source']) for m in sidecar['Mounts'] if m['Destination'] == '/var/lib/docker']
-        path_archive, source_signatures = self.archive(paths, 'end-data', shared) if paths else (None, {})
+        # Read back only what End deletes: the owned data and the workspace's worktree registration
+        # (git worktree remove). The shared Git store stays on disk; re-downloading it (28 GiB for
+        # the largest repo) on every End proved nothing about the deleted data.
+        check = paths + worktree_admin_dirs(paths, shared)
+        path_archive, source_signatures = self.archive(paths, 'end-data', shared, verify_only=check) if paths else (None, {})
         # Export streams directly to encrypted offsite Borg, never to the local disk.
         name_archive = 'storage-guard-end-rootfs-' + time.strftime('%Y%m%dT%H%M%S') + '-' + c['Id'][:12]
         dest = self.c['borg_repo'] + '::' + name_archive
@@ -678,8 +700,8 @@ class Guard:
                 if export.poll() is None:
                     export.kill()
                     export.wait()
-        self.borg(['extract','--dry-run',dest])
-        # Verify actual tar decoding, in addition to Borg chunk integrity.
+        # One read-back: extract --stdout authenticates every chunk (what a separate --dry-run
+        # did, at the cost of downloading the whole rootfs again) and tar checks the decoding.
         with tempfile.TemporaryFile() as err:
             extract = subprocess.Popen(['borg','--lock-wait','30','extract','--stdout',dest,'rootfs.tar'],
                                        stdout=subprocess.PIPE,stderr=err,env=self.borg_env())
