@@ -38,6 +38,7 @@ export interface Config {
   branch: string;          // always "main" in production; tests may override
   image: string;           // devbox:latest
   healthTimeoutMs: number;
+  endsWaitMs: number;      // how long a devd restart waits for running end backups
 }
 
 export interface DeployState { commit: string; previous: string | null; at: string; restarted: boolean; rolledBack?: boolean }
@@ -120,6 +121,7 @@ export async function update(d: Deps, cfg: Config): Promise<Outcome> {
     return { kind: "deployed", commit: target, previous: head, plan };
   }
 
+  await waitForEndBackups(d, cfg);
   await d.notify(`devbox updating to ${short(target)}; devd restarts now and the vault will need unlocking.`);
   if (await restartAndCheck(d, cfg, target)) {
     d.writeState({ commit: target, previous: head, at: new Date().toISOString(), restarted: true });
@@ -166,6 +168,30 @@ async function rebuild(d: Deps, cfg: Config, plan: Plan, run: { previousTagged: 
     const tz = (await d.run(["timedatectl", "show", "-p", "Timezone", "--value"])).stdout.trim() || "UTC";
     await step("image build", ["docker", "build", "--build-arg", `CC_VERSION=${ccVersion}`, "--build-arg", `TZ=${tz}`,
       "-t", cfg.image, `${cfg.repoDir}/image`], 90 * 60_000);
+  }
+}
+
+// An end's offsite backup (devbox-storage prepare-end) takes minutes to tens of minutes. A devd from before
+// 2026-11-23 runs it inside devd.service, so a restart killed it with devd (four ends on 2026-11-23); a newer devd runs it
+// in its own unit and finishes the rest of the end after the restart. Either way the restart waits for running
+// backups, bounded: past the bound it restarts anyway and says so.
+async function waitForEndBackups(d: Deps, cfg: Config): Promise<void> {
+  const deadline = Date.now() + cfg.endsWaitMs;
+  for (;;) {
+    const r = await d.run(["pgrep", "-af", "devbox-storage prepare-end"]);
+    if (r.code === 1) return;
+    if (r.code !== 0) {
+      await d.notify(`devbox update: could not check for running end backups (pgrep exit ${r.code}: ${r.stderr.trim()}); restarting devd anyway.`);
+      return;
+    }
+    const names = [...new Set(r.stdout.trim().split("\n").map((l) => l.trim().split(/\s+/).pop()!))];
+    const what = `${names.length} end backup${names.length === 1 ? "" : "s"}`;
+    if (Date.now() >= deadline) {
+      await d.notify(`devbox update: ${what} still running (${names.join(", ")}) after ${Math.round(cfg.endsWaitMs / 60_000)} min; restarting devd anyway.`);
+      return;
+    }
+    d.log(`waiting for ${what} before restarting devd: ${names.join(", ")}`);
+    await d.sleep(30_000);
   }
 }
 
@@ -247,7 +273,7 @@ if (import.meta.main) {
     log: (line) => console.log(line),
     sleep: (ms) => Bun.sleep(ms),
     writeState: (state) => require("node:fs").writeFileSync("/var/lib/devd/deployed.json", JSON.stringify(state, null, 2) + "\n"),
-  }, { repoDir, branch: "main", image: process.env.DEVD_IMAGE ?? "devbox:latest", healthTimeoutMs: 120_000 });
+  }, { repoDir, branch: "main", image: process.env.DEVD_IMAGE ?? "devbox:latest", healthTimeoutMs: 120_000, endsWaitMs: 90 * 60_000 });
   console.log(JSON.stringify(outcome));
   process.exit(outcome.kind === "failed" ? 1 : 0);
 }

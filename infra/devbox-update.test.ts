@@ -28,7 +28,7 @@ function fixture() {
 }
 
 /** Real git; bun/docker/systemctl/timedatectl are recorded and succeed unless told otherwise. */
-function deps(over: Partial<Deps> & { ci?: CiState; healthyCommit?: () => string | null; fail?: RegExp } = {}) {
+function deps(over: Partial<Deps> & { ci?: CiState; healthyCommit?: () => string | null; fail?: RegExp; backups?: string[] } = {}) {
   const calls: string[] = [], notes: string[] = [], states: DeployState[] = [];
   const d: Deps = {
     run: async (cmd, opts) => {
@@ -36,6 +36,8 @@ function deps(over: Partial<Deps> & { ci?: CiState; healthyCommit?: () => string
       const line = cmd.join(" ");
       calls.push(line);
       if (over.fail?.test(line)) return { code: 1, stdout: "", stderr: "boom" };
+      // pgrep: one entry of `backups` per look (the running prepare-end processes), then none (exit 1).
+      if (cmd[0] === "pgrep") { const b = over.backups?.shift() ?? ""; return { code: b ? 0 : 1, stdout: b, stderr: "" }; }
       if (cmd[0] === "docker" && cmd[1] === "run") return { code: 0, stdout: "2.1.316 (Claude Code)\n", stderr: "" };
       if (cmd[0] === "timedatectl") return { code: 0, stdout: "Europe/Prague\n", stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
@@ -50,7 +52,7 @@ function deps(over: Partial<Deps> & { ci?: CiState; healthyCommit?: () => string
   };
   return { d, calls, notes, states };
 }
-const cfg = (repoDir: string) => ({ repoDir, branch: "main", image: "devbox:latest", healthTimeoutMs: 50 });
+const cfg = (repoDir: string) => ({ repoDir, branch: "main", image: "devbox:latest", healthTimeoutMs: 50, endsWaitMs: 50 });
 
 test("planFor rebuilds only what changed", () => {
   expect(planFor(["dashboard/src/App.tsx"])).toMatchObject({ dashboard: true, image: false, restart: false, install: false });
@@ -93,6 +95,27 @@ test("a devd change restarts devd and requires the new commit in /api/health", a
   expect(t.calls).toContain("systemctl restart devd");
   expect(t.states.at(-1)).toMatchObject({ commit: target, restarted: true });
   expect(t.notes.some((n) => n.includes("restarts now"))).toBe(true);
+});
+
+// 2026-11-23: a deploy restarted devd under four ends' backups and killed them (prepare-end ran in devd's cgroup).
+// Backups now run in their own units, but a devd from before that still owns them: the restart waits for them.
+test("the restart waits for running end backups, logging what it waits for", async () => {
+  const f = fixture(); f.push({ "devd/src/api.ts": "x" });
+  const log: string[] = [];
+  const t = deps({ healthyCommit: () => f.head(), backups: ["101 devbox-storage prepare-end dev-a\n102 devbox-storage prepare-end dev-b\n", "102 devbox-storage prepare-end dev-b\n"], log: (l) => log.push(l) });
+  expect((await update(t.d, cfg(f.server))).kind).toBe("deployed");
+  expect(t.calls.filter((c) => c.startsWith("pgrep") || c === "systemctl restart devd")).toEqual([
+    "pgrep -af devbox-storage prepare-end", "pgrep -af devbox-storage prepare-end", "pgrep -af devbox-storage prepare-end", "systemctl restart devd"]);
+  expect(log.filter((l) => l.startsWith("waiting"))).toEqual([
+    "waiting for 2 end backups before restarting devd: dev-a, dev-b", "waiting for 1 end backup before restarting devd: dev-b"]);
+});
+
+test("the wait for end backups is bounded: past it devd restarts anyway and says how many were still running", async () => {
+  const f = fixture(); f.push({ "devd/src/api.ts": "x" });
+  const t = deps({ healthyCommit: () => f.head(), backups: Array(10_000).fill("101 devbox-storage prepare-end dev-a\n"), sleep: () => Bun.sleep(1) });
+  expect((await update(t.d, cfg(f.server))).kind).toBe("deployed");
+  expect(t.calls).toContain("systemctl restart devd");
+  expect(t.notes.some((n) => n.includes("1 end backup still running (dev-a)"))).toBe(true);
 });
 
 test("unhealthy after restart: rolls back to the previous commit and restarts again", async () => {
