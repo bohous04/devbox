@@ -59,6 +59,20 @@ test("TargetReader: an older failure is dropped too; the newest one is reported"
   expect(got).toEqual(["Error: new"]);
 });
 
+test("TargetReader: once disposed (the page moved to another session), a read still in flight lands nowhere", async () => {
+  const { r, reads, got } = reader();
+  void r.load();
+  void r.load();
+  r.dispose();
+  reads[0]!.resolve(AWAITING);
+  reads[1]!.reject(new Error("late"));
+  await Bun.sleep(0);
+  expect(got).toEqual([]);
+  r.poll();
+  void r.load();
+  expect(reads).toHaveLength(2);
+});
+
 test("TargetReader: Retry (load) always reads, also while a poll is in flight", async () => {
   const { r, reads } = reader();
   r.poll();

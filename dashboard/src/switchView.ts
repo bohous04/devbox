@@ -61,16 +61,24 @@ export function targetPollMs(t: Pick<ChatTarget, "awaitingTarget">): number | nu
 export class TargetReader<T> {
   private seq = 0;
   private inFlight = 0;
+  private disposed = false;
   constructor(private read: () => Promise<T>, private onValue: (t: T) => void, private onError: (e: unknown) => void) {}
 
+  /** The reader's session is no longer shown: nothing reads or lands any more, also a read in flight. */
+  dispose(): void {
+    this.disposed = true;
+    this.seq++;
+  }
+
   async load(): Promise<void> {
+    if (this.disposed) return;
     const n = ++this.seq;
     this.inFlight++;
     try {
       const t = await this.read();
-      if (n === this.seq) this.onValue(t);
+      if (n === this.seq && !this.disposed) this.onValue(t);
     } catch (e) {
-      if (n === this.seq) this.onError(e);
+      if (n === this.seq && !this.disposed) this.onError(e);
     } finally {
       this.inFlight--;
     }

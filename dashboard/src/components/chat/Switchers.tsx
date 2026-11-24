@@ -43,6 +43,7 @@ export function Switchers({ sessionId, thread, children }: {
     (t) => { setTarget(t); setTargetErr(null); },
     (e) => setTargetErr(`Could not read the current agent: ${errorText(e)}`),
   ), [sessionId]);
+  useEffect(() => () => reader.dispose(), [reader]);
   const loadTarget = useCallback(() => reader.load(), [reader]);
   useEffect(() => { void loadTarget(); }, [loadTarget, n?.harness, n?.nativeThreadId, n?.model, n?.account, ended, runCount, notices]);
   const pollMs = target === null ? null : targetPollMs(target);
