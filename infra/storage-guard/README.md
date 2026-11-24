@@ -66,7 +66,16 @@ Docker daemon or active session restart is needed to install this protection.
 * Explicit session End/removal is intercepted at host Docker CLI level: stop the
   target and its nested daemon, preserve the writable rootfs, workspace, Git common
   directory, nested databases and session transcript directory offsite, then allow
-  removal. When this takes more than 40 seconds End returns an actionable retry;
+  removal. The read-back covers what End deletes (owned data, the workspace's worktree
+  registration, the rootfs once through `tar`), and a metadata listing of the archive must show
+  every owned file with its type and size (borg leaves out a file it cannot read and only warns).
+  The shared Git store is archived but not re-downloaded; content that is only staged (index
+  differs from the working tree) lives as blobs there, so its restore relies on that unverified
+  part. Sources are signed by inode/size/mtime/ctime, not content hashes (owner decision
+  2026-11-23): borg reads each file more than a timestamp tick after its first stat, so any
+  later write, by any process, moves ctime. The session and its sidecar must stay stopped with
+  the same StartedAt, and the proof records that StartedAt for the Docker wrapper's check.
+  When this takes more than 40 seconds End returns an actionable retry;
   the systemd archive job continues and no removal occurs until it is verified.
   A simple session Stop does not trigger archival/removal.
 * Archived Codex `.jsonl` conversations older than 30 days are offloaded only after

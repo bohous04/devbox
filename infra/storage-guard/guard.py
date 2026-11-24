@@ -107,8 +107,8 @@ def signature(path, hash_content=True):
         # metadata; mode+inode+rdev below still catch a replacement. Rejecting them
         # made every End of a dind session fail permanently.
         special = not (stat.S_ISREG(s.st_mode) or stat.S_ISDIR(s.st_mode) or stat.S_ISLNK(s.st_mode))
-        # Metadata alone misses same-size rewrites within one filesystem timestamp
-        # tick. Every regular file is hashed before AND after preservation.
+        # Metadata alone misses same-size rewrites within one filesystem timestamp tick.
+        # Callers either hash content or rule that out (prepare_end: stopped writers + a gap).
         content = ((digest(p) if hash_content else None) if stat.S_ISREG(s.st_mode) else os.readlink(p) if stat.S_ISLNK(s.st_mode)
                    else f'rdev:{s.st_rdev}' if special else None)
         after = p.lstat()
@@ -122,6 +122,31 @@ def signature(path, hash_content=True):
             for name in sorted(dirs + files):
                 add(Path(parent) / name)
     return sorted(out)
+
+
+def worktree_admin_dirs(paths, shared):
+    """Registration dirs (HEAD, index, reflog) of linked worktrees among `paths`; git worktree
+    remove deletes them with the workspace. A registration outside both `paths` and `shared`
+    would not be archived at all, so it denies removal. A missing one (legacy, pruned) has
+    nothing left to delete; managed_sources already records that case."""
+    paths = [Path(p).resolve() for p in paths]
+    shared = [Path(s).resolve() for s in shared]
+    within = lambda a, roots: any(a == r or r in a.parents for r in roots)
+    out = []
+    for p in paths:
+        pointer = p / '.git'
+        if not pointer.is_file():
+            continue
+        text = pointer.read_text().strip()
+        if not text.startswith('gitdir: '):
+            raise RuntimeError(f'Unreadable worktree pointer {pointer}; removal denied')
+        admin = (p / text[8:].strip()).resolve()  # a relative gitdir is relative to the worktree
+        if within(admin, paths) or not admin.exists():
+            continue
+        if not within(admin, shared):
+            raise RuntimeError(f'Worktree registration {admin} is not archived; removal denied')
+        out.append(admin)
+    return out
 
 
 def beneath(path, root):
@@ -242,39 +267,110 @@ class Guard:
             raise RuntimeError(f'borg {args[0]} failed (rc={p.returncode}): ' + p.stderr.decode(errors='replace')[-800:])
         return p.stdout
 
-    def archive(self, paths, kind, shared=(), require_stable=True):
+    def archive(self, paths, kind, shared=(), require_stable=True, verify_only=None, hash_content=True):
         """`shared` = Git common store of a repo other live sessions keep writing to
         (new objects, refs, their worktrees/*). It is archived, but not required to
         be stable: removal never deletes it, and requiring it would deny every End
-        while any sibling session commits. Only `paths` authorize deletion."""
+        while any sibling session commits. Only `paths` authorize deletion.
+        `verify_only` limits the full read-back to these archived paths (what the caller
+        deletes); None reads back the whole archive. hash_content=False: see prepare_end."""
         paths = [Path(p).resolve() for p in paths]
         shared = [Path(p).resolve() for p in shared if Path(p).resolve() not in paths]
         if not paths or any(p == Path('/') for p in paths + shared):
             raise RuntimeError('Unsafe archive path')
         name = 'storage-guard-' + kind + '-' + time.strftime('%Y%m%dT%H%M%S') + '-' + uuid.uuid4().hex[:8]
         dest = self.c['borg_repo'] + '::' + name
+        sign = lambda p: signature(p, hash_content)
         if require_stable:
-            before = {str(p): signature(p) for p in paths}
+            before = {str(p): sign(p) for p in paths}
         else:
             # Batch mode: a path busy while hashing is left out of `before`, so the caller keeps it.
             before = {}
             for p in paths:
                 try:
-                    before[str(p)] = signature(p)
+                    before[str(p)] = sign(p)
                 except (RuntimeError, OSError):
                     pass
+        # What the listing check below must find, by type and size: the deleted paths, plus any
+        # verify_only path outside them (a worktree registration inside the shared store).
+        expect = {**before, **{str(Path(v).resolve()): signature(v, hash_content=False)
+                               for v in verify_only or () if str(Path(v).resolve()) not in before}}
+        if not hash_content:
+            # Without content hashes a write must land in a later timestamp tick than the
+            # `before` stat to be seen; borg reading only after this gap guarantees that.
+            time.sleep(1.1)
         # Exit code 1 is also a failure here: changing files cannot authorize deletion.
-        # With shared sources a warning can only come from them — owned paths are
-        # re-verified by signature below, so rc=1 is accepted in that case alone.
+        # With shared sources rc=1 is accepted: changes to owned paths are caught by the
+        # signature below, and an owned file borg could not read by the listing check.
         create = ['create', '--compression', 'zstd,3', dest, *map(str, paths + shared)]
         self.borg(create, allow_warning=True) if shared or not require_stable else self.borg(create)
-        self.borg(['extract', '--dry-run', dest])
+        # pp: is a literal path prefix; one that matches nothing makes borg exit 1, which fails here.
+        check = [] if verify_only is None else ['pp:' + str(Path(p).resolve()).lstrip('/') for p in verify_only]
+        self.borg(['extract', '--dry-run', dest, *check])
+        if verify_only is not None or not hash_content:
+            # create accepts rc=1 when shared sources are included; a per-file read error (EIO)
+            # on an owned file is also only a warning, and borg then leaves the file out. The
+            # read-back above only reads what is in the archive, and metadata signatures do not
+            # read content, so a missing item has to be caught here.
+            self.require_listed(dest, expect, check or ['pp:' + str(p).lstrip('/') for p in paths])
         # require_stable=False: the caller re-checks every path against `before` itself and
         # deletes only the unchanged ones (a batch must not fail on one busy worktree).
-        if require_stable and before != {str(p): signature(p) for p in paths}:
+        if require_stable and before != {str(p): sign(p) for p in paths}:
             raise RuntimeError('Source changed during backup; deletion denied')
         self.audit('archive-verified', archive=name, paths=list(before), shared=list(map(str, shared)))
         return name, before
+
+    def borg_lines(self, args):
+        """Stream borg's stdout line by line (a listing of ~0.5M items held at once took >1 GiB)."""
+        with tempfile.TemporaryFile() as err:
+            p = subprocess.Popen(['borg', '--lock-wait', '30', *args], stdout=subprocess.PIPE, stderr=err, env=self.borg_env())
+            try:
+                yield from p.stdout
+                rc = p.wait(timeout=600)
+            finally:
+                if p.poll() is None:
+                    p.kill()
+                    p.wait()
+                p.stdout.close()
+            if rc:
+                err.seek(0)
+                raise RuntimeError(f'borg {args[0]} failed (rc={rc}): ' + err.read().decode(errors='replace')[-800:])
+
+    def require_listed(self, dest, expect, patterns):
+        """Every expected item must be in the archive listing with its type and, for a regular
+        file, its size. borg prints paths through remove_surrogates (an undecodable byte becomes
+        '?'), so expected paths are mapped the same way."""
+        as_borg = lambda path: path.encode('utf-8', 'replace').decode('utf-8')
+        pending = {}
+        for root, sig in expect.items():
+            for rel, mode, _dev, _ino, size, *_ in sig:
+                kind = stat.filemode(mode)[0]
+                if kind == 's':
+                    continue  # borg skips sockets; they hold no data
+                raw = str(Path(root).parent / rel).lstrip('/')
+                path = as_borg(raw)
+                if path in pending:
+                    raise RuntimeError(f'{raw!r}: two names differ only in non-UTF-8 bytes, so the archive listing '
+                                       'cannot tell them apart; deletion denied')
+                pending[path] = (kind, size)
+        sizes = {}  # path -> size of verified regular files, for hardlinks listed after them
+        for line in self.borg_lines(['list', '--json-lines', dest, *patterns]):
+            it = json.loads(line)
+            want = pending.pop(it['path'], None)
+            if want is None:
+                continue
+            kind, size = want
+            if kind == '-' and it['mode'].startswith('h'):
+                # A hardlink after the first is listed with mode h... and size 0; its data is the source's.
+                listed = sizes.get(it['source'])
+            else:
+                listed = it['size']
+            if it['type'] != kind or not it['healthy'] or (kind == '-' and listed != size):
+                raise RuntimeError(f"{it['path']} differs in the archive (type/size/health); deletion denied")
+            if kind == '-':
+                sizes[it['path']] = size
+        if pending:
+            raise RuntimeError(f'{next(iter(pending))} and {len(pending) - 1} more are missing from the archive; deletion denied')
 
     def notify(self, key, message, title='Devbox: místo na disku'):
         if not self.c.get('notify_enabled', True):
@@ -657,10 +753,28 @@ class Guard:
         sidecar = json.loads(side.stdout)[0] if side.returncode == 0 else None
         if sidecar:
             run([DOCKER,'stop','--time','30','dind-'+name],timeout=90)
+        writers = [name] + (['dind-'+name] if sidecar else [])
+        started = self.stopped(writers)
         paths, shared = self.managed_sources(c)
         if sidecar:
             paths += [Path(m['Source']) for m in sidecar['Mounts'] if m['Destination'] == '/var/lib/docker']
-        path_archive, source_signatures = self.archive(paths, 'end-data', shared) if paths else (None, {})
+        # Read back only what End deletes: the owned data and the workspace's worktree registration
+        # (git worktree remove). The shared Git store stays on disk; re-downloading it (28 GiB for
+        # the largest repo) on every End proved nothing about the deleted data.
+        check = paths + worktree_admin_dirs(paths, shared)
+        # Metadata signatures (inode/size/mtime/ctime, no content hash). Owner decision 2026-11-23:
+        # hashing every file twice cost ~17 min for a 37 GiB workspace. What makes it sound is ctime:
+        # borg reads each file >1 tick after its `before` stat (archive sleeps), so any write after
+        # borg's read, by whoever (another container can mount the workspace via the host Docker
+        # socket), sets a newer ctime than recorded, and ctime cannot be set from userspace.
+        # Stopping the session's own writers (checked below: same StartedAt) keeps such writes
+        # from failing the End, it is not what detects them. An owned file borg could not read is
+        # caught by archive()'s listing check.
+        # Not read back any more: the shared object store. Content that is only staged (the
+        # index differs from the working tree) lives as blobs there and, after git worktree
+        # remove, is referenced only by the archived index of the registration.
+        path_archive, source_signatures = (self.archive(paths, 'end-data', shared, verify_only=check, hash_content=False)
+                                           if paths else (None, {}))
         # Export streams directly to encrypted offsite Borg, never to the local disk.
         name_archive = 'storage-guard-end-rootfs-' + time.strftime('%Y%m%dT%H%M%S') + '-' + c['Id'][:12]
         dest = self.c['borg_repo'] + '::' + name_archive
@@ -678,8 +792,8 @@ class Guard:
                 if export.poll() is None:
                     export.kill()
                     export.wait()
-        self.borg(['extract','--dry-run',dest])
-        # Verify actual tar decoding, in addition to Borg chunk integrity.
+        # One read-back: extract --stdout authenticates every chunk (what a separate --dry-run
+        # did, at the cost of downloading the whole rootfs again) and tar checks the decoding.
         with tempfile.TemporaryFile() as err:
             extract = subprocess.Popen(['borg','--lock-wait','30','extract','--stdout',dest,'rootfs.tar'],
                                        stdout=subprocess.PIPE,stderr=err,env=self.borg_env())
@@ -694,15 +808,30 @@ class Guard:
                 if extract.poll() is None:
                     extract.kill()
                     extract.wait()
-        if source_signatures != {str(p):signature(p) for p in paths}:
+        if self.stopped(writers) != started:
+            raise RuntimeError('Session was started during the backup; removal denied')
+        if source_signatures != {str(p):signature(p, hash_content=False) for p in paths}:
             raise RuntimeError('Mounted data changed; removal denied')
-        result = dict(container_id=c['Id'], name=name, verified_at=time.time(), data_archive=path_archive,
+        result = dict(container_id=c['Id'], name=name, verified_at=time.time(), data_archive=path_archive, started=started,
                       rootfs_archive=name_archive, signatures=source_signatures,
                       sidecar_id=sidecar['Id'] if sidecar else None, repository=self.c['borg_repo'],
                       retained_workspace=str(self.retained_workspace(c)) if self.retained_workspace(c) else None)
         atomic(destfile,result)
         self.audit('end-preserved',name=name,data_archive=path_archive,rootfs_archive=name_archive)
         return result
+
+    def stopped(self, names):
+        """StartedAt of each container; raises unless all are stopped."""
+        out = {}
+        for n in names:
+            r = subprocess.run([DOCKER,'inspect',n],capture_output=True)
+            if r.returncode:
+                raise RuntimeError(f'Cannot inspect {n}; removal denied')
+            st = json.loads(r.stdout)[0]['State']
+            if st.get('Running') or st.get('Restarting'):
+                raise RuntimeError(f'{n} is running during the backup; removal denied')
+            out[n] = st['StartedAt']
+        return out
 
     def end_ready(self, c, fresh=0):
         """fresh=N: accept a full check done within N seconds without walking again.
@@ -713,18 +842,25 @@ class Guard:
         if (not p or c['State']['Running'] or p['container_id'] != c['Id'] or
             p.get('repository')!=self.c['borg_repo'] or time.time()-p.get('verified_at',0)>3600):
             return False
+        # A proof only covers the run it was made in: start, write and stop again would leave
+        # signatures intact within the fresh window. Proofs without StartedAt are not trusted.
+        started = p.get('started')
+        if not started or started.get(p.get('name')) != c['State']['StartedAt']:
+            return False
+        if p.get('sidecar_id'):
+            r=subprocess.run([DOCKER,'inspect',p['sidecar_id']],capture_output=True)
+            if r.returncode==0:
+                st=json.loads(r.stdout)[0]['State']
+                if st['Running'] or st['StartedAt']!=started.get('dind-'+p['name']):
+                    return False
         if fresh and time.time()-p.get('checked_at',p.get('verified_at',0)) < fresh:
             return True
-        # Content was hashed twice during prepare_end (before and after the archive) with
-        # both writers stopped. Re-hashing tens of GiB here ran past devd's 60 s lifecycle
+        # prepare_end signed the sources before and after the archive with both writers
+        # stopped. Re-hashing tens of GiB here ran past devd's 60 s lifecycle
         # timeout, so End could never finish. Any later write changes ctime/size/inode.
         for path,saved in p['signatures'].items():
             meta = [tuple(x[:7]) + (None if stat.S_ISREG(x[1]) else x[7],) for x in saved]
             if signature(path, hash_content=False) != meta:
-                return False
-        if p.get('sidecar_id'):
-            r=subprocess.run([DOCKER,'inspect',p['sidecar_id']],capture_output=True)
-            if r.returncode==0 and json.loads(r.stdout)[0]['State']['Running']:
                 return False
         return True
 
