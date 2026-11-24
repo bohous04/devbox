@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Attention, InboxItem } from "../../shared/thread";
-import { asks, badgeSlots, branchLabel, canEnd, groupInbox, holdOrder, snoozeEnd, inboxHref, inboxList, metaTail, secondLine, mixedAgents, plainPreview, projectBadge, reasonLabel, reasonStatus, rowStatus, rowTitle, statusParts, shelfBlock, shortAgo, snoozeTimes, splitNeedsYou, threadHeading, upsertInbox } from "./inboxView";
+import { asks, badgeSlots, branchLabel, canEnd, groupInbox, snoozeEnd, inboxHref, inboxList, metaTail, secondLine, mixedAgents, plainPreview, projectBadge, reasonLabel, reasonStatus, rowStatus, rowTitle, statusParts, shelfBlock, shortAgo, snoozeTimes, splitNeedsYou, threadHeading, upsertInbox } from "./inboxView";
 
 const item = (sessionId: string, attention: Attention, runtime: InboxItem["runtime"] = "chat"): InboxItem => ({
   sessionId, runtime, title: sessionId, project: "p", repo: "r", agent: "claude", attention, lastText: null,
@@ -284,14 +284,4 @@ test("secondLine: an ask says what it asks; any other row where it runs (the pro
   expect(secondLine({ ...idle, branch: "feature/x" })).toBe("r · feature/x");
   const working = { ...item("w", { section: "working", reason: "running", since: 1 }), lastText: "Updating tokens" };
   expect(secondLine(working)).toBe("r · Updating tokens");
-});
-
-test("holdOrder: rows keep the order shown; a row that left goes, a new one comes last", () => {
-  const at = (id: string, since: number) => item(id, { section: "needs_you", reason: "completed", since });
-  // devd's newest-first order after "c" finished again and "d" arrived; "b" was settled.
-  const next = [at("d", 9), at("c", 8), at("a", 1)];
-  expect(holdOrder(["a", "b", "c"], next).map((i) => i.sessionId)).toEqual(["a", "c", "d"]);
-  expect(holdOrder([], next).map((i) => i.sessionId)).toEqual(["d", "c", "a"]);
-  const changed = at("a", 20);
-  expect(holdOrder(["a", "c"], [at("c", 8), changed])[0]).toBe(changed);
 });

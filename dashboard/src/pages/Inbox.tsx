@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { AlarmClock, Check, CircleAlert, CircleCheck, CircleDashed, Ellipsis, MessageCircleQuestion, Undo2 } from "lucide-react";
 import type { EndedSession } from "../../../shared/ended";
@@ -13,8 +13,9 @@ import { SettleProblem } from "../components/SettleProblem";
 import { agoLabel } from "../format";
 import { profileFor } from "../newSession";
 import { endedHref, endedMetaTail, endedSecondLine, endedTitle, settledShelf, upsertEnded } from "../endedView";
+import { applyHold, HOLD_IDLE_MS, onHoldEvent, type Hold, type HoldEvent } from "../inboxHold";
 import { claimsUndo, failureText, focusOwnsUndo, settleKey, settleShortcut } from "../inboxSettle";
-import { badgeSlots, canEnd, groupInbox, holdOrder, inboxHref, inboxList, metaTail, mixedAgents, projectBadge, reasonLabel, rowStatus, rowTitle, secondLine, shelfBlock, shortAgo, snoozeEnd, snoozeTimes, statusParts, upsertInbox, type StatusTone } from "../inboxView";
+import { badgeSlots, canEnd, groupInbox, inboxHref, inboxList, metaTail, mixedAgents, projectBadge, reasonLabel, rowStatus, rowTitle, secondLine, shelfBlock, shortAgo, snoozeEnd, snoozeTimes, statusParts, upsertInbox, type StatusTone } from "../inboxView";
 import { cn } from "@/lib/utils";
 import { useNow } from "../store";
 import { useEventStream } from "../useEventStream";
@@ -379,19 +380,32 @@ export function Inbox() {
   }, []);
   const onHidden = (id: string) => setEnded((cur) => upsertEnded(cur, { id, removed: true }));
   const g = items ? groupInbox(items) : null;
-  // While the pointer is over the column, live updates keep the rows where they were shown (holdOrder): a ✓ or a
-  // click never lands on a row that moved under the pointer. Leaving the column re-sorts.
-  const [pointerIn, setPointerIn] = useState(false);
-  const shownOrder = useRef<Record<string, string[]>>({});
-  const held = (key: string, rows: InboxItem[]) => {
-    const shown = shownOrder.current[key];
-    const out = pointerIn && shown ? holdOrder(shown, rows) : rows;
-    shownOrder.current[key] = out.map((i) => i.sessionId);
-    return out;
+  // Under the mouse the rows keep their order (inboxHold.ts); leaving the column, the window losing focus or
+  // HOLD_IDLE_MS without a move lets go and re-sorts.
+  const [hold, setHold] = useState<Hold | null>(null);
+  const shown = applyHold(hold, { list: g ? inboxList(g) : [], working: g?.working ?? [], snoozed: g?.snoozed ?? [] });
+  const { list, working, snoozed } = shown.lists;
+  // A row that came during the hold keeps the line it got.
+  useLayoutEffect(() => { if (shown.hold !== hold) setHold(shown.hold); });
+  const idle = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const onHold = (e: HoldEvent) => {
+    clearTimeout(idle.current);
+    if ((e.type === "enter" || e.type === "move") && e.pointerType === "mouse") idle.current = setTimeout(() => setHold((h) => onHoldEvent(h, { type: "idle" })), HOLD_IDLE_MS);
+    setHold((h) => onHoldEvent(h, e));
   };
-  const list = held("list", g ? inboxList(g) : []);
-  const working = held("working", g?.working ?? []);
-  const snoozed = held("snoozed", g?.snoozed ?? []);
+  const onHoldRef = useRef(onHold);
+  onHoldRef.current = onHold;
+  useEffect(() => {
+    const blur = () => onHoldRef.current({ type: "blur" });
+    const hidden = () => { if (document.hidden) onHoldRef.current({ type: "hidden" }); };
+    window.addEventListener("blur", blur);
+    document.addEventListener("visibilitychange", hidden);
+    return () => {
+      window.removeEventListener("blur", blur);
+      document.removeEventListener("visibilitychange", hidden);
+      clearTimeout(idle.current);
+    };
+  }, []);
   // A row action answers the session's new item: shown at once, the SSE event that follows is the same.
   const onItem = (item: InboxItem) => setItems((cur) => (cur === null ? cur : upsertInbox(cur, item)));
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -460,7 +474,9 @@ export function Inbox() {
         <BadgeSlots.Provider value={slots}>
         <SettleRow.Provider value={settle}>
           <div ref={listRef} className="-mx-3 max-w-[720px]" data-inbox-column
-            onPointerEnter={() => setPointerIn(true)} onPointerLeave={() => setPointerIn(false)}>
+            onPointerEnter={(e) => onHold({ type: "enter", pointerType: e.pointerType, shown: shown.lists })}
+            onPointerMove={(e) => onHold({ type: "move", pointerType: e.pointerType, shown: shown.lists })}
+            onPointerLeave={() => onHold({ type: "leave" })}>
             {list.length === 0 ? (
               <p className="mb-3 flex min-h-9 items-center gap-2 px-3 text-sm text-muted-foreground">
                 <CircleCheck className="size-4 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />Nothing waiting for you
