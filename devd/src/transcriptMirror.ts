@@ -133,7 +133,10 @@ print(json.dumps(locate(sys.argv[1])))
 // process is still the pane's nearest agent, it is not waiting for an answer, the pane is not scrolled back, and the
 // screen shows Claude's empty prompt (no dialog, nothing typed). The text goes in through a tmux buffer from stdin
 // (never through a shell) as a bracketed paste, so its newlines do not submit; Enter submits it unless a dialog
-// opened meanwhile.
+// opened meanwhile. After Enter the prompt has to empty: one that still holds the text after SUBMIT_WAIT means
+// something else took the Enter (an @-file suggestion, a popup), reported as not-submitted. A busy agent queues the
+// message and empties its prompt too. Any other screen after Enter (a dialog the new turn opened) is taken as
+// submitted; devd's pending check then warns if the message never shows up in the conversation (SEEN_TIMEOUT_MS).
 //
 // Multi-line text relies on Claude enabling bracketed paste (verified on 2.1.325: a pasted multi-line text stays one
 // draft). tmux exposes no way to check that per pane, so without it each line would be submitted on its own; that is
@@ -145,9 +148,13 @@ print(json.dumps(locate(sys.argv[1])))
 //
 // Codex (verified on 0.172.0 in tmux): its composer line starts with a bold `›` (`\e[1m›\e[0m `), followed by the dim
 // placeholder when empty or the typed text. Past prompts in the history start with a dim bold `›` on a background and
-// a popup's selected row with a reverse one, so neither passes for the composer; a popup over the composer ends with an
-// "enter select · esc back" hint (approvals: "to confirm", "to cancel"; questions: "to submit answer"). A composer
-// line without its placeholder could be the first, empty line of a longer draft: not ready. Codex also takes a
+// a popup's selected row with a reverse one, so neither passes for the composer. A popup ends with a hint: "enter
+// select · esc back" (a picker over the composer), "to confirm", "to cancel" (approvals), "to submit answer"
+// (questions); these replace the composer. While the composer holds an `@…` or `$…`, a mention or skill popup opens
+// right above it, its last line "enter/tab insert · esc close · ↑/↓ select · ←/→ filter": Enter there inserts instead
+// of submitting. So a hint counts below the composer, on the `·`-separated line right above it, or in the last lines
+// when there is no composer; chat text reading like a hint elsewhere on screen is not a dialog. A composer line
+// without its placeholder could be the first, empty line of a longer draft: not ready. Codex also takes a
 // bracketed paste as one draft. Its title names the thread it is on (codexTitleThread), checked with the process.
 export const MIRROR_SEND = String.raw`# MIRROR_SEND${PY_LOCATE_FN}
 import re, signal, time, uuid
@@ -158,7 +165,9 @@ RULE = re.compile(r"^\s*─{8,}\s*$")
 PROMPT = re.compile(r"^\s*❯")
 DIALOG = re.compile(r"Enter to (confirm|select)|Esc to cancel")
 CODEX_PROMPT = "\x1b[1m\u203a\x1b[0m"
-CODEX_DIALOG = re.compile(r"\benter\b.{0,12}\b(select|confirm|submit)|\besc\b.{0,12}\b(back|cancel)|\bto (confirm|cancel|submit)\b", re.I)
+CODEX_DIALOG = re.compile(r"\benter\b.{0,12}\b(select|confirm|submit|insert)|\btab\b.{0,6}\binsert\b|\besc\b.{0,12}\b(back|cancel|close)|\bto (confirm|cancel|submit)\b", re.I)
+# Seconds the prompt has to empty after Enter.
+SUBMIT_WAIT = 3
 TITLE_THREAD = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{0,12}")
 
 def capture(target):
@@ -173,17 +182,20 @@ def codex_screen(target):
     if got is None:
         return "unknown"
     raw, plain = got
-    if any(CODEX_DIALOG.search(l) for l in plain[-25:]):
+    at = next((i for i in range(len(raw) - 1, -1, -1) if raw[i].lstrip(" ").startswith(CODEX_PROMPT)), None)
+    if at is None:
+        hints = [l for l in plain if l.strip()][-4:]
+    else:
+        above = next((l for l in reversed(plain[:at]) if l.strip()), "")
+        hints = plain[at + 1:] + ([above] if " \u00b7 " in above else [])
+    if any(CODEX_DIALOG.search(l) for l in hints):
         return "dialog"
-    for line in reversed(raw):
-        line = line.lstrip(" ")
-        if not line.startswith(CODEX_PROMPT):
-            continue
-        rest = line[len(CODEX_PROMPT):]
-        if ANSI.sub("", DIM.sub("", rest)).replace("\u00a0", " ").strip():
-            return "draft"
-        return "ready" if DIM.search(rest) and ANSI.sub("", rest).strip() else "unknown"
-    return "unknown"
+    if at is None:
+        return "unknown"
+    rest = raw[at].lstrip(" ")[len(CODEX_PROMPT):]
+    if ANSI.sub("", DIM.sub("", rest)).replace("\u00a0", " ").strip():
+        return "draft"
+    return "ready" if DIM.search(rest) and ANSI.sub("", rest).strip() else "unknown"
 
 def screen(target):
     if kind == "codex":
@@ -274,6 +286,11 @@ time.sleep(0.3)
 if check(session, expected, agents) or screen(target) != "draft":
     fail("not-submitted")
 subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+deadline = time.time() + SUBMIT_WAIT
+while screen(target) == "draft":
+    if time.time() >= deadline:
+        fail("not-submitted")
+    time.sleep(0.1)
 print(json.dumps({"ok": True}))
 `;
 
@@ -540,8 +557,8 @@ export const SEND_MESSAGES: Record<MirrorSendError, string> = {
   "unsupported-agent": "Chat view isn't supported for this agent yet.",
   "unsupported-host": "Chat view isn't supported on InstaBox sessions yet.",
   "pane-changed": "The terminal changed while the message was being sent; nothing was typed. Check the terminal.",
-  // MIRROR_SEND pasted the text, then did not press Enter.
-  "not-submitted": "The terminal changed while the message was being typed; it was not submitted and may still be in the terminal's prompt. Check the terminal.",
+  // MIRROR_SEND pasted the text, then did not press Enter, or pressed it and the prompt still holds the text.
+  "not-submitted": "The message was typed into the terminal but not submitted (the terminal changed, or a popup or suggestion took the Enter); it may still be in the terminal's prompt. Check the terminal.",
 };
 
 /** The lock while the title names another Codex thread than the one mirrored. */

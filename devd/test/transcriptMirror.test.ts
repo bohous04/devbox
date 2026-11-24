@@ -690,7 +690,8 @@ const RULE = "─".repeat(40);
 const READY = `⏺ done\n${RULE}\n\x1b[39m❯\u00a0\x1b[2mTry "create a util"\x1b[0m\n${RULE}\n  Opus [high]\n`;
 
 /** `onLoad`/`onPaste`: shell run by the fake tmux on load-buffer/paste-buffer (`$PROC` is the fake /proc). */
-function fakeContainer(opts: { status: string; agent?: string; procStart?: string; inMode?: boolean; screen?: string; screenAfterPaste?: string; onLoad?: string; onPaste?: string; title?: string }) {
+// capture-pane shows `screen`, after a paste `screenAfterPaste`, after Enter `screenAfterEnter` (default: the empty prompt).
+function fakeContainer(opts: { status: string; agent?: string; procStart?: string; inMode?: boolean; screen?: string; screenAfterPaste?: string; screenAfterEnter?: string; onLoad?: string; onPaste?: string; title?: string }) {
   const dir = tmp("mirror-py-");
   const proc = join(dir, "proc");
   const home = join(dir, "home");
@@ -707,10 +708,11 @@ function fakeContainer(opts: { status: string; agent?: string; procStart?: strin
   const log = join(dir, "tmux.log");
   writeFileSync(join(dir, "screen"), opts.screen ?? READY);
   writeFileSync(join(dir, "screen-after"), opts.screenAfterPaste ?? `${RULE}\n❯ pasted\n${RULE}\n`);
+  writeFileSync(join(dir, "screen-enter"), opts.screenAfterEnter ?? opts.screen ?? READY);
   // display-message prints the pane's title from this file, so a test can change it mid-send (onLoad, onPaste).
   writeFileSync(join(dir, "title"), opts.title ?? "dev");
   // capture-pane shows `screen` until a paste, then `screen-after`.
-  writeFileSync(join(bin, "tmux"), `#!/bin/sh\necho "$@" >> '${log}'\ncase "$1" in\n  display-message) printf '10\\t${opts.inMode ? 1 : 0}\\t%s\\n' "$(cat '${join(dir, "title")}')" ;;\n  load-buffer) cat > '${join(dir, "pasted")}'; PROC='${proc}'; ${opts.onLoad ?? ":"} ;;\n  paste-buffer) cp '${join(dir, "screen-after")}' '${join(dir, "screen")}'; PROC='${proc}'; ${opts.onPaste ?? ":"} ;;\n  capture-pane) cat '${join(dir, "screen")}' ;;\nesac\n`, { mode: 0o755 });
+  writeFileSync(join(bin, "tmux"), `#!/bin/sh\necho "$@" >> '${log}'\ncase "$1" in\n  display-message) printf '10\\t${opts.inMode ? 1 : 0}\\t%s\\n' "$(cat '${join(dir, "title")}')" ;;\n  load-buffer) cat > '${join(dir, "pasted")}'; PROC='${proc}'; ${opts.onLoad ?? ":"} ;;\n  paste-buffer) cp '${join(dir, "screen-after")}' '${join(dir, "screen")}'; PROC='${proc}'; ${opts.onPaste ?? ":"} ;;\n  send-keys) cp '${join(dir, "screen-enter")}' '${join(dir, "screen")}' ;;\n  capture-pane) cat '${join(dir, "screen")}' ;;\nesac\n`, { mode: 0o755 });
   const run = (script: string, args: string[], stdin = "") => {
     const r = Bun.spawnSync(["python3", "-I", "-c", HARNESS, script, ...args], {
       stdin: Buffer.from(stdin), env: { FAKE_PROC: proc, PATH: `${bin}:/usr/bin:/bin` },
@@ -736,9 +738,10 @@ test.skipIf(!Bun.which("python3"))("MIRROR_SEND pastes stdin bracketed and press
   const r = c.run(MIRROR_SEND, ["main", "20", "claude,codex", "777", "claude", ""], "two\nlines $(nope) 'q'");
   expect([r.code, r.out.trim()]).toEqual([0, '{"ok": true}']);
   expect(c.pasted()).toBe("two\nlines $(nope) 'q'");
+  // After Enter only the screen is read again (the prompt emptied): nothing more is typed.
   const log = c.tmuxLog();
   expect(log).toMatch(/paste-buffer -p -d -b devd-mirror-[0-9a-f]+ -t =main:/);
-  expect(log.trim().split("\n").at(-1)).toBe("send-keys -t =main: Enter");
+  expect(log.trim().split("\n").filter((l) => !l.startsWith("capture-pane")).at(-1)).toBe("send-keys -t =main: Enter");
   expect(c.run(MIRROR_SEND, ["main", "21", "claude", "777", "claude", ""], "x").out.trim()).toBe('{"error": "pane-changed"}');
   // The same pid, but another process (it started at another time): refused too.
   expect(c.run(MIRROR_SEND, ["main", "20", "claude", "778", "claude", ""], "x").out.trim()).toBe('{"error": "pane-changed"}');
@@ -769,7 +772,13 @@ test.skipIf(!Bun.which("python3"))("MIRROR_SEND reads the screen: a draft, a dia
   const late = fakeContainer({ status: "idle", screenAfterPaste: "Enter to confirm · Esc to cancel\n" });
   expect(late.run(MIRROR_SEND, ["main", "20", "claude", "777", "claude", ""], "x").out.trim()).toBe('{"error": "not-submitted"}');
   expect(late.tmuxLog()).not.toContain("send-keys");
-}, 15_000); // seven sends, each sleeping 0.3 s before Enter
+  // Enter taken by something else (an @-file suggestion completing the path): the prompt still holds the text, so
+  // the message was not submitted, and devd says so instead of "sent" (review H1).
+  const kept = fakeContainer({ status: "idle", screenAfterPaste: `${RULE}\n❯ see @src/ap\n${RULE}\n  src/app.ts\n`,
+    screenAfterEnter: `${RULE}\n❯ see @src/app.ts \n${RULE}\n` });
+  expect(kept.run(MIRROR_SEND, ["main", "20", "claude", "777", "claude", ""], "x").out.trim()).toBe('{"error": "not-submitted"}');
+  expect(kept.tmuxLog().trim().split("\n").filter((l) => !l.startsWith("capture-pane")).at(-1)).toBe("send-keys -t =main: Enter");
+}, 20_000); // eight sends, each sleeping 0.3 s before Enter; one waits out the submit check
 
 test.skipIf(!Bun.which("python3"))("MIRROR_SEND: an agent that exits during the send gets no paste or no Enter, so nothing reaches the shell", () => {
   // Exits while the buffer loads: the check before the paste stops it, and the buffer is dropped.
@@ -792,11 +801,11 @@ const CODEX_TITLE = "work | 01aaaaaa-0000-7000-8000-00000...";
 test.skipIf(!Bun.which("python3"))("MIRROR_SEND into Codex: only its empty composer, and only while the title still names the expected thread", () => {
   const TID = "01aaaaaa-0000-7000-8000-000000000001";
   const codex = (o: Partial<Parameters<typeof fakeContainer>[0]> = {}) => fakeContainer({ status: "idle", agent: "codex", title: CODEX_TITLE, screen: CODEX_READY,
-    screenAfterPaste: "\x1b[1m›\x1b[0m x\n\n  gpt-5.4 default\n", ...o });
+    screenAfterPaste: "\x1b[1m›\x1b[0m x\n\n  gpt-5.4 default\n", screenAfterEnter: CODEX_READY, ...o });
   const send = (c: ReturnType<typeof fakeContainer>, thread = TID) => c.run(MIRROR_SEND, ["main", "20", "claude,codex", "777", "codex", thread], "x").out.trim();
   const ok = codex();
   expect(send(ok)).toBe('{"ok": true}');
-  expect(ok.tmuxLog().trim().split("\n").at(-1)).toBe("send-keys -t =main: Enter");
+  expect(ok.tmuxLog().trim().split("\n").filter((l) => !l.startsWith("capture-pane")).at(-1)).toBe("send-keys -t =main: Enter");
   // The title names another thread (/new, /resume), none (started by hand), or the chat expects another one.
   for (const c of [codex({ title: "work | 01bbbbbb-0000-7000-8000-00000..." }), codex({ title: "work" })]) {
     expect(send(c)).toBe('{"error": "conversation-unknown"}');
@@ -821,6 +830,35 @@ test.skipIf(!Bun.which("python3"))("MIRROR_SEND into Codex: only its empty compo
   const late = codex({ onPaste: `printf 'work | 01bbbbbb-0000-7000-8000-00000...' > "$PROC/../title"` });
   expect(send(late)).toBe('{"error": "not-submitted"}');
   expect(late.tmuxLog()).not.toContain("send-keys");
+}, 20_000);
+
+// Codex 0.172's mention popup, as it opens right above the composer on a pasted `@…` (captured in tmux): Enter there
+// inserts the selection instead of submitting (review H1).
+const CODEX_MENTION = "  Files, directories, plugins, skills and tasks\n  READ\n\x1b[7m›\x1b[0m README.md\n  docs/READING.md\n\n"
+  + "  \x1b[1menter/tab\x1b[0;2m insert · \x1b[0;1mesc\x1b[0;2m close · \x1b[0;1m↑/↓\x1b[0;2m select · \x1b[0;1m←/→\x1b[0;2m filter\x1b[0m\n\n"
+  + "\x1b[1m›\x1b[0m look at @READ\n\n  gpt-5.4 default · /workspace\n";
+
+test.skipIf(!Bun.which("python3"))("MIRROR_SEND into Codex presses Enter only on a plain draft, and says so when the composer still holds it after", () => {
+  const TID = "01aaaaaa-0000-7000-8000-000000000001";
+  const codex = (o: Partial<Parameters<typeof fakeContainer>[0]> = {}) => fakeContainer({ status: "idle", agent: "codex", title: CODEX_TITLE, screen: CODEX_READY,
+    screenAfterPaste: "\x1b[1m›\x1b[0m x\n\n  gpt-5.4 default\n", screenAfterEnter: CODEX_READY, ...o });
+  const send = (c: ReturnType<typeof fakeContainer>) => c.run(MIRROR_SEND, ["main", "20", "claude,codex", "777", "codex", TID], "x").out.trim();
+  // A mention or skill popup that opened on the pasted text: no Enter.
+  for (const popup of [CODEX_MENTION, "\x1b[7m›\x1b[0m deploy\n  \x1b[1menter\x1b[0;2m insert · \x1b[0;1mesc\x1b[0;2m close\x1b[0m\n\x1b[1m›\x1b[0m run $dep\n\n  gpt-5.4 default\n"]) {
+    const c = codex({ screenAfterPaste: popup });
+    expect(send(c)).toBe('{"error": "not-submitted"}');
+    expect(c.tmuxLog()).not.toContain("send-keys");
+  }
+  // Enter pressed, but the composer still holds the text after it: not submitted.
+  const kept = codex({ screenAfterEnter: "\x1b[1m›\x1b[0m x\n\n  gpt-5.4 default\n" });
+  expect(send(kept)).toBe('{"error": "not-submitted"}');
+  expect(kept.tmuxLog()).toContain("send-keys -t =main: Enter");
+  // While a turn runs Codex queues the message and clears the composer (review L5): that is a submit.
+  const queued = codex({ screenAfterEnter: `• Working (3s • esc to interrupt)\n  ↳ x\n\n${CODEX_READY}` });
+  expect(send(queued)).toBe('{"ok": true}');
+  // Ordinary chat text above the composer that reads like a popup's hint is not a dialog (review L4).
+  const chatty = codex({ screen: `• Press enter to select a file, or esc to cancel; type yes to confirm.\n\n${CODEX_READY}` });
+  expect(send(chatty)).toBe('{"ok": true}');
 }, 20_000);
 
 // ── Codex ──────────────────────────────────────────────────────────────────────────
