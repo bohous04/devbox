@@ -132,10 +132,10 @@ print(json.dumps(locate(sys.argv[1])))
 // Checks right before typing, inside the container so the window to the paste is as short as it gets: the same claude
 // process is still the pane's nearest agent, it is not waiting for an answer, the pane is not scrolled back, and the
 // screen shows Claude's empty prompt (no dialog, nothing typed). The text goes in through a tmux buffer from stdin
-// (never through a shell) as a bracketed paste, so its newlines do not submit; Enter submits it unless a dialog
-// opened meanwhile. After Enter the prompt has to empty: one that still holds the text after SUBMIT_WAIT means
-// something else took the Enter (an @-file suggestion, a popup), reported as not-submitted. A busy agent queues the
-// message and empties its prompt too. Any other screen after Enter (a dialog the new turn opened) is taken as
+// (never through a shell) as a bracketed paste, so its newlines do not submit; Enter (Codex: Tab, below) submits it
+// unless a dialog opened meanwhile. Then the prompt has to empty: one that still holds the text after SUBMIT_WAIT
+// means something else took the key (an @-file suggestion, a popup), reported as not-submitted. A busy agent queues
+// the message and empties its prompt too. Any other screen after the key (a dialog the new turn opened) is taken as
 // submitted; devd's pending check then warns if the message never shows up in the conversation (SEEN_TIMEOUT_MS).
 //
 // Multi-line text relies on Claude enabling bracketed paste (verified on 2.1.325: a pasted multi-line text stays one
@@ -152,9 +152,15 @@ print(json.dumps(locate(sys.argv[1])))
 // select · esc back" (a picker over the composer), "to confirm", "to cancel" (approvals), "to submit answer"
 // (questions); these replace the composer. While the composer holds an `@…` or `$…`, a mention or skill popup opens
 // right above it, its last line "enter/tab insert · esc close · ↑/↓ select · ←/→ filter": Enter there inserts instead
-// of submitting. So a hint counts below the composer, on the `·`-separated line right above it, or in the last lines
-// when there is no composer; chat text reading like a hint elsewhere on screen is not a dialog. A composer line
-// without its placeholder could be the first, empty line of a longer draft: not ready. Codex also takes a
+// of submitting. Next to the composer a hint counts only with its key in bold (`\e[1menter`, `\e[0;1mesc`), as Codex
+// draws hints: the status line below the composer names the thread after its first prompt ("… · write a form to
+// submit orders") and chat text can read like a hint, neither is a dialog. With no composer on screen the last lines
+// count as they read. A composer line without its placeholder could be the first, empty line of a longer draft: not
+// ready.
+//
+// Codex submits with Tab, not Enter: idle, Tab sends like Enter; during a turn, Enter steers the running turn (the
+// response in flight is dropped and the message joins that turn) while Tab queues the message as the next turn, as
+// Claude does (verified on 0.172). Codex also takes a
 // bracketed paste as one draft. Its title names the thread it is on (codexTitleThread), checked with the process.
 export const MIRROR_SEND = String.raw`# MIRROR_SEND${PY_LOCATE_FN}
 import re, signal, time, uuid
@@ -168,6 +174,7 @@ CODEX_PROMPT = "\x1b[1m\u203a\x1b[0m"
 CODEX_DIALOG = re.compile(r"\benter\b.{0,12}\b(select|confirm|submit|insert)|\btab\b.{0,6}\binsert\b|\besc\b.{0,12}\b(back|cancel|close)|\bto (confirm|cancel|submit)\b", re.I)
 # Seconds the prompt has to empty after Enter.
 SUBMIT_WAIT = 3
+HINT_KEY = re.compile(r"\x1b\[(?:0;)?1m(?:enter|esc|tab)\b", re.I)
 TITLE_THREAD = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{0,12}")
 
 def capture(target):
@@ -186,8 +193,8 @@ def codex_screen(target):
     if at is None:
         hints = [l for l in plain if l.strip()][-4:]
     else:
-        above = next((l for l in reversed(plain[:at]) if l.strip()), "")
-        hints = plain[at + 1:] + ([above] if " \u00b7 " in above else [])
+        near = raw[at + 1:] + [next((l for l in reversed(raw[:at]) if ANSI.sub("", l).strip()), "")]
+        hints = [ANSI.sub("", l) for l in near if HINT_KEY.search(l)]
     if any(CODEX_DIALOG.search(l) for l in hints):
         return "dialog"
     if at is None:
@@ -285,7 +292,7 @@ time.sleep(0.3)
 # a dialog) is exactly what this avoids.
 if check(session, expected, agents) or screen(target) != "draft":
     fail("not-submitted")
-subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+subprocess.run(["tmux", "send-keys", "-t", target, "Tab" if kind == "codex" else "Enter"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 deadline = time.time() + SUBMIT_WAIT
 while screen(target) == "draft":
     if time.time() >= deadline:

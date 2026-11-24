@@ -805,7 +805,7 @@ test.skipIf(!Bun.which("python3"))("MIRROR_SEND into Codex: only its empty compo
   const send = (c: ReturnType<typeof fakeContainer>, thread = TID) => c.run(MIRROR_SEND, ["main", "20", "claude,codex", "777", "codex", thread], "x").out.trim();
   const ok = codex();
   expect(send(ok)).toBe('{"ok": true}');
-  expect(ok.tmuxLog().trim().split("\n").filter((l) => !l.startsWith("capture-pane")).at(-1)).toBe("send-keys -t =main: Enter");
+  expect(ok.tmuxLog().trim().split("\n").filter((l) => !l.startsWith("capture-pane")).at(-1)).toBe("send-keys -t =main: Tab");
   // The title names another thread (/new, /resume), none (started by hand), or the chat expects another one.
   for (const c of [codex({ title: "work | 01bbbbbb-0000-7000-8000-00000..." }), codex({ title: "work" })]) {
     expect(send(c)).toBe('{"error": "conversation-unknown"}');
@@ -838,7 +838,7 @@ const CODEX_MENTION = "  Files, directories, plugins, skills and tasks\n  READ\n
   + "  \x1b[1menter/tab\x1b[0;2m insert · \x1b[0;1mesc\x1b[0;2m close · \x1b[0;1m↑/↓\x1b[0;2m select · \x1b[0;1m←/→\x1b[0;2m filter\x1b[0m\n\n"
   + "\x1b[1m›\x1b[0m look at @READ\n\n  gpt-5.4 default · /workspace\n";
 
-test.skipIf(!Bun.which("python3"))("MIRROR_SEND into Codex presses Enter only on a plain draft, and says so when the composer still holds it after", () => {
+test.skipIf(!Bun.which("python3"))("MIRROR_SEND into Codex submits only a plain draft, and says so when the composer still holds it after", () => {
   const TID = "01aaaaaa-0000-7000-8000-000000000001";
   const codex = (o: Partial<Parameters<typeof fakeContainer>[0]> = {}) => fakeContainer({ status: "idle", agent: "codex", title: CODEX_TITLE, screen: CODEX_READY,
     screenAfterPaste: "\x1b[1m›\x1b[0m x\n\n  gpt-5.4 default\n", screenAfterEnter: CODEX_READY, ...o });
@@ -852,13 +852,20 @@ test.skipIf(!Bun.which("python3"))("MIRROR_SEND into Codex presses Enter only on
   // Enter pressed, but the composer still holds the text after it: not submitted.
   const kept = codex({ screenAfterEnter: "\x1b[1m›\x1b[0m x\n\n  gpt-5.4 default\n" });
   expect(send(kept)).toBe('{"error": "not-submitted"}');
-  expect(kept.tmuxLog()).toContain("send-keys -t =main: Enter");
-  // While a turn runs Codex queues the message and clears the composer (review L5): that is a submit.
-  const queued = codex({ screenAfterEnter: `• Working (3s • esc to interrupt)\n  ↳ x\n\n${CODEX_READY}` });
+  expect(kept.tmuxLog()).toContain("send-keys -t =main: Tab");
+  // Codex gets Tab, not Enter: idle it submits; while a turn runs it queues the message as the next turn (Enter would
+  // steer the running turn instead), and the composer empties either way (review L5b, verified on 0.172).
+  const queued = codex({ screenAfterEnter: `• Working (3s • esc to interrupt)\n• Queued follow-up inputs\n  ↳ x\n\n${CODEX_READY}` });
   expect(send(queued)).toBe('{"ok": true}');
+  expect(queued.tmuxLog()).toContain("send-keys -t =main: Tab");
+  expect(queued.tmuxLog()).not.toContain("send-keys -t =main: Enter");
   // Ordinary chat text above the composer that reads like a popup's hint is not a dialog (review L4).
   const chatty = codex({ screen: `• Press enter to select a file, or esc to cancel; type yes to confirm.\n\n${CODEX_READY}` });
   expect(send(chatty)).toBe('{"ok": true}');
+  // Nor is the status line below the composer, which names the thread after its first prompt (review L4b).
+  const named = codex({ screen: CODEX_READY.replace("  gpt-5.4 default · /workspace\n",
+    "  \x1b[38;2;246;226;183mgpt-5.4 default\x1b[39m · \x1b[38;2;171;223;167m/workspace\x1b[39m · \x1b[38;2;148;226;213mwrite a form to submit orders\x1b[39m\n") });
+  expect(send(named)).toBe('{"ok": true}');
 }, 20_000);
 
 // ── Codex ──────────────────────────────────────────────────────────────────────────
