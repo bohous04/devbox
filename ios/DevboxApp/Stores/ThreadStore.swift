@@ -540,6 +540,10 @@ final class ThreadStore: ObservableObject {
         mirror = nil
         sendLock = nil
         loadError = nil
+        badFrame = nil
+        seenError = nil
+        olderError = nil
+        ending = false
         // The mirror's rows go: the chat thread's own load lays its rows out afresh.
         thread = nil
         rows = []

@@ -116,7 +116,12 @@ final class MacSidebarTests: XCTestCase {
         follow.landed("c", selection: &selection, parts: .init(list: ["a", "b"], shelves: ["w1", "w2", "c"]))
         XCTAssertEqual(selection, "b")
         XCTAssertFalse(follow.byOwner("b"), "the move")
+        XCTAssertTrue(follow.isUpdate(from: "b", to: "b"), "the moved-to row updated in place")
+        XCTAssertFalse(follow.isUpdate(from: nil, to: "b"), "the moved-to row arriving is not seen")
+        XCTAssertTrue(follow.isUpdate(from: nil, to: "x"), "another selected row arriving in the inbox is")
+        XCTAssertFalse(follow.isUpdate(from: "c", to: "b"), "a new selection is the selection handler's")
         XCTAssertTrue(follow.byOwner("a"), "then his own")
+        XCTAssertTrue(follow.isUpdate(from: nil, to: "b"), "after his own pick, b is like any other row")
     }
 
     /// devd asks before ending a waiting session: the move waits for the answer. Confirmed, the selection moves on;
