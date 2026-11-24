@@ -14,7 +14,7 @@ import { agoLabel } from "../format";
 import { profileFor } from "../newSession";
 import { endedHref, endedMetaTail, endedSecondLine, endedTitle, settledShelf, upsertEnded } from "../endedView";
 import { claimsUndo, failureText, focusOwnsUndo, settleKey, settleShortcut } from "../inboxSettle";
-import { badgeSlots, canEnd, groupInbox, inboxHref, inboxList, metaTail, mixedAgents, projectBadge, reasonLabel, rowStatus, rowTitle, secondLine, shelfBlock, shortAgo, snoozeEnd, snoozeTimes, statusParts, upsertInbox, type StatusTone } from "../inboxView";
+import { badgeSlots, canEnd, groupInbox, holdOrder, inboxHref, inboxList, metaTail, mixedAgents, projectBadge, reasonLabel, rowStatus, rowTitle, secondLine, shelfBlock, shortAgo, snoozeEnd, snoozeTimes, statusParts, upsertInbox, type StatusTone } from "../inboxView";
 import { cn } from "@/lib/utils";
 import { useNow } from "../store";
 import { useEventStream } from "../useEventStream";
@@ -379,7 +379,19 @@ export function Inbox() {
   }, []);
   const onHidden = (id: string) => setEnded((cur) => upsertEnded(cur, { id, removed: true }));
   const g = items ? groupInbox(items) : null;
-  const list = g ? inboxList(g) : [];
+  // While the pointer is over the column, live updates keep the rows where they were shown (holdOrder): a ✓ or a
+  // click never lands on a row that moved under the pointer. Leaving the column re-sorts.
+  const [pointerIn, setPointerIn] = useState(false);
+  const shownOrder = useRef<Record<string, string[]>>({});
+  const held = (key: string, rows: InboxItem[]) => {
+    const shown = shownOrder.current[key];
+    const out = pointerIn && shown ? holdOrder(shown, rows) : rows;
+    shownOrder.current[key] = out.map((i) => i.sessionId);
+    return out;
+  };
+  const list = held("list", g ? inboxList(g) : []);
+  const working = held("working", g?.working ?? []);
+  const snoozed = held("snoozed", g?.snoozed ?? []);
   // A row action answers the session's new item: shown at once, the SSE event that follows is the same.
   const onItem = (item: InboxItem) => setItems((cur) => (cur === null ? cur : upsertInbox(cur, item)));
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -447,7 +459,8 @@ export function Inbox() {
         <ShowAgent.Provider value={mixedAgents(items!)}>
         <BadgeSlots.Provider value={slots}>
         <SettleRow.Provider value={settle}>
-          <div ref={listRef} className="-mx-3 max-w-[720px]" data-inbox-column>
+          <div ref={listRef} className="-mx-3 max-w-[720px]" data-inbox-column
+            onPointerEnter={() => setPointerIn(true)} onPointerLeave={() => setPointerIn(false)}>
             {list.length === 0 ? (
               <p className="mb-3 flex min-h-9 items-center gap-2 px-3 text-sm text-muted-foreground">
                 <CircleCheck className="size-4 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />Nothing waiting for you
@@ -457,8 +470,8 @@ export function Inbox() {
             )}
             {g.working.length + g.snoozed.length + g.settled.length + ended.length > 0 || endedError !== null ? (
               <div className="border-t pt-1.5">
-                <Shelf label="Working" count={g.working.length}><Rows items={g.working} now={now} onItem={onItem} settle="pointer" /></Shelf>
-                <Shelf label="Snoozed" count={g.snoozed.length}><Rows items={g.snoozed} now={now} onItem={onItem} settle={false} /></Shelf>
+                <Shelf label="Working" count={working.length}><Rows items={working} now={now} onItem={onItem} settle="pointer" /></Shelf>
+                <Shelf label="Snoozed" count={snoozed.length}><Rows items={snoozed} now={now} onItem={onItem} settle={false} /></Shelf>
                 <Shelf label="Settled" count={g.settled.length + ended.length}
                   note={endedError === null ? null : <p role="alert" className="px-3 pb-1 text-xs text-destructive">Ended sessions could not be loaded: {endedError}</p>}>
                   <ul className="flex flex-col gap-px">

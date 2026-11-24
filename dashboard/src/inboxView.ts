@@ -220,6 +220,15 @@ export function inboxList(g: ReturnType<typeof groupInbox>): InboxItem[] {
   return [...action, ...[...finished, ...g.idle].sort((a, b) => b.attention.since - a.attention.since)];
 }
 
+/** The rows in the order they were last shown (`shown`, session ids), so a live update does not move rows under the
+ *  pointer: a row that left goes, a row that came is added at the end. The page holds the order only while the pointer
+ *  is over the list and re-sorts when it leaves. */
+export function holdOrder(shown: readonly string[], items: InboxItem[]): InboxItem[] {
+  const at = new Map(shown.map((id, i) => [id, i]));
+  const kept = items.filter((i) => at.has(i.sessionId)).sort((a, b) => at.get(a.sessionId)! - at.get(b.sessionId)!);
+  return [...kept, ...items.filter((i) => !at.has(i.sessionId))];
+}
+
 /** What tells a session's branch apart, or null when that says nothing: a session's own numbered branch
  *  (`session/<repo>-<n>`) is "#n", and nothing when the title already ends in that number (InboxView.branchLabel). */
 export function branchLabel(i: InboxItem): string | null {
