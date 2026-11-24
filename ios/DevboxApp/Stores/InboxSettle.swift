@@ -105,6 +105,9 @@ class InboxSettler: ObservableObject {
     @Published private(set) var problem: String?
     /// The settle the owner is asked about (devd's 409 question to `settle`), answered by `confirm` or `cancelConfirm`.
     @Published private(set) var confirming: Confirming?
+    /// The session whose settle came to nothing: it failed, or the owner cancelled devd's question. A Mac sidebar
+    /// waiting to move its selection on (MacSettleFollow) stops waiting.
+    @Published private(set) var abandoned: String?
 
     private let lifetime: Duration
     private let voiceOver: @MainActor () -> Bool
@@ -197,7 +200,15 @@ class InboxSettler: ObservableObject {
         await settle(c.item, in: store, confirmed: true)
     }
 
-    func cancelConfirm() { confirming = nil }
+    /// The owner said no to `c` (the alert's Cancel hands it over, as `confirm` is handed its question).
+    func cancelConfirm(_ c: Confirming? = nil) {
+        if let id = (c ?? confirming)?.item.sessionId { abandoned = id }
+        confirming = nil
+    }
+
+    /// The alert went away. Its dismissal can come before the button that answered it runs (`confirm`,
+    /// `cancelConfirm`), so it says nothing of the answer.
+    func dismissConfirm() { confirming = nil }
 
     private func settle(_ item: InboxItem, in store: InboxStore, confirmed: Bool, window: ObjectIdentifier? = nil) async {
         let title = InboxView.rowTitle(item)
@@ -208,6 +219,7 @@ class InboxSettler: ObservableObject {
                 confirming = Confirming(item: item, question: question, window: window)
             } else {
                 report("Couldn't settle “\(title)”: \(chatErrorText(error))")
+                abandoned = item.sessionId
             }
             return
         }
@@ -305,10 +317,10 @@ struct SettleConfirmation: ViewModifier {
     func body(content: Content) -> some View {
         let shown = Self.shows(settler.confirming, in: window) ? settler.confirming : nil
         content.alert(shown?.question ?? "",
-                      isPresented: Binding(get: { shown != nil }, set: { if !$0 { settler.cancelConfirm() } }),
+                      isPresented: Binding(get: { shown != nil }, set: { if !$0 { settler.dismissConfirm() } }),
                       presenting: shown) { c in
             Button("End Session", role: .destructive) { Task { await settler.confirm(c, in: store) } }
-            Button("Cancel", role: .cancel) { settler.cancelConfirm() }
+            Button("Cancel", role: .cancel) { settler.cancelConfirm(c) }
         } message: { c in
             Text("“\(InboxView.rowTitle(c.item))” is settled and ends in a few seconds; Undo still brings it back until then.")
         }
