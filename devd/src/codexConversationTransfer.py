@@ -658,13 +658,38 @@ def same_bytes(left, right):
     return left.stat().st_size == right.stat().st_size and is_prefix(left, right)
 
 
+def same_prefix(left, right, length):
+    """Both files hold at least `length` bytes and the same ones up to there."""
+    if left.stat().st_size < length or right.stat().st_size < length:
+        return False
+    with left.open("rb") as a, right.open("rb") as b:
+        while length > 0:
+            size = min(length, 1024 * 1024)
+            chunk = a.read(size)
+            if chunk != b.read(size):
+                return False
+            length -= size
+    return True
+
+
+def forked_prefix(histories, rid):
+    """How much of ancestor `rid`'s rollout the forks among `histories` read (their history_base end_byte_offset), or
+    None when any of them does not say (then the whole file has to match)."""
+    offsets = [meta.get("history_base", {}).get("end_byte_offset") for _, meta in histories.values()
+               if isinstance(meta.get("history_base"), dict) and meta["history_base"].get("thread_id") == rid]
+    if not offsets or not all(isinstance(o, int) and not isinstance(o, bool) and o >= 0 for o in offsets):
+        return None
+    return max(offsets)
+
+
 def copy_conversation(source, target, root, rpc_factory=Rpc):
     """Copies one conversation (its spawned agents and the history it builds on included) into another account's home,
     for a new session to resume it there (devd continue of an ended tmux session, DEVBOX-100).
 
     The source is only read, under its writer locks: nothing there is archived, moved or deleted, so it can be copied
     again. A target that already has a rollout with one of these ids keeps it: the same bytes are reused, anything else
-    refuses. The same home only checks the conversation is there. An account Codex never ran in has no databases yet:
+    refuses. An ancestor the conversation was forked from only has to match up to where the forks read it (their
+    history_base end_byte_offset): it may have gone on in either account since. The same home only checks the conversation is there. An account Codex never ran in has no databases yet:
     Codex itself creates them first (a private `codex app-server`, started and closed), so their schema is its own.
     """
     source, target, root = home_path(source), home_path(target), thread_id(root)
@@ -688,7 +713,9 @@ def copy_conversation(source, target, root, rpc_factory=Rpc):
         copies, path_map = [], {}
         for rid, (path, _) in histories.items():
             found = present.get(rid, [])
-            require(all(same_bytes(path, other) for other, _ in found) and len(found) <= 1,
+            prefix = None if rid in selected else forked_prefix(histories, rid)
+            require(all(same_bytes(path, other) if prefix is None else same_prefix(path, other, prefix) for other, _ in found)
+                    and len(found) <= 1,
                     "The selected account already has a different copy of this conversation; both were left unchanged.")
             if found:
                 path_map[str(path)] = str(found[0][0])

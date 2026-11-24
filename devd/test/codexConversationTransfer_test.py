@@ -40,13 +40,16 @@ def initialize(home):
     (home / "auth.json").write_text("credentials-" + home.name)
 
 
-def add_thread(home, ident, parent=None, archived=False, base=None):
+def add_thread(home, ident, parent=None, archived=False, base=None, base_offset=None):
     directory = home / ("archived_sessions" if archived else "sessions/2026/09/11")
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / ("rollout-2026-09-11T00-00-00-" + ident + ".jsonl")
     meta = {"id": ident, "cwd": "/workspace", "history_mode": "paginated"}
     if base:
         meta["history_base"] = {"thread_id": base, "ordinal": 3}
+        if base_offset is not None:
+            # As Codex 0.172 writes it: the fork reads the ancestor's rollout up to this byte only.
+            meta["history_base"]["end_byte_offset"] = base_offset
     path.write_text(json.dumps({"type": "session_meta", "payload": meta}) + "\n" +
                     json.dumps({"type": "response_item", "payload": {"role": "user", "content": "kept context"}}) + "\n")
     source = json.dumps({"subagent": {"thread_spawn": {"parent_thread_id": parent}}}) if parent else "cli"
@@ -434,6 +437,37 @@ class CopyTests(unittest.TestCase):
         before = snapshot_home(self.target)
         self.assertEqual(transfer.copy_conversation(self.source, self.target, ROOT)["copiedIds"], [])
         self.assertEqual(snapshot_home(self.target), before)
+
+    def test_an_ancestor_the_target_already_has_needs_to_match_only_up_to_the_forked_offset(self):
+        ancestor = add_thread(self.source, OTHER)
+        add_thread(self.source, ROOT, base=OTHER, base_offset=ancestor.stat().st_size)
+        self.assertEqual(transfer.copy_conversation(self.source, self.target, ROOT)["copiedIds"], [ROOT])
+        # Only the ancestor's rollout is copied (the fork's context), not its rows.
+        copied = self.target / ancestor.relative_to(self.source)
+        self.assertEqual(copied.read_bytes(), ancestor.read_bytes())
+        # The ancestor went on in both accounts after the fork: the part the fork reads is still the same.
+        with copied.open("a") as stream:
+            stream.write('{"type":"target-turn"}\n')
+        with ancestor.open("a") as stream:
+            stream.write('{"type":"source-turn"}\n')
+        before = snapshot_home(self.target)
+        self.assertEqual(transfer.copy_conversation(self.source, self.target, ROOT)["copiedIds"], [])
+        self.assertEqual(snapshot_home(self.target), before)
+        # Different within that part: refused, both left as they are.
+        copied.write_bytes(copied.read_bytes().replace(b"kept context", b"kept CONTEXT"))
+        before = snapshot_home(self.target)
+        with self.assertRaisesRegex(transfer.TransferError, "already has a different copy"):
+            transfer.copy_conversation(self.source, self.target, ROOT)
+        self.assertEqual(snapshot_home(self.target), before)
+
+    def test_an_ancestor_without_a_forked_offset_has_to_be_the_same_file(self):
+        ancestor = add_thread(self.source, OTHER)
+        add_thread(self.source, ROOT, base=OTHER)
+        transfer.copy_conversation(self.source, self.target, ROOT)
+        with (self.target / ancestor.relative_to(self.source)).open("a") as stream:
+            stream.write('{"type":"target-turn"}\n')
+        with self.assertRaisesRegex(transfer.TransferError, "already has a different copy"):
+            transfer.copy_conversation(self.source, self.target, ROOT)
 
     def test_a_different_file_with_that_id_in_the_target_refuses_and_both_stay(self):
         add_thread(self.source, ROOT)
