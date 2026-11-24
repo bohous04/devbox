@@ -111,7 +111,7 @@ async function until(cond: () => boolean) {
   expect(cond()).toBe(true);
 }
 
-function open(fake: ReturnType<typeof fakeCodex>, o: { resume?: string | null; model?: string | null; effort?: string | null } = {}) {
+function open(fake: ReturnType<typeof fakeCodex>, o: { resume?: string | null; forkFrom?: string | null; model?: string | null; effort?: string | null } = {}) {
   const events: BridgeEvent[] = [];
   const efforts: BridgeEvent[] = [];
   const logs: string[] = [];
@@ -121,6 +121,7 @@ function open(fake: ReturnType<typeof fakeCodex>, o: { resume?: string | null; m
       model: o.model === undefined ? "gpt-5.5-codex" : o.model,
       codexHome: "/tmp/codex-home",
       resume: o.resume ?? null,
+      ...(o.forkFrom !== undefined ? { forkFrom: o.forkFrom } : {}),
       mcpConfigArgs: ["-c", 'mcp_servers.devbox.command="agent-bridge"'],
       developerInstructions: "call devbox_wait",
       // effort.state is asserted on its own (the effort tests); the other tests read the thread's events.
@@ -558,6 +559,31 @@ describe("Codex switching", () => {
     const items = [{ type: "message", role: "user", content: [{ type: "input_text", text: "earlier" }] }];
     await session.injectItems(items);
     expect(fake.requests("thread/inject_items")[0]!.params).toEqual({ threadId: THREAD_ID, items });
+  });
+
+  test("forkFrom opens a new thread forked from the ended session's (thread/fork), never resuming it", async () => {
+    const fake = fakeCodex();
+    fake.responders["thread/fork"] = (p: any) => ({ ...threadResumeResponse(THREAD_ID), forkedFrom: p.threadId });
+    const { session, events } = open(fake, { forkFrom: "019a0000-0000-7000-8000-0000000000aa" });
+    await session.ready;
+    expect(fake.requests("thread/resume")).toEqual([]);
+    expect(fake.requests("thread/start")).toEqual([]);
+    expect(fake.requests("thread/fork")[0]!.params).toEqual({
+      threadId: "019a0000-0000-7000-8000-0000000000aa", cwd: "/workspace", approvalPolicy: "never", sandbox: "danger-full-access",
+      developerInstructions: "call devbox_wait",
+    });
+    expect(events.find((e) => e.type === "thread.native")).toMatchObject({ nativeThreadId: THREAD_ID });
+  });
+
+  test("a failed thread/fork is a failed resume: ResumeFailedError, no thread, no turn", async () => {
+    const fake = fakeCodex();
+    fake.responders["thread/fork"] = () => {
+      throw new Error("no rollout found for thread id");
+    };
+    const { session, events } = open(fake, { forkFrom: "019a0000-0000-7000-8000-0000000000aa" });
+    await expect(session.ready).rejects.toThrow(/^thread\/fork 019a0000-0000-7000-8000-0000000000aa failed: .*no rollout found/);
+    await expect(session.ready).rejects.toBeInstanceOf(ResumeFailedError);
+    expect(events.filter((e) => e.type === "thread.native")).toEqual([]);
   });
 
   test("resume failure: a failed thread/resume rejects ready with ResumeFailedError and starts no turn", async () => {

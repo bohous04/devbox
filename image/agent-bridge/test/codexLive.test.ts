@@ -96,10 +96,12 @@ describe.skipIf(codex === null)("codex app-server (real binary, loopback model)"
     expect(JSON.stringify(output.output)).toContain("SQLite");
   }, 60_000);
 
-  // Continuing an ended chat session (devd endedSessions.ts): the new session's bridge resumes the thread on another
+  // Continuing an ended chat session (devd endedSessions.ts): the new session's bridge forks the thread on another
   // account's shadow home, which shares sessions/ and sqlite/ with every other account in the codex-v2-shared volume.
-  test("a new app-server on another account's shadow home resumes a thread an ended one wrote", async () => {
-    const fx = responsesFixture([say("Noted: blue.", "msg_1"), say("It was blue.", "msg_2")]);
+  // A fork has its own id, so a second continue of the same ended session works while the first is live (review M1:
+  // resuming it twice failed with "thread-store conflict: active writer").
+  test("a new app-server on another account's shadow home forks a thread an ended one wrote, twice at once", async () => {
+    const fx = responsesFixture([say("Noted: blue.", "msg_1"), say("It was blue.", "msg_2"), say("Still blue.", "msg_3")]);
     const root = tmp();
     const paths = { sharedHome: join(root, "shared"), shadowRoot: join(root, "shadow"), defaultAuth: join(root, "none"), defaultHome: root, seedScript: "/nonexistent" };
     mkdirSync(paths.sharedHome);
@@ -109,30 +111,32 @@ describe.skipIf(codex === null)("codex app-server (real binary, loopback model)"
       mkdirSync(join(accounts, a), { recursive: true });
       writeFileSync(join(accounts, a, "auth.json"), '{"tokens":{}}');
     }
-    const open = (account: string, resume: string | null, events: BridgeEvent[]) => {
+    const open = (account: string, forkFrom: string | null, events: BridgeEvent[]) => {
       const home = prepareShadowHome(account, accounts, paths);
       const s = openCodexSession({
-        cwd: root, model: null, codexHome: home, baseEnv: { PATH: process.env.PATH, HOME: root }, resume,
+        cwd: root, model: null, codexHome: home, baseEnv: { PATH: process.env.PATH, HOME: root }, resume: null, forkFrom,
         mcpConfigArgs: ["-c", 'cli_auth_credentials_store="file"', "-c", `sqlite_home=${JSON.stringify(join(home, "sqlite"))}`],
         developerInstructions: "", emit: (e) => events.push(e), logError: () => {},
       });
       cleanups.push(() => void s.close());
       return s;
     };
+    const threadOf = (events: BridgeEvent[]) => (events.find((e) => e.type === "thread.native") as Extract<BridgeEvent, { type: "thread.native" }>).nativeThreadId;
 
     const first: BridgeEvent[] = [];
     const ended = open("0a000000-0000-4000-8000-00000000000a", null, first);
     await ended.ready;
     await ended.startTurn("run-1", "remember the colour blue", "user");
     await until(() => first.some((e) => e.type === "run.completed"));
-    const thread = (first.find((e) => e.type === "thread.native") as Extract<BridgeEvent, { type: "thread.native" }>).nativeThreadId;
+    const thread = threadOf(first);
     await ended.close();
     await ended.ended;
 
     const second: BridgeEvent[] = [];
     const continued = open("0b000000-0000-4000-8000-00000000000b", thread, second);
     await continued.ready;
-    expect(second[0]).toMatchObject({ type: "thread.native", harness: "codex", nativeThreadId: thread });
+    const forked = threadOf(second);
+    expect(forked).not.toBe(thread);
     await continued.startTurn("run-2", "which colour?", "user");
     await until(() => second.some((e) => e.type === "run.completed"));
     // The model got the ended session's conversation with the new message.
@@ -140,5 +144,16 @@ describe.skipIf(codex === null)("codex app-server (real binary, loopback model)"
     expect(history).toContain("remember the colour blue");
     expect(history).toContain("Noted: blue.");
     expect(history).toContain("which colour?");
-  }, 60_000);
+
+    // A second continue while the first is still open: its own fork, the ended history, not the first fork's turn.
+    const third: BridgeEvent[] = [];
+    const again = open("0a000000-0000-4000-8000-00000000000a", thread, third);
+    await again.ready;
+    expect([thread, forked]).not.toContain(threadOf(third));
+    await again.startTurn("run-3", "and now?", "user");
+    await until(() => third.some((e) => e.type === "run.completed"));
+    const history2 = JSON.stringify(fx.requests[2].input);
+    expect(history2).toContain("remember the colour blue");
+    expect(history2).not.toContain("which colour?");
+  }, 90_000);
 });
