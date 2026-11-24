@@ -1171,7 +1171,7 @@ export function createApp(d: ApiDeps): Hono {
   });
 
   /** Continues an ended session's work in a new session of the same repo, agent and runtime (endedSessions.ts
-   *  continuePlan). The response says how: `resume` (Claude Code starts on the ended conversation) or `handoff` (the new
+   *  continuePlan). The response says how: `resume` (the agent starts on the ended conversation) or `handoff` (the new
    *  session's first message points at the whole transcript), and `reason` why a resume became a handoff. */
   /** Ended sessions a continue is starting a session for. */
   const continuing = new Set<string>();
@@ -1204,7 +1204,7 @@ export function createApp(d: ApiDeps): Hono {
       }
       const r = await d.mgr.open({
         folder: row.folder, project: row.project, repo: row.repo, agent: row.agent, runtime: row.runtime, fresh: true,
-        ...(plan.mode === "resume" ? { resume: { thread: plan.thread, jsonl: plan.jsonl } } : { handoff: transcript! }),
+        ...(plan.mode === "resume" ? { resume: plan.seed } : { handoff: transcript! }),
         ...(row.runtime === "tmux" && prompt !== undefined ? { firstPrompt: prompt } : {}),
       });
       linkOpenedChat(r, row.runtime === "chat" ? prompt : undefined);

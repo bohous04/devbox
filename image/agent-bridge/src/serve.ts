@@ -115,7 +115,7 @@ function takeResumeFile(path: string, harness: Harness, fresh: boolean): { threa
   if (!fresh) return { thread: null, notice: null };
   const [h, id] = text.trim().split(/\s+/);
   if (h === harness && id !== undefined && THREAD_ID.test(id)) {
-    return { thread: id, notice: `This session continues ${harness === "claude" ? "Claude" : harness} conversation ${id} of an ended session.` };
+    return { thread: id, notice: `This session continues ${harness === "claude" ? "Claude" : harness === "codex" ? "Codex" : harness} conversation ${id} of an ended session.` };
   }
   return { thread: null, notice: `The ended session's conversation was not resumed: devd asked for ${JSON.stringify(text.trim().slice(0, 80))}, which this ${harness} bridge cannot open; a new conversation starts.` };
 }

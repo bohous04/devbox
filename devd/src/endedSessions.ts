@@ -9,6 +9,7 @@ import { join } from "node:path";
 import type { ContinueMode, EndedSession, TranscriptState } from "../../shared/ended";
 import type { ThreadItem } from "../../shared/thread";
 import { threadTitle } from "../../shared/threadTitle";
+import { chatHarness, isAgentName } from "./agents";
 import type { SessionRow } from "./db";
 import { ThreadStore } from "./threadStore";
 
@@ -32,23 +33,30 @@ const clip = (t: string, max: number) => (t.length > max ? `${t.slice(0, max)}â€
 
 const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** How continue goes on with this transcript. `resume`: Claude Code starts on the ended session's own conversation,
- *  whose jsonl `end()` archived with the transcript (chatArchive.ts); continue copies it into the new session.
- *  `handoff`: the new session's first message points at the whole transcript. `reason` says why a Claude conversation
- *  that should resume does not; it is null where resume is not wired (Codex, the other agents). */
-export type ContinuePlan = { mode: "resume"; thread: string; jsonl: Buffer } | { mode: "handoff"; reason: string | null };
+/** The ended conversation a new session starts on. `claude`: its jsonl, which continue copies into the new session.
+ *  `codex`: the thread id alone (see resumeBlock). */
+export type ResumeSeed = { harness: "claude"; thread: string; jsonl: Buffer } | { harness: "codex"; thread: string };
 
-/** Codex continues by handoff only. Its rollout lives in the account's CODEX_HOME volume, which end() neither archives
- *  nor owns; resuming it would need that same account leased to the new session and a Codex resume path in
- *  agent-launch.sh and the bridge's first start. Claude resumes because its jsonl sits in the session's own
- *  `_claude-projects/<id>`, which archiveChats moves into the archive: resume depends on that. */
+/** How continue goes on with this transcript. `resume`: the new session starts on the ended session's own
+ *  conversation (`seed`). `handoff`: the new session's first message points at the whole transcript. `reason` says why
+ *  a conversation that should resume does not; it is null where resume is not wired (tmux Codex, the other agents). */
+export type ContinuePlan = { mode: "resume"; seed: ResumeSeed } | { mode: "handoff"; reason: string | null };
+
+/** Claude resumes because its jsonl sits in the session's own `_claude-projects/<id>`, which archiveChats moves into
+ *  the archive: resume depends on that. A chat session's Codex thread lives in the `codex-v2-shared` volume
+ *  (sessions.ts codexV2Mounts), which every chat session mounts and whose rollouts and sqlite every account's shadow
+ *  home shares (agent-bridge codexHomes.ts): the new session's bridge resumes it by id on whatever account it gets.
+ *  Nothing in devbox removes a thread from that volume; should one be gone, the bridge reports the failed resume and devd
+ *  starts a fresh thread (chatSwitch.ts), as for a Claude thread whose copied jsonl the agent rejects. A tmux Codex
+ *  conversation stays in its account's own home (codex-home or a standalone account volume), which `co` picks per
+ *  launch: not wired, it hands off. */
 /** Why this transcript cannot resume, without reading the conversation: null when it can (as far as the archive
  *  shows); `wired: false` when resume does not exist for its agent at all. */
 function resumeBlock(row: EndedRow): { wired: boolean; reason: string } | null {
   if (row.thread_note !== null && row.native_thread === null && row.agent === "claude") return { wired: true, reason: row.thread_note };
-  if (row.native_harness !== "claude" || row.agent !== "claude" || row.native_thread === null || !THREAD_ID.test(row.native_thread) || row.archive_dir === "") {
-    return { wired: false, reason: "" };
-  }
+  if (row.native_thread === null || !THREAD_ID.test(row.native_thread)) return { wired: false, reason: "" };
+  if (row.native_harness === "codex" && row.runtime === "chat" && isAgentName(row.agent) && chatHarness(row.agent) === "codex") return null;
+  if (row.native_harness !== "claude" || row.agent !== "claude" || row.archive_dir === "") return { wired: false, reason: "" };
   const file = join(row.archive_dir, `${row.native_thread}.jsonl`);
   let st;
   try { st = lstatSync(file); } catch { return { wired: true, reason: `the Claude conversation ${row.native_thread} is not in the archive` }; }
@@ -69,11 +77,12 @@ export async function continuePlan(row: EndedRow, imageBlock: string | null): Pr
   if (block !== null) return { mode: "handoff", reason: block.wired ? block.reason : null };
   if (imageBlock !== null) return { mode: "handoff", reason: imageBlock };
   const thread = row.native_thread!;
+  if (row.native_harness === "codex") return { mode: "resume", seed: { harness: "codex", thread } };
   try {
     const f = await open(join(row.archive_dir, `${thread}.jsonl`), C.O_RDONLY | C.O_NOFOLLOW);
     try {
       if (!(await f.stat()).isFile()) throw new Error("not a regular file");
-      return { mode: "resume", thread, jsonl: await f.readFile() };
+      return { mode: "resume", seed: { harness: "claude", thread, jsonl: await f.readFile() } };
     } finally { await f.close(); }
   } catch (e) {
     return { mode: "handoff", reason: `the Claude conversation file ${thread}.jsonl could not be read: ${(e as Error).message}` };

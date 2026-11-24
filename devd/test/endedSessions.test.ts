@@ -235,13 +235,33 @@ test("continue resumes a Claude conversation whose jsonl the archive kept, and h
   expect(await continuePlan(row, null)).toEqual({ mode: "handoff", reason: expect.stringContaining("not in the archive") });
   writeFileSync(join(dir, `${THREAD}.jsonl`), '{"type":"user"}\n');
   expect(continueMode(row)).toBe("resume");
-  expect(await continuePlan(row, null)).toEqual({ mode: "resume", thread: THREAD, jsonl: Buffer.from('{"type":"user"}\n') });
+  expect(await continuePlan(row, null)).toEqual({ mode: "resume", seed: { harness: "claude", thread: THREAD, jsonl: Buffer.from('{"type":"user"}\n') } });
   // An image that cannot resume yet: handoff, and the reason says so.
   expect(await continuePlan(row, "the session image predates resume")).toEqual({ mode: "handoff", reason: "the session image predates resume" });
-  // Another agent now, or a Codex thread: resume is not wired for it, which is no failure to report.
+  // Another agent now, or a Codex thread of a Claude profile: resume is not wired for it, which is no failure to report.
   expect(continueMode({ ...row, agent: "codex" })).toBe("handoff");
   expect(await continuePlan({ ...row, native_harness: "codex" }, null)).toEqual({ mode: "handoff", reason: null });
   expect(await continuePlan({ ...row, native_thread: null }, null)).toEqual({ mode: "handoff", reason: null });
+});
+
+const CODEX_THREAD = "01a1f354-0000-7000-8000-000000000001";
+
+test("continue resumes a Codex chat thread from the shared Codex home, and hands off where that is not where it lives", async () => {
+  const root = tmp();
+  const db = openDb(":memory:");
+  const dir = join(root, "_chat-archive", "dev-acme-app-20261120-101500");
+  archivedStore(dir, "dev-acme-app.sqlite", [{ type: "thread.native", harness: "codex", nativeThreadId: CODEX_THREAD, account: null, model: null }, ...CONVO.slice(1)]);
+  const row = getEnded(db, recordEnded(db, { ...S, agent: "codex" }, dir, 5_000)!.id)!;
+  // The rollout stays in the codex-v2-shared volume every chat session mounts: nothing to copy, so no archive check.
+  expect(continueMode(row)).toBe("resume");
+  expect(await continuePlan(row, null)).toEqual({ mode: "resume", seed: { harness: "codex", thread: CODEX_THREAD } });
+  expect(await continuePlan(row, "the session image predates resume")).toEqual({ mode: "handoff", reason: "the session image predates resume" });
+  // A tmux Codex conversation lives in its account's own home, which a new session may not get: not wired.
+  expect(continueMode({ ...row, runtime: "tmux" })).toBe("handoff");
+  expect(await continuePlan({ ...row, runtime: "tmux" }, null)).toEqual({ mode: "handoff", reason: null });
+  // A Claude profile that switched to Codex starts the new session on Claude, which cannot open the Codex thread.
+  expect(await continuePlan({ ...row, agent: "claude" }, null)).toEqual({ mode: "handoff", reason: null });
+  expect(await continuePlan({ ...row, native_thread: "../secret" }, null)).toEqual({ mode: "handoff", reason: null });
 });
 
 test("continue never reads a planted link as the conversation, and never a thread id that is a path", async () => {

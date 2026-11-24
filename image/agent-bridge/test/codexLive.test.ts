@@ -1,9 +1,10 @@
 // The Codex adapter against the real `codex app-server` binary, with every model request going to a loopback
 // Responses fixture: no account, no network, a fresh CODEX_HOME. Skipped where codex is not installed (CI).
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { prepareShadowHome } from "../src/codexHomes.ts";
 import { openCodexSession } from "../src/codexSession.ts";
 import type { BridgeEvent } from "../src/events.ts";
 
@@ -36,16 +37,25 @@ function responsesFixture(script: Item[]) {
   return { url: `http://127.0.0.1:${server.port}/v1`, requests };
 }
 
+const fixtureConfig = (url: string) => [
+  'model = "gpt-5.4"', 'model_provider = "fixture"',
+  "[model_providers.fixture]", 'name = "Loopback fixture"', `base_url = ${JSON.stringify(url)}`,
+  'wire_api = "responses"', "requires_openai_auth = false", "supports_websockets = false", "",
+].join("\n");
+
+const tmp = () => {
+  const dir = mkdtempSync(join(tmpdir(), "codex-live-"));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+};
+
 function codexHome(url: string): string {
-  const home = mkdtempSync(join(tmpdir(), "codex-live-"));
-  cleanups.push(() => rmSync(home, { recursive: true, force: true }));
-  writeFileSync(join(home, "config.toml"), [
-    'model = "gpt-5.4"', 'model_provider = "fixture"',
-    "[model_providers.fixture]", 'name = "Loopback fixture"', `base_url = ${JSON.stringify(url)}`,
-    'wire_api = "responses"', "requires_openai_auth = false", "supports_websockets = false", "",
-  ].join("\n"));
+  const home = tmp();
+  writeFileSync(join(home, "config.toml"), fixtureConfig(url));
   return home;
 }
+
+const say = (text: string, id: string) => ({ type: "message", id, role: "assistant", content: [{ type: "output_text", text }] });
 
 async function until(cond: () => boolean, ms = 30_000) {
   const end = Date.now() + ms;
@@ -64,7 +74,7 @@ describe.skipIf(codex === null)("codex app-server (real binary, loopback model)"
     };
     const fx = responsesFixture([
       { type: "function_call", id: "fc_1", call_id: "call_ask", name: "request_user_input", arguments: JSON.stringify(question) },
-      { type: "message", id: "msg_1", role: "assistant", content: [{ type: "output_text", text: "Using SQLite." }] },
+      say("Using SQLite.", "msg_1"),
     ]);
     const home = codexHome(fx.url);
     const events: BridgeEvent[] = [];
@@ -84,5 +94,51 @@ describe.skipIf(codex === null)("codex app-server (real binary, loopback model)"
     await until(() => events.some((e) => e.type === "run.completed"));
     const output = fx.requests[1].input.find((i: Item) => i.type === "function_call_output" && i.call_id === "call_ask");
     expect(JSON.stringify(output.output)).toContain("SQLite");
+  }, 60_000);
+
+  // Continuing an ended chat session (devd endedSessions.ts): the new session's bridge resumes the thread on another
+  // account's shadow home, which shares sessions/ and sqlite/ with every other account in the codex-v2-shared volume.
+  test("a new app-server on another account's shadow home resumes a thread an ended one wrote", async () => {
+    const fx = responsesFixture([say("Noted: blue.", "msg_1"), say("It was blue.", "msg_2")]);
+    const root = tmp();
+    const paths = { sharedHome: join(root, "shared"), shadowRoot: join(root, "shadow"), defaultAuth: join(root, "none"), defaultHome: root, seedScript: "/nonexistent" };
+    mkdirSync(paths.sharedHome);
+    writeFileSync(join(paths.sharedHome, "config.toml"), fixtureConfig(fx.url));
+    const accounts = join(root, "accounts");
+    for (const a of ["0a000000-0000-4000-8000-00000000000a", "0b000000-0000-4000-8000-00000000000b"]) {
+      mkdirSync(join(accounts, a), { recursive: true });
+      writeFileSync(join(accounts, a, "auth.json"), '{"tokens":{}}');
+    }
+    const open = (account: string, resume: string | null, events: BridgeEvent[]) => {
+      const home = prepareShadowHome(account, accounts, paths);
+      const s = openCodexSession({
+        cwd: root, model: null, codexHome: home, baseEnv: { PATH: process.env.PATH, HOME: root }, resume,
+        mcpConfigArgs: ["-c", 'cli_auth_credentials_store="file"', "-c", `sqlite_home=${JSON.stringify(join(home, "sqlite"))}`],
+        developerInstructions: "", emit: (e) => events.push(e), logError: () => {},
+      });
+      cleanups.push(() => void s.close());
+      return s;
+    };
+
+    const first: BridgeEvent[] = [];
+    const ended = open("0a000000-0000-4000-8000-00000000000a", null, first);
+    await ended.ready;
+    await ended.startTurn("run-1", "remember the colour blue", "user");
+    await until(() => first.some((e) => e.type === "run.completed"));
+    const thread = (first.find((e) => e.type === "thread.native") as Extract<BridgeEvent, { type: "thread.native" }>).nativeThreadId;
+    await ended.close();
+    await ended.ended;
+
+    const second: BridgeEvent[] = [];
+    const continued = open("0b000000-0000-4000-8000-00000000000b", thread, second);
+    await continued.ready;
+    expect(second[0]).toMatchObject({ type: "thread.native", harness: "codex", nativeThreadId: thread });
+    await continued.startTurn("run-2", "which colour?", "user");
+    await until(() => second.some((e) => e.type === "run.completed"));
+    // The model got the ended session's conversation with the new message.
+    const history = JSON.stringify(fx.requests[1].input);
+    expect(history).toContain("remember the colour blue");
+    expect(history).toContain("Noted: blue.");
+    expect(history).toContain("which colour?");
   }, 60_000);
 });

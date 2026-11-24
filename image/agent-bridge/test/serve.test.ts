@@ -150,11 +150,11 @@ function codexAccount(id: string, auth = '{"tokens":{}}'): void {
   writeFileSync(join(homes().sharedHome, "config.toml"), 'model = "x"\n');
 }
 
-async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string | null; claudeExecutable?: string | null; acpBins?: string[]; logError?: (msg: string) => void; logCompactMinBytes?: number; now?: () => number; sweepMs?: number; resumeFile?: string } = {}) {
+async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string | null; claudeExecutable?: string | null; acpBins?: string[]; logError?: (msg: string) => void; logCompactMinBytes?: number; now?: () => number; sweepMs?: number; resumeFile?: string; harness?: "claude" | "codex" } = {}) {
   const bridge = await serve({
     bridgeDir: dir,
     socketPath,
-    harness: "claude",
+    harness: over.harness ?? "claude",
     account: over.account ?? null,
     model: null,
     openHarness: (o) => f.open(o),
@@ -200,6 +200,17 @@ describe("serve", () => {
     expect(state().nativeThreadId).toBe("0b1c2d3e-0000-4000-8000-000000000001");
     expect(events()[0]).toEqual({ type: "bridge.started", version: expect.any(String), resumed: true,
       notice: "This session continues Claude conversation 0b1c2d3e-0000-4000-8000-000000000001 of an ended session." });
+    expect(readdirSync(dir)).not.toContain("resume");
+  });
+
+  test("a Codex bridge resumes the Codex thread devd left in the resume file (continuing an ended chat session)", async () => {
+    const file = join(dir, "resume");
+    writeFileSync(file, "codex 01a1f354-0000-7000-8000-000000000001\n");
+    const f = fakeHarness();
+    await start(f, { resumeFile: file, harness: "codex", account: ACCT });
+    expect(f.opens[0].resume).toBe("01a1f354-0000-7000-8000-000000000001");
+    expect(events()[0]).toEqual({ type: "bridge.started", version: expect.any(String), resumed: true,
+      notice: "This session continues Codex conversation 01a1f354-0000-7000-8000-000000000001 of an ended session." });
     expect(readdirSync(dir)).not.toContain("resume");
   });
 

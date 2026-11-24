@@ -32,7 +32,7 @@ const THREAD = "0b1c2d3e-0000-4000-8000-000000000001";
 
 /** `claude`: the session's Claude conversation (thread.native) and its jsonl in the archive; `imageBlock`: what devd
  *  says about an image that cannot take a resume. */
-function setup(o: { runtime?: "chat" | "tmux"; remote?: string; open?: (t: Record<string, unknown>) => Promise<unknown>; claude?: boolean; imageBlock?: string } = {}) {
+function setup(o: { runtime?: "chat" | "tmux"; remote?: string; open?: (t: Record<string, unknown>) => Promise<unknown>; claude?: boolean; codex?: boolean; imageBlock?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), "ended-api-"));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const db = openDb(":memory:");
@@ -40,11 +40,12 @@ function setup(o: { runtime?: "chat" | "tmux"; remote?: string; open?: (t: Recor
   mkdirSync(join(dir, "images"), { recursive: true });
   writeFileSync(join(dir, "images", IMG), png(1, 1));
   const store = ThreadStore.openFile(join(dir, o.runtime === "tmux" ? "dev-acme-app.mirror.sqlite" : "dev-acme-app.sqlite"));
-  const events_: BridgeEvent[] = o.claude ? [{ type: "thread.native", harness: "claude", nativeThreadId: THREAD, account: null, model: null }, ...CONVO] : CONVO;
+  const native = o.claude ? "claude" : o.codex ? "codex" : null;
+  const events_: BridgeEvent[] = native ? [{ type: "thread.native", harness: native, nativeThreadId: THREAD, account: null, model: null }, ...CONVO] : CONVO;
   events_.forEach((event, i) => store.apply({ seq: i + 1, ts: 1000 * (i + 1), event }));
   store.close();
   if (o.claude) writeFileSync(join(dir, `${THREAD}.jsonl`), '{"type":"user"}\n');
-  recordEnded(db, { ...S, runtime: o.runtime ?? "chat" }, dir, 5_000);
+  recordEnded(db, { ...S, runtime: o.runtime ?? "chat", ...(o.codex ? { agent: "codex" } : {}) }, dir, 5_000);
   const bus = new EventBus();
   const events: unknown[] = [];
   bus.subscribe(["inbox-ended"], (_t, data) => events.push(data));
@@ -173,10 +174,23 @@ test("continue resumes the Claude conversation: the new session gets its jsonl a
     expect(r.status).toBe(201);
     expect((await r.json()) as ContinueResult).toEqual({ mode: "resume", sessionId: "dev-acme-app-2", runtime, reason: null });
     expect(t.opened).toEqual([{ folder: "acme", project: "acme", repo: "app", agent: "claude", runtime, fresh: true,
-      resume: { thread: THREAD, jsonl: Buffer.from('{"type":"user"}\n') } }]);
+      resume: { harness: "claude", thread: THREAD, jsonl: Buffer.from('{"type":"user"}\n') } }]);
     expect(t.firstTurns).toEqual([]);
     expect(existsSync(join(t.root, "_inbox", "_ended", `${ID}.md`))).toBe(false);
   }
+});
+
+test("continue resumes a Codex chat thread by its id alone; a tmux Codex session hands off", async () => {
+  const t = setup({ codex: true });
+  const r = await t.a.fetch(post(`/api/ended/${ID}/continue`));
+  expect((await r.json()) as ContinueResult).toEqual({ mode: "resume", sessionId: "dev-acme-app-2", runtime: "chat", reason: null });
+  expect(t.opened).toEqual([{ folder: "acme", project: "acme", repo: "app", agent: "codex", runtime: "chat", fresh: true,
+    resume: { harness: "codex", thread: THREAD } }]);
+  expect(t.firstTurns).toEqual([]);
+  const tmux = setup({ codex: true, runtime: "tmux" });
+  const h = (await (await tmux.a.fetch(post(`/api/ended/${ID}/continue`))).json()) as ContinueResult;
+  expect(h).toMatchObject({ mode: "handoff", reason: null });
+  expect(tmux.opened[0]!.resume).toBeUndefined();
 });
 
 test("a resume the image cannot take, or a conversation gone since the list, hands off and says why", async () => {
