@@ -117,7 +117,7 @@ function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; pro
 }
 
 /** A Claude conversation of one completed turn on the `primary` account. */
-function claudeThread(t: ReturnType<typeof setup>, account = "primary", model = "claude-opus-5-5") {
+function claudeThread(t: ReturnType<typeof setup>, account: string | null = "primary", model = "claude-opus-5-5") {
   t.feed([
     { type: "run.queued", runId: "r1", text: "Fix the login bug", attachments: [] },
     { type: "run.started", runId: "r1", origin: "user", nativeThreadId: null, model: null },
@@ -353,6 +353,17 @@ test("harness: a proxy profile resumes the Claude thread with the profile env", 
   expect(cmd.resume).toBe("t-claude");
   expect(getSession(t.db, CHAT.id)!.agent).toBe("claude-gemini");
   expect(activeLeases(t)).toEqual([]);
+});
+
+test("harness: one proxy profile to another restarts on the new upstream's env, never a setModel on the old one", async () => {
+  const t = setup({ agent: "claude-gemini" });
+  claudeThread(t, null, "gpt-x");
+  expect(await t.post("harness", { agent: "claude-openrouter" })).toEqual({ status: 202, body: { kind: "restart-resume" } });
+  expect(t.sent).toEqual([{
+    kind: "switchTarget", target: { harness: "claude", account: null, model: "gpt-x", env: { ...proxyProfileEnv("claude-openrouter", PROXY_INPUTS), CLAUDE_CONFIG_DIR: "/home/dev/.claude" } },
+    resume: "t-claude", handoff: null,
+  }]);
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("claude-openrouter");
 });
 
 test("harness: a proxy profile without its key is refused before anything is sent", async () => {

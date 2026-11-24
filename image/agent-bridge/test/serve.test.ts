@@ -1285,6 +1285,19 @@ describe("launch env", () => {
     expect(f.opens[0].target).toEqual({ harness: "claude", account: null, model: "gpt-x", env: { ANTHROPIC_MODEL: "gpt-x" } });
   });
 
+  test("setModel on a proxy profile is refused: the profile's env names the model (devd switches profiles with switchTarget)", async () => {
+    const f = fakeHarness();
+    const env = { ANTHROPIC_BASE_URL: "http://proxy:8317", ANTHROPIC_AUTH_TOKEN: "k-secret", ANTHROPIC_MODEL: "gpt-x", DEVBOX_PROXY_PROFILE: "1" };
+    const bridge = await serve({
+      bridgeDir: dir, socketPath, harness: "claude", account: null, model: "gpt-x", targetEnv: env,
+      openHarness: (o) => f.open(o), resolveTarget: (t) => t, now: () => NOW, logError: () => {},
+    });
+    closers.push(() => bridge.close());
+    await expect(cmd({ kind: "setModel", model: "gpt-y" })).rejects.toThrow("proxy profile");
+    // Nothing persisted that would make the next start wait for devd's target.
+    expect(state()).toMatchObject({ target: null, model: "gpt-x" });
+  });
+
   test("serveConfigFromEnv binds the bridge to its session when devd gave it a secret", () => {
     const env = { DEVD_RUNTIME: "chat", DEVD_AGENT: "vibe", DEVD_SESSION_ID: "dev-harbor-web" };
     const secret = "0f".repeat(32);

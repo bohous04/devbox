@@ -225,7 +225,10 @@ export class ChatSwitch {
     if (same && !awaiting) return r.exhausted ? { ...UNCHANGED, exhausted: true } : UNCHANGED;
     if (r.target.account !== null && r.target.account !== current.account) await this.attachProfile(s, r.target);
     const opts = { window: r.window, reserve: RESERVE_TOKENS, now: this.d.now() };
-    const caps = store.providerThread(r.target.harness)?.caps ?? NO_CAPS;
+    const threadCaps = store.providerThread(r.target.harness)?.caps ?? NO_CAPS;
+    // Another profile on the same harness (a proxy profile and back) is another env (upstream, key, ANTHROPIC_MODEL):
+    // a live setModel would keep the old one, so the harness restarts on the target's env.
+    const caps = profile === from ? threadCaps : { ...threadCaps, liveModelSwitch: false };
     const plan = planTransition(current, { harness: r.target.harness, account: r.target.account, model: r.target.model }, store, "", caps, opts);
 
     const h = handoffOf(plan);

@@ -784,6 +784,9 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
         refuseWhileSwitching("model switch");
         liveHarness();
         refuseWhileRunning("model switch");
+        // The profile's env names the model (ANTHROPIC_MODEL, the subagent model) and holds its key, which a persisted
+        // target drops: a live model change would leave the env stale and make every restart wait for devd.
+        if (current!.env.DEVBOX_PROXY_PROFILE) throw new Error("model switch refused: a proxy profile's model is set by the profile");
         await liveHarness().session.setModel(cmd.model);
         current = { ...current!, model: cmd.model };
         state.target = persistableTarget(current);
