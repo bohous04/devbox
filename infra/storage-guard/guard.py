@@ -269,15 +269,21 @@ class Guard:
             raise RuntimeError(f'borg {args[0]} failed (rc={p.returncode}): ' + p.stderr.decode(errors='replace')[-800:])
         return p.stdout
 
-    def archive(self, paths, kind, shared=(), require_stable=True, verify_only=None, hash_content=True):
+    def archive(self, paths, kind, shared=(), require_stable=True, verify_only=None, hash_content=True,
+                registrations=None):
         """`shared` = Git common store of a repo other live sessions keep writing to
         (new objects, refs, their worktrees/*). It is archived, but not required to
         be stable: removal never deletes it, and requiring it would deny every End
         while any sibling session commits. Only `paths` authorize deletion.
         `verify_only` limits the full read-back to these archived paths (what the caller
-        deletes); None reads back the whole archive. hash_content=False: see prepare_end."""
+        deletes); None reads back the whole archive. hash_content=False: see prepare_end.
+        `registrations` (batch mode) = {path: its worktree registration dir}, deleted with that
+        path; archived with `shared` and listing-checked for it."""
         paths = [Path(p).resolve() for p in paths]
+        registrations = {Path(k).resolve(): Path(v).resolve() for k, v in (registrations or {}).items()}
+        covered = lambda a, roots: any(a == r or r in a.parents for r in roots)
         shared = [Path(p).resolve() for p in shared if Path(p).resolve() not in paths]
+        shared += [a for a in dict.fromkeys(registrations.values()) if not covered(a, paths + shared)]
         if not paths or any(p == Path('/') for p in paths + shared):
             raise RuntimeError('Unsafe archive path')
         name = 'storage-guard-' + kind + '-' + time.strftime('%Y%m%dT%H%M%S') + '-' + uuid.uuid4().hex[:8]
@@ -293,6 +299,16 @@ class Guard:
                     before[str(p)] = sign(p)
                 except (RuntimeError, OSError):
                     pass
+            # A registration is signed once, metadata only; its root fails with it.
+            reg_expect, reg_owner, unsigned = {}, {}, set()
+            for root, admin in registrations.items():
+                if str(root) not in before:
+                    continue
+                try:
+                    reg_expect[str(admin)] = signature(admin, hash_content=False)
+                    reg_owner[str(admin)] = str(root)
+                except (RuntimeError, OSError):
+                    unsigned.add(str(root))
         # What the listing check below must find, by type and size: the deleted paths, plus any
         # verify_only path outside them (a worktree registration inside the shared store).
         expect = {**before, **{str(Path(v).resolve()): signature(v, hash_content=False)
@@ -312,10 +328,11 @@ class Guard:
         if not require_stable:
             # Same hole in a sweep batch (rc=1 is accepted there too): a root with a file borg
             # left out is dropped from `before`, so the caller keeps it like a busy one.
-            failed = set()
-            self.require_listed(dest, before, ['pp:' + str(p).lstrip('/') for p in paths], failed)
+            failed = set(unsigned)
+            listed = ['pp:' + str(p).lstrip('/') for p in paths + [Path(a) for a in reg_expect]]
+            self.require_listed(dest, {**before, **reg_expect}, listed, failed, reg_owner)
             for root in failed:
-                before.pop(root)
+                before.pop(root, None)
             if failed:
                 self.audit('archive-incomplete', archive=name, paths=sorted(failed))
         elif verify_only is not None or not hash_content:
@@ -347,23 +364,25 @@ class Guard:
                 err.seek(0)
                 raise RuntimeError(f'borg {args[0]} failed (rc={rc}): ' + err.read().decode(errors='replace')[-800:])
 
-    def require_listed(self, dest, expect, patterns, failed=None):
+    def require_listed(self, dest, expect, patterns, failed=None, owner=None):
         """Every expected item must be in the archive listing with its type and, for a regular
         file, its size. borg prints paths through remove_surrogates (an undecodable byte becomes
         '?'), so expected paths are mapped the same way. With a `failed` set (a sweep batch) a
-        root whose items do not match is added to it instead of failing the whole archive."""
+        root whose items do not match is added to it instead of failing the whole archive;
+        `owner` maps an expect key to the root it fails (a registration to its worktree)."""
         as_borg = lambda path: path.encode('utf-8', 'replace').decode('utf-8')
         def bad(root, message):
             if failed is None:
                 raise RuntimeError(message + '; deletion denied')
             failed.add(root)
         pending = {}
-        for root, sig in expect.items():
+        for key, sig in expect.items():
+            root = (owner or {}).get(key, key)
             for rel, mode, _dev, _ino, size, *_ in sig:
                 kind = stat.filemode(mode)[0]
                 if kind == 's':
                     continue  # borg skips sockets; they hold no data
-                raw = str(Path(root).parent / rel).lstrip('/')
+                raw = str(Path(key).parent / rel).lstrip('/')
                 path = as_borg(raw)
                 if path in pending:
                     bad(root, f'{raw!r}: two names differ only in non-UTF-8 bytes, so the archive listing '
@@ -384,7 +403,7 @@ class Guard:
                 listed = it['size']
             if it['type'] != kind or not it['healthy'] or (kind == '-' and listed != size):
                 bad(root, f"{it['path']} differs in the archive (type/size/health)")
-            if kind == '-':
+            elif kind == '-':
                 sizes[it['path']] = size
         for path, (_kind, _size, root) in pending.items():
             bad(root, f'{path} and {len(pending) - 1} more are missing from the archive')
@@ -1199,7 +1218,10 @@ class Guard:
         # Shared bare repo goes into every batch archive; borg deduplicates it.
         shared=list(dict.fromkeys([x for _,c in todo.values() if c for x in self.git_storage(c)]+orphan_admin))
         try:
-            archive,sigs=self.archive([p for p,_ in todo.values()]+orphans,'worktrees',shared,require_stable=False)
+            # Removal also deletes each worktree's registration (HEAD, index, reflog): check it in the archive too.
+            regs={p:a for p,a in [(p,self.admin_dir(p,self.root/'_sessions'/registry[k]['session'])) for k,(p,_) in todo.items()]
+                  +[(o,self.admin_dir(o,o)) for o in orphans] if a and a.is_dir()}
+            archive,sigs=self.archive([p for p,_ in todo.values()]+orphans,'worktrees',shared,require_stable=False,registrations=regs)
         except (RuntimeError,OSError,subprocess.SubprocessError) as err:
             self.audit('released-worktree-archive-failed',paths=[str(p) for p,_ in todo.values()]+list(map(str,orphans)),error=str(err)[-300:])
             report.append(dict(path='(batch)',reason='Archive of released worktrees failed: '+str(err)[-300:]))

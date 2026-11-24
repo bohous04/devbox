@@ -312,6 +312,44 @@ class Safety(unittest.TestCase):
         log=[json.loads(l) for l in (self.g.state/'actions.jsonl').read_text().splitlines()]
         self.assertIn(dict(archive=log[0]['archive'],paths=[str(b)]),[{k:v for k,v in e.items() if k in('archive','paths')} for e in log if e['action']=='archive-incomplete'])
 
+    def test_sweep_batch_keeps_a_worktree_whose_registration_borg_could_not_read(self):
+        # Removing a worktree deletes its registration (HEAD, index, reflog), which is archived
+        # only as part of the shared store, where rc=1 is accepted.
+        common=self.root/'repo.git';(common/'objects').mkdir(parents=True)
+        roots={}
+        for n in ('a','b'):
+            w=self.root/n;w.mkdir();(w/'f').write_text(n)
+            admin=common/'worktrees'/n;admin.mkdir(parents=True);(admin/'HEAD').write_text('x\n');(admin/'index').write_text(n*9)
+            roots[w]=admin
+        def borg(args,allow_warning=False):
+            if args[0]!='list':return b''
+            out=[json.loads(l) for l in listing(args).splitlines()]
+            return '\n'.join(json.dumps(i) for i in out if i['path']!=str(roots[self.root/'b']/'index').lstrip('/')).encode()
+        with patch.object(self.g,'borg',side_effect=borg):
+            _,before=self.g.archive(list(roots),'worktrees',[common/'objects'],require_stable=False,registrations=roots)
+        self.assertEqual(list(before),[str(self.root/'a')])
+
+    def test_batch_listing_fails_roots_not_the_batch(self):
+        item=lambda path,size,**k:dict(dict(type='-',mode='-rw-r--r--',path=path,healthy=True,source='',size=size),**k)
+        d=lambda path:dict(type='d',mode='drwxr-xr-x',path=path,healthy=True,source='',size=0)
+        def run(expect,items):
+            failed=set()
+            with patch.object(self.g,'borg',return_value='\n'.join(map(json.dumps,items)).encode()):
+                self.g.require_listed('x',expect,['pp:r'],failed)
+            return failed
+        # Two roots whose names differ only in non-UTF-8 bytes map to one listed name: both fail.
+        a,b='/r/w\udcff','/r/w\udcfe'
+        sig=lambda root:[(root.rsplit('/',1)[1],0o40755,1,1,0,0,0,None)]
+        self.assertEqual(run({a:sig(a),b:sig(b)},[d('r/w?')]),{a,b})
+        # A hardlink across roots: borg lists the second link as h..., size 0, source = the first.
+        exp={'/r/a':[('a',0o40755,1,1,0,0,0,None),('a/f',0o100644,1,5,4,0,0,None)],
+             '/r/b':[('b',0o40755,1,2,0,0,0,None),('b/g',0o100644,1,5,4,0,0,None)]}
+        linked=[d('r/a'),item('r/a/f',4),d('r/b'),item('r/b/g',0,mode='hrw-r--r--',source='r/a/f')]
+        self.assertEqual(run(exp,linked),set())
+        # The first link differs: its root fails, and so does the root of the link that relies on it.
+        linked[1]=item('r/a/f',3)
+        self.assertEqual(run(exp,linked),{'/r/a','/r/b'})
+
     def test_end_rootfs_that_tar_cannot_decode_denies_removal(self):
         c,*_=self.end_fixture()
         with self.assertRaisesRegex(RuntimeError,'validation'):
@@ -479,7 +517,7 @@ class Safety(unittest.TestCase):
         other=bare/'worktrees'/'other';other.mkdir();(other/'gitdir').write_text('/workspace/.worktrees/other/.git\n')
         guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[]})
         archived=[]
-        def fake_archive(paths,kind,shared=(),require_stable=True):
+        def fake_archive(paths,kind,shared=(),require_stable=True,registrations=None):
             archived.append([str(x) for x in paths]);return 'arch',{str(x):guard.signature(x) for x in paths}
         with patch.object(guard,'run',side_effect=RuntimeError('fatal: not a git repository')), \
              patch.object(guard,'referenced',return_value=False), \
@@ -657,7 +695,7 @@ class Safety(unittest.TestCase):
             calls.append([str(x) for x in args])
             if 'remove' in calls[-1]:shutil.rmtree(calls[-1][-1])
             return (str(self.root/'repo.git')+'\n').encode()
-        def fake_archive(paths,kind,shared=(),require_stable=True):
+        def fake_archive(paths,kind,shared=(),require_stable=True,registrations=None):
             archived.append(sorted(map(str,paths)));return 'arch',{str(x):guard.signature(x) for x in paths}
         with patch.object(guard,'run',side_effect=fake_run), \
              patch.object(guard,'referenced',return_value=False), \
@@ -681,7 +719,7 @@ class Safety(unittest.TestCase):
             args=[str(x) for x in args]
             if 'remove' in args:removed.append(args[-1]);shutil.rmtree(args[-1])
             return (str(self.root/'repo.git')+'\n').encode()
-        def fake_archive(paths,kind,shared=(),require_stable=True):
+        def fake_archive(paths,kind,shared=(),require_stable=True,registrations=None):
             archived.append(sorted(map(str,paths)));return 'arch',{str(x):guard.signature(x) for x in paths}
         with patch.object(guard,'run',side_effect=fake_run), \
              patch.object(guard,'referenced',return_value=False), \
@@ -769,7 +807,7 @@ class Safety(unittest.TestCase):
             args=[str(x) for x in args]
             if 'remove' in args:shutil.rmtree(args[-1])
             return (str(self.root/'repo.git')+'\n').encode()
-        def fake_archive(paths,kind,shared=(),require_stable=True):
+        def fake_archive(paths,kind,shared=(),require_stable=True,registrations=None):
             archived.append(len(paths));return 'arch',{str(x):guard.signature(x) for x in paths}
         with patch.object(guard,'run',side_effect=fake_run), \
              patch.object(guard,'referenced',return_value=False), \
@@ -795,7 +833,7 @@ class Safety(unittest.TestCase):
         ws=self.released('a','b')
         for p in ws.values():self.git(p,'gitdir: x\n')
         guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[]})
-        def fake_archive(paths,kind,shared=(),require_stable=True):
+        def fake_archive(paths,kind,shared=(),require_stable=True,registrations=None):
             self.assertFalse(require_stable)
             sigs={str(x):guard.signature(x) for x in paths}
             (ws['a']/'file').write_text('new work')
@@ -817,7 +855,7 @@ class Safety(unittest.TestCase):
         guard.atomic(self.g.state/'registry.json',reg)
         guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[{'name':'dev-live'}]})
         seen=[]
-        def fake_archive(paths,kind,shared=(),require_stable=True):
+        def fake_archive(paths,kind,shared=(),require_stable=True,registrations=None):
             seen.extend(map(str,paths));raise RuntimeError('stop here')
         with patch.object(guard,'run',return_value=(str(self.root/'repo.git')+'\n').encode()), \
              patch.object(guard,'referenced',return_value=False), \
@@ -935,7 +973,7 @@ class Safety(unittest.TestCase):
         guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[]})
         guard.atomic(self.g.state/'containers.json',[{'Id':'x','Name':'/'+n,'Mounts':[],'State':{}} for n in containers])
         guard.atomic(self.g.state/'registry.json',{})
-        def fake_archive(paths,kind,shared=(),require_stable=True):
+        def fake_archive(paths,kind,shared=(),require_stable=True,registrations=None):
             if archived is not None:archived.extend(map(str,paths))
             return 'arch',{str(Path(x).resolve()):guard.signature(Path(x).resolve()) for x in paths}
         with patch.object(guard,'referenced',return_value=False), \
@@ -975,7 +1013,9 @@ class Safety(unittest.TestCase):
         archived=[];calls=[]
         guard.atomic(self.g.state/'inventory.json',{'time':time.time(),'sessions':[]})
         guard.atomic(self.g.state/'containers.json',[]);guard.atomic(self.g.state/'registry.json',{})
-        def fake_archive(paths,kind,shared=(),require_stable=True):
+        regs={}
+        def fake_archive(paths,kind,shared=(),require_stable=True,registrations=None):
+            regs.update(registrations or {})
             archived.extend(map(str,shared));return 'arch',{str(Path(x).resolve()):guard.signature(Path(x).resolve()) for x in paths}
         with patch.object(guard,'referenced',return_value=False), \
              patch.object(self.g,'devd_sessions',return_value=set()), \
@@ -984,6 +1024,7 @@ class Safety(unittest.TestCase):
              patch.object(self.g,'archive',side_effect=fake_archive):
             self.g.sweep()
         self.assertIn(str(admin),archived)
+        self.assertEqual(regs,{d:admin},'the registration removal deletes is listing-checked with its session dir')
         self.assertTrue(any('update-ref' in c and 'refs/devbox/ended/dev-p-r-9' in c and sha in c for c in calls))
         self.assertFalse(d.exists())
 
