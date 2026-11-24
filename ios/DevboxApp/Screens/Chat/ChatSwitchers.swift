@@ -31,6 +31,15 @@ struct ChatSwitchers<Content: View>: View {
     var body: some View {
         content(target == nil ? nil : { chip(compact: $0) }, AnyView(status))
             .task(id: targetKey) { await loadTarget() }
+            // While the agent waits for its target; ends (cancelled) once a re-read says it no longer does.
+            .task(id: target.flatMap(ChatSwitch.targetPollSeconds)) {
+                guard let seconds = target.flatMap(ChatSwitch.targetPollSeconds) else { return }
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(seconds))
+                    if Task.isCancelled { return }
+                    await loadTarget()
+                }
+            }
             .task(id: target.map { "\($0.harness):\($0.account ?? "-")" }) {
                 if let target, ChatSwitch.accountMenuBlocked(target) == nil { await loadAccounts(target) }
             }
@@ -97,7 +106,7 @@ struct ChatSwitchers<Content: View>: View {
         VStack(alignment: .leading, spacing: 2) {
             if let target {
                 if let blocked = ChatSwitch.blocked(runs: thread.runs, target: target) { line(blocked, Theme.C.mutedForeground) }
-                if let awaiting = ChatSwitch.awaitingTargetText(target) { line(awaiting, Theme.C.mutedForeground) }
+                if let awaiting = ChatSwitch.awaitingTargetText(target, stale: targetError != nil) { line(awaiting, Theme.C.mutedForeground) }
                 if let outdated = ChatSwitch.bridgeOutdatedText(target) { line(outdated, Theme.C.mutedForeground) }
                 if let note { line(note, Theme.C.warnText) }
                 if let error { line(error, Theme.C.dangerText) }

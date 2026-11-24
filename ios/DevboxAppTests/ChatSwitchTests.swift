@@ -37,6 +37,15 @@ final class ChatSwitchTests: XCTestCase {
         ChatTarget(agent: agent, harness: harness, account: account, model: model, awaitingTarget: awaiting, bridgeVersion: bridge, bridgeOutdated: outdated)
     }
 
+    /// dashboard/src/switchView.test.ts: the waiting line is re-read while it shows, and a failed re-read hides it.
+    func testAwaitingTargetIsReReadAndHiddenWhenTheReReadFailed() {
+        XCTAssertEqual(ChatSwitch.awaitingTargetText(target(awaiting: true)), "Agent is waiting for a target: pick a model, account or agent to continue")
+        XCTAssertNil(ChatSwitch.awaitingTargetText(target(awaiting: true), stale: true))
+        XCTAssertNil(ChatSwitch.awaitingTargetText(target(awaiting: false)))
+        XCTAssertEqual(ChatSwitch.targetPollSeconds(target(awaiting: true)), 5)
+        XCTAssertNil(ChatSwitch.targetPollSeconds(target(awaiting: false)))
+    }
+
     func testOutdatedBridgeIsSaidWhileDevdSaysIt() {
         XCTAssertNil(ChatSwitch.bridgeOutdatedText(target(bridge: "1.8.0", outdated: false)))
         XCTAssertEqual(ChatSwitch.bridgeOutdatedText(target(bridge: "1.7.0", outdated: true)),

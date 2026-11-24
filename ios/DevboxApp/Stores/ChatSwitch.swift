@@ -93,8 +93,17 @@ enum ChatSwitch {
         t.bridgeOutdated == true ? "This session's agent bridge (\(t.bridgeVersion ?? "older than 1.1.0")) is outdated: recreate the session's container for the newer fixes." : nil
     }
 
-    static func awaitingTargetText(_ t: ChatTarget) -> String? {
-        t.awaitingTarget ? "Agent is waiting for a target: pick a model, account or agent to continue" : nil
+    /// Shown while the bridge awaits its target: picking any model, account or agent (also the current one) sends it.
+    /// Not from a `stale` target (its latest re-read failed): devd keeps re-sending on its own and may have delivered it.
+    static func awaitingTargetText(_ t: ChatTarget, stale: Bool = false) -> String? {
+        t.awaitingTarget && !stale ? "Agent is waiting for a target: pick a model, account or agent to continue" : nil
+    }
+
+    /// devd settles an awaited target by re-sending it in the background, which the thread may not show (no new native
+    /// thread, no run): while the agent waits, the target is re-read this often so the waiting line goes away
+    /// (dashboard/src/switchView.ts targetPollMs).
+    static func targetPollSeconds(_ t: ChatTarget) -> Double? {
+        t.awaitingTarget ? 5 : nil
     }
 
     /// A proxy profile's model is set in settings (devd: 400 model-set-by-profile).
