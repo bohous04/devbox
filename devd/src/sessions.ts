@@ -521,6 +521,14 @@ export class SessionManager {
   private readonly ownInFlight = new Set<string>();
   private readonly opNames = new Map<string, string>();
 
+  /** The host's docker wrapper lets `docker rm` of a session container through only once it is backed up offsite, and
+   *  waits for that only 40 s, so replacing a container (a recreate, a reopen with a new env) timed out at 60 s while the
+   *  backup ran on. The backup runs first with its own long cap, as for an end (storageGuard.ts). */
+  private async preserveBeforeReplace(id: string): Promise<void> {
+    try { await this.d.preserveForEnd?.(id); }
+    catch (e) { throw new Error(`${id}: its old container must be backed up offsite before it is replaced, and that failed: ${(e as Error).message}`); }
+  }
+
   isEnding(id: string): boolean { return this.opNames.get(id) === "end"; }
 
   /** Lock on the keys for the duration of `fn`. It rejects, it does not queue: a second click should get
@@ -1216,10 +1224,12 @@ export class SessionManager {
       if (state === "missing" || switching || staleProxy || staleCanonicalMount || staleAccounts) {
         this.revokeShares(id); // the container is being (re)created — the old sharing would lead nowhere
         if (staleCanonicalMount) {
+          await this.preserveBeforeReplace(id);
           await removeStoppedWorkspaceContainer(observed);
         } else if ((switching || staleProxy || staleAccounts) && state !== "missing") {
           // Agent switch = a new container with the correct DEVD_AGENT. Safe: a stopped
           // container has no live tmux sessions anyway, the workspace is a bind mount.
+          await this.preserveBeforeReplace(id);
           await removeContainer(id);
         }
         await this.ensureDind(id);
@@ -1364,6 +1374,7 @@ export class SessionManager {
     const agent = s.agent ?? "claude";
     this.revokeShares(id);
     await this.checkpointRecovery(id);
+    await this.preserveBeforeReplace(id);
     await removeContainer(id);
     await this.ensureDind(id);
     await this.runContainer(await this.runOpts(id, dir, s.port_base, s.project, s.repo, agent, storedRuntime(s), s.worktree ? bare : null));
@@ -1481,7 +1492,7 @@ export class SessionManager {
         clearPrompt: () => { this.syncPromptFile(id, "tmux", { status: "clean" }); },
         ensureDind: () => this.ensureDind(id),
         start: () => startContainer(id),
-        removeStopped: (observed) => removeStoppedWorkspaceContainer(observed),
+        removeStopped: async (observed) => { await this.preserveBeforeReplace(id); await removeStoppedWorkspaceContainer(observed); },
         create: async (row) => {
           this.revokeShares(id); // no-op if the session did not have a row yet (fresh Remote resume)
           await this.runContainer(await this.runOpts(id, route.cwd, row.port_base,
@@ -1564,6 +1575,7 @@ export class SessionManager {
       const staleProxy = await this.proxyEnvStale(await containerEnv(id), agent, false);
       if (staleProxy || staleCanonicalMount) {
         this.revokeShares(id);
+        await this.preserveBeforeReplace(id);
         if (staleCanonicalMount) await removeStoppedWorkspaceContainer(observed);
         else await removeContainer(id);
         await this.ensureDind(id);
