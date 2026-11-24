@@ -142,7 +142,7 @@ describe("openCodexSession", () => {
     await session.startTurn("run-1", "list files", "user");
     await until(() => fake.requests("turn/start").length === 1);
 
-    expect(fake.argv).toEqual(["codex", "app-server", "-c", 'mcp_servers.devbox.command="agent-bridge"']);
+    expect(fake.argv).toEqual(["codex", "app-server", "-c", "features.default_mode_request_user_input=true", "-c", 'mcp_servers.devbox.command="agent-bridge"']);
     expect(fake.env.CODEX_HOME).toBe("/tmp/codex-home");
     expect(fake.sent.map((m) => m.method)).toEqual(["initialize", "initialized", "thread/start", "model/list", "turn/start"]);
     expect(fake.requests("initialize")[0]!.params).toEqual({

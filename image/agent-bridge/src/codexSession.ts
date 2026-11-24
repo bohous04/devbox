@@ -216,7 +216,9 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
   for (const [k, v] of Object.entries(o.baseEnv ?? process.env)) if (v !== undefined && !HOST_SESSION_VARS.includes(k)) env[k] = v;
   env.CODEX_HOME = o.codexHome;
 
-  const proc = spawn(["codex", "app-server", ...o.mcpConfigArgs], env);
+  // The default collaboration mode refuses request_user_input without this feature (off upstream, "under
+  // development"): the agent then asks in plain text and the chat never shows a question (DEVBOX-34).
+  const proc = spawn(["codex", "app-server", "-c", "features.default_mode_request_user_input=true", ...o.mcpConfigArgs], env);
   const peer = new JsonRpcPeer(
     {
       write(line) {
