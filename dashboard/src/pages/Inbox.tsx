@@ -178,15 +178,18 @@ function spoken(item: InboxItem, now: number, title: string, showAgent: boolean)
 }
 
 // The actions sit over the row's right end: the ✓ in the state's place on the title line, the menu in the agent
-// mark's place on the second. On a touch screen (no hover) both show, always, beside the row: the ✓, then the menu.
+// mark's place on the second. On a touch screen (no hover) they show always, beside the row: the ✓ outlined so it
+// reads as an action rather than a state, then the menu.
 const ACTION = "grid place-items-center rounded-md text-muted-foreground outline-none transition-opacity hover:bg-foreground/10 hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/60";
 const ON_HOVER = "[@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:group-has-[:focus-visible]:opacity-100 data-[state=open]:opacity-100";
 const HIDE_ON_HOVER = "[@media(hover:hover)]:group-hover:invisible [@media(hover:hover)]:group-has-[:focus-visible]:invisible [@media(hover:hover)]:group-has-[[data-state=open]]:invisible";
 
 /** A row: the title with its state on the right, and one muted line (secondLine) ending in the agent's mark while the
  *  inbox mixes agents (MacInboxRow). A row of the list with nothing to say has a title a step lighter, so the eye lands
- *  on the marked ones first. `settle`: the row offers the ✓ (not on the snoozed and settled shelves). */
-function Row({ item, now, onItem, quiet, settle }: { item: InboxItem; now: number; onItem: (i: InboxItem) => void; quiet: boolean; settle: boolean }) {
+ *  on the marked ones first. `settle`: where the row offers the ✓. Not on the snoozed and settled shelves; on the
+ *  Working shelf only under a pointer, since a touch there would end a running agent (the menu still can). */
+type Settle = "everywhere" | "pointer" | false;
+function Row({ item, now, onItem, quiet, settle }: { item: InboxItem; now: number; onItem: (i: InboxItem) => void; quiet: boolean; settle: Settle }) {
   const showAgent = useContext(ShowAgent);
   const onSettle = useSettleRow();
   const title = rowTitle(item);
@@ -220,12 +223,17 @@ function Row({ item, now, onItem, quiet, settle }: { item: InboxItem; now: numbe
       </Link>
       {settle && (
         <button
-          type="button" aria-label={`Settle and end ${title} (E)`} aria-keyshortcuts="E"
+          type="button" aria-label={`Settle and end ${title}`} aria-keyshortcuts="E"
           title={`Settle and end the session (E or ${SETTLE_CHORD})`}
           onClick={() => onSettle(item)}
-          className={cn(ACTION, ON_HOVER, "size-9 flex-none self-center [@media(hover:hover)]:absolute [@media(hover:hover)]:right-2.5 [@media(hover:hover)]:top-[7px] [@media(hover:hover)]:size-auto [@media(hover:hover)]:h-[22px] [@media(hover:hover)]:w-6")}
+          className={cn(ACTION, ON_HOVER,
+            settle === "everywhere" ? "mr-2 size-9 flex-none self-center text-foreground hover:bg-transparent [@media(hover:hover)]:mr-0 [@media(hover:hover)]:size-auto [@media(hover:hover)]:text-muted-foreground [@media(hover:hover)]:hover:bg-foreground/10" : "hidden [@media(hover:hover)]:grid",
+            "[@media(hover:hover)]:absolute [@media(hover:hover)]:right-2.5 [@media(hover:hover)]:top-[7px] [@media(hover:hover)]:h-[22px] [@media(hover:hover)]:w-6")}
         >
-          <Check className="size-3.5" strokeWidth={2.5} aria-hidden="true" />
+          {/* The outline is drawn inside the 44 px target the small screen gives every button (index.css). */}
+          <span className={cn("grid place-items-center rounded-md", settle === "everywhere" && "size-8 border border-border [@media(hover:hover)]:size-auto [@media(hover:hover)]:border-0")}>
+            <Check className="size-3.5" strokeWidth={2.5} aria-hidden="true" />
+          </span>
         </button>
       )}
       <RowMenu item={item} label={title} onItem={onItem} setError={setError}
@@ -237,7 +245,7 @@ function Row({ item, now, onItem, quiet, settle }: { item: InboxItem; now: numbe
   );
 }
 
-function Rows({ items, now, onItem, quiet, settle }: { items: InboxItem[]; now: number; onItem: (i: InboxItem) => void; quiet?: boolean; settle: boolean }) {
+function Rows({ items, now, onItem, quiet, settle }: { items: InboxItem[]; now: number; onItem: (i: InboxItem) => void; quiet?: boolean; settle: Settle }) {
   return (
     <ul className="flex flex-col gap-px">
       {items.map((i) => <Row key={i.sessionId} item={i} now={now} onItem={onItem} quiet={!!quiet && rowStatus(i) === null} settle={settle} />)}
@@ -445,11 +453,11 @@ export function Inbox() {
                 <CircleCheck className="size-4 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />Nothing waiting for you
               </p>
             ) : (
-              <section aria-label="Inbox" className="mb-3"><Rows items={list} now={now} onItem={onItem} quiet settle /></section>
+              <section aria-label="Inbox" className="mb-3"><Rows items={list} now={now} onItem={onItem} quiet settle="everywhere" /></section>
             )}
             {g.working.length + g.snoozed.length + g.settled.length + ended.length > 0 || endedError !== null ? (
               <div className="border-t pt-1.5">
-                <Shelf label="Working" count={g.working.length}><Rows items={g.working} now={now} onItem={onItem} settle /></Shelf>
+                <Shelf label="Working" count={g.working.length}><Rows items={g.working} now={now} onItem={onItem} settle="pointer" /></Shelf>
                 <Shelf label="Snoozed" count={g.snoozed.length}><Rows items={g.snoozed} now={now} onItem={onItem} settle={false} /></Shelf>
                 <Shelf label="Settled" count={g.settled.length + ended.length}
                   note={endedError === null ? null : <p role="alert" className="px-3 pb-1 text-xs text-destructive">Ended sessions could not be loaded: {endedError}</p>}>
