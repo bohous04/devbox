@@ -106,6 +106,26 @@ enum ChatSwitch {
         t.awaitingTarget ? 5 : nil
     }
 
+    /// Orders the target reads (dashboard/src/switchView.ts TargetReader): only the newest read lands, so an older
+    /// `awaitingTarget: true` never overwrites a newer false; a poll skips its tick while a read is in flight.
+    struct LatestRead {
+        private var seq = 0
+        private var inFlight = 0
+        var busy: Bool { inFlight > 0 }
+
+        mutating func begin() -> Int {
+            seq += 1
+            inFlight += 1
+            return seq
+        }
+
+        /// Whether read `n`'s answer lands (no read started after it).
+        mutating func end(_ n: Int) -> Bool {
+            inFlight -= 1
+            return n == seq
+        }
+    }
+
     /// A proxy profile's model is set in settings (devd: 400 model-set-by-profile).
     static func modelMenuBlocked(_ t: ChatTarget) -> String? {
         let p = profile(t.agent)
@@ -274,6 +294,7 @@ enum ChatSwitch {
         switch code {
         case "run-active": return "A run is active or a message is queued: switch after it ends"
         case "switch-in-progress": return "Another switch is already in progress"
+        case "switch-unconfirmed": return "The last switch is not confirmed by the agent yet: wait a moment and check the thread"
         case "agent-disconnected": return "Agent not connected: nothing was switched"
         case "agent-timeout": return "No reply from the agent: the switch may have happened, check the thread before retrying"
         default: return h.serverDetail.map { "\($0) (\(code))" } ?? code

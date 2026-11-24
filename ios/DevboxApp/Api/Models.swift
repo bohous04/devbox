@@ -1267,6 +1267,8 @@ enum BridgeEvent: Decodable, Equatable {
     case bridgeStarted(version: String, resumed: Bool, notice: String?)
     /// (bridge 1.5.0+) A notice for the thread that is not about a run.
     case bridgeNotice(text: String)
+    /// (bridge 1.11.0) devd's switch confirmation; devd does not stream it, and the thread ignores it.
+    case targetApplied
     case unknown(type: String)
 
     private enum K: String, CodingKey {
@@ -1314,6 +1316,8 @@ enum BridgeEvent: Decodable, Equatable {
             self = .bridgeStarted(version: try s(.version), resumed: try c.decode(Bool.self, forKey: .resumed), notice: try o(.notice))
         case "bridge.notice":
             self = .bridgeNotice(text: try s(.text))
+        case "target.applied":
+            self = .targetApplied
         default:
             self = .unknown(type: type)
         }

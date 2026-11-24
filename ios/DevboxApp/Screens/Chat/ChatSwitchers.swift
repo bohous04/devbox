@@ -20,6 +20,7 @@ struct ChatSwitchers<Content: View>: View {
 
     @State private var target: ChatTarget?
     @State private var targetError: String?
+    @State private var targetReads = ChatSwitch.LatestRead()
     @State private var accounts: [ChatSwitch.Option]?
     @State private var accountsError: String?
     @State private var busy: Which?
@@ -37,7 +38,7 @@ struct ChatSwitchers<Content: View>: View {
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(seconds))
                     if Task.isCancelled { return }
-                    await loadTarget()
+                    if !targetReads.busy { await loadTarget() }
                 }
             }
             .task(id: target.map { "\($0.harness):\($0.account ?? "-")" }) {
@@ -159,10 +160,15 @@ struct ChatSwitchers<Content: View>: View {
     private func busyText(_ which: Which) -> String { which == .effort ? "Changing…" : "Switching…" }
 
     private func loadTarget() async {
+        let n = targetReads.begin()
         do {
-            target = try await client.get("\(base)/target")
+            let t: ChatTarget = try await client.get("\(base)/target")
+            guard targetReads.end(n) else { return }
+            target = t
             targetError = nil
         } catch {
+            // A read cancelled with its task (a new targetKey, the poll ending) is no failure to show.
+            guard targetReads.end(n), !DevdClient.isCancellation(error) else { return }
             targetError = "Could not read the current agent: \(ChatSwitch.errorText(error))"
         }
     }

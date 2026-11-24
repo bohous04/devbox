@@ -274,7 +274,7 @@ actor DevdClient {
     }
 
     /// The caller (a stopped stream) gave up: not a reason to try the other path.
-    private static func isCancellation(_ error: Error) -> Bool {
+    static func isCancellation(_ error: Error) -> Bool {
         error is CancellationError || (error as? URLError)?.code == .cancelled
     }
 
