@@ -43,6 +43,8 @@ struct ChatScreen: View {
     private let revealChanges: Int
     /// The same from the iPhone's own header chip.
     @State private var ownReveal = 0
+    /// The iPhone header's changes chip has something to show (ChangesChip.shown).
+    @State private var chipShown = false
     /// The changes card's list. It starts shut each time the thread opens: the card is one row until asked.
     @State private var changesOpen = false
 
@@ -142,9 +144,13 @@ struct ChatScreen: View {
             }
             #endif
             if openTerminal == nil {
-                ToolbarItem(placement: .primaryAction) {
-                    // As the Mac's header: the worktree's +/−, a tap away from anywhere in the thread.
-                    ChangesChip(store: store, client: client) { ownReveal += 1 }
+                if #available(iOS 26, macOS 26, *) {
+                    // Without changes to show, the item keeps no glass of its own: the bar drew it as an empty capsule
+                    // joined to the terminal button's.
+                    ToolbarItem(placement: .primaryAction) { changesChip }
+                        .sharedBackgroundVisibility(chipShown ? .visible : .hidden)
+                } else {
+                    ToolbarItem(placement: .primaryAction) { changesChip }
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button { remember(terminalSheet.userOpens()) } label: { Label("Terminal", systemImage: "terminal") }
@@ -301,6 +307,7 @@ struct ChatScreen: View {
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
+            .modifier(MacTopEdgeEffect())
             // lastSeq moves with events; a notice adds an item without one.
             .onChange(of: [t.lastSeq, t.items.count]) { _, _ in
                 if atEnd { proxy.scrollTo("end", anchor: .bottom) }
@@ -379,6 +386,11 @@ struct ChatScreen: View {
     }
 
     private static let changesId = "changes"
+
+    /// As the Mac's header: the worktree's +/−, a tap away from anywhere in the thread.
+    private var changesChip: some View {
+        ChangesChip(store: store, client: client, shown: { chipShown = $0 }) { ownReveal += 1 }
+    }
 
     /// The terminal's agent: what is typed here goes into its pane. No model or effort chip, no `/` commands (devd
     /// refuses them: they belong in the terminal) and no `@` files; images go as files (ThreadStore.sendToPane).
@@ -468,5 +480,22 @@ enum ThreadEdge {
             pad = next
         }
         return pad > 0 ? pad.rounded(.up) : nil
+    }
+}
+
+/// The Mac's thread keeps its own edge under the header (the hairline in `conversation`). macOS 26 also gave the
+/// scroll view a hard top pocket, as tall as its top inset (129 pt with the toolbar), whose divider showed as a stray
+/// rule across a short thread, well below the header. The soft style has no divider. The iPhone keeps the system's.
+private struct MacTopEdgeEffect: ViewModifier {
+    func body(content: Content) -> some View {
+        #if os(macOS)
+        if #available(macOS 26, *) {
+            content.scrollEdgeEffectStyle(.soft, for: .top)
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
     }
 }

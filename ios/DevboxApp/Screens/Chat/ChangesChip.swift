@@ -7,17 +7,26 @@ struct ChangesChip: View {
     @ObservedObject var thread: ThreadStore
     @StateObject private var changes: ChangesStore
     let show: () -> Void
+    /// Whether the chip shows anything: the iPhone's toolbar hides the item's glass while it does not, or the bar
+    /// drew an empty capsule beside the terminal button.
+    let shown: (Bool) -> Void
     @State private var hover = false
 
-    init(store: ThreadStore, client: DevdClient, show: @escaping () -> Void) {
+    init(store: ThreadStore, client: DevdClient, shown: @escaping (Bool) -> Void = { _ in }, show: @escaping () -> Void) {
         thread = store
         _changes = StateObject(wrappedValue: ChangesStore(sessionId: store.sessionId, client: client))
+        self.shown = shown
         self.show = show
+    }
+
+    private var loaded: SessionChanges? {
+        guard thread.changesAnchor != nil, case .loaded(let c) = changes.state else { return nil }
+        return c
     }
 
     var body: some View {
         Group {
-            if thread.changesAnchor != nil, case .loaded(let c) = changes.state {
+            if let c = loaded {
                 Button(action: show) {
                     #if os(macOS)
                     totals(c)
@@ -41,6 +50,7 @@ struct ChangesChip: View {
                 Color.clear.frame(width: 0, height: 0).accessibilityHidden(true)
             }
         }
+        .onChange(of: loaded != nil, initial: true) { _, visible in shown(visible) }
         // A run that starts takes the anchor away: the chip goes, without a fetch, until the run ends.
         .task(id: thread.changesAnchor) {
             guard thread.changesAnchor != nil else { return changes.reset() }
