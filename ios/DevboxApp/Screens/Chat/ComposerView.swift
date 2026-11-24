@@ -158,7 +158,7 @@ struct ComposerView: View {
         // Escape closed the menu only for the word it was pressed on: no trigger word at the caret (or no focus) ends it.
         .onChange(of: offeredTrigger.map(Self.key)) { _, k in if k == nil { dismissed = nil } }
         // VoiceOver hears the menu open and change (the web's live region), and the option the arrows move to.
-        .onChange(of: menu.map(ComposerTriggers.announcement)) { _, s in if let s { AccessibilityNotification.Announcement(s).post() } }
+        .onChange(of: menu.flatMap(ComposerTriggers.announcement)) { _, s in if let s { AccessibilityNotification.Announcement(s).post() } }
         .onChange(of: picks) { _, items in
             guard !items.isEmpty else { return }
             picks = []
@@ -397,6 +397,10 @@ struct CaretField: View {
     /// Tests take the older systems' path on a newer one.
     static var debugWithoutSelection = false
     #endif
+    #if os(macOS)
+    /// The field's window: another window's composer may hold the same text (macOS 14 path).
+    @State private var window = WeakWindow()
+    #endif
 
     var body: some View {
         if #available(iOS 18, macOS 15, *), !Self.withoutSelection {
@@ -406,16 +410,28 @@ struct CaretField: View {
                 .onChange(of: text) { old, new in caret = ComposerTriggers.caretAfterEdit(from: old, to: new) }
                 .onChange(of: setCaret) { _, c in if c != nil { setCaret = nil } }
                 #if os(macOS)
+                .background(WindowConfigurator { w in window.window = w })
                 .onReceive(NotificationCenter.default.publisher(for: NSTextView.didChangeSelectionNotification)) { n in
-                    // A focused editor holding this composer's text: the notification names no SwiftUI field. A
-                    // selection change inside an edit comes before the text change, which then decides.
-                    guard let editor = n.object as? NSTextView, editor.window?.firstResponder === editor,
-                          editor.string == text else { return }
+                    // A selection change inside an edit comes before the text change, which then decides.
+                    guard let editor = n.object as? NSTextView, Self.isOwnEditor(editor, window: window.window, text: text) else { return }
                     caret = editor.selectedRange().location
                 }
                 #endif
         }
     }
+
+    #if os(macOS)
+    /// Whether a selection change is this field's: the notification names no SwiftUI field, so it is the focused
+    /// editor in the field's own window holding its text. Without the window check, a second window whose composer
+    /// held the same text took this one's caret.
+    static func isOwnEditor(_ editor: NSTextView, window: NSWindow?, text: String) -> Bool {
+        guard let window, editor.window === window else { return false }
+        return window.firstResponder === editor && editor.string == text
+    }
+
+    /// Held weakly: the field must not keep its window alive.
+    final class WeakWindow { weak var window: NSWindow? }
+    #endif
 
     private static var withoutSelection: Bool {
         #if DEBUG

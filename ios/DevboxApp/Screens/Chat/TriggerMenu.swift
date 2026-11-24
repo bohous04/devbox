@@ -50,6 +50,14 @@ struct TriggerMenu: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         // The shadow on the card's shape alone: on the whole view it would shade the highlighted row too.
         .background(RoundedRectangle(cornerRadius: 12).fill(Theme.C.card).shadow(color: .black.opacity(0.12), radius: 12, y: 4))
+        // The thread fades out just above the menu, as it does above the composer: a card's edge right behind the
+        // menu's top (the changes card, the same width) read as a doubled border.
+        .background(alignment: .top) {
+            // Solid over the last 8 pt above the menu, fading out over the 10 pt above that.
+            LinearGradient(stops: [.init(color: Theme.C.background.opacity(0), location: 0), .init(color: Theme.C.background, location: 0.5)],
+                           startPoint: .top, endPoint: .bottom)
+                .frame(height: 20).offset(y: -18).allowsHitTesting(false)
+        }
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.C.border))
     }
 
@@ -73,7 +81,25 @@ struct TriggerMenu: View {
         .accessibilityAddTraits(highlighted ? .isSelected : [])
     }
 
+    /// The highlighted option's detail (a command's description) under the chips, which have room for the name only.
+    private var activeDetail: String? {
+        model.options.indices.contains(active) ? model.options[active].detail : nil
+    }
+
     private var bar: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            chips
+            if let d = activeDetail {
+                Text(d).font(Theme.F.meta).foregroundStyle(Theme.C.mutedForeground).lineLimit(1)
+                    .padding(.horizontal, 6)
+                    .opacity(model.searching ? 0.6 : 1)
+                    // The chip's own label says it already.
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+
+    private var chips: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 ForEach(Array(model.options.enumerated()), id: \.offset) { i, o in
@@ -88,6 +114,11 @@ struct TriggerMenu: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(o.detail.map { "\(o.label), \($0)" } ?? o.label)
+                    // A long press shows any chip's detail, with the pick.
+                    .contextMenu {
+                        if let d = o.detail { Text(d) }
+                        Button { if !model.searching { onPick(o.value) } } label: { Label("Insert \(o.label)", systemImage: "text.insert") }
+                    }
                 }
                 if model.status != nil { statusLine.padding(.horizontal, 4) }
             }

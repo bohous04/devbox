@@ -112,6 +112,27 @@ final class ComposerKeysTests: XCTestCase {
         XCTAssertEqual(attached.count, 0)
     }
 
+    /// macOS 14's caret (CaretField): a selection change counts only from the focused editor in the field's own
+    /// window. Two windows whose composers hold the same text no longer take each other's caret.
+    func testCaretComesOnlyFromTheFieldsOwnWindow() throws {
+        func window(_ text: String) -> (NSWindow, NSTextView) {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
+            w.isReleasedWhenClosed = false
+            let editor = NSTextView(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+            editor.string = text
+            w.contentView!.addSubview(editor)
+            XCTAssertTrue(w.makeFirstResponder(editor))
+            return (w, editor)
+        }
+        let (a, editorA) = window("see @sy")
+        let (b, editorB) = window("see @sy")
+        defer { a.close(); b.close() }
+        XCTAssertTrue(CaretField.isOwnEditor(editorA, window: a, text: "see @sy"))
+        XCTAssertFalse(CaretField.isOwnEditor(editorB, window: a, text: "see @sy"), "the other window's editor, same text")
+        XCTAssertFalse(CaretField.isOwnEditor(editorA, window: nil, text: "see @sy"), "before the field is in a window")
+        XCTAssertFalse(CaretField.isOwnEditor(editorA, window: a, text: "other"), "another field in the same window")
+    }
+
     private static func png() throws -> Data {
         let ctx = CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
                             bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
