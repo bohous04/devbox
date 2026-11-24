@@ -531,6 +531,27 @@ final class ThreadStore: ObservableObject {
         paused = false
     }
 
+    /// The session is no longer a terminal session (`noLongerTmux`): read it again from its start, as a chat thread.
+    func reopen() async {
+        stop()
+        noLongerTmux = false
+        isTmux = false
+        runtime = nil
+        mirror = nil
+        sendLock = nil
+        loadError = nil
+        // The mirror's rows go: the chat thread's own load lays its rows out afresh.
+        thread = nil
+        rows = []
+        display = []
+        changesAnchor = nil
+        hasOlder = false
+        held = ThreadView.Held()
+        rowBase = 0
+        postedSeen = 0
+        await start()
+    }
+
     /// Back from the background: what changed after our seq, then the stream again from the new seq.
     /// `look: false` when the caller marks the look itself (the Mac, on the window becoming key).
     func resume(look: Bool = true) async {
@@ -816,16 +837,15 @@ final class ThreadStore: ObservableObject {
             let _: Sent = try await client.post("\(base)/mirror/messages", body: MirrorMessage(text: MirrorView.messageText(text, imagePaths: paths)))
             sendLock = nil
             return true
-        } catch let e as DevdHTTPError {
-            guard let lock = MirrorView.sendLock(e) else { throw e }
-            sendLock = lock
-            return false
-        } catch let e as DecodingError {
-            // devd answered, with a body this app does not read: said as such (errorText), not as unconfirmed.
-            throw e
         } catch {
+            if let lock = MirrorView.sendLock(error) {
+                sendLock = lock
+                return false
+            }
             // No answer (a timeout, a dropped connection): devd may have typed it already, and nothing is retried.
-            throw MirrorSendUnconfirmed()
+            // Anything else (devd's body unreadable, no path configured, a CF path without its token) is said as it is.
+            if MirrorView.mayHaveArrived(error) { throw MirrorSendUnconfirmed() }
+            throw error
         }
     }
 

@@ -117,9 +117,17 @@ final class ComposerTriggerTests: XCTestCase {
         XCTAssertEqual(ComposerTriggers.announcement(TriggerMenuModel.make(slash, commands: [AgentCommand(name: "a"), AgentCommand(name: "b")], files: nil)),
                        "2 commands")
         let at = ComposerTrigger(kind: .at, query: "x", start: 0, end: 2)
-        XCTAssertEqual(ComposerTriggers.announcement(TriggerMenuModel.make(at, commands: [], files: nil)), "Searching…")
+        XCTAssertNil(ComposerTriggers.announcement(TriggerMenuModel.make(at, commands: [], files: nil)),
+                     "a search on its way says nothing: it would talk over each typed letter")
+        XCTAssertNil(ComposerTriggers.announcement(TriggerMenuModel.make(at, commands: [], files: FileSearchResult(query: "", files: SessionFiles(files: ["x.ts"])))),
+                     "an older query's results while the next one runs")
         XCTAssertEqual(ComposerTriggers.announcement(TriggerMenuModel.make(at, commands: [], files: FileSearchResult(query: "x", files: SessionFiles(files: ["x.ts"])))),
-                       "1 files")
+                       "1 file")
+        XCTAssertEqual(ComposerTriggers.announcement(TriggerMenuModel.make(at, commands: [], files: FileSearchResult(query: "x", files: SessionFiles(files: ["x.ts", "y.ts"])))),
+                       "2 files")
+        XCTAssertEqual(ComposerTriggers.announcement(TriggerMenuModel.make(slash, commands: [AgentCommand(name: "a")], files: nil)), "1 command")
+        XCTAssertEqual(ComposerTriggers.announcement(TriggerMenuModel.make(at, commands: [], files: FileSearchResult(query: "x", files: SessionFiles(files: [])))),
+                       "No matching file")
     }
 
     /// A `thread-commands` frame of the wrong shape is none, as in the snapshot, not an unreadable-update error.

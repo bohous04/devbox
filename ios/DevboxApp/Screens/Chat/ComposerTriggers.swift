@@ -92,9 +92,13 @@ enum ComposerTriggers {
         new.hasPrefix(old) || old.hasPrefix(new) ? new.utf16.count : nil
     }
 
-    /// What VoiceOver says of the open menu (the web's live region): its status, else how many options it shows.
-    static func announcement(_ m: TriggerMenuModel) -> String {
-        m.status ?? "\(m.options.count) \(m.title == "Commands" ? "commands" : "files")"
+    /// What VoiceOver says of the open menu (the web's live region): its status, else how many options it shows. Nil
+    /// while a file search runs: "Searching…" on every key of an `@` word would talk over the echo of the typed letters.
+    static func announcement(_ m: TriggerMenuModel) -> String? {
+        if m.searching { return nil }
+        if let status = m.status { return status }
+        let noun = m.title == "Commands" ? "command" : "file"
+        return "\(m.options.count) \(noun)\(m.options.count == 1 ? "" : "s")"
     }
 
     /// The empty composer names the triggers this session has (a Codex chat runs no slash commands, so no `/`).

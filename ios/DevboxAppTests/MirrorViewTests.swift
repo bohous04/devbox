@@ -35,6 +35,29 @@ final class MirrorViewTests: XCTestCase {
         XCTAssertEqual(MirrorView.sendLock(DevdHTTPError(statusCode: 409, serverMessage: "not-a-tmux-session"))?.code, "not-a-tmux-session")
         XCTAssertNil(MirrorView.sendLock(DevdHTTPError(statusCode: 409, serverMessage: "something-new")))
         XCTAssertNil(MirrorView.sendLock(URLError(.notConnectedToInternet)))
+        // The first path never connected, the fallback reached devd and was refused: the lock, not the combined text.
+        let viaFallback = DevdClientError(description: "Tailscale: …; Cloudflare: …", underlying: [URLError(.cannotConnectToHost), draft])
+        XCTAssertEqual(MirrorView.sendLock(viaFallback), MirrorLock(code: "terminal-has-draft", message: "Text is already typed."))
+        XCTAssertNil(MirrorView.sendLock(DevdClientError(description: "both", underlying: [draft, URLError(.timedOut)])),
+                     "the attempt made last decides, as for mayHaveArrived")
+    }
+
+    /// Only a request cut off on the way may have been typed; an error raised before anything went out, or a connect
+    /// that never reached devd, is said as it is.
+    func testOnlyACutOffSendMayHaveArrived() {
+        XCTAssertTrue(MirrorView.mayHaveArrived(URLError(.timedOut)))
+        XCTAssertTrue(MirrorView.mayHaveArrived(URLError(.networkConnectionLost)))
+        XCTAssertTrue(MirrorView.mayHaveArrived(CancellationError()))
+        XCTAssertFalse(MirrorView.mayHaveArrived(URLError(.notConnectedToInternet)), "never left the device")
+        XCTAssertFalse(MirrorView.mayHaveArrived(URLError(.cannotConnectToHost)))
+        XCTAssertFalse(MirrorView.mayHaveArrived(DevdClientError(description: "No network path configured")))
+        XCTAssertFalse(MirrorView.mayHaveArrived(DevdClientError(description: "Invalid URL: /x")))
+        XCTAssertFalse(MirrorView.mayHaveArrived(DevdClientError(description: "CF path missing service token")))
+        XCTAssertFalse(MirrorView.mayHaveArrived(DevdHTTPError(statusCode: 500, serverMessage: "boom")), "devd answered")
+        XCTAssertFalse(MirrorView.mayHaveArrived(DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "x"))))
+        // Both paths failed: the fallback's attempt decides.
+        XCTAssertTrue(MirrorView.mayHaveArrived(DevdClientError(description: "both", underlying: [URLError(.cannotConnectToHost), URLError(.timedOut)])))
+        XCTAssertFalse(MirrorView.mayHaveArrived(DevdClientError(description: "both", underlying: [URLError(.cannotConnectToHost), URLError(.cannotFindHost)])))
     }
 
     func testTheLineAboveTheComposerPromptFirstThenTheRefusedSendThenDevdsReason() {
