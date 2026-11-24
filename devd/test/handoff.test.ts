@@ -98,13 +98,30 @@ test("a Codex plan update (update_plan) is carried as a plan, with its explanati
   const items = [
     user("go"),
     item({ kind: "tool", tool: "update_plan", input: { explanation: "Two steps", plan }, output: "", isError: false }),
-    item({ kind: "tool", tool: "update_plan", input: { explanation: null, plan: [{ step: "Ship", status: "pending" }] }, output: "", isError: false }),
-    item({ kind: "tool", tool: "update_plan", input: { plan: "not a list" }, output: "", isError: false }),
+    item({ kind: "tool", tool: "update_plan", input: { explanation: null, plan: [{ step: "Ship", status: "pending" }] }, output: "", isError: false, runId: "r2" }),
+    item({ kind: "tool", tool: "update_plan", input: { plan: "not a list" }, output: "", isError: false, runId: "r3" }),
   ];
   const h = buildHandoff({ ...base, items });
   expect(h.preamble).toContain("[plan] Two steps\n- [completed] Read the code\n- [inProgress] Fix the bug\n");
   expect(h.preamble).toContain("[plan] - [pending] Ship\n");
   expect(h.preamble).toContain("[plan] (plan text unavailable)");
+});
+
+test("of a turn's Codex plan updates only the latest is carried: each one is the whole plan", () => {
+  const step = (status: string) => ({ explanation: null, plan: [{ step: "Fix the bug", status }] });
+  const items = [
+    user("go"),
+    item({ kind: "tool", tool: "update_plan", input: step("pending"), output: "", isError: false }),
+    item({ kind: "tool", tool: "update_plan", input: step("inProgress"), output: "", isError: false }),
+    asst("working on it"),
+    item({ kind: "tool", tool: "update_plan", input: step("completed"), output: "", isError: false }),
+    user("next", "r2"),
+    item({ kind: "tool", tool: "update_plan", input: step("pending"), output: "", isError: false, runId: "r2" }),
+  ];
+  const h = buildHandoff({ ...base, items, runs: [run(), run({ runId: "r2" })] });
+  expect(h.includedItemSeqs).toEqual([items[0].seq, items[3].seq, items[4].seq, items[5].seq, items[6].seq]);
+  expect(h.omitted).toBe(0);
+  expect(h.preamble).not.toContain("[inProgress]");
 });
 
 test("delta skips items of covered runs", () => {

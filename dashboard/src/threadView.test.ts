@@ -72,6 +72,11 @@ test("effort: a thread-effort replaces the thread's effort; an effort.state thre
   expect(merged.effort).toEqual(effort);
 });
 
+test("a target.applied thread event (devd never sends one) changes nothing", () => {
+  const after = run(emptyThread(), [{ type: "target.applied", switchId: "sw-1", harness: "codex", account: null, model: null }]);
+  expect(after.items).toEqual([]);
+});
+
 test("commands: thread-commands replaces the list (null = none: no / menu); a replay snapshot carries its own or none", () => {
   const list = [{ name: "compact", hint: "<instructions>" }];
   const t = applyCommands(emptyThread(), list);

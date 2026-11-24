@@ -151,6 +151,17 @@ final class ThreadStoreTests: XCTestCase {
         let t = ThreadView.apply(.empty, e)
         XCTAssertEqual(t.items.first?.input, .null)
     }
+
+    /// devd keeps target.applied (bridge 1.11.0, its switch confirmation) out of the stream; one that gets here anyway
+    /// is ignored, never shown as an unknown event.
+    func testTargetAppliedIsIgnored() throws {
+        let json = #"{"seq":1,"ts":5,"event":{"type":"target.applied","switchId":"sw-1","harness":"codex","account":null,"model":null}}"#
+        let e = try JSONDecoder().decode(LoggedEvent.self, from: Data(json.utf8))
+        XCTAssertEqual(e.event, .targetApplied)
+        let t = ThreadView.apply(.empty, e)
+        XCTAssertEqual(t.items, [])
+        XCTAssertEqual(t.lastSeq, 1)
+    }
 }
 
 /// `ThreadStore` over devd: load, stream frames, resume after the app was in the background, sending.

@@ -347,7 +347,8 @@ function ChatPage({ id }: { id: string }) {
                   </>}
                 />
               ) : (
-              <Switchers sessionId={id} thread={thread}>
+              // Keyed: another session's page starts with none of this one's target, menus or notes.
+              <Switchers key={id} sessionId={id} thread={thread}>
                 {({ menus, status }) => (
                   <Composer
                     running={running} onStop={() => api.interrupt(id)}

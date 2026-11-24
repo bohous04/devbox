@@ -55,6 +55,40 @@ export function targetPollMs(t: Pick<ChatTarget, "awaitingTarget">): number | nu
   return t.awaitingTarget ? 5_000 : null;
 }
 
+/** Reads the target so that only the newest read lands: an answer (or failure) of a read started before another one
+ *  is dropped, so an older `awaitingTarget: true` never overwrites a newer false. `load` always reads (a trigger,
+ *  Retry, after a switch); `poll` skips its tick while any read is in flight. */
+export class TargetReader<T> {
+  private seq = 0;
+  private inFlight = 0;
+  private disposed = false;
+  constructor(private read: () => Promise<T>, private onValue: (t: T) => void, private onError: (e: unknown) => void) {}
+
+  /** The reader's session is no longer shown: nothing reads or lands any more, also a read in flight. */
+  dispose(): void {
+    this.disposed = true;
+    this.seq++;
+  }
+
+  async load(): Promise<void> {
+    if (this.disposed) return;
+    const n = ++this.seq;
+    this.inFlight++;
+    try {
+      const t = await this.read();
+      if (n === this.seq && !this.disposed) this.onValue(t);
+    } catch (e) {
+      if (n === this.seq && !this.disposed) this.onError(e);
+    } finally {
+      this.inFlight--;
+    }
+  }
+
+  poll(): void {
+    if (this.inFlight === 0) void this.load();
+  }
+}
+
 /** A proxy profile's model is set in settings.proxyModels (devd: 400 model-set-by-profile). */
 export function modelMenuBlocked(t: ChatTarget): string | null {
   const p = profileFor(t.agent);
@@ -161,6 +195,8 @@ export function switchErrorText(status: number, body: unknown): string {
   switch (b.error) {
     case "run-active": return "A run is active or a message is queued: switch after it ends";
     case "switch-in-progress": return "Another switch is already in progress";
+    // devd lost the bridge's answer to the last switch and waits for its confirmation (chatSwitch UNCONFIRMED_HOLD_MS).
+    case "switch-unconfirmed": return "The last switch is not confirmed by the agent yet: wait a moment and check the thread";
     case "agent-disconnected": return "Agent not connected: nothing was switched";
     case "agent-timeout": return "No reply from the agent: the switch may have happened, check the thread before retrying";
   }

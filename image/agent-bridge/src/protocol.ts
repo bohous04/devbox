@@ -40,7 +40,9 @@ export type BridgeCommand =
   // model does not offer; 1.8.0: before the model is known, taken from effort.state's `unchecked` and checked with
   // the next message.
   | { kind: "setEffort"; effort: string | null }
-  | { kind: "switchTarget"; target: SwitchTarget; resume: string | null; handoff: HandoffDelivery | null };
+  // switchId (1.11.0): devd's id for this switch; once the target is open the bridge logs target.applied with it, also
+  // after a restart, so devd can confirm a switch whose answer it never got. Older bridges ignore it.
+  | { kind: "switchTarget"; target: SwitchTarget; resume: string | null; handoff: HandoffDelivery | null; switchId?: string };
 
 export type ClientFrame =
   // `nonce` (1.6.0): a bound bridge answers it with a `bind` frame before anything else. Older bridges ignore it.
@@ -143,7 +145,12 @@ function parseCommand(v: unknown): BridgeCommand {
       return { kind: "setEffort", effort: v.effort };
     case "switchTarget": {
       if (!("resume" in v) || !("handoff" in v)) throw new ProtocolError("switchTarget needs resume and handoff (null for none)");
-      return { kind: "switchTarget", target: parseTarget(v.target), resume: nullableString(v.resume, "switchTarget.resume"), handoff: parseHandoff(v.handoff) };
+      const cmd: BridgeCommand = { kind: "switchTarget", target: parseTarget(v.target), resume: nullableString(v.resume, "switchTarget.resume"), handoff: parseHandoff(v.handoff) };
+      if (v.switchId !== undefined) {
+        if (typeof v.switchId !== "string" || v.switchId === "" || v.switchId.length > 128) throw new ProtocolError("switchTarget.switchId must be a non-empty string of at most 128 characters");
+        cmd.switchId = v.switchId;
+      }
+      return cmd;
     }
     default:
       throw new ProtocolError(`unknown command kind: ${String(v.kind)}`);

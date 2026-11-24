@@ -8,8 +8,8 @@ import { PROXY_PROFILE_ENV_KEYS, PROXY_PROFILES, proxyProfileEnv } from "../../i
 import type { BridgeEvent, Capabilities } from "../../shared/thread";
 import { PROFILE_ENV } from "../src/agentSwitch";
 import { BRIDGE_VERSION } from "../../image/agent-bridge/src/version";
-import { AgentDisconnected, CommandFailed } from "../src/bridgeLink";
-import { CHAT_MODELS, ChatSwitch, MODEL_WINDOW_ALIASES, type ChatSwitchDeps } from "../src/chatSwitch";
+import { AgentDisconnected, AgentNotConnected, CommandFailed, CommandTimeout } from "../src/bridgeLink";
+import { CHAT_MODELS, ChatSwitch, MODEL_WINDOW_ALIASES, SWITCH_TIMEOUT_MS, type ChatSwitchDeps } from "../src/chatSwitch";
 import { PRICED_MODELS } from "../src/pricing";
 import type { CodexAccountView } from "../src/codexAccounts";
 import { ACCOUNT_POOL_DEFAULTS } from "../src/config";
@@ -67,9 +67,13 @@ function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; pro
   const store = ThreadStore.open(dir, CHAT.id, { onNotice: (item) => published.push(item.text) });
   cleanups.push(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
 
+  /** What was sent, without a switchTarget's switchId (random): that one is in `switchIds`, in send order. */
   const sent: BridgeCommand[] = [];
+  const switchIds: (string | undefined)[] = [];
   /** Runs before a command resolves: may feed bridge events or throw the bridge's answer. */
   let onSend: (cmd: BridgeCommand) => void = () => {};
+  /** BridgeLinks.handshaken: the link is up and its handshake (after the replay) came. */
+  let linkUp = true;
   const feed = (events: BridgeEvent[]) => {
     for (const event of events) {
       const e = { seq: store.lastSeq() + 1, ts: NOW, event };
@@ -80,7 +84,17 @@ function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; pro
   const codex = o.codex ?? [codexAccount("default"), codexAccount("c-two")];
   const deps: ChatSwitchDeps = {
     db,
-    links: { send: async (_id, cmd) => { sent.push(cmd); onSend(cmd); } },
+    links: {
+      send: async (_id, cmd) => {
+        if (cmd.kind === "switchTarget") {
+          const { switchId, ...rest } = cmd;
+          switchIds.push(switchId);
+          sent.push(rest);
+        } else sent.push(cmd);
+        onSend(cmd);
+      },
+      handshaken: () => linkUp,
+    },
     threads: () => store,
     claudePool: () => ACCOUNT_POOL_DEFAULTS,
     codexAccounts: {
@@ -113,7 +127,7 @@ function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; pro
   };
   /** A handshake of the session's bridge (BridgeLinks.onHandshake). */
   const handshake = (awaitingTarget: boolean, version: string | null = "1.1.0") => sw.onHandshake(CHAT.id, { version, awaitingTarget });
-  return { db, store, sent, feed, post, sw, app, published, handshake, setOnSend: (f: (cmd: BridgeCommand) => void) => { onSend = f; } };
+  return { db, deps, store, sent, switchIds, feed, post, sw, app, published, handshake, setOnSend: (f: (cmd: BridgeCommand) => void) => { onSend = f; }, setLinkUp: (up: boolean) => { linkUp = up; } };
 }
 
 /** A Claude conversation of one completed turn on the `primary` account. */
@@ -189,7 +203,8 @@ test("switch during an active run is 409", async () => {
 test("a disconnected bridge is 409 agent-disconnected and changes nothing", async () => {
   const t = setup();
   claudeThread(t);
-  t.setOnSend(() => { throw new AgentDisconnected("not connected"); });
+  // Not sent at all: nothing is left unconfirmed, so the next switch is not held.
+  t.setOnSend(() => { throw new AgentNotConnected("not connected"); });
   expect(await t.post("account", { accountId: "backup" })).toEqual({ status: 409, body: { error: "agent-disconnected" } });
   expect(await t.post("model", { model: "claude-sonnet-5-5" })).toEqual({ status: 409, body: { error: "agent-disconnected" } });
   expect(await t.post("harness", { agent: "codex" })).toEqual({ status: 409, body: { error: "agent-disconnected" } });
@@ -958,4 +973,205 @@ test("open-failed: the bridge could not open its persisted target and awaits one
   expect(await t.post("harness", { agent: "claude" })).toMatchObject({ status: 202 });
   expect(t.sent.at(-1)).toMatchObject({ kind: "switchTarget", target: { harness: "claude" } });
   expect(t.sw.target(CHAT.id).awaitingTarget).toBe(false);
+});
+
+// --- DEVBOX-101: the bridge's target.applied confirms a switch whose answer devd never got ---
+
+const switchEvents = (t: ReturnType<typeof setup>) =>
+  (t.db.query("SELECT data FROM events WHERE session_id=? AND type='chat-switch'").all(CHAT.id) as { data: string }[]).map((r) => JSON.parse(r.data));
+const applied = (switchId: string, harness = "codex", account: string | null = "default", model: string | null = null): BridgeEvent =>
+  ({ type: "target.applied", switchId, harness, account, model });
+
+test("target.applied: a switch whose answer timed out is confirmed in the DB once the bridge logs it, once", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.setOnSend(() => { throw new CommandTimeout("timeout"); });
+  expect(await t.post("harness", { agent: "codex" })).toEqual({ status: 504, body: { error: "agent-timeout" } });
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("claude");
+  const id = t.switchIds[0]!;
+  expect(id).toMatch(/^[0-9a-f-]{36}$/);
+  t.feed([applied(id)]);
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("codex");
+  expect(getRepoAgent(t.db, "acme", "a", "chat")).toBe("codex");
+  expect(activeLeases(t)).toEqual([]);
+  expect(switchEvents(t)).toEqual([{
+    kind: "fresh-with-handoff", from: { agent: "claude", harness: "claude", account: "primary", model: "claude-opus-5-5" },
+    to: { agent: "codex", harness: "codex", account: "default", model: null },
+  }]);
+  expect(t.published.at(-1)).toBe("The switch to Codex went through after all: the agent confirmed it after devd stopped waiting.");
+  // A replay (or a second delivery) of the same switch changes nothing.
+  t.feed([applied(id)]);
+  expect(switchEvents(t)).toHaveLength(1);
+  // devd plans the next switch from the confirmed target, not the one it had before.
+  expect(t.sw.target(CHAT.id)).toMatchObject({ agent: "codex", harness: "codex" });
+});
+
+test("target.applied: a devd restarted after the timeout confirms the switch from the DB", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.setOnSend(() => { throw new AgentDisconnected("link lost"); });
+  expect((await t.post("harness", { agent: "codex" })).status).toBe(409);
+  const restarted = new ChatSwitch(t.deps);
+  const e = { seq: t.store.lastSeq() + 1, ts: NOW, event: applied(t.switchIds[0]!) };
+  t.store.apply(e);
+  restarted.onEvent(CHAT.id, e);
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("codex");
+  expect(switchEvents(t)).toHaveLength(1);
+});
+
+test("target.applied: the event that comes before the bridge's answer confirms the switch exactly once", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.setOnSend((cmd) => { if (cmd.kind === "switchTarget") t.feed([applied(cmd.switchId!)]); });
+  expect(await t.post("harness", { agent: "codex" })).toEqual({ status: 202, body: { kind: "fresh-with-handoff" } });
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("codex");
+  expect(switchEvents(t)).toHaveLength(1);
+  // The usual notice only: the switch did not need the event to go through.
+  expect(t.published.filter((n) => String(n).includes("after all"))).toEqual([]);
+});
+
+test("target.applied: an older bridge sends none, and its answer confirms the switch as before", async () => {
+  const t = setup();
+  claudeThread(t);
+  expect((await t.post("harness", { agent: "codex" })).status).toBe(202);
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("codex");
+  expect(switchEvents(t)).toHaveLength(1);
+  // Nothing is left unconfirmed: a late event for that switch changes nothing.
+  t.feed([applied(t.switchIds[0]!)]);
+  expect(switchEvents(t)).toHaveLength(1);
+});
+
+test("target.applied: an unknown switch id, or one of a switch the bridge refused, changes nothing", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.setOnSend(() => { throw new CommandFailed("Authentication required"); });
+  expect((await t.post("harness", { agent: "codex" })).status).toBe(409);
+  t.feed([applied(t.switchIds[0]!), applied("someone-else")]);
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("claude");
+  expect(switchEvents(t)).toEqual([]);
+});
+
+test("target.applied: a proxy switch confirmed by the event is what a restarted bridge that awaits its target gets again", async () => {
+  // The bug of DEVBOX-101: the bridge drops the proxy secret on disk, restarts awaiting its target, and devd re-sent
+  // the target its DB still had (plain Claude) because the switch's answer was lost.
+  const t = setup();
+  claudeThread(t);
+  t.setOnSend(() => { throw new CommandTimeout("timeout"); });
+  await t.post("harness", { agent: "claude-gemini" });
+  t.feed([applied(t.switchIds[0]!, "claude", null, "gpt-x")]);
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("claude-gemini");
+  t.setOnSend(() => {});
+  t.handshake(true);
+  await waitUntil(() => t.sent.length === 2, "the re-sent target");
+  expect(t.sent[1]).toMatchObject({ kind: "switchTarget", target: { harness: "claude", model: "gpt-x", env: { ...proxyProfileEnv("claude-gemini", PROXY_INPUTS) } } });
+  // A re-send is not a new switch: no switchId.
+  expect(t.switchIds[1]).toBeUndefined();
+});
+
+test("target.applied before a resume-failed: the fresh thread is planned on the confirmed account, not the DB's old one", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.setOnSend(() => { throw new CommandTimeout("timeout"); });
+  expect((await t.post("account", { accountId: "backup" })).status).toBe(504);
+  t.setOnSend(() => {});
+  // The bridge's order (serve.ts resumeFailed): the switch is applied, then its thread could not be resumed.
+  t.feed([applied(t.switchIds[0]!, "claude", "backup", "claude-opus-5-5"), { type: "run.failed", runId: "never-started", error: "resume-failed" }]);
+  await waitUntil(() => t.sent.length === 2, "the re-planned target");
+  expect(t.sent[1]).toMatchObject({ kind: "switchTarget", target: { harness: "claude", account: "backup", env: { CLAUDE_CONFIG_DIR: "/home/dev/.claude-accounts/backup" } }, resume: null });
+  expect(activeLeases(t)).toEqual(["backup"]);
+});
+
+test("target.applied before a resume-failed: a harness switch's fresh thread is planned on the confirmed harness", async () => {
+  const t = setup({ agent: "codex" });
+  t.feed([
+    { type: "thread.native", harness: "codex", nativeThreadId: "t-codex", account: "default", model: "gpt-5.6-sol", caps: CODEX_CAPS },
+    { type: "run.queued", runId: "r1", text: "hello", attachments: [] },
+    { type: "run.completed", runId: "r1", nativeThreadId: "t-codex", usage: null, costUsd: null },
+  ]);
+  await t.post("harness", { agent: "claude" });
+  t.feed([{ type: "thread.native", harness: "claude", nativeThreadId: "t-claude", account: "backup", model: "claude-opus-5-5", caps: CLAUDE_CAPS }]);
+  t.setOnSend(() => { throw new CommandTimeout("timeout"); });
+  expect((await t.post("harness", { agent: "codex" })).status).toBe(504);
+  expect(t.sent.at(-1)).toMatchObject({ target: { harness: "codex" }, resume: "t-codex" });
+  t.setOnSend(() => {});
+  const before = t.sent.length;
+  t.feed([applied(t.switchIds.at(-1)!, "codex", "default", "gpt-5.6-sol"), { type: "run.failed", runId: "never-started", error: "resume-failed" }]);
+  await waitUntil(() => t.sent.length === before + 1, "the re-planned target");
+  expect(t.sent.at(-1)).toMatchObject({ kind: "switchTarget", target: { harness: "codex", account: "default" }, resume: null });
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("codex");
+});
+
+test("a switch the bridge has not confirmed yet holds the next one (409 switch-unconfirmed) until it is confirmed", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.setOnSend(() => { throw new CommandTimeout("timeout"); });
+  await t.post("harness", { agent: "codex" });
+  t.setOnSend(() => {});
+  expect(await t.post("account", { accountId: "backup" })).toEqual({ status: 409, body: { error: "switch-unconfirmed" } });
+  expect(t.sent).toHaveLength(1);
+  t.feed([applied(t.switchIds[0]!)]);
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("codex");
+  expect((await t.post("harness", { agent: "claude" })).status).toBe(202);
+});
+
+test("an unconfirmed switch older than the wait is given up: the next switch goes ahead and the thread says it did not go through", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.setOnSend(() => { throw new CommandTimeout("timeout"); });
+  await t.post("harness", { agent: "codex" });
+  t.setOnSend(() => {});
+  t.deps.now = () => NOW + 3 * SWITCH_TIMEOUT_MS;
+  expect((await t.post("account", { accountId: "backup" })).status).toBe(202);
+  expect(notices(t)).toContain("The switch to Codex did not go through: the agent never confirmed it.");
+  // Its event, if it ever comes, no longer applies.
+  t.feed([applied(t.switchIds[0]!)]);
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("claude");
+});
+
+test("an expired unconfirmed switch is not given up while the link is down: the replay after the reconnect confirms it", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.setOnSend(() => { throw new CommandTimeout("timeout"); });
+  await t.post("harness", { agent: "codex" });
+  t.setOnSend(() => {});
+  t.setLinkUp(false);
+  t.deps.now = () => NOW + 3 * SWITCH_TIMEOUT_MS;
+  // The bridge may have logged its target.applied: devd cannot know before the link is back with its replay.
+  expect(await t.post("account", { accountId: "backup" })).toEqual({ status: 409, body: { error: "agent-disconnected" } });
+  expect(t.sent).toHaveLength(1);
+  expect(notices(t).some((n) => n.includes("did not go through"))).toBe(false);
+  // The reconnect: the replayed event, then the handshake.
+  t.setLinkUp(true);
+  t.feed([applied(t.switchIds[0]!)]);
+  t.handshake(false);
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("codex");
+  expect((await t.post("harness", { agent: "claude" })).status).toBe(202);
+});
+
+test("a re-sent target replaces a switch the bridge never confirmed, and the thread says it did not go through", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.setOnSend(() => { throw new CommandTimeout("timeout"); });
+  await t.post("harness", { agent: "claude-gemini" });
+  t.setOnSend(() => {});
+  // Restarted mid-switch, the bridge dropped the proxy secret and awaits its target: devd sends the DB's.
+  t.handshake(true);
+  await waitUntil(() => t.sent.length === 2, "the re-sent target");
+  expect(t.sent[1]).toMatchObject({ target: { harness: "claude", account: "primary" } });
+  await waitUntil(() => notices(t).includes("The switch to Claude Code + Gemini did not go through: the agent is on the session's earlier target."), "the notice");
+  expect((await t.post("account", { accountId: "backup" })).status).toBe(202);
+});
+
+test("a switch the bridge applied and then answered with an error (its recovery failed) is a switch all the same", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.setOnSend((cmd) => {
+    if (cmd.kind !== "switchTarget") return;
+    t.feed([applied(cmd.switchId!)]);
+    throw new CommandFailed("recovering the queue failed");
+  });
+  expect(await t.post("harness", { agent: "codex" })).toEqual({ status: 202, body: { kind: "fresh-with-handoff" } });
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("codex");
+  expect(notices(t).some((n) => n.includes("stays on"))).toBe(false);
+  expect(switchEvents(t)).toHaveLength(1);
 });

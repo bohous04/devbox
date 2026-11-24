@@ -93,8 +93,37 @@ enum ChatSwitch {
         t.bridgeOutdated == true ? "This session's agent bridge (\(t.bridgeVersion ?? "older than 1.1.0")) is outdated: recreate the session's container for the newer fixes." : nil
     }
 
-    static func awaitingTargetText(_ t: ChatTarget) -> String? {
-        t.awaitingTarget ? "Agent is waiting for a target: pick a model, account or agent to continue" : nil
+    /// Shown while the bridge awaits its target: picking any model, account or agent (also the current one) sends it.
+    /// Not from a `stale` target (its latest re-read failed): devd keeps re-sending on its own and may have delivered it.
+    static func awaitingTargetText(_ t: ChatTarget, stale: Bool = false) -> String? {
+        t.awaitingTarget && !stale ? "Agent is waiting for a target: pick a model, account or agent to continue" : nil
+    }
+
+    /// devd settles an awaited target by re-sending it in the background, which the thread may not show (no new native
+    /// thread, no run): while the agent waits, the target is re-read this often so the waiting line goes away
+    /// (dashboard/src/switchView.ts targetPollMs).
+    static func targetPollSeconds(_ t: ChatTarget) -> Double? {
+        t.awaitingTarget ? 5 : nil
+    }
+
+    /// Orders the target reads (dashboard/src/switchView.ts TargetReader): only the newest read lands, so an older
+    /// `awaitingTarget: true` never overwrites a newer false; a poll skips its tick while a read is in flight.
+    struct LatestRead {
+        private var seq = 0
+        private var inFlight = 0
+        var busy: Bool { inFlight > 0 }
+
+        mutating func begin() -> Int {
+            seq += 1
+            inFlight += 1
+            return seq
+        }
+
+        /// Whether read `n`'s answer lands (no read started after it).
+        mutating func end(_ n: Int) -> Bool {
+            inFlight -= 1
+            return n == seq
+        }
     }
 
     /// A proxy profile's model is set in settings (devd: 400 model-set-by-profile).
@@ -265,6 +294,7 @@ enum ChatSwitch {
         switch code {
         case "run-active": return "A run is active or a message is queued: switch after it ends"
         case "switch-in-progress": return "Another switch is already in progress"
+        case "switch-unconfirmed": return "The last switch is not confirmed by the agent yet: wait a moment and check the thread"
         case "agent-disconnected": return "Agent not connected: nothing was switched"
         case "agent-timeout": return "No reply from the agent: the switch may have happened, check the thread before retrying"
         default: return h.serverDetail.map { "\($0) (\(code))" } ?? code

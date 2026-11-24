@@ -333,6 +333,8 @@ export class ThreadStore {
         db.query("INSERT INTO commands (harness, list) VALUES (?, ?) ON CONFLICT(harness) DO UPDATE SET list=excluded.list").run(n.harness, JSON.stringify(list));
         return;
       }
+      case "target.applied":
+        return; // devd's switch confirmation (chatSwitch.ts), nothing in the thread
       default: {
         const unknown: never = ev;
         const type = (unknown as { type?: unknown }).type;

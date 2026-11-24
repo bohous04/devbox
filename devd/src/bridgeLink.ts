@@ -17,6 +17,8 @@ export interface BridgeHandshake { version: string | null; awaitingTarget: boole
 
 /** The bridge is not reachable (no socket, connection lost, link dropped). devd does not queue: the bridge owns the queue. */
 export class AgentDisconnected extends Error {}
+/** The link was down when the command was to be sent: the bridge never got it. */
+export class AgentNotConnected extends AgentDisconnected {}
 /** The bridge did not answer in time. A subclass because the caller cannot tell whether the command ran. */
 export class CommandTimeout extends AgentDisconnected {}
 /** The bridge answered `res{ok:false}`; the message is the bridge's. */
@@ -267,6 +269,12 @@ export class BridgeLinks {
     return this.links.get(sessionId)?.status ?? "disconnected";
   }
 
+  /** The link is up and this connection's handshake came, so every event the bridge had logged was replayed. */
+  handshaken(sessionId: string): boolean {
+    const link = this.links.get(sessionId);
+    return link !== undefined && link.status === "connected" && link.socket !== null && link.version !== undefined;
+  }
+
   /** Since when the bridge's event log has been behind the thread store, or null. While it is, the bridge reuses
    *  seqs the store already holds, and the store drops those events as duplicates. */
   behind(sessionId: string): number | null {
@@ -276,7 +284,7 @@ export class BridgeLinks {
   send(sessionId: string, cmd: BridgeCommand, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<void> {
     const link = this.links.get(sessionId);
     if (!link || link.status !== "connected" || !link.socket) {
-      return Promise.reject(new AgentDisconnected(`agent bridge of ${sessionId} is not connected`));
+      return Promise.reject(new AgentNotConnected(`agent bridge of ${sessionId} is not connected`));
     }
     const id = crypto.randomUUID();
     return new Promise<void>((resolve, reject) => {

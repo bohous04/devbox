@@ -37,6 +37,26 @@ final class ChatSwitchTests: XCTestCase {
         ChatTarget(agent: agent, harness: harness, account: account, model: model, awaitingTarget: awaiting, bridgeVersion: bridge, bridgeOutdated: outdated)
     }
 
+    /// dashboard/src/switchView.test.ts: the waiting line is re-read while it shows, and a failed re-read hides it.
+    func testAwaitingTargetIsReReadAndHiddenWhenTheReReadFailed() {
+        XCTAssertEqual(ChatSwitch.awaitingTargetText(target(awaiting: true)), "Agent is waiting for a target: pick a model, account or agent to continue")
+        XCTAssertNil(ChatSwitch.awaitingTargetText(target(awaiting: true), stale: true))
+        XCTAssertNil(ChatSwitch.awaitingTargetText(target(awaiting: false)))
+        XCTAssertEqual(ChatSwitch.targetPollSeconds(target(awaiting: true)), 5)
+        XCTAssertNil(ChatSwitch.targetPollSeconds(target(awaiting: false)))
+    }
+
+    func testOnlyTheNewestTargetReadLands() {
+        var r = ChatSwitch.LatestRead()
+        XCTAssertFalse(r.busy)
+        let poll = r.begin()
+        XCTAssertTrue(r.busy)
+        let trigger = r.begin()
+        XCTAssertTrue(r.end(trigger))
+        XCTAssertFalse(r.end(poll))
+        XCTAssertFalse(r.busy)
+    }
+
     func testOutdatedBridgeIsSaidWhileDevdSaysIt() {
         XCTAssertNil(ChatSwitch.bridgeOutdatedText(target(bridge: "1.8.0", outdated: false)))
         XCTAssertEqual(ChatSwitch.bridgeOutdatedText(target(bridge: "1.7.0", outdated: true)),
@@ -96,6 +116,7 @@ final class ChatSwitchTests: XCTestCase {
 
     func testErrorAndResultTexts() {
         XCTAssertEqual(ChatSwitch.errorText(DevdHTTPError(statusCode: 409, serverMessage: "run-active")), "A run is active or a message is queued: switch after it ends")
+        XCTAssertEqual(ChatSwitch.errorText(DevdHTTPError(statusCode: 409, serverMessage: "switch-unconfirmed")), "The last switch is not confirmed by the agent yet: wait a moment and check the thread")
         XCTAssertEqual(ChatSwitch.errorText(DevdHTTPError(statusCode: 504, serverMessage: "agent-timeout")), "No reply from the agent: the switch may have happened, check the thread before retrying")
         XCTAssertEqual(ChatSwitch.errorText(DevdHTTPError(statusCode: 409, serverMessage: "bridge-too-old", serverDetail: "recreate the container")), "recreate the container (bridge-too-old)")
         XCTAssertEqual(ChatSwitch.errorText(DevdHTTPError(statusCode: 400, serverMessage: "unknown-model")), "unknown-model")

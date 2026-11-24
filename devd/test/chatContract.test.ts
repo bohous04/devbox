@@ -182,12 +182,15 @@ test("C1 end to end: a thread the restarted bridge cannot resume becomes a fresh
   const b1: Bridge = await serve({ ...opts, openHarness: (o) => first.open(o) });
   links.ensure(ID);
   await waitFor(() => links.status(ID) === "connected", "link");
+  // Handshaken only once the ready came (after the replay); a closed bridge's link is not.
+  await waitFor(() => links.handshaken(ID), "the handshake");
   first.emit({ type: "thread.native", harness: "claude", nativeThreadId: "thread-1", account: null, model: "claude-opus-5-5", caps: CLAUDE_CAPABILITIES });
   await links.send(ID, { kind: "startTurn", text: "remember the number 42" });
   first.emit({ type: "message.final", runId: first.runId!, itemId: "m1", role: "assistant", text: "Noted: 42." });
   first.emit({ type: "run.completed", runId: first.runId!, nativeThreadId: "thread-1", usage: null, costUsd: null });
   await waitFor(() => store.snapshot().runs[0]?.status === "completed", "first run");
   await b1.close();
+  await waitFor(() => !links.handshaken(ID), "the dropped link");
 
   // The restarted bridge cannot resume thread-1: it stays up, devd re-plans and sends the fresh target with the handoff.
   const second = resumeFailingHarness("thread-1");

@@ -45,6 +45,8 @@ describe("parseClientFrame", () => {
       { kind: "switchTarget", target: { harness: "claude", account: null, model: "m", env: {} }, resume: null, handoff: null },
       { kind: "switchTarget", target: { harness: "claude", account: null, model: "m", env: {} }, resume: null, handoff: { preamble: null } },
       { kind: "switchTarget", target: { harness: "vibe", account: null, model: null, env: {} }, resume: "sess-1", handoff: { preamble: "earlier" } },
+      // (1.11.0) devd's id for the switch, echoed in target.applied.
+      { kind: "switchTarget", target: { harness: "claude", account: null, model: null, env: {} }, resume: null, handoff: null, switchId: "sw-1" },
     ];
     for (const cmd of cmds) {
       expect(parseClientFrame(JSON.stringify({ t: "cmd", id: "c", cmd }))).toEqual({ t: "cmd", id: "c", cmd });
@@ -90,6 +92,9 @@ describe("parseClientFrame", () => {
         { resume: null },
         { resume: null, handoff: { preamble: 1 } },
         { resume: null, handoff: { preamble: null, injectItems: "x" } },
+        { resume: null, handoff: null, switchId: "" },
+        { resume: null, handoff: null, switchId: 7 },
+        { resume: null, handoff: null, switchId: "s".repeat(129) },
       ].map((rest) => JSON.stringify({ t: "cmd", id: "c1", cmd: { kind: "switchTarget", target: { harness: "claude", account: null, model: null, env: {} }, ...rest } })),
     ];
     for (const line of bad) expect(() => parseClientFrame(line)).toThrow(ProtocolError);

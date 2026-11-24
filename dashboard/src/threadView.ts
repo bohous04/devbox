@@ -159,6 +159,7 @@ function dispatch(n: ThreadSnapshot, { seq, ts, event: ev }: LoggedEvent) {
       return;
     case "effort.state":
     case "commands.changed":
+    case "target.applied":
       // devd never sends these as thread events (older apps would show them as unknown): see applyEffort.
       return;
     default: {

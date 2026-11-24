@@ -805,6 +805,16 @@ test("SSE: an effort.state goes out parsed as thread-effort, never as a thread e
   ]);
 });
 
+test("SSE: a target.applied is devd's alone, never a thread event (older apps show those as unknown)", async () => {
+  const t = setup({ bridgeVersion: "1.11.0" });
+  const res = await t.a.fetch(req("GET", `/api/stream?session=${CHAT.id}`));
+  const events = readEvents(res, 1);
+  await Bun.sleep(10);
+  t.feed(CHAT.id, [{ type: "target.applied", switchId: "sw-1", harness: "codex", account: "default", model: null }]);
+  const [next] = t.feed(CHAT.id, [started("r1")]);
+  expect(await events).toEqual([{ event: "thread", id: "2", data: next }]);
+});
+
 test("SSE: commands.changed goes out as thread-commands (the current harness's list), never as a thread event; a harness switch sends the new harness's", async () => {
   const t = setup({ bridgeVersion: "1.9.0" });
   const res = await t.a.fetch(req("GET", `/api/stream?session=${CHAT.id}`));

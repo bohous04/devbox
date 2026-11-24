@@ -486,6 +486,11 @@ export function openDb(path: string): Database {
   db.run(`CREATE TABLE IF NOT EXISTS session_taints (
     container_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, created_at INTEGER NOT NULL)`);
   db.run(`CREATE INDEX IF NOT EXISTS session_taints_session ON session_taints (session_id)`);
+  // A chat switch sent to the bridge whose DB writes are not done yet (chatSwitch.ts): its answer may never come (a
+  // timeout, a dropped link, a devd restart), so the bridge's target.applied with the switch id confirms it instead.
+  // One row per session (a newer switch replaces it); no env, which may hold a proxy token. Deleted with the session.
+  db.run(`CREATE TABLE IF NOT EXISTS chat_switches_unconfirmed (
+    session_id TEXT PRIMARY KEY, switch_id TEXT NOT NULL, data TEXT NOT NULL, created_at INTEGER NOT NULL)`);
   migrateMetricsIndex(db);
   migrateMetricsSessionIndex(db);
   migrateMetricsAttrColumns(db);
@@ -762,6 +767,7 @@ export function deleteSession(db: Database, id: string): void {
   db.query(`DELETE FROM session_attention WHERE session_id=?`).run(id);
   db.query(`DELETE FROM tmux_seen WHERE session_id=?`).run(id);
   db.query(`DELETE FROM session_prs WHERE session_id=?`).run(id);
+  db.query(`DELETE FROM chat_switches_unconfirmed WHERE session_id=?`).run(id);
   // An undelivered first message must not reach a later session that reuses the id.
   db.query(`DELETE FROM pending_first_turns WHERE session_id=?`).run(id);
   db.query(`DELETE FROM bridge_secrets WHERE session_id=?`).run(id);
@@ -789,6 +795,27 @@ export function getSession(db: Database, id: string): SessionRow | null {
 
 export function listSessions(db: Database): SessionRow[] {
   return db.query(`SELECT * FROM sessions ORDER BY created_at`).all() as SessionRow[];
+}
+
+/** The session's switch waiting for its confirmation; replaces an earlier one. `data` is chatSwitch's, as JSON. */
+export function saveUnconfirmedSwitch(db: Database, sessionId: string, switchId: string, data: unknown, now: number): void {
+  db.query(`INSERT INTO chat_switches_unconfirmed (session_id, switch_id, data, created_at) VALUES (?,?,?,?)
+    ON CONFLICT(session_id) DO UPDATE SET switch_id=excluded.switch_id, data=excluded.data, created_at=excluded.created_at`)
+    .run(sessionId, switchId, JSON.stringify(data), now);
+}
+
+/** The session's switch waiting for its confirmation, if any. */
+export function getUnconfirmedSwitch(db: Database, sessionId: string): { switchId: string; data: unknown; createdAt: number } | null {
+  const r = db.query(`SELECT switch_id, data, created_at FROM chat_switches_unconfirmed WHERE session_id=?`).get(sessionId) as
+    { switch_id: string; data: string; created_at: number } | null;
+  return r === null ? null : { switchId: r.switch_id, data: JSON.parse(r.data), createdAt: r.created_at };
+}
+
+/** Removes and returns the session's unconfirmed switch `switchId`; null when it is not the one waiting (already
+ *  confirmed, refused, or replaced by a newer switch). */
+export function takeUnconfirmedSwitch(db: Database, sessionId: string, switchId: string): unknown | null {
+  const r = db.query(`DELETE FROM chat_switches_unconfirmed WHERE session_id=? AND switch_id=? RETURNING data`).get(sessionId, switchId) as { data: string } | null;
+  return r === null ? null : JSON.parse(r.data);
 }
 
 export function logEvent(db: Database, sessionId: string | null, type: string, data?: unknown): void {

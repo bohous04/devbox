@@ -400,6 +400,9 @@ enum ThreadView {
         case let .bridgeNotice(text):
             notice(&n, seq, ts, runId: nil, text)
 
+        case .targetApplied:
+            break
+
         case let .unknown(type):
             logger.error("thread view: unknown event type \(type, privacy: .public) at seq \(seq)")
             notice(&n, seq, ts, runId: nil, "unknown event \(type)")

@@ -127,7 +127,7 @@ function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities | (() => 
 }
 
 function baseState(over: Partial<BridgeState> = {}): BridgeState {
-  return { harness: "claude", nativeThreadId: null, account: null, model: null, activeRunId: null, queue: [], continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, trimSeq: 0, ackCandidate: null, awaitingTarget: false, effort: null, ...over };
+  return { harness: "claude", nativeThreadId: null, account: null, model: null, activeRunId: null, queue: [], continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, trimSeq: 0, ackCandidate: null, awaitingTarget: false, effort: null, appliedSwitchId: null, ...over };
 }
 
 // Account homes for switch targets, under the test dir.
@@ -1606,5 +1606,56 @@ describe("step 6 hardening", () => {
     expect(f.opens).toEqual([]);
     expect(events().slice(2)).toEqual([{ type: "bridge.started", version: BRIDGE_VERSION, resumed: true, awaitingTarget: true }, { type: "background.changed", work: [] }]);
     expect(state()).toMatchObject({ harness: "codex", nativeThreadId: raw.nativeThreadId, trimSeq: 0, ackCandidate: null, awaitingTarget: false, pendingHandoff: raw.pendingHandoff });
+  });
+});
+
+describe("target.applied (DEVBOX-101)", () => {
+  const applied = () => events().filter((e) => e.type === "target.applied");
+
+  test("a switch with devd's switchId logs target.applied once the target is open, before it answers", async () => {
+    const f = fakeHarness();
+    await start(f, { account: "a" });
+    const target: SwitchTarget = { harness: "claude", account: "b", model: "m2", env: { CLAUDE_CONFIG_DIR: claudeProfile("b") } };
+    await cmd({ kind: "switchTarget", target, resume: null, handoff: null, switchId: "sw-1" });
+    expect(applied()).toEqual([{ type: "target.applied", switchId: "sw-1", harness: "claude", account: "b", model: "m2" }]);
+    expect(state().appliedSwitchId).toBeNull();
+  });
+
+  test("a switch without a switchId (an older devd, a re-send) logs none", async () => {
+    const f = fakeHarness();
+    await start(f, { account: "a" });
+    await switchCmd({ harness: "claude", account: "b", model: null, env: { CLAUDE_CONFIG_DIR: claudeProfile("b") } });
+    expect(applied()).toEqual([]);
+  });
+
+  test("a bridge restarted mid-switch opens the saved target and then logs its target.applied", async () => {
+    saveState(join(dir, "state.json"), baseState({
+      harness: "claude", account: "b", model: "m2", nativeThreadId: "thread-b", appliedSwitchId: "sw-2",
+      target: { harness: "claude", account: "b", model: "m2", env: { CLAUDE_CONFIG_DIR: claudeProfile("b") }, droppedEnvKeys: [] },
+    }));
+    const f = fakeHarness();
+    await start(f, { account: "a" });
+    expect(f.opens[0]).toMatchObject({ resume: "thread-b", target: { account: "b" } });
+    expect(applied()).toEqual([{ type: "target.applied", switchId: "sw-2", harness: "claude", account: "b", model: "m2" }]);
+    expect(state().appliedSwitchId).toBeNull();
+  });
+
+  test("a target that cannot open is not applied: no event, and the previous target keeps what it had", async () => {
+    const f = fakeHarness({ readyErrors: [undefined, new Error("Authentication required")] });
+    await start(f, { account: "a" });
+    await expect(cmd({ kind: "switchTarget", target: { harness: "vibe", account: null, model: null, env: {} }, resume: null, handoff: null, switchId: "sw-3" }))
+      .rejects.toThrow("Authentication required");
+    expect(applied()).toEqual([]);
+    expect(state()).toMatchObject({ harness: "claude", appliedSwitchId: null });
+  });
+
+  test("a target whose thread cannot be resumed is applied all the same: the bridge is on it, awaiting a fresh thread", async () => {
+    const f = fakeHarness({ readyErrors: [undefined, new ResumeFailedError("no transcript")] });
+    await start(f, { account: "a" });
+    await cmd({ kind: "switchTarget", target: { harness: "claude", account: "b", model: null, env: { CLAUDE_CONFIG_DIR: claudeProfile("b") } }, resume: "thread-dead", handoff: null, switchId: "sw-4" });
+    expect(applied()).toEqual([{ type: "target.applied", switchId: "sw-4", harness: "claude", account: "b", model: null }]);
+    // Before the resume-failed: devd re-plans the fresh thread from the target it confirmed, not the one it had before.
+    const types = events().map((e) => e.type);
+    expect(types.indexOf("target.applied")).toBeLessThan(types.lastIndexOf("run.failed"));
   });
 });
