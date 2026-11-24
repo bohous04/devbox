@@ -42,6 +42,8 @@ class Safety(unittest.TestCase):
         self.cfg=json.loads((HERE/'config.example.json').read_text())
         self.cfg.update(root=str(self.root),state_dir=str(self.root/'state'))
         self.g=guard.Guard(self.cfg)
+        # Listings go through whatever fake a test installs as borg (borg_lines has its own tests).
+        self.g.borg_lines=lambda args:iter(self.g.borg(args).splitlines())
     def tearDown(self):self.tmp.cleanup()
 
     @patch.dict(os.environ, {'DEVBOX_STORAGE_GUARD': '1'})
@@ -307,11 +309,11 @@ class Safety(unittest.TestCase):
             with patch.object(self.g,'borg',side_effect=borg):
                 if ok:self.g.archive([own],'test',[shared],verify_only=[own],hash_content=False)
                 else:
-                    with self.assertRaisesRegex(RuntimeError,'missing'):
+                    with self.assertRaisesRegex(RuntimeError,'missing from the archive'):
                         self.g.archive([own],'test',[shared],verify_only=[own],hash_content=False)
 
     def test_listing_check_covers_size_type_and_the_registration(self):
-        c,ws,common,admin=self.end_fixture();(ws/'f').write_text('data')
+        c,ws,common,admin=self.end_fixture();(ws/'f').write_text('data');(ws/'g').write_text('data')
         sig={str(ws):guard.signature(ws,False),str(admin):guard.signature(admin,False)}
         pats=['pp:'+str(ws).lstrip('/'),'pp:'+str(admin).lstrip('/')]
         good=[json.loads(l) for l in listing(['list','x',*pats]).splitlines()]
@@ -323,12 +325,28 @@ class Safety(unittest.TestCase):
                        [dict(i,type='l') if i['path'].endswith('/f') else i for i in good],
                        [dict(i,healthy=False) if i['path'].endswith('/f') else i for i in good],
                        [i for i in good if not i['path'].endswith('/HEAD')]):
-            with self.assertRaisesRegex(RuntimeError,'missing or different'):check(broken)
+            with self.assertRaisesRegex(RuntimeError,'(missing from|differs in) the archive'):check(broken)
         # A later hardlink is listed with mode h... and size 0; its size is the source's.
-        hl=[dict(i,mode='h'+i['mode'][1:],size=0,source='first') if i['path'].endswith('/f') else i for i in good]
-        check(hl+[dict(type='-',mode='-rw-r--r--',path='first',healthy=True,source='',size=4)])
-        with self.assertRaisesRegex(RuntimeError,'missing or different'):
-            check(hl+[dict(type='-',mode='-rw-r--r--',path='first',healthy=True,source='',size=3)])
+        # borg lists the first link (here g) before the later ones.
+        g=next(i for i in good if i['path'].endswith('/g'))
+        hl=[i for i in good if i is not g]
+        at=next(n for n,i in enumerate(hl) if i['path'].endswith('/f'))
+        hl[at:at+1]=[g,dict(hl[at],mode='h'+hl[at]['mode'][1:],size=0,source=g['path'])]
+        check(hl)
+        with self.assertRaisesRegex(RuntimeError,'differs in the archive'):
+            check([dict(i,source='elsewhere') if i['mode'].startswith('h') else i for i in hl])
+
+    def test_listing_matches_non_utf8_names_as_borg_prints_them(self):
+        # Python keeps an undecodable byte as a surrogate; borg's JSON shows it as '?'.
+        root=str(self.root/'w');name='bad\udcff.txt'
+        sig={root:[('w',0o40755,1,1,0,0,0,None),('w/'+name,0o100644,1,2,3,0,0,None)]}
+        items=[dict(type='d',mode='drwxr-xr-x',path=root.lstrip('/'),healthy=True,source='',size=0),
+               dict(type='-',mode='-rw-r--r--',path=root.lstrip('/')+'/bad?.txt',healthy=True,source='',size=3)]
+        with patch.object(self.g,'borg',return_value='\n'.join(map(json.dumps,items)).encode()):
+            self.g.require_listed('x',sig,['pp:'+root.lstrip('/')])
+            sig[root].append(('w/bad\udcfe.txt',0o100644,1,3,3,0,0,None))  # maps to the same '?' name
+            with self.assertRaisesRegex(RuntimeError,'non-UTF-8'):
+                self.g.require_listed('x',sig,['pp:'+root.lstrip('/')])
 
     def test_worktree_registration_edge_cases(self):
         c,ws,common,admin=self.end_fixture()
@@ -1083,6 +1101,38 @@ class Safety(unittest.TestCase):
         self.assertIn(common/'objects',paths)
         self.assertEqual((workspace/'.git').read_text(),pointer)
         self.assertEqual((workspace/'unique').read_text(),'preserve me')
+
+
+class BorgLines(unittest.TestCase):
+    """borg_lines streams a real child process; `borg` is swapped for a Python one-liner."""
+    def lines(self,code,consume=None):
+        g=guard.Guard.__new__(guard.Guard);g.borg_env=lambda:dict(os.environ)
+        real=subprocess.Popen
+        def popen(args,**k):
+            self.child=real([sys.executable,'-c',code],**k);return self.child
+        with patch.object(guard.subprocess,'Popen',side_effect=popen):
+            gen=g.borg_lines(['list','x'])
+            return list(gen) if consume is None else consume(gen)
+
+    def test_streams_every_line(self):
+        self.assertEqual(self.lines('print("a");print("b")'),[b'a\n',b'b\n'])
+
+    def test_failure_after_the_stream_raises(self):
+        with self.assertRaisesRegex(RuntimeError,r'rc=2.*broken'):
+            self.lines('import sys;print("a");sys.stderr.write("broken");sys.exit(2)')
+
+    def test_abandoned_stream_kills_borg(self):
+        def first(gen):
+            line=next(gen);gen.close();return line
+        self.assertEqual(self.lines('import time;print("a",flush=True);time.sleep(60)',first),b'a\n')
+        self.assertIsNotNone(self.child.poll())
+
+    def test_bad_line_raises(self):
+        g=guard.Guard.__new__(guard.Guard)
+        sig={'/r':[('r',0o100644,1,1,3,0,0,None)]}
+        for out in (b'not json',b'{"path": "r"}'):
+            g.borg_lines=lambda args,out=out:iter([out])
+            with self.assertRaises((ValueError,KeyError)):g.require_listed('x',sig,['pp:r'])
 
 
 class InspectExisting(unittest.TestCase):

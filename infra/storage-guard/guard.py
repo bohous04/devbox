@@ -320,22 +320,57 @@ class Guard:
         self.audit('archive-verified', archive=name, paths=list(before), shared=list(map(str, shared)))
         return name, before
 
+    def borg_lines(self, args):
+        """Stream borg's stdout line by line (a listing of ~0.5M items held at once took >1 GiB)."""
+        with tempfile.TemporaryFile() as err:
+            p = subprocess.Popen(['borg', '--lock-wait', '30', *args], stdout=subprocess.PIPE, stderr=err, env=self.borg_env())
+            try:
+                yield from p.stdout
+                rc = p.wait(timeout=600)
+            finally:
+                if p.poll() is None:
+                    p.kill()
+                    p.wait()
+                p.stdout.close()
+            if rc:
+                err.seek(0)
+                raise RuntimeError(f'borg {args[0]} failed (rc={rc}): ' + err.read().decode(errors='replace')[-800:])
+
     def require_listed(self, dest, expect, patterns):
-        items = {}
-        for line in self.borg(['list', '--json-lines', dest, *patterns]).splitlines():
-            it = json.loads(line)
-            items[it['path']] = it
+        """Every expected item must be in the archive listing with its type and, for a regular
+        file, its size. borg prints paths through remove_surrogates (an undecodable byte becomes
+        '?'), so expected paths are mapped the same way."""
+        as_borg = lambda path: path.encode('utf-8', 'replace').decode('utf-8')
+        pending = {}
         for root, sig in expect.items():
             for rel, mode, _dev, _ino, size, *_ in sig:
                 kind = stat.filemode(mode)[0]
                 if kind == 's':
                     continue  # borg skips sockets; they hold no data
-                path = str(Path(root).parent / rel).lstrip('/')
-                it = items.get(path)
+                raw = str(Path(root).parent / rel).lstrip('/')
+                path = as_borg(raw)
+                if path in pending:
+                    raise RuntimeError(f'{raw!r}: two names differ only in non-UTF-8 bytes, so the archive listing '
+                                       'cannot tell them apart; deletion denied')
+                pending[path] = (kind, size)
+        sizes = {}  # path -> size of verified regular files, for hardlinks listed after them
+        for line in self.borg_lines(['list', '--json-lines', dest, *patterns]):
+            it = json.loads(line)
+            want = pending.pop(it['path'], None)
+            if want is None:
+                continue
+            kind, size = want
+            if kind == '-' and it['mode'].startswith('h'):
                 # A hardlink after the first is listed with mode h... and size 0; its data is the source's.
-                listed = items.get(it['source'], {}).get('size') if it and it['mode'].startswith('h') else it and it['size']
-                if not it or it['type'] != kind or not it.get('healthy', False) or (kind == '-' and listed != size):
-                    raise RuntimeError(f'{path} is missing or different in the archive; deletion denied')
+                listed = sizes.get(it['source'])
+            else:
+                listed = it['size']
+            if it['type'] != kind or not it['healthy'] or (kind == '-' and listed != size):
+                raise RuntimeError(f"{it['path']} differs in the archive (type/size/health); deletion denied")
+            if kind == '-':
+                sizes[it['path']] = size
+        if pending:
+            raise RuntimeError(f'{next(iter(pending))} and {len(pending) - 1} more are missing from the archive; deletion denied')
 
     def notify(self, key, message, title='Devbox: místo na disku'):
         if not self.c.get('notify_enabled', True):
