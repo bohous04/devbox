@@ -55,6 +55,32 @@ export function targetPollMs(t: Pick<ChatTarget, "awaitingTarget">): number | nu
   return t.awaitingTarget ? 5_000 : null;
 }
 
+/** Reads the target so that only the newest read lands: an answer (or failure) of a read started before another one
+ *  is dropped, so an older `awaitingTarget: true` never overwrites a newer false. `load` always reads (a trigger,
+ *  Retry, after a switch); `poll` skips its tick while any read is in flight. */
+export class TargetReader<T> {
+  private seq = 0;
+  private inFlight = 0;
+  constructor(private read: () => Promise<T>, private onValue: (t: T) => void, private onError: (e: unknown) => void) {}
+
+  async load(): Promise<void> {
+    const n = ++this.seq;
+    this.inFlight++;
+    try {
+      const t = await this.read();
+      if (n === this.seq) this.onValue(t);
+    } catch (e) {
+      if (n === this.seq) this.onError(e);
+    } finally {
+      this.inFlight--;
+    }
+  }
+
+  poll(): void {
+    if (this.inFlight === 0) void this.load();
+  }
+}
+
 /** A proxy profile's model is set in settings.proxyModels (devd: 400 model-set-by-profile). */
 export function modelMenuBlocked(t: ChatTarget): string | null {
   const p = profileFor(t.agent);

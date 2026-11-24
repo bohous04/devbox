@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Check, ChevronDown, LoaderCircle } from "lucide-react";
 import type { ThreadSnapshot } from "../../../../shared/thread";
 import { Button } from "@/components/ui/button";
@@ -10,7 +10,7 @@ import { profileFor } from "../../newSession";
 import { AgentLogo, logoForAgent } from "../agentLogos";
 import {
   accountMenuBlocked, awaitingTargetText, targetPollMs, bridgeOutdatedText, switchNoticeCount, claudeAccountOptions, codexAccountOptions, effortChipLabel, effortFooter, effortMenuBlocked, effortOptions, harnessOptions,
-  modelLabel, modelMenuBlocked, modelOptions, switchBlocked, switchErrorText, switchResultText, type SwitchOption,
+  modelLabel, modelMenuBlocked, modelOptions, switchBlocked, switchErrorText, switchResultText, TargetReader, type SwitchOption,
 } from "../../switchView";
 
 type Which = "harness" | "model" | "account" | "effort";
@@ -38,17 +38,19 @@ export function Switchers({ sessionId, thread, children }: {
   // A queued message or a devd notice (a bridge restart, a failed resume) may mean the bridge now awaits its target.
   const notices = switchNoticeCount(thread.items);
   const runCount = thread.runs.length;
-  const loadTarget = useCallback(() => api.chatTarget(sessionId).then(
+  const reader = useMemo(() => new TargetReader(
+    () => api.chatTarget(sessionId),
     (t) => { setTarget(t); setTargetErr(null); },
     (e) => setTargetErr(`Could not read the current agent: ${errorText(e)}`),
   ), [sessionId]);
+  const loadTarget = useCallback(() => reader.load(), [reader]);
   useEffect(() => { void loadTarget(); }, [loadTarget, n?.harness, n?.nativeThreadId, n?.model, n?.account, ended, runCount, notices]);
   const pollMs = target === null ? null : targetPollMs(target);
   useEffect(() => {
     if (pollMs === null) return;
-    const id = setInterval(() => void loadTarget(), pollMs);
+    const id = setInterval(() => reader.poll(), pollMs);
     return () => clearInterval(id);
-  }, [loadTarget, pollMs]);
+  }, [reader, pollMs]);
   // A result note belongs to the last switch; the next message the user sends is a new action.
   const runs = thread.runs.length;
   useEffect(() => { setNote(null); }, [runs]);
@@ -85,16 +87,9 @@ export function Switchers({ sessionId, thread, children }: {
     setBusy(null);
   }
 
-  const targetErrLine = targetErr ? (
-    <p key="targetErr" role="alert" className="flex flex-wrap items-center gap-2 text-xs text-destructive">
-      {targetErr}
-      <Button type="button" variant="outline" size="xs" onClick={() => void loadTarget()}>Retry</Button>
-    </p>
-  ) : null;
-  if (!target) return children({ menus: null, status: targetErrLine });
+  const status = <SwitcherStatus target={target} targetErr={targetErr} note={note} err={err} onRetry={() => void loadTarget()} />;
+  if (!target) return children({ menus: null, status });
   const blocked = switchBlocked(thread, target);
-  const awaiting = awaitingTargetText(target, { stale: targetErr !== null });
-  const outdated = bridgeOutdatedText(target);
   const profile = profileFor(target.agent);
 
   // A readable name only for a model the menu ticks; any other id (a dated or effort variant) shows as reported.
@@ -158,14 +153,33 @@ export function Switchers({ sessionId, thread, children }: {
       </DropdownMenuContent>
     </DropdownMenu>
   );
+  return children({ menus, status });
+}
+
+/** The status lines above the composer: the waiting line (hidden while the latest re-read failed), an outdated
+ *  bridge, the last switch's result or error, and a failed target read with Retry. Nothing when there is none. */
+export function SwitcherStatus({ target, targetErr, note, err, onRetry }: {
+  target: ChatTarget | null;
+  targetErr: string | null;
+  note: string | null;
+  err: string | null;
+  onRetry: () => void;
+}) {
+  const awaiting = target && awaitingTargetText(target, { stale: targetErr !== null });
+  const outdated = target && bridgeOutdatedText(target);
   const lines = [
     awaiting && <p key="awaiting" role="status" className="text-xs text-muted-foreground">{awaiting}</p>,
     outdated && <p key="outdated" role="status" className="text-xs text-muted-foreground">{outdated}</p>,
-    note && <p key="note" role="status" className="text-xs text-amber-700 dark:text-amber-300">{note}</p>,
-    err && <p key="err" role="alert" className="text-xs text-destructive">{err}</p>,
-    targetErrLine,
+    target && note && <p key="note" role="status" className="text-xs text-amber-700 dark:text-amber-300">{note}</p>,
+    target && err && <p key="err" role="alert" className="text-xs text-destructive">{err}</p>,
+    targetErr && (
+      <p key="targetErr" role="alert" className="flex flex-wrap items-center gap-2 text-xs text-destructive">
+        {targetErr}
+        <Button type="button" variant="outline" size="xs" onClick={onRetry}>Retry</Button>
+      </p>
+    ),
   ].filter(Boolean);
-  return children({ menus, status: lines.length > 0 ? <div className="flex flex-col gap-1">{lines}</div> : null });
+  return lines.length > 0 ? <div className="flex flex-col gap-1">{lines}</div> : null;
 }
 
 /** One section of the menu. Disabled options show their reason inline (a disabled menu item gets no hover, and touch
