@@ -178,7 +178,7 @@ function spoken(item: InboxItem, now: number, title: string, showAgent: boolean)
 }
 
 // The actions sit over the row's right end: the ✓ in the state's place on the title line, the menu in the agent
-// mark's place on the second. On a touch screen (no hover) only the menu shows, always, beside the row.
+// mark's place on the second. On a touch screen (no hover) both show, always, beside the row: the ✓, then the menu.
 const ACTION = "grid place-items-center rounded-md text-muted-foreground outline-none transition-opacity hover:bg-foreground/10 hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/60";
 const ON_HOVER = "[@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:group-has-[:focus-visible]:opacity-100 data-[state=open]:opacity-100";
 const HIDE_ON_HOVER = "[@media(hover:hover)]:group-hover:invisible [@media(hover:hover)]:group-has-[:focus-visible]:invisible [@media(hover:hover)]:group-has-[[data-state=open]]:invisible";
@@ -223,7 +223,7 @@ function Row({ item, now, onItem, quiet, settle }: { item: InboxItem; now: numbe
           type="button" aria-label={`Settle and end ${title} (E)`} aria-keyshortcuts="E"
           title={`Settle and end the session (E or ${SETTLE_CHORD})`}
           onClick={() => onSettle(item)}
-          className={cn(ACTION, ON_HOVER, "absolute right-2.5 top-[7px] hidden h-[22px] w-6 [@media(hover:hover)]:grid")}
+          className={cn(ACTION, ON_HOVER, "size-9 flex-none self-center [@media(hover:hover)]:absolute [@media(hover:hover)]:right-2.5 [@media(hover:hover)]:top-[7px] [@media(hover:hover)]:size-auto [@media(hover:hover)]:h-[22px] [@media(hover:hover)]:w-6")}
         >
           <Check className="size-3.5" strokeWidth={2.5} aria-hidden="true" />
         </button>
