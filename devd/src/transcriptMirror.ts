@@ -1,5 +1,5 @@
 // The Chat view of a tmux session: its `main` pane's Claude Code transcript or Codex rollout (codexMirror.ts), mapped
-// onto the chat thread's item model, and a composer that types into the pane (Claude only: Codex is read-only for now).
+// onto the chat thread's item model, and a composer that types into the pane.
 //
 // Where the transcript is: a VPS session container mounts devd's `<root>/_claude-projects/<session id>` as
 // `/home/dev/.claude/projects/-workspace` (sessions.ts), and every account profile's `projects` resolves into it, so
@@ -70,11 +70,12 @@ def main_rollout(path):
 
 def locate(session):
     out = {"pane": None, "procs": [], "claude": {}, "codex": {}}
-    r = subprocess.run(["tmux", "display-message", "-p", "-t", "=" + session + ":", "#{pane_pid}\t#{pane_in_mode}"],
-                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    f = r.stdout.strip().split("\t")
-    if r.returncode == 0 and len(f) == 2 and f[0].isdigit():
-        out["pane"] = {"pid": int(f[0]), "inMode": f[1] == "1"}
+    # The title last: whatever the agent set it to may hold a tab.
+    r = subprocess.run(["tmux", "display-message", "-p", "-t", "=" + session + ":", "#{pane_pid}\t#{pane_in_mode}\t#{pane_title}"],
+                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace")
+    f = r.stdout.rstrip("\n").split("\t", 2)
+    if r.returncode == 0 and len(f) == 3 and f[0].isdigit():
+        out["pane"] = {"pid": int(f[0]), "inMode": f[1] == "1", "title": f[2]}
     for d in os.listdir("/proc"):
         if not d.isdigit():
             continue
@@ -141,6 +142,13 @@ print(json.dumps(locate(sys.argv[1])))
 // The screen: Claude's selection dialogs (trust, question, permission) end with a "Enter to confirm/select … Esc to
 // cancel" footer; its prompt box is a `❯` line right below a rule, running to the next rule, and the placeholder in an
 // empty prompt is dim (`\e[2m` up to a reset). Verified on Claude Code 2.1.325.
+//
+// Codex (verified on 0.172.0 in tmux): its composer line starts with a bold `›` (`\e[1m›\e[0m `), followed by the dim
+// placeholder when empty or the typed text. Past prompts in the history start with a dim bold `›` on a background and
+// a popup's selected row with a reverse one, so neither passes for the composer; a popup over the composer ends with an
+// "enter select · esc back" hint (approvals: "to confirm", "to cancel"; questions: "to submit answer"). A composer
+// line without its placeholder could be the first, empty line of a longer draft: not ready. Codex also takes a
+// bracketed paste as one draft. Its title names the thread it is on (codexTitleThread), checked with the process.
 export const MIRROR_SEND = String.raw`# MIRROR_SEND${PY_LOCATE_FN}
 import re, signal, time, uuid
 
@@ -149,13 +157,41 @@ DIM = re.compile(r"\x1b\[2m.*?(?:\x1b\[0?m|\x1b\[22m|$)")
 RULE = re.compile(r"^\s*─{8,}\s*$")
 PROMPT = re.compile(r"^\s*❯")
 DIALOG = re.compile(r"Enter to (confirm|select)|Esc to cancel")
+CODEX_PROMPT = "\x1b[1m\u203a\x1b[0m"
+CODEX_DIALOG = re.compile(r"\benter\b.{0,12}\b(select|confirm|submit)|\besc\b.{0,12}\b(back|cancel)|\bto (confirm|cancel|submit)\b", re.I)
+TITLE_THREAD = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{0,12}")
 
-def screen(target):
+def capture(target):
     r = subprocess.run(["tmux", "capture-pane", "-e", "-p", "-t", target], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     if r.returncode != 0:
-        return "unknown"
+        return None
     raw = r.stdout.decode("utf-8", "replace").split("\n")
-    plain = [ANSI.sub("", l) for l in raw]
+    return raw, [ANSI.sub("", l) for l in raw]
+
+def codex_screen(target):
+    got = capture(target)
+    if got is None:
+        return "unknown"
+    raw, plain = got
+    if any(CODEX_DIALOG.search(l) for l in plain[-25:]):
+        return "dialog"
+    for line in reversed(raw):
+        line = line.lstrip(" ")
+        if not line.startswith(CODEX_PROMPT):
+            continue
+        rest = line[len(CODEX_PROMPT):]
+        if ANSI.sub("", DIM.sub("", rest)).replace("\u00a0", " ").strip():
+            return "draft"
+        return "ready" if DIM.search(rest) and ANSI.sub("", rest).strip() else "unknown"
+    return "unknown"
+
+def screen(target):
+    if kind == "codex":
+        return codex_screen(target)
+    got = capture(target)
+    if got is None:
+        return "unknown"
+    raw, plain = got
     if any(DIALOG.search(l) for l in plain[-25:]):
         return "dialog"
     for i in range(len(plain) - 1, 0, -1):
@@ -199,7 +235,11 @@ def check(session, expected, agents):
         queue.extend(sorted(children.get(p, [])))
     if nearest != expected or starts.get(nearest) != expected_start:
         return "pane-changed"
-    if (now["claude"].get(str(expected)) or {}).get("status") == "waiting":
+    if kind == "codex":
+        ids = TITLE_THREAD.findall(pane.get("title") or "")
+        if len(ids) != 1 or len(ids[0]) < 24 or not thread.startswith(ids[0]):
+            return "conversation-unknown"
+    elif (now["claude"].get(str(expected)) or {}).get("status") == "waiting":
         return "agent-waiting-in-terminal"
     if pane["inMode"]:
         return "terminal-scrolled"
@@ -208,6 +248,8 @@ def check(session, expected, agents):
 # Below the docker exec timeout (15 s), so a hung tmux never leaves this running to type later.
 signal.alarm(12)
 session, expected, agents, expected_start = sys.argv[1], int(sys.argv[2]), set(sys.argv[3].split(",")), sys.argv[4]
+# "claude", or "codex" with the thread its title must name.
+kind, thread = sys.argv[5], sys.argv[6]
 text = sys.stdin.buffer.read()
 target = "=" + session + ":"
 refused = check(session, expected, agents)
@@ -241,8 +283,21 @@ export type PaneAgent =
   | { kind: "no-agent"; inMode: boolean }
   | { kind: "other"; runtime: string; inMode: boolean }
   | { kind: "claude"; pid: number; start: string; inMode: boolean; sid: string | null; status: "idle" | "busy" | "waiting" | null }
-  /** `open`: thread ids of the rollouts the process has open. */
-  | { kind: "codex"; pid: number; start: string; inMode: boolean; home: string | null; open: string[] };
+  /** `open`: thread ids of the rollouts the process has open. `titleThread`: the thread id (a prefix of it) the pane's
+   *  title shows (codexTitleThread), null when it shows none. */
+  | { kind: "codex"; pid: number; start: string; inMode: boolean; home: string | null; open: string[]; titleThread: string | null };
+
+// agent-launch has Codex put its thread id in the terminal title (image/co, `tui.terminal_title` item "thread-id"),
+// truncated by Codex to 29 characters and "..." (verified on 0.172.0). Unlike its rollouts and hooks, the title
+// changes the moment `/new` or `/resume` switches the conversation, so it tells whether a message typed in now lands in
+// the conversation the chat shows. 24 characters (up to the fourth group) is the least taken as an id.
+const TITLE_THREAD = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{0,12}/g;
+
+/** The one thread id (or its truncated prefix) in a Codex pane's title; null for none, a short one, or several. */
+export function codexTitleThread(title: string): string | null {
+  const ids = title.match(TITLE_THREAD) ?? [];
+  return ids.length === 1 && ids[0]!.length >= 24 ? ids[0]! : null;
+}
 
 /** null when the output is not what MIRROR_LOCATE prints. */
 export function parseLocate(stdout: string): PaneAgent | null {
@@ -251,7 +306,7 @@ export function parseLocate(stdout: string): PaneAgent | null {
   if (typeof raw !== "object" || raw === null) return null;
   const o = raw as { pane?: unknown; procs?: unknown; claude?: unknown; codex?: unknown };
   if (o.pane === null) return { kind: "no-pane" };
-  const pane = o.pane as { pid?: unknown; inMode?: unknown } | undefined;
+  const pane = o.pane as { pid?: unknown; inMode?: unknown; title?: unknown } | undefined;
   if (typeof pane?.pid !== "number" || typeof pane.inMode !== "boolean" || !Array.isArray(o.procs) || typeof o.claude !== "object" || o.claude === null
     || typeof o.codex !== "object" || o.codex === null) return null;
   const procs: Proc[] = [];
@@ -267,7 +322,8 @@ export function parseLocate(stdout: string): PaneAgent | null {
     const info = (o.codex as Record<string, { home?: unknown; open?: unknown }>)[String(nearest.pid)];
     const home = typeof info?.home === "string" && codexHomeAllowed(info.home) ? info.home : null;
     const open = Array.isArray(info?.open) ? info.open.filter((t): t is string => typeof t === "string" && UUID.test(t)) : [];
-    return { kind: "codex", pid: nearest.pid, start: starts.get(nearest.pid)!, inMode: pane.inMode, home, open };
+    const titleThread = typeof pane.title === "string" ? codexTitleThread(pane.title) : null;
+    return { kind: "codex", pid: nearest.pid, start: starts.get(nearest.pid)!, inMode: pane.inMode, home, open, titleThread };
   }
   if (nearest.comm !== "claude") return { kind: "other", runtime: nearest.comm, inMode: pane.inMode };
   const info = (o.claude as Record<string, { sid?: unknown; status?: unknown }>)[String(nearest.pid)];
@@ -480,13 +536,16 @@ export const SEND_MESSAGES: Record<MirrorSendError, string> = {
   "terminal-not-ready": "The terminal is not showing the agent's prompt. Check the terminal.",
   "terminal-scrolled": "The terminal is scrolled back. Return it to the bottom first.",
   "conversation-unknown": "devd could not tell which conversation the agent is on. Use the terminal.",
-  "codex-send-unsupported": "Sending from chat isn't available for Codex yet; reply in the terminal.",
+  "codex-send-unsupported": "This Codex doesn't show its conversation in the terminal title, so devd can't tell where a message would land. Restart it from devbox to send from chat, or reply in the terminal.",
   "unsupported-agent": "Chat view isn't supported for this agent yet.",
   "unsupported-host": "Chat view isn't supported on InstaBox sessions yet.",
   "pane-changed": "The terminal changed while the message was being sent; nothing was typed. Check the terminal.",
   // MIRROR_SEND pasted the text, then did not press Enter.
   "not-submitted": "The terminal changed while the message was being typed; it was not submitted and may still be in the terminal's prompt. Check the terminal.",
 };
+
+/** The lock while the title names another Codex thread than the one mirrored. */
+const CODEX_MOVED = "The terminal is on another Codex conversation than this chat shows (after /new or /resume). Send its first prompt in the terminal and the chat follows, or use the terminal.";
 
 export interface MirrorDeps {
   db: Parameters<typeof getSession>[0];
@@ -749,18 +808,19 @@ export class TranscriptMirror {
     }
     if (pane.kind === "codex") {
       const agent = AGENTS.codex.label;
-      // v1 only reads Codex: which conversation its TUI shows can change (/new, /resume) with nothing devd can see
-      // until the next prompt, so a message typed in from here could land in another conversation than the one shown.
-      const sendBlock = block("codex-send-unsupported");
-      if (codex?.thread == null) return { ...base, state: "unresolved", agent, sendBlock };
-      // Codex reports no status of its own: waiting comes from its hook events, a running turn from the rollout.
-      const live = this.d.live(id);
-      const waiting = live?.status === "waiting";
-      return {
-        state: "live", agent, conversationId: codex.thread, activity: waiting ? "waiting" : codex.busy ? "busy" : "idle",
-        terminalPrompt: waiting ? { text: live.reason || "The agent is waiting for an answer in the terminal." } : null,
-        sendBlock,
-      };
+      // Which conversation Codex's TUI is on changes with /new and /resume, which neither its rollouts nor its hooks
+      // show until the next prompt: only its title does (codexTitleThread). Without the id there, a message typed in
+      // from here could land in another conversation than the one shown.
+      if (pane.titleThread === null) {
+        const sendBlock = block("codex-send-unsupported");
+        if (codex?.thread == null) return { ...base, state: "unresolved", agent, sendBlock };
+        return { ...this.codexLive(id, codex.thread, codex.busy), agent, sendBlock };
+      }
+      if (codex?.thread == null) return { ...base, state: "unresolved", agent, sendBlock: block("conversation-unknown") };
+      const info = this.codexLive(id, codex.thread, codex.busy);
+      const sendBlock = !codex.thread.startsWith(pane.titleThread) ? block("conversation-unknown", CODEX_MOVED)
+        : info.activity === "waiting" ? block("agent-waiting-in-terminal") : pane.inMode ? block("terminal-scrolled") : null;
+      return { ...info, agent, sendBlock };
     }
     const agent = AGENTS.claude.label;
     if (pane.sid === null) return { ...base, state: "unresolved", agent, sendBlock: block("conversation-unknown") };
@@ -770,6 +830,17 @@ export class TranscriptMirror {
       state: "live", agent, conversationId: pane.sid, activity: pane.status,
       terminalPrompt: waiting ? { text: live?.status === "waiting" && live.reason ? live.reason : "The agent is waiting for an answer in the terminal." } : null,
       sendBlock: waiting ? block("agent-waiting-in-terminal") : pane.inMode ? block("terminal-scrolled") : null,
+    };
+  }
+
+  /** A Codex pane's info apart from the agent and the send lock. Codex reports no status of its own: waiting comes
+   *  from its hook events, a running turn from the rollout. */
+  private codexLive(id: string, thread: string, busy: boolean): Omit<MirrorInfo, "agent" | "sendBlock"> {
+    const live = this.d.live(id);
+    const waiting = live?.status === "waiting";
+    return {
+      state: "live", conversationId: thread, activity: waiting ? "waiting" : busy ? "busy" : "idle",
+      terminalPrompt: waiting ? { text: live.reason || "The agent is waiting for an answer in the terminal." } : null,
     };
   }
 
@@ -1024,7 +1095,7 @@ export class TranscriptMirror {
   }
 
   /** Types `text` into the pane's agent prompt and submits it, or refuses with the reason. Never types into anything
-   *  but a verified, ready Claude prompt. */
+   *  but a verified, ready Claude prompt or Codex composer (and Codex only while its title names the mirrored thread). */
   async send(id: string, text: string): Promise<void> {
     // Leading blank lines would leave an agent's prompt looking empty after the paste, so Enter would not be pressed.
     text = text.replace(/\r\n/g, "\n").replace(/^(?:[ \t]*\n)+/, "");
@@ -1050,11 +1121,12 @@ export class TranscriptMirror {
       const pane = this.panes.get(id);
       if (pane === undefined) throw new MirrorSendRefused("terminal-not-ready", "devd could not check the terminal just now. Try again, or use the terminal.");
       const info = this.info(id);
-      if (pane?.kind !== "claude" || info.sendBlock) {
+      if ((pane?.kind !== "claude" && pane?.kind !== "codex") || info.sendBlock || (pane.kind === "codex" && info.conversationId === null)) {
         const b = info.sendBlock ?? { code: "agent-not-running" as const, message: SEND_MESSAGES["agent-not-running"] };
         throw new MirrorSendRefused(b.code, b.message);
       }
-      const sent = await this.d.exec(s.container, ["python3", "-I", "-c", MIRROR_SEND, MIRROR_PANE, String(pane.pid), AGENT_RUNTIMES.join(","), pane.start], 15_000, text);
+      const thread = pane.kind === "codex" ? info.conversationId! : "";
+      const sent = await this.d.exec(s.container, ["python3", "-I", "-c", MIRROR_SEND, MIRROR_PANE, String(pane.pid), AGENT_RUNTIMES.join(","), pane.start, pane.kind, thread], 15_000, text);
       let out: { ok?: unknown; error?: unknown } | null = null;
       try { out = JSON.parse(sent.stdout); } catch { out = null; }
       if (sent.code !== 0 || sent.timedOut || out === null) {

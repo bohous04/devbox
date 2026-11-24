@@ -55,13 +55,16 @@ export function parseProbe(raw: string): TmuxSession[] {
 const LEADING_GLYPHS = /^[⠀-⣿✀-➿·•*\s]+/;
 // Titles that say nothing: shells and Claude's idle title ("✳ Claude Code").
 const NOISE = new Set(["claude code", "claude", "zsh", "bash", "sh", "node", "tmux"]);
+// The thread id Codex puts last in its title when agent-launch started it (image/co), truncated with "...": the chat
+// mirror's marker (transcriptMirror.ts codexTitleThread), not something to label a session with.
+const CODEX_THREAD_SUFFIX = /(?:^|\s*\|\s*)[0-9a-f]{8}-[0-9a-f-]{1,27}(?:\.\.\.)?$/;
 // tmux default pane title = container hostname = 12 hex characters (docker container id).
 const HOSTNAME_LIKE = /^[0-9a-f]{12}$/;
 export const MAX_LABEL = 45;
 
 export function cleanTitle(raw: string | null): string | null {
   if (!raw) return null;
-  const t = raw.replace(LEADING_GLYPHS, "").trim();
+  const t = raw.replace(LEADING_GLYPHS, "").replace(CODEX_THREAD_SUFFIX, "").trim();
   if (!t) return null;
   if (NOISE.has(t.toLowerCase())) return null;
   if (HOSTNAME_LIKE.test(t)) return null;

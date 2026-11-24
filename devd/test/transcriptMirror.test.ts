@@ -6,6 +6,7 @@ import { Hono } from "hono";
 import type { MirrorResponse } from "../../shared/mirror";
 import type { ThreadItem } from "../../shared/thread";
 import type { ExecResult } from "../src/ccUpkeep";
+import { AGENT_RUNTIMES } from "../src/agents";
 import { insertNotifyLog, insertSession, openDb, type SessionRow } from "../src/db";
 import { CODEX_CHUNK_BYTES, mapCodexLines, MIRROR_CODEX_READ, newCodexMapState } from "../src/codexMirror";
 import { EventBus } from "../src/eventBus";
@@ -132,7 +133,7 @@ test("readChunk returns complete lines only, reads a line longer than the budget
   expect(over).toEqual({ lines: [], next: second.next, skipped: 1 });
 });
 
-const locateOut = (o: { pane?: { pid: number; inMode: boolean } | null; procs?: ([number, number, string] | [number, number, string, string])[]; claude?: Record<string, { sid: unknown; status: unknown }>; codex?: Record<string, unknown> }) =>
+const locateOut = (o: { pane?: { pid: number; inMode: boolean; title?: string } | null; procs?: ([number, number, string] | [number, number, string, string])[]; claude?: Record<string, { sid: unknown; status: unknown }>; codex?: Record<string, unknown> }) =>
   JSON.stringify({ pane: o.pane === undefined ? { pid: 10, inMode: false } : o.pane, procs: (o.procs ?? []).map((p) => p.length === 3 ? [...p, "777"] : p), claude: o.claude ?? {}, codex: o.codex ?? {} });
 
 test("parseLocate finds the pane's nearest agent and trusts only a well-formed session id", () => {
@@ -142,13 +143,21 @@ test("parseLocate finds the pane's nearest agent and trusts only a well-formed s
   expect(parseLocate(locateOut({ procs, claude: { "20": { sid: "../../etc/passwd", status: "weird" } } })))
     .toEqual({ kind: "claude", pid: 20, start: "777", inMode: false, sid: null, status: null });
   const codexAt = (home: string) => parseLocate(locateOut({ procs: [[10, 1, "bash"], [11, 10, "codex", "5"]], codex: { "11": { home, open: [SID, "../x"] } } }));
-  expect(codexAt("/home/dev/.codex")).toEqual({ kind: "codex", pid: 11, start: "5", inMode: false, home: "/home/dev/.codex", open: [SID] });
+  expect(codexAt("/home/dev/.codex")).toEqual({ kind: "codex", pid: 11, start: "5", inMode: false, home: "/home/dev/.codex", open: [SID], titleThread: null });
   expect(codexAt(`/home/dev/.codex-accounts/${SID2}`)).toMatchObject({ home: `/home/dev/.codex-accounts/${SID2}` });
   // Only the default home or an account profile's: a CODEX_HOME the agent chose itself is not read.
   for (const foreign of ["/tmp/codex", "/home/dev/.codex-accounts/default", `/home/dev/.codex-accounts/${SID2}/..`, "/home/dev/.codex/", "relative"]) {
     expect(codexAt(foreign)).toMatchObject({ kind: "codex", home: null });
   }
   expect(parseLocate(locateOut({ procs: [[10, 1, "bash"], [11, 10, "grok"]] }))).toEqual({ kind: "other", runtime: "grok", inMode: false });
+  // The thread id agent-launch has Codex put in the terminal title (truncated by Codex to 29 characters and "...").
+  const codexTitled = (title: string) => parseLocate(locateOut({ pane: { pid: 10, inMode: false, title }, procs: [[10, 1, "bash"], [11, 10, "codex", "5"]], codex: { "11": { home: "/home/dev/.codex", open: [] } } }));
+  expect(codexTitled("⠋ work | 01a20f04-879d-7191-83d5-8dd05...")).toMatchObject({ titleThread: "01a20f04-879d-7191-83d5-8dd05" });
+  expect(codexTitled(`work | ${SID}`)).toMatchObject({ titleThread: SID });
+  // No id, too short a prefix to tell threads apart, or two ids (a project name that looks like one): unknown.
+  for (const title of ["work", "work | 01a20f04-879d-7191...", `${SID} | 01a20f04-879d-7191-83d5-8dd05...`, "work | 01A20F04-879D-7191-83D5-8DD05..."]) {
+    expect(codexTitled(title)).toMatchObject({ titleThread: null });
+  }
   expect(parseLocate(locateOut({ procs: [[10, 1, "bash"]] }))).toEqual({ kind: "no-agent", inMode: false });
   expect(parseLocate(locateOut({ pane: null }))).toEqual({ kind: "no-pane" });
   expect(parseLocate("not json")).toBeNull();
@@ -170,6 +179,8 @@ interface Pane {
   /** The container is stopped (the backup stopped it): every exec fails with exit 1, docker reports it exited. */
   stopped?: boolean;
   codexHome?: string; home?: string; homes?: Record<string, string>; codexOpen?: string[]; pid?: number; start?: string;
+  /** The pane's terminal title (Codex: carries the thread id when agent-launch started it). */
+  title?: string;
   /** Holds every pane read until it settles: a slow `docker exec`. */
   gate?: Promise<void>;
 }
@@ -194,7 +205,7 @@ function setup(pane: Pane, isEnding: (id: string) => boolean = () => false, o: {
       if (pane.noPane) return ok(locateOut({ pane: null }));
       const agent = pane.agent ?? "claude";
       const pid = pane.pid ?? 20;
-      return ok(locateOut({ pane: { pid: 10, inMode: pane.inMode ?? false }, procs: agent === "none" ? [[10, 1, "bash"]] : [[10, 1, "bash"], [pid, 10, agent, pane.start ?? "777"]],
+      return ok(locateOut({ pane: { pid: 10, inMode: pane.inMode ?? false, title: pane.title ?? "" }, procs: agent === "none" ? [[10, 1, "bash"]] : [[10, 1, "bash"], [pid, 10, agent, pane.start ?? "777"]],
         claude: agent === "claude" ? { [pid]: { sid: pane.sid, status: pane.status ?? "idle" } } : {},
         codex: agent === "codex" ? { [pid]: { home: pane.home ?? "/home/dev/.codex", open: pane.codexOpen ?? [] } } : {} }));
     }
@@ -525,8 +536,7 @@ test("send types the text through the send script's stdin and maps its refusals"
   expect(typed(t)).toHaveLength(1);
   expect(typed(t)[0]!.stdin).toBe("line one\nline 'two' / not a command");
   expect(typed(t)[0]!.cmd.slice(0, 3)).toEqual(["python3", "-I", "-c"]);
-  expect(typed(t)[0]!.cmd.slice(4, 6)).toEqual(["main", "20"]);
-  expect(typed(t)[0]!.cmd.at(-1)).toBe("777");
+  expect(typed(t)[0]!.cmd.slice(4)).toEqual(["main", "20", AGENT_RUNTIMES.join(","), "777", "claude", ""]);
   expect(await refusal(t.mirror.send(TMUX.id, "\n  \nafter blank lines"))).toBe("sent");
   expect(typed(t)[1]!.stdin).toBe("after blank lines");
   pane.sendResult = '{"error": "pane-changed"}';
@@ -680,7 +690,7 @@ const RULE = "─".repeat(40);
 const READY = `⏺ done\n${RULE}\n\x1b[39m❯\u00a0\x1b[2mTry "create a util"\x1b[0m\n${RULE}\n  Opus [high]\n`;
 
 /** `onLoad`/`onPaste`: shell run by the fake tmux on load-buffer/paste-buffer (`$PROC` is the fake /proc). */
-function fakeContainer(opts: { status: string; agent?: string; procStart?: string; inMode?: boolean; screen?: string; screenAfterPaste?: string; onLoad?: string; onPaste?: string }) {
+function fakeContainer(opts: { status: string; agent?: string; procStart?: string; inMode?: boolean; screen?: string; screenAfterPaste?: string; onLoad?: string; onPaste?: string; title?: string }) {
   const dir = tmp("mirror-py-");
   const proc = join(dir, "proc");
   const home = join(dir, "home");
@@ -697,8 +707,10 @@ function fakeContainer(opts: { status: string; agent?: string; procStart?: strin
   const log = join(dir, "tmux.log");
   writeFileSync(join(dir, "screen"), opts.screen ?? READY);
   writeFileSync(join(dir, "screen-after"), opts.screenAfterPaste ?? `${RULE}\n❯ pasted\n${RULE}\n`);
+  // display-message prints the pane's title from this file, so a test can change it mid-send (onLoad, onPaste).
+  writeFileSync(join(dir, "title"), opts.title ?? "dev");
   // capture-pane shows `screen` until a paste, then `screen-after`.
-  writeFileSync(join(bin, "tmux"), `#!/bin/sh\necho "$@" >> '${log}'\ncase "$1" in\n  display-message) printf '10\\t${opts.inMode ? 1 : 0}\\n' ;;\n  load-buffer) cat > '${join(dir, "pasted")}'; PROC='${proc}'; ${opts.onLoad ?? ":"} ;;\n  paste-buffer) cp '${join(dir, "screen-after")}' '${join(dir, "screen")}'; PROC='${proc}'; ${opts.onPaste ?? ":"} ;;\n  capture-pane) cat '${join(dir, "screen")}' ;;\nesac\n`, { mode: 0o755 });
+  writeFileSync(join(bin, "tmux"), `#!/bin/sh\necho "$@" >> '${log}'\ncase "$1" in\n  display-message) printf '10\\t${opts.inMode ? 1 : 0}\\t%s\\n' "$(cat '${join(dir, "title")}')" ;;\n  load-buffer) cat > '${join(dir, "pasted")}'; PROC='${proc}'; ${opts.onLoad ?? ":"} ;;\n  paste-buffer) cp '${join(dir, "screen-after")}' '${join(dir, "screen")}'; PROC='${proc}'; ${opts.onPaste ?? ":"} ;;\n  capture-pane) cat '${join(dir, "screen")}' ;;\nesac\n`, { mode: 0o755 });
   const run = (script: string, args: string[], stdin = "") => {
     const r = Bun.spawnSync(["python3", "-I", "-c", HARNESS, script, ...args], {
       stdin: Buffer.from(stdin), env: { FAKE_PROC: proc, PATH: `${bin}:/usr/bin:/bin` },
@@ -721,25 +733,25 @@ test.skipIf(!Bun.which("python3"))("MIRROR_LOCATE reports the pane, the process 
 
 test.skipIf(!Bun.which("python3"))("MIRROR_SEND pastes stdin bracketed and presses Enter, or refuses after re-checking", () => {
   const c = fakeContainer({ status: "idle" });
-  const r = c.run(MIRROR_SEND, ["main", "20", "claude,codex", "777"], "two\nlines $(nope) 'q'");
+  const r = c.run(MIRROR_SEND, ["main", "20", "claude,codex", "777", "claude", ""], "two\nlines $(nope) 'q'");
   expect([r.code, r.out.trim()]).toEqual([0, '{"ok": true}']);
   expect(c.pasted()).toBe("two\nlines $(nope) 'q'");
   const log = c.tmuxLog();
   expect(log).toMatch(/paste-buffer -p -d -b devd-mirror-[0-9a-f]+ -t =main:/);
   expect(log.trim().split("\n").at(-1)).toBe("send-keys -t =main: Enter");
-  expect(c.run(MIRROR_SEND, ["main", "21", "claude", "777"], "x").out.trim()).toBe('{"error": "pane-changed"}');
+  expect(c.run(MIRROR_SEND, ["main", "21", "claude", "777", "claude", ""], "x").out.trim()).toBe('{"error": "pane-changed"}');
   // The same pid, but another process (it started at another time): refused too.
-  expect(c.run(MIRROR_SEND, ["main", "20", "claude", "778"], "x").out.trim()).toBe('{"error": "pane-changed"}');
-  expect(fakeContainer({ status: "waiting" }).run(MIRROR_SEND, ["main", "20", "claude", "777"], "x").out.trim()).toBe('{"error": "agent-waiting-in-terminal"}');
+  expect(c.run(MIRROR_SEND, ["main", "20", "claude", "778", "claude", ""], "x").out.trim()).toBe('{"error": "pane-changed"}');
+  expect(fakeContainer({ status: "waiting" }).run(MIRROR_SEND, ["main", "20", "claude", "777", "claude", ""], "x").out.trim()).toBe('{"error": "agent-waiting-in-terminal"}');
   const scrolled = fakeContainer({ status: "idle", inMode: true });
-  expect(scrolled.run(MIRROR_SEND, ["main", "20", "claude", "777"], "x").out.trim()).toBe('{"error": "terminal-scrolled"}');
+  expect(scrolled.run(MIRROR_SEND, ["main", "20", "claude", "777", "claude", ""], "x").out.trim()).toBe('{"error": "terminal-scrolled"}');
   expect(scrolled.tmuxLog()).not.toContain("paste-buffer");
 });
 
 test.skipIf(!Bun.which("python3"))("MIRROR_SEND reads the screen: a draft, a dialog or an unknown screen is never typed into", () => {
   const send = (screen: string) => {
     const c = fakeContainer({ status: "idle", screen });
-    return { out: c.run(MIRROR_SEND, ["main", "20", "claude", "777"], "x").out.trim(), log: c.tmuxLog() };
+    return { out: c.run(MIRROR_SEND, ["main", "20", "claude", "777", "claude", ""], "x").out.trim(), log: c.tmuxLog() };
   };
   for (const [screen, want] of [
     [`${RULE}\n\x1b[39m❯ \n${RULE}\n`, '{"ok": true}'],
@@ -755,21 +767,61 @@ test.skipIf(!Bun.which("python3"))("MIRROR_SEND reads the screen: a draft, a dia
   }
   // A dialog that opens while the paste lands: Enter is not pressed.
   const late = fakeContainer({ status: "idle", screenAfterPaste: "Enter to confirm · Esc to cancel\n" });
-  expect(late.run(MIRROR_SEND, ["main", "20", "claude", "777"], "x").out.trim()).toBe('{"error": "not-submitted"}');
+  expect(late.run(MIRROR_SEND, ["main", "20", "claude", "777", "claude", ""], "x").out.trim()).toBe('{"error": "not-submitted"}');
   expect(late.tmuxLog()).not.toContain("send-keys");
 }, 15_000); // seven sends, each sleeping 0.3 s before Enter
 
 test.skipIf(!Bun.which("python3"))("MIRROR_SEND: an agent that exits during the send gets no paste or no Enter, so nothing reaches the shell", () => {
   // Exits while the buffer loads: the check before the paste stops it, and the buffer is dropped.
   const atLoad = fakeContainer({ status: "idle", onLoad: 'rm -rf "$PROC/20" "$PROC/30"' });
-  expect(atLoad.run(MIRROR_SEND, ["main", "20", "claude", "777"], "x").out.trim()).toBe('{"error": "pane-changed"}');
+  expect(atLoad.run(MIRROR_SEND, ["main", "20", "claude", "777", "claude", ""], "x").out.trim()).toBe('{"error": "pane-changed"}');
   expect(atLoad.tmuxLog()).not.toContain("paste-buffer");
   expect(atLoad.tmuxLog()).toContain("delete-buffer");
   // Exits while the paste lands (the shell got the bracketed paste, which it does not run): no Enter, no other key.
   const atPaste = fakeContainer({ status: "idle", onPaste: 'rm -rf "$PROC/20" "$PROC/30"', screenAfterPaste: "dev@box:/workspace$ x" });
-  expect(atPaste.run(MIRROR_SEND, ["main", "20", "claude", "777"], "x").out.trim()).toBe('{"error": "not-submitted"}');
+  expect(atPaste.run(MIRROR_SEND, ["main", "20", "claude", "777", "claude", ""], "x").out.trim()).toBe('{"error": "not-submitted"}');
   expect(atPaste.tmuxLog()).not.toContain("send-keys");
 });
+
+// Codex 0.172's composer, as `tmux capture-pane -e` shows it (verified against the real TUI in tmux): a bold `›`, then
+// the dim placeholder when empty. Past prompts in the history carry a dim bold `›` on a background; a selection
+// popup's row a reverse one; popups end with an "enter select · esc back" hint.
+const CODEX_READY = `\x1b[1;2m\x1b[38;2;238;238;238m› \x1b[0m\x1b[48;2;68;68;68mearlier prompt\x1b[39m\n• reply\n\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n  gpt-5.4 default · /workspace\n  \x1b[1m←\x1b[0m for agents · \x1b[1m?\x1b[0m for shortcuts\n`;
+const CODEX_TITLE = "work | 01aaaaaa-0000-7000-8000-00000...";
+
+test.skipIf(!Bun.which("python3"))("MIRROR_SEND into Codex: only its empty composer, and only while the title still names the expected thread", () => {
+  const TID = "01aaaaaa-0000-7000-8000-000000000001";
+  const codex = (o: Partial<Parameters<typeof fakeContainer>[0]> = {}) => fakeContainer({ status: "idle", agent: "codex", title: CODEX_TITLE, screen: CODEX_READY,
+    screenAfterPaste: "\x1b[1m›\x1b[0m x\n\n  gpt-5.4 default\n", ...o });
+  const send = (c: ReturnType<typeof fakeContainer>, thread = TID) => c.run(MIRROR_SEND, ["main", "20", "claude,codex", "777", "codex", thread], "x").out.trim();
+  const ok = codex();
+  expect(send(ok)).toBe('{"ok": true}');
+  expect(ok.tmuxLog().trim().split("\n").at(-1)).toBe("send-keys -t =main: Enter");
+  // The title names another thread (/new, /resume), none (started by hand), or the chat expects another one.
+  for (const c of [codex({ title: "work | 01bbbbbb-0000-7000-8000-00000..." }), codex({ title: "work" })]) {
+    expect(send(c)).toBe('{"error": "conversation-unknown"}');
+    expect(c.tmuxLog()).not.toContain("paste-buffer");
+  }
+  expect(send(codex(), "01aaaaaa-0000-7000-8000-100000000001")).toBe('{"error": "conversation-unknown"}');
+  for (const [screen, want] of [
+    ["\x1b[1m›\x1b[0m half typed\n\n  gpt-5.4 default\n", '{"error": "terminal-has-draft"}'],
+    // A popup over the composer: its selected row is not the composer, and its hint says it waits.
+    ["  Select Model and Effort\n\x1b[1;7m›  1. GPT-6.2-Sol\x1b[0m\n  2. GPT-6.2-Astra\n  \x1b[1menter\x1b[0;2m select · \x1b[0;1mesc\x1b[0;2m back\n", '{"error": "agent-waiting-in-terminal"}'],
+    // Only the history's prompt is on screen, or an empty composer line without its placeholder: not the composer.
+    ["\x1b[1;2m› \x1b[0mearlier prompt\n• working\n", '{"error": "terminal-not-ready"}'],
+    ["\x1b[1m›\x1b[0m \n  second line\n", '{"error": "terminal-not-ready"}'],
+    // Claude's prompt is not Codex's.
+    [READY, '{"error": "terminal-not-ready"}'],
+  ] as [string, string][]) {
+    const c = codex({ screen });
+    expect(send(c)).toBe(want);
+    expect(c.tmuxLog()).not.toContain("paste-buffer");
+  }
+  // /new while the paste lands: the text sits in the new conversation's composer, Enter is not pressed.
+  const late = codex({ onPaste: `printf 'work | 01bbbbbb-0000-7000-8000-00000...' > "$PROC/../title"` });
+  expect(send(late)).toBe('{"error": "not-submitted"}');
+  expect(late.tmuxLog()).not.toContain("send-keys");
+}, 20_000);
 
 // ── Codex ──────────────────────────────────────────────────────────────────────────
 
@@ -818,12 +870,39 @@ test.skipIf(!Bun.which("python3"))("a Codex pane: the hook-named thread's rollou
   await t.mirror.refresh(TMUX.id);
   expect(items(t.mirror)).toEqual(renderCodex(lines).items.map(brief));
   // Idle and resolved: still locked, with the reason the composer shows next to Open terminal.
-  const lock = { code: "codex-send-unsupported", message: "Sending from chat isn't available for Codex yet; reply in the terminal." };
+  // This codex shows no thread id in its title (started by hand, or before agent-launch set it up).
+  const lock = { code: "codex-send-unsupported", message: "This Codex doesn't show its conversation in the terminal title, so devd can't tell where a message would land. Restart it from devbox to send from chat, or reply in the terminal." };
   expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "live", activity: "idle", sendBlock: lock });
   expect(t.mirror.store(TMUX.id).snapshot().native).toMatchObject({ harness: "codex", nativeThreadId: TID });
   const res = await app(t).request(`/api/sessions/${TMUX.id}/mirror/messages`, { method: "POST", body: JSON.stringify({ text: "next" }), headers: { "content-type": "application/json" } });
   expect([res.status, await res.json()]).toEqual([409, { error: lock.code, message: lock.message }]);
   expect(typed(t)).toEqual([]);
+});
+
+test.skipIf(!Bun.which("python3"))("a Codex pane whose title names the mirrored thread takes a message; another thread there locks the chat", async () => {
+  const c = codexHome();
+  c.write(TID, [userMsg("u1", "First conversation")]);
+  const pane: Pane = { sid: null, agent: "codex", codexHome: c.home, codexOpen: [TID], title: "⠋ work | 01aaaaaa-0000-7000-8000-00000..." };
+  const t = setup(pane);
+  t.hook(TID);
+  await t.mirror.refresh(TMUX.id);
+  expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "live", conversationId: TID, sendBlock: null });
+  expect(await refusal(t.mirror.send(TMUX.id, "next step"))).toBe("sent");
+  // The send script gets the thread to find in the title once more, right before it types.
+  expect(typed(t)[0]!.cmd.slice(4)).toEqual(["main", "20", AGENT_RUNTIMES.join(","), "777", "codex", TID]);
+  expect(typed(t)[0]!.stdin).toBe("next step");
+  // /new or /resume: the title names the new thread at once, before its rollout or hook exist.
+  pane.title = "work | 01bbbbbb-0000-7000-8000-00000...";
+  await t.mirror.refresh(TMUX.id); // the read the send started, from before the switch
+  await t.mirror.refresh(TMUX.id);
+  const moved = { code: "conversation-unknown", message: "The terminal is on another Codex conversation than this chat shows (after /new or /resume). Send its first prompt in the terminal and the chat follows, or use the terminal." };
+  expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "live", conversationId: TID, sendBlock: moved });
+  expect(await refusal(t.mirror.send(TMUX.id, "next step"))).toBe("conversation-unknown");
+  pane.title = "work | 01aaaaaa-0000-7000-8000-00000...";
+  pane.inMode = true;
+  await t.mirror.refresh(TMUX.id);
+  expect(t.mirror.info(TMUX.id)).toMatchObject({ sendBlock: { code: "terminal-scrolled" } });
+  expect(typed(t)).toHaveLength(1);
 });
 
 test.skipIf(!Bun.which("python3"))("a Codex foreign CODEX_HOME or a symlinked sessions directory is never read", async () => {
