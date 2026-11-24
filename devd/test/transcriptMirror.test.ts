@@ -165,6 +165,8 @@ const CHAT: SessionRow = { ...TMUX, id: "dev-a-chat", container: "dev-a-chat", r
  *  rollouts the codex process has open; `pid`/`start`: the agent process (20, "777"). */
 interface Pane {
   sid: string | null; status?: string; agent?: string; inMode?: boolean; sendResult?: string; noPane?: boolean;
+  /** The locate exec itself fails (a timeout, docker gone). */
+  locateFails?: boolean;
   codexHome?: string; home?: string; homes?: Record<string, string>; codexOpen?: string[]; pid?: number; start?: string;
   /** Holds every pane read until it settles: a slow `docker exec`. */
   gate?: Promise<void>;
@@ -185,6 +187,7 @@ function setup(pane: Pane, isEnding: (id: string) => boolean = () => false, o: {
     const ok = (stdout: string): ExecResult => ({ code: 0, stdout, stderr: "", timedOut: false });
     if (cmd[3] === MIRROR_LOCATE) {
       await pane.gate;
+      if (pane.locateFails) return { code: 1, stdout: "", stderr: "context deadline exceeded", timedOut: true };
       if (pane.noPane) return ok(locateOut({ pane: null }));
       const agent = pane.agent ?? "claude";
       const pid = pane.pid ?? 20;
@@ -286,6 +289,88 @@ test("finalRefresh reads the transcript of an ending session that plain refreshe
   expect(store.snapshot().items.map(brief)).toEqual(render(lines).snapshot.items.map(brief));
   // After the final read the session is ending again for everyone else.
   expect(t.mirror.session(TMUX.id)).toEqual({ error: "session-ending" });
+});
+
+// 2026-11-24: ended tmux Claude sessions were listed with no thread and no transcript, although their conversation was
+// archived: the last read ran after the backup had stopped the container and found no pane. end() now reads live
+// before the backup (finalRefresh) and once more after it stopped the container (finalTail), without a pane.
+const NOTE = "The session holds 2 Claude conversations and no read of its terminal named the one it ended on, so none was picked.";
+const native = (t: ReturnType<typeof setup>) => {
+  t.mirror.release(TMUX.id);
+  const store = ThreadStore.open(t.root, TMUX.id, { dir: "_mirrors" });
+  cleanups.push(() => store.close());
+  return { items: store.snapshot().items.map(brief), native: store.snapshot({ limit: 0 }).native };
+};
+
+test("the read after the stop reads the conversation the live read pinned to its end, with no pane and no note", async () => {
+  const pane: Pane = { sid: SID };
+  const t = setup(pane, () => true);
+  const lines = fixtureLines();
+  t.write(SID, lines.slice(0, 5));
+  t.write(SID2, lines.slice(0, 3)); // another conversation in the same session (an earlier one, a /clear)
+  expect(await t.mirror.finalRefresh(TMUX.id)).toEqual({ truncated: false });
+  // The agent keeps writing until the backup stops the container.
+  t.write(SID, lines.slice(5));
+  pane.noPane = true;
+  expect(await t.mirror.finalTail(TMUX.id)).toEqual({ truncated: false });
+  const r = native(t);
+  expect(r.items).toEqual(render(lines).snapshot.items.map(brief));
+  expect(r.native).toMatchObject({ harness: "claude", nativeThreadId: SID });
+});
+
+test("a retried end (devd restarted after the live read) keeps the pinned conversation", async () => {
+  const pane: Pane = { sid: SID };
+  let ending = false;
+  const t = setup(pane, () => ending);
+  t.write(SID, fixtureLines().slice(0, 5));
+  await t.mirror.refresh(TMUX.id);
+  t.write(SID2, fixtureLines().slice(0, 3));
+  t.write(SID, fixtureLines().slice(5));
+  t.restart();
+  ending = true;
+  pane.noPane = true; // the stopped container: a plain no-pane answer
+  expect(await t.mirror.finalRefresh(TMUX.id)).toEqual({ truncated: false });
+  expect(await t.mirror.finalTail(TMUX.id)).toEqual({ truncated: false });
+  expect(native(t)).toEqual({ items: render(fixtureLines()).snapshot.items.map(brief), native: expect.objectContaining({ nativeThreadId: SID }) });
+});
+
+test("without a pinned conversation the read after the stop takes the session's only one", async () => {
+  const t = setup({ sid: null, noPane: true }, () => true);
+  t.write(SID, fixtureLines());
+  expect(await t.mirror.finalRefresh(TMUX.id)).toEqual({ truncated: false });
+  expect(await t.mirror.finalTail(TMUX.id)).toEqual({ truncated: false });
+  expect(native(t)).toEqual({ items: render(fixtureLines()).snapshot.items.map(brief), native: expect.objectContaining({ nativeThreadId: SID }) });
+});
+
+test("without a pinned conversation it does not pick one of several: it says so, and that is not a cut-short transcript", async () => {
+  const t = setup({ sid: null, noPane: true }, () => true);
+  t.write(SID, fixtureLines());
+  t.write(SID2, fixtureLines().slice(0, 3));
+  await t.mirror.finalRefresh(TMUX.id);
+  expect(await t.mirror.finalTail(TMUX.id)).toEqual({ truncated: false, threadNote: NOTE });
+  t.mirror.release(TMUX.id);
+  expect(existsSync(join(t.root, "_mirrors", `${TMUX.id}.sqlite`))).toBe(false);
+});
+
+test("a final live read that cannot reach the pane is cut short and infers nothing; the read after the stop stays cut short", async () => {
+  const pane: Pane = { sid: SID };
+  let ending = false;
+  const t = setup(pane, () => ending);
+  t.write(SID, fixtureLines());
+  await t.mirror.refresh(TMUX.id);
+  ending = true;
+  pane.locateFails = true;
+  expect(await t.mirror.finalRefresh(TMUX.id)).toEqual({ truncated: true });
+  expect(await t.mirror.finalTail(TMUX.id)).toEqual({ truncated: true });
+  expect(t.logs).toContain(`mirror ${TMUX.id}: the final read could not reach the pane`);
+});
+
+test("finalTail leaves an agent other than Claude to its live read", async () => {
+  const t = setup({ sid: null, agent: "codex" }, () => true);
+  t.write(SID, fixtureLines());
+  const db = (t.mirror as unknown as { d: { db: ReturnType<typeof openDb> } }).d.db;
+  db.query(`UPDATE sessions SET agent='codex' WHERE id=?`).run(TMUX.id);
+  expect(await t.mirror.finalTail(TMUX.id)).toBeNull();
 });
 
 test("a rewritten transcript is read again from the start with a notice", async () => {

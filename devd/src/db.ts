@@ -279,6 +279,10 @@ export function openDb(path: string): Database {
   if (!(db.query("PRAGMA table_info(ended_sessions)").all() as { name: string }[]).some((c) => c.name === "kept_worktree")) {
     db.run(`ALTER TABLE ended_sessions ADD COLUMN kept_worktree TEXT`);
   }
+  // Why the end recorded no Claude conversation for a tmux session (TranscriptMirror.finalRefresh); NULL when nothing to say.
+  if (!(db.query("PRAGMA table_info(ended_sessions)").all() as { name: string }[]).some((c) => c.name === "thread_note")) {
+    db.run(`ALTER TABLE ended_sessions ADD COLUMN thread_note TEXT`);
+  }
   // The PR of a session's pushed branch as the PR watch last saw it (prWatch.ts). Kept across devd restarts so a
   // CI failure is notified once and a merge settles once. One row per session, deleted with it (deleteSession).
   // First deploy of the PR watch: the table is new, so PRs that are already failing or merged are not news. The

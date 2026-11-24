@@ -24,6 +24,8 @@ export interface EndedRow {
   archive_dir: string; store_file: string; native_harness: string | null; native_thread: string | null; hidden_at: number | null;
   transcript: TranscriptState;
   kept_worktree: string | null;
+  /** Why no conversation was recorded (several in the session, none confirmed at the end); null otherwise. */
+  thread_note: string | null;
 }
 
 const clip = (t: string, max: number) => (t.length > max ? `${t.slice(0, max)}…` : t);
@@ -43,6 +45,7 @@ export type ContinuePlan = { mode: "resume"; thread: string; jsonl: Buffer } | {
 /** Why this transcript cannot resume, without reading the conversation: null when it can (as far as the archive
  *  shows); `wired: false` when resume does not exist for its agent at all. */
 function resumeBlock(row: EndedRow): { wired: boolean; reason: string } | null {
+  if (row.thread_note !== null && row.native_thread === null && row.agent === "claude") return { wired: true, reason: row.thread_note };
   if (row.native_harness !== "claude" || row.agent !== "claude" || row.native_thread === null || !THREAD_ID.test(row.native_thread) || row.archive_dir === "") {
     return { wired: false, reason: "" };
   }
@@ -83,6 +86,7 @@ export function toEnded(r: EndedRow): EndedSession {
     agent: r.agent, branch: r.branch, topic: r.topic, lastText: r.last_text, endedAt: r.ended_at, continueMode: continueMode(r),
     transcript: r.transcript, keptWorktree: r.kept_worktree,
     keptWorktreeRemoved: r.kept_worktree === null ? false : !existsSync(r.kept_worktree),
+    threadNote: r.thread_note,
   };
 }
 
@@ -99,7 +103,7 @@ function archivedStoreFile(archiveDir: string, sessionId: string): string | null
  *  (TranscriptMirror.finalRefresh). Seals the store for read-only use (ThreadStore.sealArchive). Throws when the
  *  archived store cannot be read. */
 export function recordEnded(db: Database, s: SessionRow, archiveDir: string | null, endedAt: number,
-  o: { id?: string; truncated?: boolean; keptWorktree?: string | null } = {}): EndedSession | null {
+  o: { id?: string; truncated?: boolean; keptWorktree?: string | null; threadNote?: string } = {}): EndedSession | null {
   const file = archiveDir === null ? null : archivedStoreFile(archiveDir, s.id);
   const runtime = s.runtime === "chat" ? "chat" : "tmux";
   if (file === null && runtime !== "tmux") return null;
@@ -123,10 +127,11 @@ export function recordEnded(db: Database, s: SessionRow, archiveDir: string | nu
     topic: first === null ? null : threadTitle(first), last_text: last === null ? null : clip(last, LAST_TEXT_MAX), ended_at: endedAt,
     archive_dir: archiveDir ?? "", store_file: file ?? "", native_harness: native?.harness ?? null, native_thread: native?.nativeThreadId ?? null, hidden_at: null,
     transcript: file === null ? "missing" : o.truncated ? "truncated" : "complete", kept_worktree: o.keptWorktree ?? null,
+    thread_note: o.threadNote ?? null,
   };
-  db.query(`INSERT OR REPLACE INTO ended_sessions (id,session_id,folder,project,repo,agent,runtime,title,branch,topic,last_text,ended_at,archive_dir,store_file,native_harness,native_thread,hidden_at,transcript,kept_worktree)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)`).run(row.id, row.session_id, row.folder, row.project, row.repo, row.agent, row.runtime, row.title,
-    row.branch, row.topic, row.last_text, row.ended_at, row.archive_dir, row.store_file, row.native_harness, row.native_thread, row.transcript, row.kept_worktree);
+  db.query(`INSERT OR REPLACE INTO ended_sessions (id,session_id,folder,project,repo,agent,runtime,title,branch,topic,last_text,ended_at,archive_dir,store_file,native_harness,native_thread,hidden_at,transcript,kept_worktree,thread_note)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?)`).run(row.id, row.session_id, row.folder, row.project, row.repo, row.agent, row.runtime, row.title,
+    row.branch, row.topic, row.last_text, row.ended_at, row.archive_dir, row.store_file, row.native_harness, row.native_thread, row.transcript, row.kept_worktree, row.thread_note);
   return toEnded(row);
 }
 
@@ -155,7 +160,7 @@ export class TranscriptGone extends Error {}
 
 /** The archived store, opened read-only for its snapshot. The caller closes it. */
 export function openTranscript(row: EndedRow): ThreadStore {
-  if (row.transcript === "missing") throw new TranscriptGone(`${row.id} ended without a transcript`);
+  if (row.transcript === "missing") throw new TranscriptGone(`${row.id} ended without a transcript${row.thread_note ? `: ${row.thread_note}` : ""}`);
   const path = join(row.archive_dir, row.store_file);
   if (!existsSync(path)) throw new TranscriptGone(`the transcript of ${row.id} is missing: ${path}`);
   return ThreadStore.openArchived(path);

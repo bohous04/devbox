@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addWorktree, archiveBranch, cloneBare, defaultBranch, ensureWorktree, fetchBare, pullWithRebase, removeWorktree, trackRemote, worktreeBranch, worktreeChanges, worktreeHealthy } from "../src/git";
+import { addWorktree, archiveBranch, cloneBare, defaultBranch, ensureWorktree, fetchBare, pullWithRebase, removeWorktree, trackRemote, worktreeBranch, worktreeChanges, worktreeHealthy, worktreeRemoveFailure } from "../src/git";
 import { sh } from "./helpers/sh";
 import { restoreBranch, sessionBranch, sessionWorktreePath, worktreeMounts } from "../src/sessions";
 
@@ -574,4 +574,15 @@ test("removeWorktree removes a dir git left empty (git as the agent uid cannot r
   symlinkSync(target, join(base, "_sessions", "dev-c"));
   await removeWorktree(bare, join(base, "_sessions", "dev-c"));
   expect(existsSync(target)).toBe(true);
+});
+
+// Every end logged "git worktree remove … failed: Permission denied": git runs as the agent uid and cannot delete the
+// worktree dir itself from the root-owned _sessions. It has emptied the dir and dropped its registration by then (git
+// goes on past that error); devd removes the emptied dir right after. Only that one expected error is not a failure.
+test("the only error git worktree remove is expected to report is the root-owned slot itself", () => {
+  const dest = "/srv/dev/_sessions/dev-p-app";
+  expect(worktreeRemoveFailure(`error: failed to delete '${dest}': Permission denied\n`, dest)).toBeNull();
+  expect(worktreeRemoveFailure(`error: failed to delete '${dest}/src/x': Permission denied\nerror: failed to delete '${dest}': Directory not empty\n`, dest))
+    .toBe(`error: failed to delete '${dest}/src/x': Permission denied\nerror: failed to delete '${dest}': Directory not empty`);
+  expect(worktreeRemoveFailure(`fatal: '${dest}' is not a working tree\n`, dest)).toBe(`fatal: '${dest}' is not a working tree`);
 });

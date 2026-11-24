@@ -155,6 +155,10 @@ export interface SessionDeps {
   /** The last read of a tmux session's transcript mirror while its container still runs (TranscriptMirror.finalRefresh):
    *  end() archives the mirror as the ended session's transcript. `truncated`: the read stopped short. Never throws. */
   finalizeTranscript?: (s: SessionRow) => Promise<{ truncated: boolean }>;
+  /** The read after the backup stopped the container (TranscriptMirror.finalTail): the pinned conversation to its end,
+   *  from the host. null: nothing to add to the live read. `threadNote`: why the conversation the session ended on is
+   *  not known (several, none pinned). Never throws. */
+  finalizeTail?: (s: SessionRow) => Promise<{ truncated: boolean; threadNote?: string } | null>;
   /** An ended session's transcript was kept (endedSessions.ts): the inbox lists it (SSE `inbox-ended`). */
   onEnded?: (e: EndedSession) => void;
 }
@@ -520,6 +524,20 @@ export class SessionManager {
   private readonly ownInFlight = new Set<string>();
   private readonly opNames = new Map<string, string>();
 
+  /** The host's docker wrapper lets `docker rm` of a session container through only once it is backed up offsite, and
+   *  waits for that only 40 s, so replacing a container (a recreate, a reopen with a new env) timed out at 60 s while the
+   *  backup ran on. The backup runs first with its own long cap, as for an end (storageGuard.ts). */
+  private async preserveBeforeReplace(id: string, container: string): Promise<void> {
+    try { await this.d.preserveForEnd?.(container); }
+    catch (e) {
+      // The backup stops the container before archiving: as after a failed end, the row must not keep saying
+      // "running". Only a container docker reports as exited; reading it must not replace the backup's error.
+      try { if (await containerState(container) === "exited") updateSession(this.d.db, id, { status: "stopped" }); }
+      catch (inspectErr) { console.error(`after the failed backup of ${id}, reading its container failed:`, inspectErr); }
+      throw new Error(`${id}: its old container must be backed up offsite before it is replaced, and that failed: ${(e as Error).message}`);
+    }
+  }
+
   isEnding(id: string): boolean { return this.opNames.get(id) === "end"; }
 
   /** Lock on the keys for the duration of `fn`. It rejects, it does not queue: a second click should get
@@ -624,7 +642,7 @@ export class SessionManager {
   /** After the archive: the chat images go next to the transcript, and the transcript is listed as an ended session.
    *  Never throws (end() deletes the session row after this, the container is already gone); a failure is logged and,
    *  where the owner loses something, notified. `truncated`: the last mirror read stopped short. */
-  private keepTranscript(s: SessionRow, dest: string | null, truncated: boolean, keptWorktree: string | null) {
+  private keepTranscript(s: SessionRow, dest: string | null, truncated: boolean, keptWorktree: string | null, threadNote?: string) {
     const id = s.id;
     // A mirror store the archive did not take must not greet a later session that reuses the id.
     try { for (const x of ["", "-wal", "-shm"]) rmSync(join(this.d.root, "_mirrors", `${id}.sqlite${x}`), { force: true }); }
@@ -643,7 +661,7 @@ export class SessionManager {
         console.error(`${id}: its ended transcript is listed already (an end resumed after a restart), not listed again`);
         return;
       }
-      const ended = recordEnded(this.d.db, s, dest, this.now(), { id: `${id}-${archiveStamp(new Date(this.now()))}`, truncated, keptWorktree });
+      const ended = recordEnded(this.d.db, s, dest, this.now(), { id: `${id}-${archiveStamp(new Date(this.now()))}`, truncated, keptWorktree, threadNote });
       if (ended?.transcript === "truncated") console.error(`the ended transcript of ${id} is cut short: the last read did not reach the end`);
       if (ended) this.d.onEnded?.(ended);
     } catch (e) {
@@ -886,8 +904,9 @@ export class SessionManager {
    *    started in it — i.e. when it lacked a key or model and agent-launch therefore
    *    fell into zsh. A key rotation under a live agent waits for the next stop.
    *
-   *  For a stopped session a recreate is cheap: the workspace is a bind mount and a stopped
-   *  container has no live tmux sessions anyway. */
+   *  For a stopped session a recreate loses nothing: the workspace is a bind mount and a stopped
+   *  container has no live tmux sessions anyway. It is not quick: the old container is backed up offsite first
+   *  (preserveBeforeReplace). */
   private agentCtx(agent: AgentName): Promise<number | null> {
     return agentContextTokens(agent, sessionSettings(this.d), (m) => contextLengthCached(m, DEFAULT_OPENROUTER_URL));
   }
@@ -1215,10 +1234,14 @@ export class SessionManager {
       if (state === "missing" || switching || staleProxy || staleCanonicalMount || staleAccounts) {
         this.revokeShares(id); // the container is being (re)created — the old sharing would lead nowhere
         if (staleCanonicalMount) {
+          progress({ step: "container", detail: "backing up the old container offsite before replacing it" });
+          await this.preserveBeforeReplace(id, existing.container);
           await removeStoppedWorkspaceContainer(observed);
         } else if ((switching || staleProxy || staleAccounts) && state !== "missing") {
           // Agent switch = a new container with the correct DEVD_AGENT. Safe: a stopped
           // container has no live tmux sessions anyway, the workspace is a bind mount.
+          progress({ step: "container", detail: "backing up the old container offsite before replacing it" });
+          await this.preserveBeforeReplace(id, existing.container);
           await removeContainer(id);
         }
         await this.ensureDind(id);
@@ -1363,6 +1386,7 @@ export class SessionManager {
     const agent = s.agent ?? "claude";
     this.revokeShares(id);
     await this.checkpointRecovery(id);
+    await this.preserveBeforeReplace(id, s.container);
     await removeContainer(id);
     await this.ensureDind(id);
     await this.runContainer(await this.runOpts(id, dir, s.port_base, s.project, s.repo, agent, storedRuntime(s), s.worktree ? bare : null));
@@ -1480,7 +1504,8 @@ export class SessionManager {
         clearPrompt: () => { this.syncPromptFile(id, "tmux", { status: "clean" }); },
         ensureDind: () => this.ensureDind(id),
         start: () => startContainer(id),
-        removeStopped: (observed) => removeStoppedWorkspaceContainer(observed),
+        // The container restoreExactSession inspected is the one named by the session id (inspectRemoteContainer).
+        removeStopped: async (observed) => { await this.preserveBeforeReplace(id, id); await removeStoppedWorkspaceContainer(observed); },
         create: async (row) => {
           this.revokeShares(id); // no-op if the session did not have a row yet (fresh Remote resume)
           await this.runContainer(await this.runOpts(id, route.cwd, row.port_base,
@@ -1559,10 +1584,12 @@ export class SessionManager {
       // old/empty proxy key or model stayed in it, after unlocking the vault the user would get
       // a reopened session with the same "unlock the vault" message forever. `running:
       // false` lets proxyEnvStale return true right away once the fresh env differs — for
-      // a stopped session there is nothing to lose, a recreate is cheap (the workspace is a bind mount).
+      // a stopped session there is nothing to lose (the workspace is a bind mount), though the replace waits for the
+      // old container's offsite backup (preserveBeforeReplace).
       const staleProxy = await this.proxyEnvStale(await containerEnv(id), agent, false);
       if (staleProxy || staleCanonicalMount) {
         this.revokeShares(id);
+        await this.preserveBeforeReplace(id, s.container);
         if (staleCanonicalMount) await removeStoppedWorkspaceContainer(observed);
         else await removeContainer(id);
         await this.ensureDind(id);
@@ -1624,9 +1651,12 @@ export class SessionManager {
       // Native history may resume after end(): retain its exact files, including uncommitted work.
       // Validate authority BEFORE removing Docker or files; malformed registry fails closed.
       const keepRemote = retainRemoteWorkspace(s, this.d.root);
+      // A live read while the container runs pins the conversation the agent is on (a stopped container has no pane to
+      // ask); the backup stops the container, possibly many minutes later; the read after it takes that conversation
+      // to its end from the host.
+      const live = await this.d.finalizeTranscript?.(s);
       await this.d.preserveForEnd?.(s.container);
-      // The last read right before the container goes: nothing the agent writes after it is lost but the end itself.
-      const final = await this.d.finalizeTranscript?.(s);
+      const final: { truncated: boolean; threadNote?: string } | undefined = (await this.d.finalizeTail?.(s)) ?? live;
       await removeContainer(id);
       // The worktree belongs to the session, so it goes with it — except for `keepWorktree` (see above).
       // The branch does NOT: there may be work in progress on it and deleting it quietly when the window is closed
@@ -1647,7 +1677,7 @@ export class SessionManager {
       this.d.releaseThread?.(id, true);
       // Recorded only when it is on disk: an earlier, cut-short run of this end may have removed it already.
       const kept = s.worktree && opts.keepWorktree && existsSync(s.worktree) ? s.worktree : null;
-      this.keepTranscript(s, this.keepChats(id), final?.truncated ?? false, kept);
+      this.keepTranscript(s, this.keepChats(id), final?.truncated ?? false, kept, final?.threadNote);
       deleteGitStat(this.d.db, id);
       // The lease belongs to the session — without releasing it the account would look occupied until the
       // period expires and the poller would needlessly keep it at the fast cadence. An error here must not, however,

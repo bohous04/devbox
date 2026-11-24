@@ -33,6 +33,9 @@ export interface EndedSession {
   /** The kept worktree is no longer on disk (someone removed it since): the view says it was kept, not where it is.
    *  Optional: older devd does not send it. */
   keptWorktreeRemoved?: boolean;
+  /** Why the ended tmux Claude session has no conversation to resume: it held several and the one it ended on could
+   *  not be confirmed, so none was picked (devd does not guess). null otherwise. Optional: older devd does not send it. */
+  threadNote?: string | null;
 }
 
 /** SSE `inbox-ended` when a transcript was hidden or purged. */

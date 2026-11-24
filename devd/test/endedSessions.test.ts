@@ -55,7 +55,7 @@ test("recordEnded keeps a chat session's archived thread as an ended transcript"
     id: "dev-acme-app-20261120-101500", sessionId: "dev-acme-app", runtime: "chat", title: "Login fix",
     folder: "acme", project: "acme", repo: "app", agent: "claude", branch: "feat/x",
     topic: "Fix the login form validation", lastText: "Fixed it; the email check now trims spaces.", endedAt: 5_000, continueMode: "handoff",
-    transcript: "complete", keptWorktree: null, keptWorktreeRemoved: false,
+    transcript: "complete", keptWorktree: null, keptWorktreeRemoved: false, threadNote: null,
   });
   expect(listEnded(db)).toEqual([e]);
   expect(getEnded(db, e.id)?.native_thread).toBe("0b1c2d3e-0000-4000-8000-000000000001");
@@ -77,6 +77,28 @@ test("recordEnded takes a tmux session's mirror store, says when it was cut shor
   expect(never).toMatchObject({ id: "dev-acme-tui-20261120-101600", transcript: "missing", topic: null, continueMode: "handoff" });
   expect(() => openTranscript(getEnded(db, never.id)!)).toThrow(TranscriptGone);
   expect(listEnded(db).map((e) => e.id)).toEqual(["dev-acme-tui-20261120-101600", "dev-acme-app-20261120-101500"]);
+});
+
+// The last read could not tell which of several Claude conversations the session ended on (TranscriptMirror
+// readWithoutPane): the row says so, records no thread (a continue would otherwise resume a guess), and a continue
+// that finds nothing to hand off repeats why.
+test("a thread note is kept in the row and explains a handoff and a missing transcript", async () => {
+  const root = tmp();
+  const db = openDb(":memory:");
+  const note = "The session holds 2 Claude conversations and the one it ended on could not be read from its terminal, so none was picked.";
+  const dir = join(root, "_chat-archive", "dev-acme-app-20261120-101500");
+  // A store an earlier read filled without ever naming the conversation (no thread.native).
+  archivedStore(dir, "dev-acme-app.mirror.sqlite", CONVO.slice(1));
+  writeFileSync(join(dir, "0b1c2d3e-0000-4000-8000-000000000001.jsonl"), "{}\n");
+  const kept = recordEnded(db, { ...S, runtime: "tmux" }, dir, 5_000, { threadNote: note })!;
+  expect(kept).toMatchObject({ transcript: "complete", continueMode: "handoff", threadNote: note });
+  expect(getEnded(db, kept.id)).toMatchObject({ native_thread: null, native_harness: null, thread_note: note });
+  expect(await continuePlan(getEnded(db, kept.id)!, null)).toEqual({ mode: "handoff", reason: note });
+  const none = recordEnded(db, { ...S, id: "dev-acme-tui", runtime: "tmux" }, null, 6_000, { id: "dev-acme-tui-20261120-101600", threadNote: note })!;
+  expect(none).toMatchObject({ transcript: "missing", threadNote: note });
+  expect(() => openTranscript(getEnded(db, none.id)!)).toThrow(`dev-acme-tui-20261120-101600 ended without a transcript: ${note}`);
+  // Without a note the field is null.
+  expect(recordEnded(db, { ...S, id: "dev-acme-x", runtime: "tmux" }, null, 7_000, { id: "dev-acme-x-1" })).toMatchObject({ threadNote: null });
 });
 
 test("an archived store is read read-only: no WAL switch, no write, after end() sealed it once", () => {

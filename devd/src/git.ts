@@ -573,16 +573,23 @@ export async function unpushedCommits(dir: string): Promise<number | null> {
   return Number.isSafeInteger(n) ? n : null;
 }
 
+/** What in `git worktree remove`'s stderr is a real failure, or null. Git runs as the agent uid (safeGit.ts layer 4) and
+ *  cannot delete `dest` itself from the root-owned `_sessions`: it reports exactly that one line, after it has emptied
+ *  the dir and while it still drops the registration. removeWorktree removes the emptied dir right after. */
+export function worktreeRemoveFailure(stderr: string, dest: string): string | null {
+  const text = stderr.trim();
+  return text === `error: failed to delete '${dest}': Permission denied` ? null : text;
+}
+
 export async function removeWorktree(bare: string, dest: string): Promise<void> {
   // `--force`: the worktree of a running session contains uncommitted changes and git would otherwise
   // refuse to delete it. Ending a session is a conscious user step (F9 → End), so here
   // this is the correct behavior, not bypassing a safeguard.
   // Twice: a session's registration is locked (lockWorktree) and a single --force does not remove a locked one.
   const r = await sh(bare, "git", "-C", bare, "-c", `safe.directory=${bare}`, "worktree", "remove", "--force", "--force", dest);
-  if (r.code !== 0) {
-    // Non-critical: the container is already gone, an orphaned directory must not prevent deleting the row.
-    console.error(`git worktree remove ${dest} failed: ${r.stderr.trim()}`);
-  }
+  const failure = r.code !== 0 ? worktreeRemoveFailure(r.stderr, dest) : null;
+  // Non-critical: the container is already gone, an orphaned directory must not prevent deleting the row.
+  if (failure !== null) console.error(`git worktree remove ${dest} failed: ${failure}`);
   // Git runs as the agent uid (safeGit.ts layer 4) and cannot remove `dest` itself from the
   // root-owned `_sessions`; the emptied dir is removed here. rmdir only: never recursive, and a
   // symlink or a non-empty dir stays (and is logged).
