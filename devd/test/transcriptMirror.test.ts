@@ -412,6 +412,25 @@ test("the read after the stop leaves the live result when the pinned conversatio
   expect(await t.mirror.finalTail(TMUX.id)).toBeNull();
 });
 
+// Review of #157: finalTail never throws (end() runs it between the backup and docker rm) and leaves no state behind:
+// the session is ending again for everyone else, whichever way it returned.
+test("finalTail never throws and leaves no state behind, also when it has nothing to add", async () => {
+  const pane: Pane = { sid: SID };
+  const t = setup(pane, () => true);
+  t.write(SID, fixtureLines());
+  await t.mirror.finalRefresh(TMUX.id);
+  // Nothing to add (the pinned file is gone): no finalizing left over.
+  rmSync(join(t.projects, `${SID}.jsonl`));
+  expect(await t.mirror.finalTail(TMUX.id)).toBeNull();
+  expect(t.mirror.session(TMUX.id)).toEqual({ error: "session-ending" });
+  // The projects dir cannot be listed (here a file in its place): cut short, not a throw.
+  rmSync(t.projects, { recursive: true });
+  writeFileSync(t.projects, "");
+  expect(await t.mirror.finalTail(TMUX.id)).toEqual({ truncated: true });
+  expect(t.mirror.session(TMUX.id)).toEqual({ error: "session-ending" });
+  expect(t.logs.some((l) => l.startsWith(`mirror ${TMUX.id}: the read after the stop failed`))).toBe(true);
+});
+
 test("finalTail leaves an agent other than Claude to its live read", async () => {
   const t = setup({ sid: null, agent: "codex" }, () => true);
   t.write(SID, fixtureLines());

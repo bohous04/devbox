@@ -648,18 +648,22 @@ export class TranscriptMirror {
     this.finalizing.add(id);
     this.cutShort.delete(id);
     const unsure = this.finalLocateFailed.delete(id);
-    // A pinned conversation whose file is not in the projects dir (a Codex thread in a Claude session's pane): nothing
-    // to add here, the live read's result stands.
-    const pinned = this.pinned(id);
-    if (pinned !== null && !this.conversations(id).some((c) => c.sid === pinned)) return null;
     let threadNote: string | undefined;
-    const run = (async () => { threadNote = await this.readPaneless(id, unsure); })().catch((e) => {
+    let nothingToAdd = false;
+    const run = (async () => {
+      // A pinned conversation whose file is not in the projects dir (a Codex thread in a Claude session's pane):
+      // nothing to add here, the live read's result stands.
+      const pinned = this.pinned(id);
+      if (pinned !== null && !this.conversations(id).some((c) => c.sid === pinned)) { nothingToAdd = true; return; }
+      threadNote = await this.readPaneless(id, unsure);
+    })().catch((e) => {
       this.cutShort.add(id);
       this.log(`mirror ${id}: the read after the stop failed, the transcript ends where the last read got to: ${(e as Error).message}`);
     }).finally(() => { this.finalizing.delete(id); this.running.delete(id); });
     this.running.set(id, run);
     await run;
     const truncated = this.cutShort.delete(id);
+    if (nothingToAdd) return null;
     return threadNote === undefined ? { truncated } : { truncated, threadNote };
   }
 
