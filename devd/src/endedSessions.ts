@@ -45,9 +45,10 @@ export type ContinuePlan = { mode: "resume"; seed: ResumeSeed } | { mode: "hando
 /** Claude resumes because its jsonl sits in the session's own `_claude-projects/<id>`, which archiveChats moves into
  *  the archive: resume depends on that. A chat session's Codex thread lives in the `codex-v2-shared` volume
  *  (sessions.ts codexV2Mounts), which every chat session mounts and whose rollouts and sqlite every account's shadow
- *  home shares (agent-bridge codexHomes.ts): the new session's bridge resumes it by id on whatever account it gets.
- *  Nothing in devbox removes a thread from that volume; should one be gone, the bridge reports the failed resume and devd
- *  starts a fresh thread (chatSwitch.ts), as for a Claude thread whose copied jsonl the agent rejects. A tmux Codex
+ *  home shares (agent-bridge codexHomes.ts): the new session's bridge forks it by id on whatever account it gets (its
+ *  own thread with that history). devd checks the rollout is still there before promising that (api.ts, codexContinue.ts);
+ *  should the fork fail anyway, the bridge reports a failed resume and devd starts a fresh thread (chatSwitch.ts), as for
+ *  a Claude thread whose copied jsonl the agent rejects. A tmux Codex
  *  conversation stays in its account's own home (codex-home or a standalone account volume), which `co` picks per
  *  launch: not wired, it hands off. */
 /** Why this transcript cannot resume, without reading the conversation: null when it can (as far as the archive
