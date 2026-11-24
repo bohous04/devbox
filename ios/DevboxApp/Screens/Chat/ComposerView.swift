@@ -60,6 +60,8 @@ struct ComposerView: View {
     @State private var setCaret: Int?
     @State private var dismissed: String?
     @State private var activeOption = 0
+    /// What VoiceOver last heard of the open menu; nil once it closes.
+    @State private var announced: String?
     @State private var fileResult: FileSearchResult?
 
     private var hasCommands: Bool { commands?.isEmpty == false }
@@ -157,8 +159,16 @@ struct ComposerView: View {
         .onChange(of: [trigger.map(Self.key), trigger?.query, menu.map { String($0.options.count) }]) { activeOption = 0 }
         // Escape closed the menu only for the word it was pressed on: no trigger word at the caret (or no focus) ends it.
         .onChange(of: offeredTrigger.map(Self.key)) { _, k in if k == nil { dismissed = nil } }
-        // VoiceOver hears the menu open and change (the web's live region), and the option the arrows move to.
-        .onChange(of: menu.flatMap(ComposerTriggers.announcement)) { _, s in if let s { AccessibilityNotification.Announcement(s).post() } }
+        // VoiceOver hears the menu open and change (the web's live region) once typing pauses, and not again while it
+        // says the same; the option the arrows move to is said on its own.
+        .task(id: menu.flatMap(ComposerTriggers.announcement)) {
+            guard menu != nil else { announced = nil; return }
+            guard let s = menu.flatMap(ComposerTriggers.announcement), s != announced else { return }
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            announced = s
+            AccessibilityNotification.Announcement(s).post()
+        }
         .onChange(of: picks) { _, items in
             guard !items.isEmpty else { return }
             picks = []

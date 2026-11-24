@@ -35,6 +35,11 @@ final class MirrorViewTests: XCTestCase {
         XCTAssertEqual(MirrorView.sendLock(DevdHTTPError(statusCode: 409, serverMessage: "not-a-tmux-session"))?.code, "not-a-tmux-session")
         XCTAssertNil(MirrorView.sendLock(DevdHTTPError(statusCode: 409, serverMessage: "something-new")))
         XCTAssertNil(MirrorView.sendLock(URLError(.notConnectedToInternet)))
+        // The first path never connected, the fallback reached devd and was refused: the lock, not the combined text.
+        let viaFallback = DevdClientError(description: "Tailscale: …; Cloudflare: …", underlying: [URLError(.cannotConnectToHost), draft])
+        XCTAssertEqual(MirrorView.sendLock(viaFallback), MirrorLock(code: "terminal-has-draft", message: "Text is already typed."))
+        XCTAssertNil(MirrorView.sendLock(DevdClientError(description: "both", underlying: [draft, URLError(.timedOut)])),
+                     "the attempt made last decides, as for mayHaveArrived")
     }
 
     /// Only a request cut off on the way may have been typed; an error raised before anything went out, or a connect

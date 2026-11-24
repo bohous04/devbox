@@ -31,13 +31,7 @@ enum MirrorView {
     /// URL", "CF path missing service token") and a connect that never reached devd (the same codes DevdClient
     /// falls back on) are not. When both paths failed, the last one decides: it is the attempt that may have arrived.
     static func mayHaveArrived(_ error: Error) -> Bool {
-        let last: Error
-        if let both = error as? DevdClientError {
-            guard let l = both.underlying.last else { return false }
-            last = l
-        } else {
-            last = error
-        }
+        guard let last = lastAttempt(error) else { return false }
         if last is CancellationError { return true }
         guard let code = (last as? URLError)?.code else { return false }
         return ![.cannotConnectToHost, .cannotFindHost, .dnsLookupFailed, .notConnectedToInternet].contains(code)
@@ -52,8 +46,17 @@ enum MirrorView {
 
     /// The lock a refused send (404/409) puts on the composer; nil for any other failure, which the composer shows as
     /// its error.
+    /// The error of the attempt made last: when both network paths failed (DevdClientError), the fallback's; nil
+    /// when no attempt was made.
+    private static func lastAttempt(_ error: Error) -> Error? {
+        guard let both = error as? DevdClientError else { return error }
+        return both.underlying.last
+    }
+
+    /// A refusal devd answered, also on the fallback path after the first path failed (it is the attempt that
+    /// reached devd), as the composer's lock; nil for any other failure.
     static func sendLock(_ error: Error) -> MirrorLock? {
-        guard let e = error as? DevdHTTPError, e.statusCode == 409 || e.statusCode == 404, let code = e.serverMessage else { return nil }
+        guard let e = lastAttempt(error) as? DevdHTTPError, e.statusCode == 409 || e.statusCode == 404, let code = e.serverMessage else { return nil }
         if let message = e.serverDetail { return MirrorLock(code: code, message: message) }
         return sessionRefusals[code].map { MirrorLock(code: code, message: $0) }
     }

@@ -685,6 +685,37 @@ final class ThreadStoreLiveTests: XCTestCase {
         store.stop()
     }
 
+    /// Reopen reads a session that is no longer a tmux session again, as a chat thread: /thread, not the mirror.
+    func testReopenLoadsANoLongerTmuxSessionAsAChatThread() async throws {
+        var chat = false
+        MockURLProtocol.handler = { req in
+            switch req.url?.path {
+            case "/api/sessions/s1/thread":
+                return chat ? .init(statusCode: 200, data: self.snapshot(lastSeq: 7, seenSeq: 7))
+                    : .init(statusCode: 409, data: Data(#"{"error":"not-a-chat-session"}"#.utf8))
+            case "/api/sessions/s1/mirror": return .init(statusCode: 200, data: self.mirrorBody(lastSeq: 1))
+            default: return .init(statusCode: 204)
+            }
+        }
+        var paths: [String] = []
+        let store = ThreadStore(sessionId: "s1", client: client(), connect: { path, _ in
+            paths.append(path)
+            if !chat { throw DevdHTTPError(statusCode: 409, serverMessage: "not-a-tmux-session") }
+            return AsyncThrowingStream { _ in }
+        })
+        await store.start()
+        try await waitUntil { store.noLongerTmux }
+        chat = true
+        await store.reopen()
+        XCTAssertFalse(store.noLongerTmux)
+        XCTAssertFalse(store.isTmux)
+        XCTAssertNil(store.mirror)
+        XCTAssertEqual(store.thread?.lastSeq, 7)
+        try await waitUntil { paths.count == 2 }
+        XCTAssertEqual(paths.last, "/api/stream?session=s1&afterSeq=7")
+        store.stop()
+    }
+
     /// /mirror itself failing leaves the load error (the screen offers Open terminal), not a silent empty thread.
     func testMirrorLoadFailureIsShown() async throws {
         MockURLProtocol.handler = { req in

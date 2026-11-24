@@ -91,11 +91,11 @@ struct ChatScreen: View {
                     if let closeWindow { Button("Close window", action: closeWindow) }
                 }
             } else if store.noLongerTmux {
-                // The way out the other dead ends offer: the session lives on, in its terminal.
+                // The session lives on, now a chat session: read it again as one.
                 ContentUnavailableView {
-                    Label(MirrorView.noLongerTmux, systemImage: "terminal")
+                    Label(MirrorView.noLongerTmux, systemImage: "bubble.left.and.bubble.right")
                 } actions: {
-                    Button("Open terminal", action: toTerminal)
+                    Button("Reopen") { Task { await store.reopen() } }
                     if let closeWindow { Button("Close window", action: closeWindow) }
                 }
             } else if let reason = store.mirror.flatMap(MirrorView.unsupported) {
