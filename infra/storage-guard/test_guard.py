@@ -17,6 +17,21 @@ def module(name):
     s=importlib.util.spec_from_file_location(name,HERE/(name+'.py'))
     m=importlib.util.module_from_spec(s);s.loader.exec_module(m);return m
 guard=module('guard');client=module('client')
+
+
+def listing(args,drop=()):
+    """What `borg list --json-lines ARCHIVE pp:...` prints for these paths as they are on disk
+    (an archive of them); `drop` leaves names out, as borg does with a file it could not read."""
+    out=[]
+    for pat in [a for a in args if a.startswith('pp:')]:
+        root=Path('/'+pat[3:])
+        for q in [root,*sorted(root.rglob('*'))]:
+            if q.name in drop:continue
+            st=q.lstat();kind=guard.stat.filemode(st.st_mode)[0]
+            if kind=='s':continue
+            out.append(json.dumps(dict(type=kind,mode=guard.stat.filemode(st.st_mode),path=str(q).lstrip('/'),healthy=True,
+                                       source='',size=st.st_size if kind in '-l' else 0)))
+    return '\n'.join(out).encode()
 host=module('host-docker')
 
 
@@ -157,16 +172,16 @@ class Safety(unittest.TestCase):
 
     def test_end_ready_checks_metadata_without_rehashing(self):
         p=self.root/'work';p.mkdir();(p/'f').write_text('one')
-        c={'Id':'abc','State':{'Running':False}}
-        guard.atomic(self.g.state/'prepared'/'abc.json',dict(container_id='abc',signatures={str(p):guard.signature(p)},repository=self.cfg['borg_repo'],verified_at=time.time()))
+        c={'Id':'abc','State':{'Running':False,'StartedAt':'t0'}}
+        guard.atomic(self.g.state/'prepared'/'abc.json',dict(container_id='abc',name='x',started={'x':'t0'},signatures={str(p):guard.signature(p)},repository=self.cfg['borg_repo'],verified_at=time.time()))
         with patch.object(guard,'digest',side_effect=AssertionError('rehash')):
             self.assertTrue(self.g.end_ready(c))
             (p/'f').write_text('two!')
             self.assertFalse(self.g.end_ready(c))
     def test_end_ready_trusts_recent_full_check_only_when_fresh(self):
         p=self.root/'work';p.mkdir();(p/'f').write_text('one')
-        c={'Id':'abc','State':{'Running':False}}
-        rec=dict(container_id='abc',signatures={str(p):guard.signature(p)},repository=self.cfg['borg_repo'],verified_at=time.time())
+        c={'Id':'abc','State':{'Running':False,'StartedAt':'t0'}}
+        rec=dict(container_id='abc',name='x',started={'x':'t0'},signatures={str(p):guard.signature(p)},repository=self.cfg['borg_repo'],verified_at=time.time())
         guard.atomic(self.g.state/'prepared'/'abc.json',rec)
         (p/'f').write_text('changed!')
         with patch.object(guard,'signature',side_effect=AssertionError('walk')):
@@ -174,7 +189,7 @@ class Safety(unittest.TestCase):
         rec['checked_at']=rec['verified_at']=time.time()-400
         guard.atomic(self.g.state/'prepared'/'abc.json',rec)
         self.assertFalse(self.g.end_ready(c,fresh=300))
-        self.assertFalse(self.g.end_ready({'Id':'abc','State':{'Running':True}},fresh=300))
+        self.assertFalse(self.g.end_ready({'Id':'abc','State':{'Running':True,'StartedAt':'t0'}},fresh=300))
     def test_shared_git_store_changes_do_not_block_but_owned_ones_do(self):
         own=self.root/'work';own.mkdir();(own/'f').write_text('one')
         shared=self.root/'repo.git';shared.mkdir();(shared/'o').write_text('a')
@@ -197,7 +212,7 @@ class Safety(unittest.TestCase):
         shared=self.root/'repo.git';shared.mkdir();(shared/'o').write_text('a')
         calls=[]
         def borg(args,allow_warning=False):
-            calls.append(args);return b''
+            calls.append(args);return listing(args) if args[0]=='list' else b''
         with patch.object(self.g,'borg',side_effect=borg):
             name,_=self.g.archive([own],'test',[shared],verify_only=[own])
             self.g.archive([own],'test',[shared])
@@ -212,7 +227,7 @@ class Safety(unittest.TestCase):
         common=self.root/'repo.git';(common/'objects').mkdir(parents=True,exist_ok=True)
         admin=common/'worktrees'/'dev-x';admin.mkdir(parents=True,exist_ok=True);(admin/'HEAD').write_text('ref: refs/heads/s\n')
         ws=self.root/'_sessions'/'dev-x';ws.mkdir(parents=True,exist_ok=True);(ws/'.git').write_text(f'gitdir: {admin}\n')
-        c={'Id':'abc123456789ff','Name':'/dev-x','State':{'Running':False},
+        c={'Id':'abc123456789ff','Name':'/dev-x','State':{'Running':False,'StartedAt':'t0'},
            'Mounts':[{'Source':str(ws),'Destination':'/workspace'},{'Source':str(common),'Destination':str(common)}]}
         return c,ws,common,admin
 
@@ -235,7 +250,7 @@ class Safety(unittest.TestCase):
             archived.update(paths=paths,shared=shared,verify_only=verify_only)
             return 'data-archive',{str(Path(p).resolve()):guard.signature(Path(p).resolve(),hash_content) for p in paths}
         def fake_borg(args,**k):
-            borg_calls.append(['borg',*args]);return b''
+            borg_calls.append(['borg',*args]);return listing(args) if args[0]=='list' else b''
         def fake_run(args,**k):
             if list(map(str,args[:2]))==['/usr/bin/git','-c']:
                 return (str(Path(c['Mounts'][1]['Source']))+'\n').encode()
@@ -277,9 +292,76 @@ class Safety(unittest.TestCase):
         def borg(args,allow_warning=False):
             if args[0]=='extract':
                 st=(p/'f').stat();(p/'f').write_text('two');os.utime(p/'f',ns=(st.st_atime_ns,st.st_mtime_ns))
-            return b''
+            return listing(args) if args[0]=='list' else b''
         with patch.object(guard,'digest',side_effect=AssertionError('content hashed')),patch.object(self.g,'borg',side_effect=borg):
             with self.assertRaisesRegex(RuntimeError,'changed'):self.g.archive([p],'test',hash_content=False)
+
+    def test_owned_file_borg_could_not_read_denies_removal(self):
+        # borg create: rc=1 is accepted with shared sources, and an EIO on one file is just such a
+        # warning; the file is left out of the archive while its metadata stays unchanged.
+        own=self.root/'work';own.mkdir();(own/'f').write_text('one');(own/'lost').write_text('x')
+        shared=self.root/'repo.git';shared.mkdir()
+        for drop,ok in (((),True),(('lost',),False)):
+            def borg(args,allow_warning=False):
+                return listing(args,drop) if args[0]=='list' else b''
+            with patch.object(self.g,'borg',side_effect=borg):
+                if ok:self.g.archive([own],'test',[shared],verify_only=[own],hash_content=False)
+                else:
+                    with self.assertRaisesRegex(RuntimeError,'missing'):
+                        self.g.archive([own],'test',[shared],verify_only=[own],hash_content=False)
+
+    def test_listing_check_covers_size_type_and_the_registration(self):
+        c,ws,common,admin=self.end_fixture();(ws/'f').write_text('data')
+        sig={str(ws):guard.signature(ws,False),str(admin):guard.signature(admin,False)}
+        pats=['pp:'+str(ws).lstrip('/'),'pp:'+str(admin).lstrip('/')]
+        good=[json.loads(l) for l in listing(['list','x',*pats]).splitlines()]
+        def check(items):
+            with patch.object(self.g,'borg',return_value='\n'.join(map(json.dumps,items)).encode()):
+                self.g.require_listed('x',sig,pats)
+        check(good)
+        for broken in ([dict(i,size=1) if i['path'].endswith('/f') else i for i in good],
+                       [dict(i,type='l') if i['path'].endswith('/f') else i for i in good],
+                       [dict(i,healthy=False) if i['path'].endswith('/f') else i for i in good],
+                       [i for i in good if not i['path'].endswith('/HEAD')]):
+            with self.assertRaisesRegex(RuntimeError,'missing or different'):check(broken)
+        # A later hardlink is listed with mode h... and size 0; its size is the source's.
+        hl=[dict(i,mode='h'+i['mode'][1:],size=0,source='first') if i['path'].endswith('/f') else i for i in good]
+        check(hl+[dict(type='-',mode='-rw-r--r--',path='first',healthy=True,source='',size=4)])
+        with self.assertRaisesRegex(RuntimeError,'missing or different'):
+            check(hl+[dict(type='-',mode='-rw-r--r--',path='first',healthy=True,source='',size=3)])
+
+    def test_worktree_registration_edge_cases(self):
+        c,ws,common,admin=self.end_fixture()
+        (ws/'.git').write_text('gitdir: ../../repo.git/worktrees/dev-x\n')  # relative to the worktree
+        self.assertEqual(guard.worktree_admin_dirs([ws],[common/'worktrees']),[admin.resolve()])
+        (ws/'.git').write_text(f'gitdir: {common}/worktrees/gone\n')        # legacy, pruned: nothing to delete
+        self.assertEqual(guard.worktree_admin_dirs([ws],[common/'worktrees']),[])
+        elsewhere=self.root/'other.git'/'worktrees'/'dev-x';elsewhere.mkdir(parents=True)
+        (ws/'.git').write_text(f'gitdir: {elsewhere}\n')                     # would not be archived
+        with self.assertRaisesRegex(RuntimeError,'not archived'):guard.worktree_admin_dirs([ws],[common/'worktrees'])
+        (ws/'.git').write_text('garbage\n')
+        with self.assertRaisesRegex(RuntimeError,'Unreadable'):guard.worktree_admin_dirs([ws],[common/'worktrees'])
+
+    def test_proof_does_not_survive_a_restart_of_the_session(self):
+        p=self.root/'work';p.mkdir();(p/'f').write_text('one')
+        rec=dict(container_id='abc',name='x',started={'x':'t0'},signatures={str(p):guard.signature(p,False)},
+                 repository=self.cfg['borg_repo'],verified_at=time.time(),checked_at=time.time())
+        guard.atomic(self.g.state/'prepared'/'abc.json',rec)
+        self.assertTrue(self.g.end_ready({'Id':'abc','State':{'Running':False,'StartedAt':'t0'}},fresh=300))
+        # Started, written and stopped again inside the fresh window: the shortcut must not apply.
+        self.assertFalse(self.g.end_ready({'Id':'abc','State':{'Running':False,'StartedAt':'t1'}},fresh=300))
+        rec.pop('started');guard.atomic(self.g.state/'prepared'/'abc.json',rec)
+        self.assertFalse(self.g.end_ready({'Id':'abc','State':{'Running':False,'StartedAt':'t0'}},fresh=300))
+
+    def test_proof_records_sidecar_start_and_rejects_a_restarted_sidecar(self):
+        c,*_=self.end_fixture()
+        result,_,_=self.run_prepare_end(c)
+        self.assertEqual(result['started'],{'dev-x':'t0'})
+        rec=dict(result,sidecar_id='side',started={'dev-x':'t0','dind-dev-x':'s0'});rec['checked_at']=time.time()
+        guard.atomic(self.g.state/'prepared'/(c['Id']+'.json'),rec)
+        for state,ok in (({'Running':False,'StartedAt':'s0'},True),({'Running':False,'StartedAt':'s1'},False),({'Running':True,'StartedAt':'s0'},False)):
+            with patch.object(guard.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout=json.dumps([{'State':state}]).encode())):
+                self.assertEqual(self.g.end_ready(c,fresh=300),ok,state)
 
     def test_end_never_hashes_content(self):
         c,ws,*_=self.end_fixture();(ws/'f').write_text('data')
@@ -290,7 +372,7 @@ class Safety(unittest.TestCase):
 
     def test_end_denied_when_session_started_during_backup(self):
         # Metadata signatures are only sound while no writer runs (owner decision 2026-11-23).
-        for state in ({'Running':True},{'Running':False,'StartedAt':'later'}):
+        for state in ({'Running':True,'StartedAt':'first'},{'Running':False,'StartedAt':'later'}):
             c,*_=self.end_fixture();c['State']['StartedAt']='first'
             with self.assertRaisesRegex(RuntimeError,'removal denied'):
                 self.run_prepare_end(c,during=lambda:c['State'].update(state))
@@ -307,15 +389,15 @@ class Safety(unittest.TestCase):
 
     def test_running_session_never_ready_for_removal(self):
         atomic=guard.atomic
-        atomic(self.g.state/'prepared'/'abc.json',{'container_id':'abc','signatures':{}})
-        self.assertFalse(self.g.end_ready({'Id':'abc','State':{'Running':True}}))
+        atomic(self.g.state/'prepared'/'abc.json',{'container_id':'abc','name':'x','started':{'x':'t0'},'signatures':{}})
+        self.assertFalse(self.g.end_ready({'Id':'abc','State':{'Running':True,'StartedAt':'t0'}}))
 
     def test_modified_stopped_session_invalidates_proof(self):
         p=self.root/'source';p.write_text('first')
-        guard.atomic(self.g.state/'prepared'/'abc.json',dict(container_id='abc',signatures={str(p):guard.signature(p)},repository=self.cfg['borg_repo'],verified_at=time.time()))
-        self.assertTrue(self.g.end_ready({'Id':'abc','State':{'Running':False}}))
+        guard.atomic(self.g.state/'prepared'/'abc.json',dict(container_id='abc',name='x',started={'x':'t0'},signatures={str(p):guard.signature(p)},repository=self.cfg['borg_repo'],verified_at=time.time()))
+        self.assertTrue(self.g.end_ready({'Id':'abc','State':{'Running':False,'StartedAt':'t0'}}))
         p.write_text('changed')
-        self.assertFalse(self.g.end_ready({'Id':'abc','State':{'Running':False}}))
+        self.assertFalse(self.g.end_ready({'Id':'abc','State':{'Running':False,'StartedAt':'t0'}}))
 
     def test_unknown_or_active_owner_not_swept(self):
         p=self.root/'_sessions'/'dev-owner'/'copy';p.mkdir(parents=True);(p/'unique').write_text('keep')
@@ -979,12 +1061,12 @@ class Safety(unittest.TestCase):
             self.preserve_with_unit(['inactive','failed'],ready_after=99)
 
     def test_expired_or_other_repository_proof_denies_removal(self):
-        proof=dict(container_id='abc',signatures={},repository='wrong-repository',verified_at=time.time())
+        proof=dict(container_id='abc',name='x',started={'x':'t0'},signatures={},repository='wrong-repository',verified_at=time.time())
         guard.atomic(self.g.state/'prepared'/'abc.json',proof)
-        self.assertFalse(self.g.end_ready({'Id':'abc','State':{'Running':False}}))
+        self.assertFalse(self.g.end_ready({'Id':'abc','State':{'Running':False,'StartedAt':'t0'}}))
         proof.update(repository=self.cfg['borg_repo'],verified_at=time.time()-4000)
         guard.atomic(self.g.state/'prepared'/'abc.json',proof)
-        self.assertFalse(self.g.end_ready({'Id':'abc','State':{'Running':False}}))
+        self.assertFalse(self.g.end_ready({'Id':'abc','State':{'Running':False,'StartedAt':'t0'}}))
 
     def test_legacy_git_registration_keeps_raw_data_without_guessing_head(self):
         workspace=self.root/'workspace';workspace.mkdir()
