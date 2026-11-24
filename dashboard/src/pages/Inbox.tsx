@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { AlarmClock, Check, CircleAlert, CircleCheck, CircleDashed, Ellipsis, MessageCircleQuestion, Undo2 } from "lucide-react";
 import type { EndedSession } from "../../../shared/ended";
@@ -13,6 +13,7 @@ import { SettleProblem } from "../components/SettleProblem";
 import { agoLabel } from "../format";
 import { profileFor } from "../newSession";
 import { endedHref, endedMetaTail, endedSecondLine, endedTitle, settledShelf, upsertEnded } from "../endedView";
+import { applyHold, onHoldEvent, type Hold, type HoldEvent } from "../inboxHold";
 import { claimsUndo, failureText, focusOwnsUndo, settleKey, settleShortcut } from "../inboxSettle";
 import { badgeSlots, canEnd, groupInbox, inboxHref, inboxList, metaTail, mixedAgents, projectBadge, reasonLabel, rowStatus, rowTitle, secondLine, shelfBlock, shortAgo, snoozeEnd, snoozeTimes, statusParts, upsertInbox, type StatusTone } from "../inboxView";
 import { cn } from "@/lib/utils";
@@ -379,7 +380,24 @@ export function Inbox() {
   }, []);
   const onHidden = (id: string) => setEnded((cur) => upsertEnded(cur, { id, removed: true }));
   const g = items ? groupInbox(items) : null;
-  const list = g ? inboxList(g) : [];
+  // Under the mouse the rows keep their order (inboxHold.ts); leaving the column or the window losing focus lets go
+  // and re-sorts.
+  const [hold, setHold] = useState<Hold | null>(null);
+  const shown = applyHold(hold, { list: g ? inboxList(g) : [], working: g?.working ?? [], snoozed: g?.snoozed ?? [] });
+  const { list, working, snoozed } = shown.lists;
+  // A row that came during the hold keeps the line it got.
+  useLayoutEffect(() => { if (shown.hold !== hold) setHold(shown.hold); });
+  const onHold = (e: HoldEvent) => setHold((h) => onHoldEvent(h, e));
+  useEffect(() => {
+    const blur = () => onHold({ type: "blur" });
+    const hidden = () => { if (document.hidden) onHold({ type: "hidden" }); };
+    window.addEventListener("blur", blur);
+    document.addEventListener("visibilitychange", hidden);
+    return () => {
+      window.removeEventListener("blur", blur);
+      document.removeEventListener("visibilitychange", hidden);
+    };
+  }, []);
   // A row action answers the session's new item: shown at once, the SSE event that follows is the same.
   const onItem = (item: InboxItem) => setItems((cur) => (cur === null ? cur : upsertInbox(cur, item)));
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -447,7 +465,10 @@ export function Inbox() {
         <ShowAgent.Provider value={mixedAgents(items!)}>
         <BadgeSlots.Provider value={slots}>
         <SettleRow.Provider value={settle}>
-          <div ref={listRef} className="-mx-3 max-w-[720px]" data-inbox-column>
+          <div ref={listRef} className="-mx-3 max-w-[720px]" data-inbox-column
+            onPointerEnter={(e) => onHold({ type: "enter", pointerType: e.pointerType, shown: shown.lists })}
+            onPointerMove={(e) => onHold({ type: "move", pointerType: e.pointerType, shown: shown.lists })}
+            onPointerLeave={() => onHold({ type: "leave" })}>
             {list.length === 0 ? (
               <p className="mb-3 flex min-h-9 items-center gap-2 px-3 text-sm text-muted-foreground">
                 <CircleCheck className="size-4 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />Nothing waiting for you
@@ -457,8 +478,8 @@ export function Inbox() {
             )}
             {g.working.length + g.snoozed.length + g.settled.length + ended.length > 0 || endedError !== null ? (
               <div className="border-t pt-1.5">
-                <Shelf label="Working" count={g.working.length}><Rows items={g.working} now={now} onItem={onItem} settle="pointer" /></Shelf>
-                <Shelf label="Snoozed" count={g.snoozed.length}><Rows items={g.snoozed} now={now} onItem={onItem} settle={false} /></Shelf>
+                <Shelf label="Working" count={working.length}><Rows items={working} now={now} onItem={onItem} settle="pointer" /></Shelf>
+                <Shelf label="Snoozed" count={snoozed.length}><Rows items={snoozed} now={now} onItem={onItem} settle={false} /></Shelf>
                 <Shelf label="Settled" count={g.settled.length + ended.length}
                   note={endedError === null ? null : <p role="alert" className="px-3 pb-1 text-xs text-destructive">Ended sessions could not be loaded: {endedError}</p>}>
                   <ul className="flex flex-col gap-px">
