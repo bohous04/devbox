@@ -299,14 +299,20 @@ class Guard:
                     before[str(p)] = sign(p)
                 except (RuntimeError, OSError):
                     pass
-            # A registration is signed once, metadata only; its root fails with it.
+            # A registration is signed once, metadata only, and fails every root pointing at it
+            # (a copied worktree shares its registration). One inside its own root is already
+            # covered by that root's signature. Registrations are not signed again after the
+            # archive: the listing proves the archive holds them as they were before it, the
+            # worktree is released and unreferenced, and the window to removal is short; a
+            # changed registration would at worst lose what changed in that window.
             reg_expect, reg_owner, unsigned = {}, {}, set()
             for root, admin in registrations.items():
-                if str(root) not in before:
+                if str(root) not in before or admin == root or root in admin.parents:
                     continue
                 try:
-                    reg_expect[str(admin)] = signature(admin, hash_content=False)
-                    reg_owner[str(admin)] = str(root)
+                    if str(admin) not in reg_expect:
+                        reg_expect[str(admin)] = signature(admin, hash_content=False)
+                    reg_owner.setdefault(str(admin), set()).add(str(root))
                 except (RuntimeError, OSError):
                     unsigned.add(str(root))
         # What the listing check below must find, by type and size: the deleted paths, plus any
@@ -369,44 +375,50 @@ class Guard:
         file, its size. borg prints paths through remove_surrogates (an undecodable byte becomes
         '?'), so expected paths are mapped the same way. With a `failed` set (a sweep batch) a
         root whose items do not match is added to it instead of failing the whole archive;
-        `owner` maps an expect key to the root it fails (a registration to its worktree)."""
+        `owner` maps an expect key to the roots it fails (a registration to every worktree that
+        points at it). The same file reached from two keys counts for the roots of both."""
         as_borg = lambda path: path.encode('utf-8', 'replace').decode('utf-8')
-        def bad(root, message):
+        def bad(roots, message):
             if failed is None:
                 raise RuntimeError(message + '; deletion denied')
-            failed.add(root)
-        pending = {}
+            failed.update(roots)
+        pending = {}  # listed path -> [kind, size, roots, raw path]
         for key, sig in expect.items():
-            root = (owner or {}).get(key, key)
+            roots = set((owner or {}).get(key, {key}))
             for rel, mode, _dev, _ino, size, *_ in sig:
                 kind = stat.filemode(mode)[0]
                 if kind == 's':
                     continue  # borg skips sockets; they hold no data
                 raw = str(Path(key).parent / rel).lstrip('/')
                 path = as_borg(raw)
-                if path in pending:
-                    bad(root, f'{raw!r}: two names differ only in non-UTF-8 bytes, so the archive listing '
-                              'cannot tell them apart')
-                    bad(pending[path][2], 'non-UTF-8 name collision')
-                pending[path] = (kind, size, root)
+                seen = pending.get(path)
+                if seen is None:
+                    pending[path] = [kind, size, roots, raw]
+                    continue
+                if seen[3] != raw:
+                    bad(seen[2] | roots, f'{raw!r}: two names differ only in non-UTF-8 bytes, so the archive '
+                                         'listing cannot tell them apart')
+                elif seen[:2] != [kind, size]:
+                    bad(seen[2] | roots, f'{raw!r} changed between its two signatures')
+                seen[2] = seen[2] | roots
         sizes = {}  # path -> size of verified regular files, for hardlinks listed after them
         for line in self.borg_lines(['list', '--json-lines', dest, *patterns]):
             it = json.loads(line)
             want = pending.pop(it['path'], None)
             if want is None:
                 continue
-            kind, size, root = want
+            kind, size, roots, _raw = want
             if kind == '-' and it['mode'].startswith('h'):
                 # A hardlink after the first is listed with mode h... and size 0; its data is the source's.
                 listed = sizes.get(it['source'])
             else:
                 listed = it['size']
             if it['type'] != kind or not it['healthy'] or (kind == '-' and listed != size):
-                bad(root, f"{it['path']} differs in the archive (type/size/health)")
+                bad(roots, f"{it['path']} differs in the archive (type/size/health)")
             elif kind == '-':
                 sizes[it['path']] = size
-        for path, (_kind, _size, root) in pending.items():
-            bad(root, f'{path} and {len(pending) - 1} more are missing from the archive')
+        for path, (_kind, _size, roots, _raw) in pending.items():
+            bad(roots, f'{path} and {len(pending) - 1} more are missing from the archive')
 
     def notify(self, key, message, title='Devbox: místo na disku'):
         if not self.c.get('notify_enabled', True):
@@ -1219,13 +1231,22 @@ class Guard:
         shared=list(dict.fromkeys([x for _,c in todo.values() if c for x in self.git_storage(c)]+orphan_admin))
         try:
             # Removal also deletes each worktree's registration (HEAD, index, reflog): check it in the archive too.
-            regs={p:a for p,a in [(p,self.admin_dir(p,self.root/'_sessions'/registry[k]['session'])) for k,(p,_) in todo.items()]
-                  +[(o,self.admin_dir(o,o)) for o in orphans] if a and a.is_dir()}
+            regs,unparsed={},[]
+            for p,owner in [(p,self.root/'_sessions'/registry[k]['session']) for k,(p,_) in todo.items()]+[(o,o) for o in orphans]:
+                try:
+                    a=self.admin_dir(p,owner,strict=True)
+                except RuntimeError:
+                    unparsed.append(p);continue
+                if a and a.is_dir():regs[p]=a
             archive,sigs=self.archive([p for p,_ in todo.values()]+orphans,'worktrees',shared,require_stable=False,registrations=regs)
         except (RuntimeError,OSError,subprocess.SubprocessError) as err:
             self.audit('released-worktree-archive-failed',paths=[str(p) for p,_ in todo.values()]+list(map(str,orphans)),error=str(err)[-300:])
             report.append(dict(path='(batch)',reason='Archive of released worktrees failed: '+str(err)[-300:]))
             return
+        for p in unparsed:
+            # Its registration cannot be located, so it cannot be checked in the archive: keep it.
+            sigs.pop(str(p.resolve()),None)
+            self.audit('worktree-pointer-unreadable',path=str(p),archive=archive)
         try:
             # The archive can take hours: a session may have claimed its directory meanwhile.
             live=self.devd_sessions() if orphans else set()
@@ -1297,12 +1318,17 @@ class Guard:
             out.append(d)
         return out
 
-    def admin_dir(self, p, owner):
+    def admin_dir(self, p, owner, strict=False):
+        """strict: a `.git` file without a gitdir line raises instead of meaning "no registration"."""
         try:
             admin=(p/'.git').read_text().split('gitdir:',1)[1].strip()
-        except (OSError,IndexError):
+        except OSError:
             return None
-        admin=owner/admin[len('/workspace/'):] if admin.startswith('/workspace/') else Path(admin)
+        except IndexError:
+            if strict:raise RuntimeError(f'Unreadable worktree pointer {p/".git"}')
+            return None
+        # A relative gitdir is relative to the worktree, as git reads it.
+        admin=owner/admin[len('/workspace/'):] if admin.startswith('/workspace/') else p/admin
         return admin if admin.parent.name=='worktrees' and beneath(admin,self.root) else None
 
     def claimed_elsewhere(self, admin, owner, target):

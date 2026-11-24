@@ -329,6 +329,32 @@ class Safety(unittest.TestCase):
             _,before=self.g.archive(list(roots),'worktrees',[common/'objects'],require_stable=False,registrations=roots)
         self.assertEqual(list(before),[str(self.root/'a')])
 
+    def test_registration_shared_by_two_worktrees_fails_both(self):
+        # A copied worktree (cp -a) points at the same registration; a missing index in it must
+        # keep both, or removing either deletes the unarchived registration.
+        common=self.root/'repo.git';admin=common/'worktrees'/'wt';admin.mkdir(parents=True)
+        (admin/'HEAD').write_text('x\n');(admin/'index').write_text('i'*9)
+        a=self.root/'a';b=self.root/'b';c=self.root/'c'
+        for w in (a,b,c):w.mkdir();(w/'f').write_text(w.name)
+        def borg(args,allow_warning=False):
+            if args[0]!='list':return b''
+            return b'\n'.join(l for l in listing(args).splitlines() if not l.decode().count('/worktrees/wt/index'))
+        with patch.object(self.g,'borg',side_effect=borg):
+            _,before=self.g.archive([a,b,c],'worktrees',[common/'objects'],require_stable=False,registrations={a:admin,b:admin})
+        self.assertEqual(list(before),[str(c)])
+
+    def test_registration_inside_its_own_root_is_not_signed_twice(self):
+        a=self.root/'a';admin=a/'nested.git'/'worktrees'/'x';admin.mkdir(parents=True);(admin/'HEAD').write_text('x\n')
+        signed=[];real=guard.signature
+        def counting(p,*k):
+            signed.append(Path(p).resolve());return real(p,*k)
+        def borg(args,allow_warning=False):
+            return listing(args) if args[0]=='list' else b''
+        with patch.object(self.g,'borg',side_effect=borg),patch.object(guard,'signature',side_effect=counting):
+            _,before=self.g.archive([a],'worktrees',[],require_stable=False,registrations={a:admin})
+        self.assertEqual(list(before),[str(a)])
+        self.assertNotIn(admin.resolve(),signed)
+
     def test_batch_listing_fails_roots_not_the_batch(self):
         item=lambda path,size,**k:dict(dict(type='-',mode='-rw-r--r--',path=path,healthy=True,source='',size=size),**k)
         d=lambda path:dict(type='d',mode='drwxr-xr-x',path=path,healthy=True,source='',size=0)
@@ -981,6 +1007,24 @@ class Safety(unittest.TestCase):
              patch.object(self.g,'container_exists',side_effect=lambda n:n in containers), \
              patch.object(self.g,'archive',side_effect=fake_archive):
             self.g.sweep()
+
+    def test_orphan_with_an_unreadable_worktree_pointer_is_kept(self):
+        # Its registration cannot be located, so nothing proves it is in the archive.
+        d,admin=self.orphan('dev-p-r-4');(d/'.git').write_text('garbage\n')
+        old=time.time()-7200
+        for x in (d,d/'.git'):os.utime(x,(old,old))
+        self.run_orphan_sweep()
+        self.assertTrue(d.exists());self.assertTrue(admin.exists())
+        log=(self.g.state/'actions.jsonl').read_text() if (self.g.state/'actions.jsonl').exists() else ''
+        self.assertIn('worktree-pointer-unreadable',log)
+
+    def test_admin_dir_reads_a_relative_gitdir_and_strictly_rejects_garbage(self):
+        d,admin=self.orphan('dev-p-r-5')
+        (d/'.git').write_text('gitdir: ../../fivem/repo.git/worktrees/dev-p-r-5\n')
+        self.assertEqual(self.g.admin_dir(d,d).resolve(),admin.resolve())
+        (d/'.git').write_text('garbage\n')
+        self.assertIsNone(self.g.admin_dir(d,d))
+        with self.assertRaisesRegex(RuntimeError,'Unreadable worktree pointer'):self.g.admin_dir(d,d,strict=True)
 
     def test_orphan_session_dir_is_archived_and_removed_with_its_registration(self):
         # Ended sessions whose workspace devd retained (or a failed start) stayed on disk forever,
