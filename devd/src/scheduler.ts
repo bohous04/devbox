@@ -42,6 +42,8 @@ export function stamp(d: Date): string {
 }
 export function scheduledPrompt(sch: ScheduleRow, branch: string): string {
   return `Automated scheduled run "${sch.name}".\n\n`
+    // A question (Codex's request_user_input, Claude's AskUserQuestion) would wait for an answer that never comes.
+    + `Nobody is watching this run: do not ask questions; decide yourself and say what you decided and why in the pull request.\n\n`
     + `First create and switch to a new git branch \`${branch}\` (from the current default branch). Then the task:\n\n`
     + `${sch.prompt}\n\n`
     + `When you are done: commit, push the branch and open a pull request via \`gh\` with a summary. Do not merge. `
