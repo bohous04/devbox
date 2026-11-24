@@ -17,6 +17,16 @@ final class MacSidebarTests: XCTestCase {
         XCTAssertTrue(MacSettler.claimsUndo(flags: [.command, .capsLock], key: "Z", noticeShown: true, focusOwnsUndo: false), "caps lock")
     }
 
+    /// Settling the selected row moves the selection to the row that takes its place (T3 Code), else the one above.
+    func testSelectionAfterSettleMovesOn() {
+        let rows = ["a", "b", "c"]
+        XCTAssertEqual(MacSidebarLayout.afterSettle("a", rows: rows), "b")
+        XCTAssertEqual(MacSidebarLayout.afterSettle("b", rows: rows), "c")
+        XCTAssertEqual(MacSidebarLayout.afterSettle("c", rows: rows), "b", "the last row: the one above")
+        XCTAssertNil(MacSidebarLayout.afterSettle("a", rows: ["a"]), "the only row")
+        XCTAssertNil(MacSidebarLayout.afterSettle("x", rows: rows), "not shown")
+    }
+
     /// The Mac's settle announcement names ⌘Z.
     func testMacAnnouncesCommandZ() { XCTAssertEqual(MacSettler(voiceOver: { false }).undoHint, "⌘Z to undo") }
 }

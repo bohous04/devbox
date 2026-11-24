@@ -258,7 +258,8 @@ struct InboxScreen: View {
             .swipeActions(edge: .trailing, allowsFullSwipe: inList && InboxSettler.canSettle(item)) {
                 trailingAction(item)
             }
-            .swipeActions(edge: .leading) {
+            // As the trailing Settle: a full swipe acts only in the list, never on a shelf's rows.
+            .swipeActions(edge: .leading, allowsFullSwipe: inList) {
                 if InboxSettler.canSettle(item) && InboxView.shelfBlock(item) == nil {
                     Button { actionsFor = item } label: { Label("Snooze", systemImage: "alarm") }
                         .tint(InboxTone.snoozeSwipe)

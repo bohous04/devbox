@@ -162,6 +162,9 @@ struct MacInboxSidebar: View {
     @SceneStorage("macShelfSnoozedOpen") private var snoozedOpen = MacSidebarLayout.startsOpen("Snoozed")
     @SceneStorage("macShelfSettledOpen") private var settledOpen = MacSidebarLayout.startsOpen("Settled")
     @State private var actionsFor: InboxItem?
+    /// A settle of the selected row on its way (devd may ask first): the row and where the selection goes once the
+    /// settle lands (MacSidebarLayout.afterSettle).
+    @State private var settling: (id: String, next: String?)?
     /// The terminal's F9 actions in the row menu (MacSessionActions.swift).
     @StateObject private var sessionActions = MacSessionActions()
     @State private var query = ""
@@ -268,6 +271,12 @@ struct MacInboxSidebar: View {
         .onDisappear { if let window { state.settler.leftSidebar(window: window) } }
         // Seen only in the window the owner is using. The selected row is marked only where that leaves it in place
         // (MacSettler.seenMoves); otherwise when he leaves it, so no row jumps from under the pointer.
+        // The selected row settled (now, or after devd's question): the selection moves on as the row leaves.
+        .onReceive(state.settler.$notice) { notice in
+            guard let s = settling, notice?.sessionId == s.id else { return }
+            settling = nil
+            if selection == s.id { selection = s.next }
+        }
         .onChange(of: selection) { old, new in
             state.settler.actionTaken()
             // Not key: a selection changed from elsewhere (a notification, a link) is no look, so the row left is
@@ -291,7 +300,16 @@ struct MacInboxSidebar: View {
     }
 
     private func settle(_ item: InboxItem) {
+        if item.sessionId == selection { settling = (item.sessionId, MacSidebarLayout.afterSettle(item.sessionId, rows: shownOrder)) }
         Task { await state.settler.settle(item, in: store, window: window) }
+    }
+
+    /// The rows' ids as the sidebar shows them: the list, then the open shelves' rows.
+    private var shownOrder: [String] {
+        guard let items = store.items else { return [] }
+        let g = InboxView.group(items.filter { InboxView.matches($0, query) })
+        let pinned = InboxView.shelves(g, ended: store.ended.filter { InboxView.matches($0, query) }, endedError: store.endedError)
+        return InboxView.list(g).map(\.sessionId) + pinned.flatMap(visibleRows).map(\.id)
     }
 
     /// `look`: he opened the row or came back to the window; an idle tmux session then records the look (devd
@@ -511,6 +529,15 @@ enum MacSidebarLayout {
         if down, id == list.last { return shelves.first }
         if !down, id == shelves.first { return list.last }
         return nil
+    }
+
+    /// Where the selection goes when its row settles and leaves (T3 Code's): the row that takes its place in the
+    /// sidebar's order (`rows`: the list, then the shelves' visible rows), else the one above the last; nil when it
+    /// was the only row, or is not shown.
+    static func afterSettle(_ id: String, rows: [String]) -> String? {
+        guard let i = rows.firstIndex(of: id) else { return nil }
+        if i + 1 < rows.count { return rows[i + 1] }
+        return i > 0 ? rows[i - 1] : nil
     }
 
     /// What the shelves' list shows: which shelves, and which of their rows (none of a shut one).
