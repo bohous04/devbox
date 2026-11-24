@@ -406,9 +406,10 @@ export class ChatSwitch {
     return this.d.links.send(sessionId, { kind: "switchTarget", target: l.target, resume: l.resume, handoff: l.handoff }, SWITCH_TIMEOUT_MS);
   }
 
-  /** The bridge could not resume the thread `l` asked for: a fresh thread with the full handoff on the same target. */
+  /** The bridge could not resume the thread `l` asked for: a fresh thread with the full handoff on the same target.
+   *  devd may not know that thread (`l.resume` null: rebuilt after a devd restart from a store that never saw it
+   *  announced); the bridge still awaits a fresh target, so it gets one, with nothing to mark as failed. */
   private replan(store: ThreadStore, l: LastSwitch): Transition {
-    if (l.resume === null) throw new Error("the bridge reported a failed resume, but no thread was being resumed");
     const t = planAfterResumeFailure(l.target, l.resume, store, "", { window: l.window, reserve: RESERVE_TOKENS, now: this.d.now() });
     const h = handoffOf(t);
     l.resume = null;

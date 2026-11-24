@@ -715,6 +715,24 @@ test("C1: a resume failure reported at the bridge's start (no switch in flight, 
   expect(notices(t)).toEqual(["Agent bridge restarted (v1.1.0)", "Could not resume the earlier codex thread; started a fresh one · context handed over (1 items)"]);
 });
 
+test("a resume failure devd has no thread for (none announced on this harness) sends a fresh target once instead of retrying forever", async () => {
+  const t = setup();
+  t.feed([
+    { type: "run.queued", runId: "r1", text: "hello", attachments: [] },
+    { type: "bridge.started", version: "1.1.0", resumed: true },
+    { type: "run.failed", runId: "never-started", error: "resume-failed" },
+  ]);
+  await waitUntil(() => t.sent.length > 0, "re-plan");
+  await Bun.sleep(60);
+  expect(targets(t)).toHaveLength(1);
+  expect(targets(t)[0]).toMatchObject({ target: { harness: "claude", account: "primary" }, resume: null });
+  expect(targets(t)[0].handoff!.preamble).toContain("[user] hello");
+  // No thread was marked: there was none devd knew of.
+  expect(t.store.providerThread("claude")).toBeNull();
+  expect(notices(t).some((n) => n.startsWith("The agent waits for its target"))).toBe(false);
+  expect(t.sw.target(CHAT.id).awaitingTarget).toBe(false);
+});
+
 test("I1: a re-send after a devd restart carries no handoff, so the bridge keeps its own; a message that started at once clears devd's copy", async () => {
   const t = setup({ agent: "codex" });
   t.feed([
