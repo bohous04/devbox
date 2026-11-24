@@ -592,7 +592,8 @@ const mgr = new SessionManager({
   dind: dindEnabled,
   preserveForEnd: (container) => preserveForEnd(container),
   // Late-bound: transcriptMirror is created below; end() never runs before startup finishes.
-  finalizeTranscript: (s): Promise<{ truncated: boolean; threadNote?: string }> => (storedRuntime(s) === "tmux" ? transcriptMirror.finalRefresh(s.id) : Promise.resolve({ truncated: false })),
+  finalizeTail: (s) => (storedRuntime(s) === "tmux" ? transcriptMirror.finalTail(s.id) : Promise.resolve(null)),
+  finalizeTranscript: (s): Promise<{ truncated: boolean }> => (storedRuntime(s) === "tmux" ? transcriptMirror.finalRefresh(s.id) : Promise.resolve({ truncated: false })),
   onEnded: (e) => bus.publish("inbox-ended", e),
   storageGuard: () => existsSync(STORAGE_GUARD),
   // A shared / tainted session gets no dind sidecar (shareTaint.ts, final review C2).

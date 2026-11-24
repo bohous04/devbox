@@ -82,15 +82,16 @@ test("recordEnded takes a tmux session's mirror store, says when it was cut shor
 // The last read could not tell which of several Claude conversations the session ended on (TranscriptMirror
 // readWithoutPane): the row says so, records no thread (a continue would otherwise resume a guess), and a continue
 // that finds nothing to hand off repeats why.
-test("a thread note is kept in the row, records no thread, and explains a handoff and a missing transcript", async () => {
+test("a thread note is kept in the row and explains a handoff and a missing transcript", async () => {
   const root = tmp();
   const db = openDb(":memory:");
   const note = "The session holds 2 Claude conversations and the one it ended on could not be read from its terminal, so none was picked.";
   const dir = join(root, "_chat-archive", "dev-acme-app-20261120-101500");
-  archivedStore(dir, "dev-acme-app.mirror.sqlite", CONVO);
+  // A store an earlier read filled without ever naming the conversation (no thread.native).
+  archivedStore(dir, "dev-acme-app.mirror.sqlite", CONVO.slice(1));
   writeFileSync(join(dir, "0b1c2d3e-0000-4000-8000-000000000001.jsonl"), "{}\n");
-  const kept = recordEnded(db, { ...S, runtime: "tmux" }, dir, 5_000, { truncated: true, threadNote: note })!;
-  expect(kept).toMatchObject({ transcript: "truncated", continueMode: "handoff", threadNote: note });
+  const kept = recordEnded(db, { ...S, runtime: "tmux" }, dir, 5_000, { threadNote: note })!;
+  expect(kept).toMatchObject({ transcript: "complete", continueMode: "handoff", threadNote: note });
   expect(getEnded(db, kept.id)).toMatchObject({ native_thread: null, native_harness: null, thread_note: note });
   expect(await continuePlan(getEnded(db, kept.id)!, null)).toEqual({ mode: "handoff", reason: note });
   const none = recordEnded(db, { ...S, id: "dev-acme-tui", runtime: "tmux" }, null, 6_000, { id: "dev-acme-tui-20261120-101600", threadNote: note })!;

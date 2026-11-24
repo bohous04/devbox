@@ -153,9 +153,12 @@ export interface SessionDeps {
    *  tens of minutes — End must wait for it, otherwise the storage guard refuses `docker rm`. */
   preserveForEnd?: (container: string) => Promise<void>;
   /** The last read of a tmux session's transcript mirror while its container still runs (TranscriptMirror.finalRefresh):
-   *  end() archives the mirror as the ended session's transcript. `truncated`: the read stopped short. `threadNote`: why
-   *  the conversation the session ended on is not known (the ended row records no thread then). Never throws. */
-  finalizeTranscript?: (s: SessionRow) => Promise<{ truncated: boolean; threadNote?: string }>;
+   *  end() archives the mirror as the ended session's transcript. `truncated`: the read stopped short. Never throws. */
+  finalizeTranscript?: (s: SessionRow) => Promise<{ truncated: boolean }>;
+  /** The read after the backup stopped the container (TranscriptMirror.finalTail): the pinned conversation to its end,
+   *  from the host. null: nothing to add to the live read. `threadNote`: why the conversation the session ended on is
+   *  not known (several, none pinned). Never throws. */
+  finalizeTail?: (s: SessionRow) => Promise<{ truncated: boolean; threadNote?: string } | null>;
   /** An ended session's transcript was kept (endedSessions.ts): the inbox lists it (SSE `inbox-ended`). */
   onEnded?: (e: EndedSession) => void;
 }
@@ -1637,10 +1640,12 @@ export class SessionManager {
       // Native history may resume after end(): retain its exact files, including uncommitted work.
       // Validate authority BEFORE removing Docker or files; malformed registry fails closed.
       const keepRemote = retainRemoteWorkspace(s, this.d.root);
-      // The last read while the container still runs: the backup stops it, and a stopped container has no pane to tell
-      // which conversation the agent is on. What the agent writes after it is in its archived jsonl, not in the mirror.
-      const final = await this.d.finalizeTranscript?.(s);
+      // A live read while the container runs pins the conversation the agent is on (a stopped container has no pane to
+      // ask); the backup stops the container, possibly many minutes later; the read after it takes that conversation
+      // to its end from the host.
+      const live = await this.d.finalizeTranscript?.(s);
       await this.d.preserveForEnd?.(s.container);
+      const final: { truncated: boolean; threadNote?: string } | undefined = (await this.d.finalizeTail?.(s)) ?? live;
       await removeContainer(id);
       // The worktree belongs to the session, so it goes with it — except for `keepWorktree` (see above).
       // The branch does NOT: there may be work in progress on it and deleting it quietly when the window is closed

@@ -45,7 +45,7 @@ export type ContinuePlan = { mode: "resume"; thread: string; jsonl: Buffer } | {
 /** Why this transcript cannot resume, without reading the conversation: null when it can (as far as the archive
  *  shows); `wired: false` when resume does not exist for its agent at all. */
 function resumeBlock(row: EndedRow): { wired: boolean; reason: string } | null {
-  if (row.thread_note !== null && row.agent === "claude") return { wired: true, reason: row.thread_note };
+  if (row.thread_note !== null && row.native_thread === null && row.agent === "claude") return { wired: true, reason: row.thread_note };
   if (row.native_harness !== "claude" || row.agent !== "claude" || row.native_thread === null || !THREAD_ID.test(row.native_thread) || row.archive_dir === "") {
     return { wired: false, reason: "" };
   }
@@ -117,8 +117,7 @@ export function recordEnded(db: Database, s: SessionRow, archiveDir: string | nu
     try {
       first = store.firstUserText();
       last = store.lastMessageText();
-      // A note means the conversation the session ended on is not known: the store's is an earlier one, not recorded.
-      native = o.threadNote === undefined ? store.snapshot({ limit: 0 }).native : null;
+      native = store.snapshot({ limit: 0 }).native;
     } finally { store.close(); }
   }
   const row: EndedRow = {
