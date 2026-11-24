@@ -31,6 +31,7 @@ import type { TurnInterruptParams } from "./codex-protocol/v2/TurnInterruptParam
 import type { TurnStartedNotification } from "./codex-protocol/v2/TurnStartedNotification";
 import type { TurnStartParams } from "./codex-protocol/v2/TurnStartParams";
 import type { TurnStartResponse } from "./codex-protocol/v2/TurnStartResponse";
+import type { TurnPlanUpdatedNotification } from "./codex-protocol/v2/TurnPlanUpdatedNotification";
 
 export interface CodexProcess {
   stdin: { write(s: string): void };
@@ -71,6 +72,7 @@ export type CodexNotification =
   | { method: "item/agentMessage/delta"; params: AgentMessageDeltaNotification }
   | { method: "thread/tokenUsage/updated"; params: ThreadTokenUsageUpdatedNotification }
   | { method: "serverRequest/resolved"; params: ServerRequestResolvedNotification }
+  | { method: "turn/plan/updated"; params: TurnPlanUpdatedNotification }
   | { method: "error"; params: ErrorNotification };
 
 // The answer to an approval request that grants it; any other text declines it.
@@ -130,6 +132,8 @@ interface ActiveRun {
   usageBase: TokenUsageBreakdown | null;
   usageTotal: TokenUsageBreakdown | null;
   startedItems: Set<string>;
+  /** Plan updates of this turn so far: each is its own item. */
+  planUpdates: number;
 }
 
 interface Turn {
@@ -156,7 +160,7 @@ function newRun(runId: string, turnId: string | null): ActiveRun {
   });
   // A failed turn/start is reported as run.failed; only interrupt() awaits this promise.
   turnIdKnown.catch(() => {});
-  const run: ActiveRun = { runId, turnId, turnIdKnown, setTurnId, failTurnId, interrupted: false, interruptReported: false, usageBase: null, usageTotal: null, startedItems: new Set() };
+  const run: ActiveRun = { runId, turnId, turnIdKnown, setTurnId, failTurnId, interrupted: false, interruptReported: false, usageBase: null, usageTotal: null, startedItems: new Set(), planUpdates: 0 };
   if (turnId !== null) setTurnId(turnId);
   return run;
 }
@@ -416,6 +420,16 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
         if (tool === null) return;
         if (!run.startedItems.delete(item.id)) emit({ type: "tool.started", runId: run.runId, itemId: item.id, tool, input: toolInput(item) });
         emit({ type: "tool.finished", runId: run.runId, itemId: item.id, ...toolOutput(item) });
+        return;
+      }
+      case "turn/plan/updated": {
+        // Codex's update_plan (its TodoWrite): not a thread item in the protocol, so each update becomes a tool item
+        // under that name, which the thread shows and a switch's handoff carries as a plan.
+        const run = runFor(n.params.turnId, n.method);
+        if (run === null) return;
+        const itemId = `plan:${n.params.turnId}:${++run.planUpdates}`;
+        emit({ type: "tool.started", runId: run.runId, itemId, tool: "update_plan", input: { explanation: n.params.explanation, plan: n.params.plan } });
+        emit({ type: "tool.finished", runId: run.runId, itemId, isError: false, output: "" });
         return;
       }
       case "serverRequest/resolved": {

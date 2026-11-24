@@ -93,6 +93,20 @@ test("commands, errors and plans are carried; other tool calls and notices are n
   expect(h.preamble).not.toContain("restarted");
 });
 
+test("a Codex plan update (update_plan) is carried as a plan, with its explanation", () => {
+  const plan = [{ step: "Read the code", status: "completed" }, { step: "Fix the bug", status: "inProgress" }];
+  const items = [
+    user("go"),
+    item({ kind: "tool", tool: "update_plan", input: { explanation: "Two steps", plan }, output: "", isError: false }),
+    item({ kind: "tool", tool: "update_plan", input: { explanation: null, plan: [{ step: "Ship", status: "pending" }] }, output: "", isError: false }),
+    item({ kind: "tool", tool: "update_plan", input: { plan: "not a list" }, output: "", isError: false }),
+  ];
+  const h = buildHandoff({ ...base, items });
+  expect(h.preamble).toContain("[plan] Two steps\n- [completed] Read the code\n- [inProgress] Fix the bug\n");
+  expect(h.preamble).toContain("[plan] - [pending] Ship\n");
+  expect(h.preamble).toContain("[plan] (plan text unavailable)");
+});
+
 test("delta skips items of covered runs", () => {
   const items = [user("stale", "r1"), asst("stale answer", "r1"), user("new", "r2")];
   const h = buildHandoff({ ...base, items, runs: [run(), run({ runId: "r2" })], coveredRunIds: new Set(["r1"]) });

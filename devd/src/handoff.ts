@@ -36,7 +36,8 @@ export function handoffBudget(window: number, used: number, inputBytes: number, 
 
 const COMMAND_TOOLS = new Set(["Bash", "command"]);
 const FILE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit", "fileChange"]);
-const PLAN_TOOLS = new Set(["ExitPlanMode", "TodoWrite"]);
+// update_plan: Codex's plan updates, as the bridge reports them (codexSession.ts).
+const PLAN_TOOLS = new Set(["ExitPlanMode", "TodoWrite", "update_plan"]);
 
 function asRecord(v: unknown): Record<string, unknown> | null {
   return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
@@ -62,6 +63,15 @@ function filePaths(input: unknown): string[] | null {
 function planText(tool: string, input: unknown): string | null {
   const r = asRecord(input);
   if (tool === "ExitPlanMode") return typeof r?.plan === "string" ? r.plan : null;
+  if (tool === "update_plan") {
+    if (!Array.isArray(r?.plan)) return null;
+    const steps = (r.plan as unknown[]).map((s) => {
+      const step = asRecord(s);
+      return typeof step?.step === "string" ? `- [${String(step.status ?? "?")}] ${step.step}` : null;
+    });
+    if (!steps.every((l): l is string => l !== null)) return null;
+    return [...(typeof r.explanation === "string" ? [r.explanation] : []), ...steps].join("\n");
+  }
   if (!Array.isArray(r?.todos)) return null;
   const lines = (r.todos as unknown[]).map((t) => {
     const todo = asRecord(t);

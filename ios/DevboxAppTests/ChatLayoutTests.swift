@@ -233,6 +233,8 @@ final class ChatLayoutTests: XCTestCase {
         XCTAssertEqual(ToolLabel("command", .string("ls -la")).target, "ls -la")
         XCTAssertEqual(ToolLabel("fileChange", .array([.object(["path": .string("a/b.ts")]), .object(["path": .string("c.ts")])])).target, "2 files")
         XCTAssertEqual(ToolLabel("mcp__docs__search", .object(["q": .string("x")])).verb, "docs · search")
+        // Codex's plan updates, as the bridge reports them.
+        XCTAssertEqual(ToolLabel("update_plan", .object(["plan": .array([])])), ToolLabel(kind: .other, verb: "Updated the plan", target: "", code: false))
     }
 
     /// shared/fixtures/thread-titles.json: the cases devd's inbox `topic` (shared/threadTitle.ts) runs too.

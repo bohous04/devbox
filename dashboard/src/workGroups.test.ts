@@ -60,6 +60,8 @@ test("toolLabel: Claude, Codex, ACP and MCP tools", () => {
   expect(toolLabel("execute", { title: "npm test", rawInput: {} })).toMatchObject({ kind: "command", target: "npm test" });
   expect(toolLabel("mcp__plane__list_projects", { limit: 5 })).toEqual({ kind: "other", verb: "plane · list_projects", target: '{"limit":5}', code: true });
   expect(toolLabel(undefined, undefined)).toEqual({ kind: "other", verb: "(unknown)", target: "", code: true });
+  // Codex's plan updates, as the bridge reports them.
+  expect(toolLabel("update_plan", { explanation: null, plan: [] })).toEqual({ kind: "other", verb: "Updated the plan", target: "", code: false });
 });
 
 test("workSummary counts tool kinds", () => {

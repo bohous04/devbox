@@ -172,7 +172,7 @@ struct ToolLabel: Equatable {
             self.init(kind: .web, verb: "Fetched", target: host ?? str("url") ?? title ?? "", code: false)
         case "WebSearch": self.init(kind: .web, verb: "Searched the web for", target: str("query") ?? "", code: false)
         case "Task", "Agent": self.init(kind: .agent, verb: "Ran agent", target: str("description") ?? "", code: false)
-        case "TodoWrite": self.init(kind: .other, verb: "Updated the plan", target: "", code: false)
+        case "TodoWrite", "update_plan": self.init(kind: .other, verb: "Updated the plan", target: "", code: false)
         default:
             // MCP tools arrive as mcp__<server>__<tool>; show "server · tool".
             let parts = name.components(separatedBy: "__")
