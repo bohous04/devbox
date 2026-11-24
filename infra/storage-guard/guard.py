@@ -254,7 +254,9 @@ class Guard:
         import shlex
         env.update(BORG_PASSCOMMAND='cat ' + shlex.quote(self.c['borg_passfile']),
                    BORG_RSH='ssh -i ' + shlex.quote(self.c['borg_key']) +
-                   ' -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15',
+                   ' -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15'
+                   # A stalled connection would otherwise hang borg until the unit's 4 h timeout.
+                   ' -o ServerAliveInterval=30 -o ServerAliveCountMax=4',
                    BORG_REMOTE_PATH='borg-1.4', BORG_RELOCATED_REPO_ACCESS_IS_OK='no',
                    BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK='no')
         return env
@@ -307,7 +309,16 @@ class Guard:
         # pp: is a literal path prefix; one that matches nothing makes borg exit 1, which fails here.
         check = [] if verify_only is None else ['pp:' + str(Path(p).resolve()).lstrip('/') for p in verify_only]
         self.borg(['extract', '--dry-run', dest, *check])
-        if verify_only is not None or not hash_content:
+        if not require_stable:
+            # Same hole in a sweep batch (rc=1 is accepted there too): a root with a file borg
+            # left out is dropped from `before`, so the caller keeps it like a busy one.
+            failed = set()
+            self.require_listed(dest, before, ['pp:' + str(p).lstrip('/') for p in paths], failed)
+            for root in failed:
+                before.pop(root)
+            if failed:
+                self.audit('archive-incomplete', archive=name, paths=sorted(failed))
+        elif verify_only is not None or not hash_content:
             # create accepts rc=1 when shared sources are included; a per-file read error (EIO)
             # on an owned file is also only a warning, and borg then leaves the file out. The
             # read-back above only reads what is in the archive, and metadata signatures do not
@@ -336,11 +347,16 @@ class Guard:
                 err.seek(0)
                 raise RuntimeError(f'borg {args[0]} failed (rc={rc}): ' + err.read().decode(errors='replace')[-800:])
 
-    def require_listed(self, dest, expect, patterns):
+    def require_listed(self, dest, expect, patterns, failed=None):
         """Every expected item must be in the archive listing with its type and, for a regular
         file, its size. borg prints paths through remove_surrogates (an undecodable byte becomes
-        '?'), so expected paths are mapped the same way."""
+        '?'), so expected paths are mapped the same way. With a `failed` set (a sweep batch) a
+        root whose items do not match is added to it instead of failing the whole archive."""
         as_borg = lambda path: path.encode('utf-8', 'replace').decode('utf-8')
+        def bad(root, message):
+            if failed is None:
+                raise RuntimeError(message + '; deletion denied')
+            failed.add(root)
         pending = {}
         for root, sig in expect.items():
             for rel, mode, _dev, _ino, size, *_ in sig:
@@ -350,27 +366,28 @@ class Guard:
                 raw = str(Path(root).parent / rel).lstrip('/')
                 path = as_borg(raw)
                 if path in pending:
-                    raise RuntimeError(f'{raw!r}: two names differ only in non-UTF-8 bytes, so the archive listing '
-                                       'cannot tell them apart; deletion denied')
-                pending[path] = (kind, size)
+                    bad(root, f'{raw!r}: two names differ only in non-UTF-8 bytes, so the archive listing '
+                              'cannot tell them apart')
+                    bad(pending[path][2], 'non-UTF-8 name collision')
+                pending[path] = (kind, size, root)
         sizes = {}  # path -> size of verified regular files, for hardlinks listed after them
         for line in self.borg_lines(['list', '--json-lines', dest, *patterns]):
             it = json.loads(line)
             want = pending.pop(it['path'], None)
             if want is None:
                 continue
-            kind, size = want
+            kind, size, root = want
             if kind == '-' and it['mode'].startswith('h'):
                 # A hardlink after the first is listed with mode h... and size 0; its data is the source's.
                 listed = sizes.get(it['source'])
             else:
                 listed = it['size']
             if it['type'] != kind or not it['healthy'] or (kind == '-' and listed != size):
-                raise RuntimeError(f"{it['path']} differs in the archive (type/size/health); deletion denied")
+                bad(root, f"{it['path']} differs in the archive (type/size/health)")
             if kind == '-':
                 sizes[it['path']] = size
-        if pending:
-            raise RuntimeError(f'{next(iter(pending))} and {len(pending) - 1} more are missing from the archive; deletion denied')
+        for path, (_kind, _size, root) in pending.items():
+            bad(root, f'{path} and {len(pending) - 1} more are missing from the archive')
 
     def notify(self, key, message, title='Devbox: místo na disku'):
         if not self.c.get('notify_enabled', True):
@@ -750,6 +767,10 @@ class Guard:
         # Stop both writers before preserving the layer and nested databases.
         run([DOCKER,'stop','--time','30',name],timeout=90)
         side = subprocess.run([DOCKER,'inspect','dind-'+name],capture_output=True)
+        if side.returncode and not re.search(r'no such (object|container)', side.stderr.decode(errors='replace'), re.I):
+            # Only a sidecar that does not exist may be skipped; an unanswered inspect could hide
+            # a running nested daemon and its volume.
+            raise RuntimeError('Cannot inspect dind-'+name+'; removal denied: '+side.stderr.decode(errors='replace')[-300:])
         sidecar = json.loads(side.stdout)[0] if side.returncode == 0 else None
         if sidecar:
             run([DOCKER,'stop','--time','30','dind-'+name],timeout=90)
