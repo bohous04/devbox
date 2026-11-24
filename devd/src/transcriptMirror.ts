@@ -11,7 +11,7 @@
 // The mapped events go into a ThreadStore of its own (`_mirrors/<id>.sqlite`), so the snapshot, paging and SSE replay
 // work exactly like a chat thread's. Polling runs only while a client watches (SSE) and on the session's hook events.
 // Transcript content never goes to logs.
-import { closeSync, constants as C, fstatSync, openSync, read as readFd, readSync } from "node:fs";
+import { closeSync, constants as C, existsSync, fstatSync, openSync, read as readFd, readdirSync, readSync } from "node:fs";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -615,18 +615,47 @@ export class TranscriptMirror {
    *  the ended session's transcript. Waits for a refresh in progress (it stops at its next step: the session is
    *  ending), then reads to the end of the transcript, within FINAL_READ_MS. `truncated`: it did not get there (the
    *  cap, a failed read), logged. Never throws. */
-  async finalRefresh(id: string): Promise<{ truncated: boolean }> {
+  async finalRefresh(id: string): Promise<{ truncated: boolean; threadNote?: string }> {
     await this.running.get(id);
     this.finalizing.add(id);
     this.cutShort.delete(id);
-    const run = this.tick(id).catch((e) => {
+    let threadNote: string | undefined;
+    const run = (async () => {
+      await this.tick(id);
+      threadNote = await this.readWithoutPane(id);
+    })().catch((e) => {
       this.cutShort.add(id);
       this.log(`mirror ${id}: final refresh failed, the transcript ends where the last read got to: ${(e as Error).message}`);
     }).finally(() => { this.finalizing.delete(id); this.running.delete(id); });
     this.running.set(id, run);
     await run;
     const truncated = this.cutShort.delete(id);
-    return { truncated };
+    return threadNote === undefined ? { truncated } : { truncated, threadNote };
+  }
+
+  /** The last read found no Claude conversation in the pane (no pane: a container the backup stopped or a resumed end;
+   *  an agent that exited). The session's own projects dir then decides, only when it holds exactly one conversation:
+   *  that is the one. With several, none is picked; the returned note says so and a store an earlier read filled is
+   *  marked cut short. */
+  private async readWithoutPane(id: string): Promise<string | undefined> {
+    const s = getSession(this.d.db, id);
+    if (!s || (s.agent ?? "claude") !== "claude" || this.infos.get(id)?.conversationId) return undefined;
+    let sids: string[];
+    try {
+      sids = withDir(this.d.root, ["_claude-projects", id], false, (dir) => readdirSync(dir.path, { withFileTypes: true }))
+        .filter((e) => e.isFile() && e.name.endsWith(".jsonl") && UUID.test(e.name.slice(0, -6))).map((e) => e.name.slice(0, -6));
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw e;
+    }
+    if (sids.length === 0) return undefined;
+    if (sids.length === 1) {
+      const gen = this.gen(id);
+      await this.read(id, sids[0]!, true, () => gen === this.gen(id) && !this.ending(id));
+      return undefined;
+    }
+    if (this.stores.has(id) || existsSync(join(this.d.root, "_mirrors", `${id}.sqlite`))) this.cutShort.add(id);
+    return `The session holds ${sids.length} Claude conversations and the one it ended on could not be read from its terminal, so none was picked.`;
   }
 
   /** Session stopped or ended: closes the store. An ended session's store stays on disk for end() to archive. */

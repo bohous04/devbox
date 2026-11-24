@@ -92,7 +92,7 @@ const THREAD = "0b1c2d3e-0000-4000-8000-000000000001";
 const IMG = "00000000-0000-4000-8000-000000000000.png";
 const AT = Date.parse("2026-11-20T10:15:00Z");
 
-async function ending(o: { runtime?: "chat" | "tmux"; store?: boolean; truncated?: boolean; prepare?: (root: string) => void; keepWorktree?: boolean;
+async function ending(o: { runtime?: "chat" | "tmux"; store?: boolean; truncated?: boolean; threadNote?: string; prepare?: (root: string) => void; keepWorktree?: boolean;
   seed?: (db: ReturnType<typeof openDb>) => void } = {}) {
   const bin = mkdtempSync(join(tmpdir(), "fake-docker-"));
   writeFileSync(join(bin, "docker"), "#!/usr/bin/env bash\necho \"$@\" >> \"$(dirname \"$0\")/calls\"\nexit 0\n");
@@ -129,7 +129,7 @@ async function ending(o: { runtime?: "chat" | "tmux"; store?: boolean; truncated
       preserveForEnd: async () => { order.push("preserve"); },
       finalizeTranscript: async (s) => {
         order.push(`finalize ${s.id} ending=${mgr.isEnding(s.id)} rm-before=${!existsSync(join(bin, "calls"))}`);
-        return { truncated: o.truncated ?? false };
+        return o.threadNote === undefined ? { truncated: o.truncated ?? false } : { truncated: o.truncated ?? false, threadNote: o.threadNote };
       },
       onEnded: (e) => { ended.push(e); },
       notify: (_t, m) => { notices.push(m); },
@@ -145,8 +145,9 @@ async function ending(o: { runtime?: "chat" | "tmux"; store?: boolean; truncated
 test("end() keeps the thread, its images and the Claude jsonl as an ended transcript and announces it", async () => {
   const t = await ending();
   expect(t.error).toBeNull();
-  // The last read comes after the backup and right before docker rm.
-  expect(t.order).toEqual(["preserve", "finalize dev-a-b ending=true rm-before=true"]);
+  // The last read comes before the backup: the backup stops the container, and a stopped container has no pane to
+  // read the conversation from (2026-11-24: ended tmux sessions were listed with no thread and no transcript).
+  expect(t.order).toEqual(["finalize dev-a-b ending=true rm-before=true", "preserve"]);
   expect(existsSync(join(t.dir, "dev-a-b.sqlite"))).toBe(true);
   expect(existsSync(join(t.dir, "images", IMG))).toBe(true);
   expect(readFileSync(join(t.dir, `${THREAD}.jsonl`), "utf8")).toBe("{}\n");
@@ -227,4 +228,11 @@ test("keepTranscript failing to clean up the mirror does not throw end() after t
   } });
   expect(t.error).toBeNull();
   expect(t.db.query("SELECT id FROM sessions").all()).toEqual([]);
+});
+
+test("the last read's note on an unknown conversation reaches the ended row", async () => {
+  const t = await ending({ runtime: "tmux", store: false, threadNote: "The session holds 2 Claude conversations and the one it ended on could not be read from its terminal, so none was picked." });
+  expect(t.error).toBeNull();
+  expect(t.ended.map((e) => [e.transcript, e.threadNote])).toEqual([["missing",
+    "The session holds 2 Claude conversations and the one it ended on could not be read from its terminal, so none was picked."]]);
 });

@@ -288,6 +288,43 @@ test("finalRefresh reads the transcript of an ending session that plain refreshe
   expect(t.mirror.session(TMUX.id)).toEqual({ error: "session-ending" });
 });
 
+// 2026-11-24: ended tmux Claude sessions were listed with no thread and no transcript, although their conversation was
+// archived: the last read found no pane (a container the backup had stopped, an agent that had exited) and read
+// nothing. Without a live pane the session's own projects dir decides, but only when it holds one conversation.
+test("finalRefresh without a live pane reads the session's only Claude conversation from its projects dir", async () => {
+  const t = setup({ sid: null, noPane: true }, () => true);
+  t.write(SID, fixtureLines());
+  expect(await t.mirror.finalRefresh(TMUX.id)).toEqual({ truncated: false });
+  t.mirror.release(TMUX.id);
+  const store = ThreadStore.open(t.root, TMUX.id, { dir: "_mirrors" });
+  cleanups.push(() => store.close());
+  expect(store.snapshot().items.map(brief)).toEqual(render(fixtureLines()).snapshot.items.map(brief));
+  expect(store.snapshot({ limit: 0 }).native).toMatchObject({ harness: "claude", nativeThreadId: SID });
+});
+
+test("finalRefresh without a live pane does not pick one of several conversations: it says so", async () => {
+  const t = setup({ sid: null, noPane: true }, () => true);
+  t.write(SID, fixtureLines());
+  t.write(SID2, fixtureLines().slice(0, 3));
+  expect(await t.mirror.finalRefresh(TMUX.id)).toEqual({ truncated: false,
+    threadNote: "The session holds 2 Claude conversations and the one it ended on could not be read from its terminal, so none was picked." });
+  t.mirror.release(TMUX.id);
+  expect(existsSync(join(t.root, "_mirrors", `${TMUX.id}.sqlite`))).toBe(false);
+});
+
+test("finalRefresh without a live pane over an earlier read of several conversations keeps that read, marked cut short", async () => {
+  let ending = false;
+  const pane: Pane = { sid: SID };
+  const t = setup(pane, () => ending);
+  t.write(SID, fixtureLines().slice(0, 5));
+  await t.mirror.refresh(TMUX.id);
+  t.write(SID2, fixtureLines());
+  pane.noPane = true;
+  ending = true;
+  expect(await t.mirror.finalRefresh(TMUX.id)).toEqual({ truncated: true,
+    threadNote: "The session holds 2 Claude conversations and the one it ended on could not be read from its terminal, so none was picked." });
+});
+
 test("a rewritten transcript is read again from the start with a notice", async () => {
   const t = setup({ sid: SID });
   t.write(SID, fixtureLines());

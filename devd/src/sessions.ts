@@ -153,8 +153,9 @@ export interface SessionDeps {
    *  tens of minutes — End must wait for it, otherwise the storage guard refuses `docker rm`. */
   preserveForEnd?: (container: string) => Promise<void>;
   /** The last read of a tmux session's transcript mirror while its container still runs (TranscriptMirror.finalRefresh):
-   *  end() archives the mirror as the ended session's transcript. `truncated`: the read stopped short. Never throws. */
-  finalizeTranscript?: (s: SessionRow) => Promise<{ truncated: boolean }>;
+   *  end() archives the mirror as the ended session's transcript. `truncated`: the read stopped short. `threadNote`: why
+   *  the conversation the session ended on is not known (the ended row records no thread then). Never throws. */
+  finalizeTranscript?: (s: SessionRow) => Promise<{ truncated: boolean; threadNote?: string }>;
   /** An ended session's transcript was kept (endedSessions.ts): the inbox lists it (SSE `inbox-ended`). */
   onEnded?: (e: EndedSession) => void;
 }
@@ -624,7 +625,7 @@ export class SessionManager {
   /** After the archive: the chat images go next to the transcript, and the transcript is listed as an ended session.
    *  Never throws (end() deletes the session row after this, the container is already gone); a failure is logged and,
    *  where the owner loses something, notified. `truncated`: the last mirror read stopped short. */
-  private keepTranscript(s: SessionRow, dest: string | null, truncated: boolean, keptWorktree: string | null) {
+  private keepTranscript(s: SessionRow, dest: string | null, truncated: boolean, keptWorktree: string | null, threadNote?: string) {
     const id = s.id;
     // A mirror store the archive did not take must not greet a later session that reuses the id.
     try { for (const x of ["", "-wal", "-shm"]) rmSync(join(this.d.root, "_mirrors", `${id}.sqlite${x}`), { force: true }); }
@@ -643,7 +644,7 @@ export class SessionManager {
         console.error(`${id}: its ended transcript is listed already (an end resumed after a restart), not listed again`);
         return;
       }
-      const ended = recordEnded(this.d.db, s, dest, this.now(), { id: `${id}-${archiveStamp(new Date(this.now()))}`, truncated, keptWorktree });
+      const ended = recordEnded(this.d.db, s, dest, this.now(), { id: `${id}-${archiveStamp(new Date(this.now()))}`, truncated, keptWorktree, threadNote });
       if (ended?.transcript === "truncated") console.error(`the ended transcript of ${id} is cut short: the last read did not reach the end`);
       if (ended) this.d.onEnded?.(ended);
     } catch (e) {
@@ -1624,9 +1625,10 @@ export class SessionManager {
       // Native history may resume after end(): retain its exact files, including uncommitted work.
       // Validate authority BEFORE removing Docker or files; malformed registry fails closed.
       const keepRemote = retainRemoteWorkspace(s, this.d.root);
-      await this.d.preserveForEnd?.(s.container);
-      // The last read right before the container goes: nothing the agent writes after it is lost but the end itself.
+      // The last read while the container still runs: the backup stops it, and a stopped container has no pane to tell
+      // which conversation the agent is on. What the agent writes after it is in its archived jsonl, not in the mirror.
       const final = await this.d.finalizeTranscript?.(s);
+      await this.d.preserveForEnd?.(s.container);
       await removeContainer(id);
       // The worktree belongs to the session, so it goes with it — except for `keepWorktree` (see above).
       // The branch does NOT: there may be work in progress on it and deleting it quietly when the window is closed
@@ -1647,7 +1649,7 @@ export class SessionManager {
       this.d.releaseThread?.(id, true);
       // Recorded only when it is on disk: an earlier, cut-short run of this end may have removed it already.
       const kept = s.worktree && opts.keepWorktree && existsSync(s.worktree) ? s.worktree : null;
-      this.keepTranscript(s, this.keepChats(id), final?.truncated ?? false, kept);
+      this.keepTranscript(s, this.keepChats(id), final?.truncated ?? false, kept, final?.threadNote);
       deleteGitStat(this.d.db, id);
       // The lease belongs to the session — without releasing it the account would look occupied until the
       // period expires and the poller would needlessly keep it at the fast cadence. An error here must not, however,
