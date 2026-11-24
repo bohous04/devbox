@@ -429,7 +429,7 @@ test("three consecutive poll errors mark a pending PR unknown and release the ho
   expect(t.messages()).toEqual(["Claude finished working"]);
 });
 
-test("merged settles the thread and stops polling that PR", async () => {
+test("merged leaves the thread where it is and stops polling that PR", async () => {
   const t = setup();
   await t.feed(CHAT.id, [started("r1"), completed("r1")]);
   t.tick(10_000); // past the grace a just-ended run still counts as working
@@ -438,15 +438,16 @@ test("merged settles the thread and stops polling that PR", async () => {
   await t.watch.tick();
   t.pr(CHAT.id, "merged", "none");
   await t.watch.tick();
-  expect(t.attention(CHAT.id).section).toBe("settled");
-  expect(getSessionAttention(t.db, CHAT.id)?.settled_reason).toBe("merged");
+  expect(t.attention(CHAT.id).section).not.toBe("settled");
+  expect(getSessionAttention(t.db, CHAT.id)?.settled_reason ?? null).toBeNull();
+  expect(getSessionPr(t.db, CHAT.id)?.merge_settled_at).not.toBeNull();
   t.polled.length = 0;
   t.tick(30 * MIN);
   await t.watch.tick();
   expect(t.polled).not.toContain(CHAT.id);
 });
 
-test("merge during an active run settles after it", async () => {
+test("a merge never settles, during an active run or after it", async () => {
   const t = setup();
   await t.feed(CHAT.id, [started("r1")]);
   t.pr(CHAT.id, "merged", "none");
@@ -455,7 +456,7 @@ test("merge during an active run settles after it", async () => {
   await t.feed(CHAT.id, [completed("r1")]);
   t.tick(10_000);
   await t.watch.tick();
-  expect(t.attention(CHAT.id).section).toBe("settled");
+  expect(t.attention(CHAT.id).section).not.toBe("settled");
   t.hub.handle(getSession(t.db, TMUX.id)!, "user_prompt_submit");
   t.pr(TMUX.id, "merged", "none");
   t.heads.set(TMUX.id, "h2"); // pushed
@@ -464,7 +465,7 @@ test("merge during an active run settles after it", async () => {
   t.hub.handle(getSession(t.db, TMUX.id)!, "stop");
   t.sweep();
   await t.watch.tick();
-  expect(t.attention(TMUX.id).section).toBe("settled");
+  expect(t.attention(TMUX.id).section).not.toBe("settled");
 });
 
 test("after a closed or merged PR, a run completion polls again and picks up a new PR from the same branch", async () => {
@@ -563,8 +564,7 @@ test("after a devd restart: no second failure notification, a merge the user uns
   a.pr(CHAT.id, "merged", "none");
   a.pr(TMUX.id, "open", "failure");
   await a.watch.tick();
-  expect(a.attention(CHAT.id).section).toBe("settled");
-  a.inbox.unsettle(CHAT.id);
+  expect(a.attention(CHAT.id).section).not.toBe("settled");
 
   const b = setup({ dbPath });
   b.pr(CHAT.id, "merged", "none");

@@ -306,9 +306,11 @@ export class PrWatch {
   private settleMerged(sessionId: string): void {
     const r = getSessionPr(this.d.db, sessionId);
     if (!r || r.state !== "merged" || r.merge_settled_at !== null) return;
-    if (!this.d.inbox.settleWhenIdle(sessionId, "merged")) return;
+    // A merged PR no longer settles the session: a settle ends it (#143), and a session often goes on to its next
+    // PR, so the owner's work was ended between two tasks. The merge is only recorded, which stops polling that PR;
+    // the idle rule still settles the session when nothing happens for a day.
     const now = this.now();
     putSessionPr(this.d.db, { ...r, merge_settled_at: now, updated_at: now });
-    logEvent(this.d.db, sessionId, "pr_merged_settled", { number: r.number });
+    logEvent(this.d.db, sessionId, "pr_merged", { number: r.number });
   }
 }
