@@ -148,6 +148,7 @@ test("harness menu: a bridge older than 1.2.0 cannot take an ACP agent, as devd 
 test("switch errors are spelled out, never swallowed", () => {
   expect(switchErrorText(409, { error: "run-active" })).toMatch(/run is active/);
   expect(switchErrorText(409, { error: "switch-in-progress" })).toMatch(/already in progress/);
+  expect(switchErrorText(409, { error: "switch-unconfirmed" })).toMatch(/not confirmed by the agent yet/);
   expect(switchErrorText(409, { error: "unknown-model-window", message: "the context window of model x-9 is unknown to devd" })).toMatch(/x-9/);
   expect(switchErrorText(400, { error: "invalid-account", message: "that account does not exist or is disabled/quarantined" })).toMatch(/disabled\/quarantined/);
   expect(switchErrorText(409, { error: "agent-disconnected" })).toMatch(/not connected/);

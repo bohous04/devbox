@@ -804,6 +804,13 @@ export function saveUnconfirmedSwitch(db: Database, sessionId: string, switchId:
     .run(sessionId, switchId, JSON.stringify(data), now);
 }
 
+/** The session's switch waiting for its confirmation, if any. */
+export function getUnconfirmedSwitch(db: Database, sessionId: string): { switchId: string; data: unknown; createdAt: number } | null {
+  const r = db.query(`SELECT switch_id, data, created_at FROM chat_switches_unconfirmed WHERE session_id=?`).get(sessionId) as
+    { switch_id: string; data: string; created_at: number } | null;
+  return r === null ? null : { switchId: r.switch_id, data: JSON.parse(r.data), createdAt: r.created_at };
+}
+
 /** Removes and returns the session's unconfirmed switch `switchId`; null when it is not the one waiting (already
  *  confirmed, refused, or replaced by a newer switch). */
 export function takeUnconfirmedSwitch(db: Database, sessionId: string, switchId: string): unknown | null {

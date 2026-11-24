@@ -764,8 +764,9 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     persist();
     recoveryPending = true;
     awaitingTarget = true;
-    server.publish({ type: "run.failed", runId: crypto.randomUUID(), error: RESUME_FAILED });
+    // First: devd re-plans the fresh thread on the resume-failed from the target it has confirmed by then.
     announceApplied();
+    server.publish({ type: "run.failed", runId: crypto.randomUUID(), error: RESUME_FAILED });
   }
 
   async function handle(cmd: BridgeCommand): Promise<unknown> {

@@ -1654,5 +1654,8 @@ describe("target.applied (DEVBOX-101)", () => {
     await start(f, { account: "a" });
     await cmd({ kind: "switchTarget", target: { harness: "claude", account: "b", model: null, env: { CLAUDE_CONFIG_DIR: claudeProfile("b") } }, resume: "thread-dead", handoff: null, switchId: "sw-4" });
     expect(applied()).toEqual([{ type: "target.applied", switchId: "sw-4", harness: "claude", account: "b", model: null }]);
+    // Before the resume-failed: devd re-plans the fresh thread from the target it confirmed, not the one it had before.
+    const types = events().map((e) => e.type);
+    expect(types.indexOf("target.applied")).toBeLessThan(types.lastIndexOf("run.failed"));
   });
 });

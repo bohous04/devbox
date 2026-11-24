@@ -27,9 +27,9 @@ import { toCandidates } from "./accounts";
 import { AGENTS, agentNameFor, chatHarness, chatRuntimeBlock, isAgentName, specFor, type AgentName, type ChatHarness } from "./agents";
 import { codexAccountUsable, codexLimitLive, type CodexAccountView } from "./codexAccounts";
 import type { AccountPoolSettings } from "./config";
-import { AgentDisconnected, CommandFailed, CommandTimeout, type BridgeHandshake } from "./bridgeLink";
+import { AgentDisconnected, AgentNotConnected, CommandFailed, CommandTimeout, type BridgeHandshake } from "./bridgeLink";
 import {
-  getSession, insertLease, leaseHistory, logEvent, releaseLeasesForSession, saveUnconfirmedSwitch, setRepoAgent, setSessionAgent, takeUnconfirmedSwitch,
+  getSession, getUnconfirmedSwitch, insertLease, leaseHistory, logEvent, releaseLeasesForSession, saveUnconfirmedSwitch, setRepoAgent, setSessionAgent, takeUnconfirmedSwitch,
   type SessionRow,
 } from "./db";
 import type { Handoff } from "./handoff";
@@ -64,6 +64,10 @@ export const MODEL_WINDOW_ALIASES: Readonly<Record<string, string>> = {
 export const RESERVE_TOKENS = 32_000;
 /** A switch closes one harness and opens another (CLI start, resume check, app-server start). */
 export const SWITCH_TIMEOUT_MS = 90_000;
+/** How long a switch the bridge has not confirmed (its answer was lost) holds the next one (409 switch-unconfirmed):
+ *  a switch sent meanwhile would replace its row, and a late target.applied of it would then confirm nothing. After
+ *  this it is given up. */
+export const UNCONFIRMED_HOLD_MS = 2 * SWITCH_TIMEOUT_MS;
 /** Pauses between re-sends of the target to a bridge that awaits it, while its link is up; the last one repeats. */
 export const RESEND_DELAYS_MS: readonly number[] = [5_000, 15_000, 60_000, 300_000];
 const CLAUDE_HOME = "/home/dev/.claude";
@@ -133,12 +137,18 @@ interface LastSwitch {
   resumeFailed: boolean;
   /** The switchId it was first sent with; null for a setModel or a target devd rebuilt. */
   switchId: string | null;
+  /** The bridge's target.applied for it came while it was being sent. */
+  applied?: boolean;
 }
 
 interface Resolved { profile: AgentName; target: SwitchTarget; window: number; exhausted: boolean }
 
 /** A sent switch the DB does not follow yet (table chat_switches_unconfirmed): what `confirmed` needs, without env. */
-interface Unconfirmed { from: AgentName; profile: AgentName; kind: Transition["kind"]; current: Target; target: Target }
+interface Unconfirmed {
+  from: AgentName; profile: AgentName; kind: Transition["kind"]; current: Target; target: Target;
+  /** For devd's memory of the target once confirmed late (LastSwitch). */
+  window: number; resume: string | null;
+}
 
 const handoffDelivery = (h: Handoff): HandoffDelivery | null => (h.preamble === null ? null : { preamble: h.preamble });
 const handoffOf = (t: Transition): Handoff | null => (t.kind === "resume-with-delta" || t.kind === "fresh-with-handoff" ? t.handoff : null);
@@ -213,6 +223,11 @@ export class ChatSwitch {
     const store = this.d.threads(s.id);
     const from = agentNameFor(s.agent);
     const profile = this.requestedProfile(from, req);
+    const held = getUnconfirmedSwitch(this.d.db, s.id);
+    if (held !== null) {
+      if (this.d.now() - held.createdAt < UNCONFIRMED_HOLD_MS) throw new SwitchRefused(409, "switch-unconfirmed");
+      this.gaveUp(s.id, held, "the agent never confirmed it");
+    }
     // A 1.0.0 bridge (no version in its handshake) does not know setModel/switchTarget and would drop the link.
     if (this.bridgeVersions.get(s.id) === null) {
       throw new SwitchRefused(409, "bridge-too-old", "the agent bridge in this container predates switching; recreate the session's container first");
@@ -256,22 +271,28 @@ export class ChatSwitch {
     this.pending.set(s.id, next);
     if (switchId !== null) {
       const t = (x: Target): Target => ({ harness: x.harness, account: x.account, model: x.model });
-      const u: Unconfirmed = { from, profile, kind: plan.kind, current: t(current), target: t(r.target) };
+      const u: Unconfirmed = { from, profile, kind: plan.kind, current: t(current), target: t(r.target), window: r.window, resume: next.resume };
       saveUnconfirmedSwitch(this.d.db, s.id, switchId, u, this.d.now());
     }
     try {
       if (viaSetModel) await this.d.links.send(s.id, { kind: "setModel", model: plan.model }, SWITCH_TIMEOUT_MS);
       else await this.sendTarget(s.id, next, switchId ?? undefined);
     } catch (e) {
-      // The bridge answered that it is back where it was: nothing to confirm later. Without an answer (a timeout, a
-      // dropped link) the switch stays unconfirmed: the bridge may have opened the target all the same.
-      if (e instanceof CommandFailed && switchId !== null) takeUnconfirmedSwitch(this.d.db, s.id, switchId);
-      // The bridge answered: it could not open the new agent (e.g. its CLI is not signed in) and is back where it was.
-      if (e instanceof CommandFailed && req.kind === "harness") {
-        const after = awaiting ? "The agent still waits for its target." : `The session stays on ${specFor(from).label}.`;
-        store.addNotice(`Switching to ${specFor(profile).label} failed: ${e.message}. ${after}`, this.d.now(), "warn");
+      // The bridge logged target.applied and failed only after that (e.g. recovering its queue): it is on the target,
+      // so the switch stands.
+      if (!(e instanceof CommandFailed && next.applied)) {
+        // The bridge answered that it is back where it was, or never got the command: nothing to confirm later.
+        // Without an answer (a timeout, a link dropped meanwhile) the switch stays unconfirmed: the bridge may have
+        // opened the target all the same.
+        if ((e instanceof CommandFailed || e instanceof AgentNotConnected) && switchId !== null) takeUnconfirmedSwitch(this.d.db, s.id, switchId);
+        // The bridge answered: it could not open the new agent (e.g. its CLI is not signed in) and is back where it was.
+        if (e instanceof CommandFailed && req.kind === "harness") {
+          const after = awaiting ? "The agent still waits for its target." : `The session stays on ${specFor(from).label}.`;
+          store.addNotice(`Switching to ${specFor(profile).label} failed: ${e.message}. ${after}`, this.d.now(), "warn");
+        }
+        throw e;
       }
-      throw e;
+      this.log(`chat switch ${s.id}: the bridge applied the switch, then answered: ${e.message}`);
     } finally {
       this.pending.delete(s.id);
     }
@@ -356,7 +377,7 @@ export class ChatSwitch {
       if (account === null) throw new SwitchRefused(409, "no-account", "the Codex account of this session is unknown");
       return { profile, target: { harness, account, model, env: {} }, window, exhausted };
     }
-    return { profile, target: { harness, account, model, env: { CLAUDE_CONFIG_DIR: account === null ? CLAUDE_HOME : `${CLAUDE_ACCOUNTS_ROOT}/${account}` } }, window, exhausted };
+    return { profile, target: { harness, account, model, env: plainEnv(harness, account) }, window, exhausted };
   }
 
   /** A Claude pool account's profile must be attached to the container before the bridge can use it. The cause is
@@ -461,11 +482,26 @@ export class ChatSwitch {
     const s = getSession(this.d.db, sessionId);
     if (!s) return;
     this.confirmed(s, u.from, u.profile, u.current, u.target, u.kind);
-    if (this.pending.get(sessionId)?.switchId === switchId) return;
-    this.last.delete(sessionId);
-    const what = u.profile !== u.from ? AGENTS[u.profile].label
-      : u.target.account !== u.current.account ? `account ${u.target.account}` : `model ${u.target.model}`;
-    this.d.threads(sessionId).addNotice(`The switch to ${what} went through after all: the agent confirmed it after devd stopped waiting.`, this.d.now());
+    const p = this.pending.get(sessionId);
+    if (p?.switchId === switchId) {
+      p.applied = true;
+      return;
+    }
+    // devd's memory still holds the target before it: from now on the confirmed one is planned from and re-sent. A
+    // proxy profile's env (its token) is not stored: rebuild assembles it from the DB, which follows the switch now.
+    if (isProxyProfile(u.profile)) this.last.delete(sessionId);
+    else {
+      const target = { ...u.target, env: plainEnv(u.target.harness, u.target.account) };
+      this.last.set(sessionId, { profile: u.profile, target, window: u.window, resume: u.resume, handoff: null, resumeFailed: false, switchId });
+    }
+    this.d.threads(sessionId).addNotice(`The switch to ${switchLabel(u)} went through after all: the agent confirmed it after devd stopped waiting.`, this.d.now());
+  }
+
+  /** An unconfirmed switch that can no longer be confirmed: the bridge got another target since, or never answered
+   *  within UNCONFIRMED_HOLD_MS. Said in the thread, so a switch that silently did not happen is visible. */
+  private gaveUp(sessionId: string, held: { switchId: string; data: unknown }, why: string): void {
+    if (takeUnconfirmedSwitch(this.d.db, sessionId, held.switchId) === null) return;
+    this.d.threads(sessionId).addNotice(`The switch to ${switchLabel(held.data as Unconfirmed)} did not go through: ${why}.`, this.d.now(), "warn");
   }
 
   private confirmed(s: SessionRow, from: AgentName, profile: AgentName, current: Target, target: Target, kind: Transition["kind"]): void {
@@ -592,6 +628,9 @@ export class ChatSwitch {
         store.addNotice(freshThreadNotice(l.target.harness, this.replan(store, l)), this.d.now());
         await this.sendTarget(sessionId, l);
       }
+      // The bridge took this target without a switchId: a switch it had not confirmed can never be any more.
+      const held = getUnconfirmedSwitch(this.d.db, sessionId);
+      if (held !== null) this.gaveUp(sessionId, held, "the agent is on the session's earlier target");
       if (this.resends.get(sessionId) === r) this.settled(sessionId);
     } catch (e) {
       if (this.resends.get(sessionId) === r) this.retryLater(sessionId, store, e, r);
@@ -641,8 +680,7 @@ export class ChatSwitch {
     const model = n?.harness === harness ? n.model : null;
     const account = harness === "claude" ? currentAccount(leaseHistory(this.d.db, "devbox", sessionId)) : harness === "codex" && n?.harness === harness ? n.account : null;
     if (harness === "codex" && account === null) throw new Error("the Codex account of this session is unknown");
-    const env: Record<string, string> = harness === "claude" ? { CLAUDE_CONFIG_DIR: account === null ? CLAUDE_HOME : `${CLAUDE_ACCOUNTS_ROOT}/${account}` } : {};
-    return { profile, target: { harness, account, model, env }, window: windowFor(harness, model), resume, handoff: null, resumeFailed: false, switchId: null };
+    return { profile, target: { harness, account, model, env: plainEnv(harness, account) }, window: windowFor(harness, model), resume, handoff: null, resumeFailed: false, switchId: null };
   }
 }
 
@@ -675,6 +713,17 @@ function handedOver(plan: Transition): string | null {
   if (h === null) return null;
   if (h.preamble === null) return h.omitted > 0 ? "no history handed over" : null;
   return `context handed over (${h.includedItemSeqs.length} items${h.omitted > 0 ? `, ${h.omitted} omitted` : ""})`;
+}
+
+/** What a switch was to, for the thread: the agent, else the account, else the model. */
+function switchLabel(u: Unconfirmed): string {
+  if (u.profile !== u.from) return AGENTS[u.profile].label;
+  return u.target.account !== u.current.account ? `account ${u.target.account}` : `model ${u.target.model}`;
+}
+
+/** The env of a target that is not a proxy profile: Claude's profile directory of its account; nothing otherwise. */
+function plainEnv(harness: string, account: string | null): Record<string, string> {
+  return harness === "claude" ? { CLAUDE_CONFIG_DIR: account === null ? CLAUDE_HOME : `${CLAUDE_ACCOUNTS_ROOT}/${account}` } : {};
 }
 
 /** The chat harness of a chat session's profile; chatRuntimeBlock keeps profiles without one out of chat sessions. */

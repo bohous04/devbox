@@ -187,6 +187,8 @@ export function switchErrorText(status: number, body: unknown): string {
   switch (b.error) {
     case "run-active": return "A run is active or a message is queued: switch after it ends";
     case "switch-in-progress": return "Another switch is already in progress";
+    // devd lost the bridge's answer to the last switch and waits for its confirmation (chatSwitch UNCONFIRMED_HOLD_MS).
+    case "switch-unconfirmed": return "The last switch is not confirmed by the agent yet: wait a moment and check the thread";
     case "agent-disconnected": return "Agent not connected: nothing was switched";
     case "agent-timeout": return "No reply from the agent: the switch may have happened, check the thread before retrying";
   }
