@@ -434,7 +434,7 @@ export class ThreadStore {
     const before = opts.beforeSeq ?? Number.MAX_SAFE_INTEGER;
     const itemRows = this.db.query(
       // devd notices (addNotice) at the replay's own seq too: they took no seq of their own.
-      `SELECT * FROM (SELECT * FROM items WHERE (updated_seq > ? OR (item_id LIKE 'notice:%' AND seq >= ?)) AND seq < ?
+      `SELECT * FROM (SELECT * FROM items WHERE (updated_seq > ? OR (run_id IS NULL AND item_id LIKE 'notice:%' AND seq >= ?)) AND seq < ?
         ORDER BY id DESC LIMIT ?) ORDER BY id`,
     ).all(after, after, before, limit) as Record<string, any>[];
     const items: ThreadItem[] = itemRows.map((r) => {

@@ -299,6 +299,14 @@ test("a devd notice is announced to the listener, keeps the bridge's seq and is 
   expect(s.snapshot({ afterSeq: 2 }).items.map((i) => i.text)).toEqual([]);
 });
 
+test("a replay re-sends only devd's own notices at its seq, not an agent item whose id happens to start with notice:", () => {
+  const s = store(); n = 0;
+  s.apply(ev({ type: "run.queued", runId: "r1", text: "hi", attachments: [] }));
+  s.apply(ev({ type: "message.final", runId: "r1", itemId: "notice:7", role: "assistant", text: "agent text" }));
+  s.addNotice("switched", 1500);
+  expect(s.snapshot({ afterSeq: 2 }).items.map((i) => i.text)).toEqual(["switched"]);
+});
+
 test("a thread.native without a model keeps the harness's known model; another harness's is not carried over", () => {
   const s = store(); n = 0;
   s.apply(ev({ type: "thread.native", harness: "claude", nativeThreadId: "t1", account: "a", model: "claude-opus-5-5" }));
