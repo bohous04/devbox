@@ -491,7 +491,8 @@ export class ChatSwitch {
     // proxy profile's env (its token) is not stored: rebuild assembles it from the DB, which follows the switch now.
     if (isProxyProfile(u.profile)) this.last.delete(sessionId);
     else {
-      const target = { ...u.target, env: plainEnv(u.target.harness, u.target.account) };
+      // The row was written from this switch's SwitchTarget: its harness is one.
+      const target: SwitchTarget = { ...u.target, harness: u.target.harness as SwitchTarget["harness"], env: plainEnv(u.target.harness, u.target.account) };
       this.last.set(sessionId, { profile: u.profile, target, window: u.window, resume: u.resume, handoff: null, resumeFailed: false, switchId });
     }
     this.d.threads(sessionId).addNotice(`The switch to ${switchLabel(u)} went through after all: the agent confirmed it after devd stopped waiting.`, this.d.now());
