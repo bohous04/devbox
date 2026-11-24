@@ -283,6 +283,11 @@ export function openDb(path: string): Database {
   if (!(db.query("PRAGMA table_info(ended_sessions)").all() as { name: string }[]).some((c) => c.name === "thread_note")) {
     db.run(`ALTER TABLE ended_sessions ADD COLUMN thread_note TEXT`);
   }
+  // The Codex account whose home held a tmux session's conversation (the mirror's thread.native): continue copies the
+  // conversation from there (endedSessions.ts continuePlan). NULL for every other session and for ends before it.
+  if (!(db.query("PRAGMA table_info(ended_sessions)").all() as { name: string }[]).some((c) => c.name === "native_account")) {
+    db.run(`ALTER TABLE ended_sessions ADD COLUMN native_account TEXT`);
+  }
   // The PR of a session's pushed branch as the PR watch last saw it (prWatch.ts). Kept across devd restarts so a
   // CI failure is notified once and a merge settles once. One row per session, deleted with it (deleteSession).
   // First deploy of the PR watch: the table is new, so PRs that are already failing or merged are not news. The

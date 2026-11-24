@@ -918,7 +918,8 @@ test.skipIf(!Bun.which("python3"))("a Codex pane: the hook-named thread's rollou
   // This codex shows no thread id in its title (started by hand, or before agent-launch set it up).
   const lock = { code: "codex-send-unsupported", message: "This Codex doesn't show its conversation in the terminal title, so devd can't tell where a message would land. Restart it from devbox to send from chat, or reply in the terminal." };
   expect(t.mirror.info(TMUX.id)).toMatchObject({ state: "live", activity: "idle", sendBlock: lock });
-  expect(t.mirror.store(TMUX.id).snapshot().native).toMatchObject({ harness: "codex", nativeThreadId: TID });
+  // The account whose home holds the thread: continuing the session once it ends copies it from there (DEVBOX-100).
+  expect(t.mirror.store(TMUX.id).snapshot().native).toMatchObject({ harness: "codex", nativeThreadId: TID, account: "default" });
   const res = await app(t).request(`/api/sessions/${TMUX.id}/mirror/messages`, { method: "POST", body: JSON.stringify({ text: "next" }), headers: { "content-type": "application/json" } });
   expect([res.status, await res.json()]).toEqual([409, { error: lock.code, message: lock.message }]);
   expect(typed(t)).toEqual([]);
@@ -1079,6 +1080,8 @@ test.skipIf(!Bun.which("python3"))("a rewritten Codex rollout is read again from
   Object.assign(pane, { home: ACCOUNT_HOME, homes: { [ACCOUNT_HOME]: account.home }, pid: 30 });
   await t.mirror.refresh(TMUX.id);
   expect(items(t.mirror)).toEqual(["user: Before", "notice: The transcript was rewritten; it is read again from the start", "user: After", "user: On the other account"]);
+  // The same conversation, now in the other account's home: that is where continue finds it.
+  expect(t.mirror.store(TMUX.id).snapshot().native).toMatchObject({ nativeThreadId: TID, account: SID2 });
   // A rollout replaced by a symlink is not read; the cursor stays.
   const cursor = t.mirror.store(TMUX.id).mirrorCursor();
   rmSync(account.file(TID));

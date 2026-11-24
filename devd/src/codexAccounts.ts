@@ -4,6 +4,7 @@ import type { CodexAuthDeps } from "./agentAuth";
 import { buildCodexView, codexUsageView, pollCodex, type CodexView } from "./codexPoller";
 import { parseCodexAuthJson } from "./codexUsageFetch";
 import { sharedRolloutBlock } from "./codexContinue";
+import { copyCodexConversation } from "./codexResumeCopy";
 import { codexPreference, getCodexAccount, initCodexAccounts, listCodexAccounts, storedCodexAccountUsage } from "./codexAccountsDb";
 import { accountLoginStatus, installAccountAuth, cancelAccountLogin, codexAccountVolume, CodexProfileInUseError, readAccountAuth, removeAccountProfile, startAccountLogin } from "./codexAccountProfiles";
 
@@ -240,6 +241,14 @@ export class CodexAccounts {
   /** Why an ended chat session's Codex conversation cannot be continued (codexContinue.ts); null when it can. */
   sharedRolloutBlock(thread: string): Promise<string | null> {
     return sharedRolloutBlock(this.d.auth, thread);
+  }
+  /** Continue of an ended tmux Codex session (DEVBOX-100): copies its conversation from the account it ran on into the
+   *  one a new session gets now (as `co` would select it), or says why not. */
+  async resumeCopy(from: string, thread: string): Promise<{ account: string } | { reason: string }> {
+    let to: { accountId: string; label: string };
+    try { to = this.select(); }
+    catch (e) { return { reason: `no Codex account can take the conversation: ${(e as Error).message.replace(/\.$/, "")}` }; }
+    return copyCodexConversation(this.d.auth, from, to, thread);
   }
   async refresh(id: string, force = true) {
     const row = this.require(id);

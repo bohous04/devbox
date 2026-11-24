@@ -1192,11 +1192,17 @@ export function createApp(d: ApiDeps): Hono {
     continuing.add(row.id);
     try {
       // The image check only where a resume is in question: it asks docker.
-      let plan = await continuePlan(row, continueMode(row) === "resume" ? await d.mgr.resumeImageBlock() : null);
-      // Before a resume is promised: a Codex conversation gone from the shared home hands off with the reason.
+      let plan = await continuePlan(row, continueMode(row) === "resume" ? await d.mgr.resumeImageBlock(row.runtime === "tmux" && row.agent === "codex" ? "tmux-codex" : "any") : null);
       if (plan.mode === "resume" && plan.seed.harness === "codex") {
-        const gone = d.codexAccounts ? await d.codexAccounts.sharedRolloutBlock(plan.seed.thread) : "Codex accounts are not configured in devd";
-        if (gone !== null) plan = { mode: "handoff", reason: gone };
+        if (plan.seed.account !== undefined) {
+          // A tmux Codex conversation lives in its account's home: copied into the account the new session gets first.
+          const copied = d.codexAccounts ? await d.codexAccounts.resumeCopy(plan.seed.account, plan.seed.thread) : { reason: "Codex accounts are not configured in devd" };
+          plan = "reason" in copied ? { mode: "handoff", reason: copied.reason } : { mode: "resume", seed: { ...plan.seed, account: copied.account } };
+        } else {
+          // Before a resume is promised: a chat Codex conversation gone from the shared home hands off with the reason.
+          const gone = d.codexAccounts ? await d.codexAccounts.sharedRolloutBlock(plan.seed.thread) : "Codex accounts are not configured in devd";
+          if (gone !== null) plan = { mode: "handoff", reason: gone };
+        }
       }
       let prompt: string | undefined, transcript: string | undefined;
       if (plan.mode === "handoff") {

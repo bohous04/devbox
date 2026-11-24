@@ -687,17 +687,22 @@ export class SessionManager {
       // Claude Code appends to it as the conversation goes on: the agent's file.
       withDir(projects, [], false, (d) => writeFileAt(d, `${resume.thread}.jsonl`, resume.jsonl, { mode: 0o600, replace: true, ...owner }));
     }
-    withDir(dir, [], false, (d) => writeFileAt(d, "resume", `${resume.harness} ${resume.thread}\n`, { mode: 0o666, replace: true }));
+    const account = resume.harness === "codex" && resume.account !== undefined ? ` ${resume.account}` : "";
+    withDir(dir, [], false, (d) => writeFileAt(d, "resume", `${resume.harness} ${resume.thread}${account}\n`, { mode: 0o666, replace: true }));
   }
 
   /** Why the session image cannot start a session on an ended conversation, null when it can. An image built before
    *  agent-launch.sh and the bridge read /run/devd/resume lacks the `devbox.resume-file` label (image/Dockerfile);
-   *  continue then hands off instead and says so. */
-  async resumeImageBlock(): Promise<string | null> {
+   *  continue then hands off instead and says so. The label is a level, each one doing all the earlier did:
+   *  `tmux-codex` needs 2 or later, from when agent-launch.sh also resumes a tmux Codex conversation. */
+  async resumeImageBlock(kind: "any" | "tmux-codex"): Promise<string | null> {
     const r = await sh("/", "docker", "image", "inspect", "--format", '{{ index .Config.Labels "devbox.resume-file" }}', this.d.image);
     if (r.code !== 0) return `the session image ${this.d.image} could not be inspected: ${r.stderr.trim()}`;
-    if (r.stdout.trim() === "1") return null;
-    return `the session image ${this.d.image} predates resuming ended conversations; new sessions get it after the next devbox-update image rebuild`;
+    const label = r.stdout.trim();
+    const level = /^[0-9]+$/.test(label) ? Number(label) : 0;
+    if (level >= (kind === "tmux-codex" ? 2 : 1)) return null;
+    const what = level === 1 ? "resuming tmux Codex conversations" : "resuming ended conversations";
+    return `the session image ${this.d.image} predates ${what}; new sessions get it after the next devbox-update image rebuild`;
   }
 
   private claudeProjectsDir(id: string) {

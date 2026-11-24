@@ -356,6 +356,11 @@ export function parseLocate(stdout: string): PaneAgent | null {
   return { kind: "claude", pid: nearest.pid, start: starts.get(nearest.pid)!, inMode: pane.inMode, sid, status };
 }
 
+/** The Codex account (as `co` names it) whose home `home` is; `home` is one codexHomeAllowed accepts. */
+function codexAccountOf(home: string): string {
+  return home === "/home/dev/.codex" ? "default" : home.slice(CODEX_PROFILE_ROOT.length + 1);
+}
+
 /** The homes a session's codex may read from: the default one or an account profile's (the rule
  *  codexSessionAccounts' accountFromEnvironment applies). Any other CODEX_HOME is the agent's own choice and not read. */
 export function codexHomeAllowed(home: string): boolean {
@@ -543,6 +548,8 @@ export interface Cursor {
   proc?: string;
   /** Codex: the home read from (another home is another file of the same thread, so a new inode is no rewrite there). */
   home?: string;
+  /** Codex: the account announced in thread.native (the home's), so a session ending holds where its thread is. */
+  account?: string;
   /** Codex: codexThread's watch, kept so a devd restart does not take a process it saw before for a first look. */
   watch?: CodexWatch;
 }
@@ -980,14 +987,23 @@ export class TranscriptMirror {
         if (cur.map.openRun !== null) pre.push({ type: "run.completed", runId: cur.map.openRun, nativeThreadId: cur.sid ?? "", usage: null, costUsd: null });
       };
       const from = cur.sid === out.id && !out.rewritten ? cur.offset : 0;
+      const account = codexAccountOf(pane.home);
       if (cur.sid !== out.id) {
         if (cur.sid !== null) { closeOpenRun(); pre.push({ type: "bridge.notice", text: "New conversation" }); }
-        pre.push({ type: "thread.native", harness: "codex", nativeThreadId: out.id, account: null, model: null });
-        cur = { ...cur, sid: out.id, map: newCodexMapState() };
-      } else if (out.rewritten) {
-        closeOpenRun();
-        pre.push({ type: "bridge.notice", text: "The transcript was rewritten; it is read again from the start" });
-        cur = { ...cur, map: newCodexMapState() };
+        pre.push({ type: "thread.native", harness: "codex", nativeThreadId: out.id, account, model: null });
+        cur = { ...cur, sid: out.id, map: newCodexMapState(), account };
+      } else {
+        if (out.rewritten) {
+          closeOpenRun();
+          pre.push({ type: "bridge.notice", text: "The transcript was rewritten; it is read again from the start" });
+          cur = { ...cur, map: newCodexMapState() };
+        }
+        // The same thread in another account's home (an account switch), or a mirror that announced it before the
+        // account was recorded: the account is announced again, as continue copies the thread from there.
+        if (cur.account !== account) {
+          pre.push({ type: "thread.native", harness: "codex", nativeThreadId: out.id, account, model: null });
+          cur = { ...cur, account };
+        }
       }
       const map = cur.map as CodexMapState;
       // Another codex process now writes the thread (resumed after its predecessor died): that one's turn is over.
