@@ -11,7 +11,7 @@
 // The mapped events go into a ThreadStore of its own (`_mirrors/<id>.sqlite`), so the snapshot, paging and SSE replay
 // work exactly like a chat thread's. Polling runs only while a client watches (SSE) and on the session's hook events.
 // Transcript content never goes to logs.
-import { closeSync, constants as C, existsSync, fstatSync, openSync, read as readFd, readdirSync, readSync } from "node:fs";
+import { closeSync, constants as C, existsSync, fstatSync, lstatSync, openSync, read as readFd, readdirSync, readSync } from "node:fs";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -495,6 +495,8 @@ export interface MirrorDeps {
   isEnding: (id: string) => boolean;
   /** docker exec into the session's container; `stdin` is piped to the command. */
   exec: (container: string, cmd: string[], timeoutMs: number, stdin?: string) => Promise<ExecResult>;
+  /** docker's view of the container (docker.ts containerState): tells a stopped container from a failed exec. */
+  containerState: (container: string) => Promise<"running" | "exited" | "missing">;
   /** The session's hook-derived state (AgentEventHub.liveSnapshot): the reason a waiting agent gives. */
   live: (id: string) => AgentLiveSnapshot | null;
   now?: () => number;
@@ -647,38 +649,63 @@ export class TranscriptMirror {
     this.cutShort.delete(id);
     const unsure = this.finalLocateFailed.delete(id);
     let threadNote: string | undefined;
-    const run = (async () => { threadNote = await this.readPaneless(id, unsure); })().catch((e) => {
+    let nothingToAdd = false;
+    const run = (async () => {
+      // A pinned conversation whose file is not in the projects dir (a Codex thread in a Claude session's pane):
+      // nothing to add here, the live read's result stands.
+      const pinned = this.pinned(id);
+      if (pinned !== null && !this.conversations(id).some((c) => c.sid === pinned)) { nothingToAdd = true; return; }
+      threadNote = await this.readPaneless(id, unsure);
+    })().catch((e) => {
       this.cutShort.add(id);
       this.log(`mirror ${id}: the read after the stop failed, the transcript ends where the last read got to: ${(e as Error).message}`);
     }).finally(() => { this.finalizing.delete(id); this.running.delete(id); });
     this.running.set(id, run);
     await run;
     const truncated = this.cutShort.delete(id);
+    if (nothingToAdd) return null;
     return threadNote === undefined ? { truncated } : { truncated, threadNote };
+  }
+
+  /** The conversation the store's cursor holds: the one the last live read named. */
+  private pinned(id: string): string | null {
+    const stored = this.stores.has(id) || existsSync(join(this.d.root, "_mirrors", `${id}.sqlite`));
+    const saved = stored ? this.store(id).mirrorCursor() : null;
+    return saved ? (JSON.parse(saved) as Cursor).sid : null;
+  }
+
+  /** The Claude conversations in the session's projects dir (regular files only), newest first. */
+  private conversations(id: string): { sid: string; mtime: number }[] {
+    try {
+      return withDir(this.d.root, ["_claude-projects", id], false, (dir) => readdirSync(dir.path, { withFileTypes: true })
+        .filter((e) => e.isFile() && e.name.endsWith(".jsonl") && UUID.test(e.name.slice(0, -6)))
+        .map((e) => ({ sid: e.name.slice(0, -6), mtime: lstatSync(join(dir.path, e.name)).mtimeMs })))
+        .sort((a, b) => b.mtime - a.mtime);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw e;
+    }
   }
 
   private async readPaneless(id: string, unsure: boolean): Promise<string | undefined> {
     const gen = this.gen(id);
     const current = () => gen === this.gen(id) && !this.ending(id);
-    const stored = this.stores.has(id) || existsSync(join(this.d.root, "_mirrors", `${id}.sqlite`));
-    const saved = stored ? this.store(id).mirrorCursor() : null;
-    const pinned = saved ? (JSON.parse(saved) as Cursor).sid : null;
+    const pinned = this.pinned(id);
+    const all = this.conversations(id);
     if (pinned !== null) {
       if (unsure) this.cutShort.add(id);
       await this.read(id, pinned, true, current);
+      // A newer conversation than the pinned one (a /clear nobody watched): the session may have ended there.
+      const newest = all[0];
+      if (newest && newest.sid !== pinned && newest.mtime > (all.find((c) => c.sid === pinned)?.mtime ?? 0)) {
+        this.cutShort.add(id);
+        return `The session's newest Claude conversation (${newest.sid}) is not the one the last read of its terminal named (${pinned}); the transcript is that one.`;
+      }
       return undefined;
     }
-    let sids: string[];
-    try {
-      sids = withDir(this.d.root, ["_claude-projects", id], false, (dir) => readdirSync(dir.path, { withFileTypes: true }))
-        .filter((e) => e.isFile() && e.name.endsWith(".jsonl") && UUID.test(e.name.slice(0, -6))).map((e) => e.name.slice(0, -6));
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-      throw e;
-    }
-    if (sids.length === 0) return undefined;
-    if (sids.length === 1) { await this.read(id, sids[0]!, true, current); return undefined; }
-    return `The session holds ${sids.length} Claude conversations and no read of its terminal named the one it ended on, so none was picked.`;
+    if (all.length === 0) return undefined;
+    if (all.length === 1) { await this.read(id, all[0]!.sid, true, current); return undefined; }
+    return `The session holds ${all.length} Claude conversations and no read of its terminal named the one it ended on, so none was picked.`;
   }
 
   /** Session stopped or ended: closes the store. An ended session's store stays on disk for end() to archive. */
@@ -757,7 +784,9 @@ export class TranscriptMirror {
     if (!current()) return;
     // A final read that could not ask the pane (a failed or timed-out exec) is no proof the pane is gone: what it shows
     // is unknown, so the transcript is not complete and the read after the stop does not trust the cursor either.
-    if (reachable && pane === null && this.finalizing.has(id)) {
+    // A container docker reports exited (the backup stopped it; the row says running until the end is done) certainly
+    // has no pane: nothing is unknown there.
+    if (reachable && pane === null && this.finalizing.has(id) && await this.d.containerState(s.container) !== "exited") {
       this.cutShort.add(id);
       this.finalLocateFailed.add(id);
       this.log(`mirror ${id}: the final read could not reach the pane`);

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
@@ -167,6 +167,8 @@ interface Pane {
   sid: string | null; status?: string; agent?: string; inMode?: boolean; sendResult?: string; noPane?: boolean;
   /** The locate exec itself fails (a timeout, docker gone). */
   locateFails?: boolean;
+  /** The container is stopped (the backup stopped it): every exec fails with exit 1, docker reports it exited. */
+  stopped?: boolean;
   codexHome?: string; home?: string; homes?: Record<string, string>; codexOpen?: string[]; pid?: number; start?: string;
   /** Holds every pane read until it settles: a slow `docker exec`. */
   gate?: Promise<void>;
@@ -187,6 +189,7 @@ function setup(pane: Pane, isEnding: (id: string) => boolean = () => false, o: {
     const ok = (stdout: string): ExecResult => ({ code: 0, stdout, stderr: "", timedOut: false });
     if (cmd[3] === MIRROR_LOCATE) {
       await pane.gate;
+      if (pane.stopped) return { code: 1, stdout: "", stderr: "Error response from daemon: container abc is not running", timedOut: false };
       if (pane.locateFails) return { code: 1, stdout: "", stderr: "context deadline exceeded", timedOut: true };
       if (pane.noPane) return ok(locateOut({ pane: null }));
       const agent = pane.agent ?? "claude";
@@ -204,7 +207,8 @@ function setup(pane: Pane, isEnding: (id: string) => boolean = () => false, o: {
     throw new Error(`unexpected exec ${cmd.join(" ")}`);
   };
   const bus = new EventBus();
-  const mirror = new TranscriptMirror({ db, root, bus, exec, isEnding, live: () => null, now: () => now, log: (m) => logs.push(m), ...o });
+  const containerState = async () => (pane.stopped ? "exited" as const : "running" as const);
+  const mirror = new TranscriptMirror({ db, root, bus, exec, containerState, isEnding, live: () => null, now: () => now, log: (m) => logs.push(m), ...o });
   cleanups.push(() => { mirror.release(TMUX.id); mirror.release(CHAT.id); });
   const write = (sid: string, lines: string[]) => appendFileSync(join(projects, `${sid}.jsonl`), lines.map((l) => `${l}\n`).join(""));
   /** A hook event of the session naming agent thread `thread` (what Codex's hooks record). */
@@ -213,7 +217,7 @@ function setup(pane: Pane, isEnding: (id: string) => boolean = () => false, o: {
     /** devd restarts: a new mirror over the same root and database. */
     restart: () => {
       t.mirror.release(TMUX.id);
-      t.mirror = new TranscriptMirror({ db, root, bus, exec, isEnding, live: () => null, now: () => now, log: (m) => logs.push(m) });
+      t.mirror = new TranscriptMirror({ db, root, bus, exec, containerState, isEnding, live: () => null, now: () => now, log: (m) => logs.push(m) });
       const next = t.mirror;
       cleanups.push(() => next.release(TMUX.id));
     } };
@@ -363,6 +367,68 @@ test("a final live read that cannot reach the pane is cut short and infers nothi
   expect(await t.mirror.finalRefresh(TMUX.id)).toEqual({ truncated: true });
   expect(await t.mirror.finalTail(TMUX.id)).toEqual({ truncated: true });
   expect(t.logs).toContain(`mirror ${TMUX.id}: the final read could not reach the pane`);
+});
+
+// Review of #149 (A): after a restart the row still says running, but the backup has stopped the container, so the
+// final live read's exec fails. That is certainly no pane, not an unknown one: the read after the stop is complete.
+test("a final live read into a container the backup stopped is not cut short; the read after the stop completes it", async () => {
+  const pane: Pane = { sid: SID };
+  let ending = false;
+  const t = setup(pane, () => ending);
+  t.write(SID, fixtureLines().slice(0, 5));
+  await t.mirror.refresh(TMUX.id);
+  t.write(SID, fixtureLines().slice(5));
+  t.restart();
+  ending = true;
+  pane.stopped = true;
+  expect(await t.mirror.finalRefresh(TMUX.id)).toEqual({ truncated: false });
+  expect(await t.mirror.finalTail(TMUX.id)).toEqual({ truncated: false });
+  expect(native(t).items).toEqual(render(fixtureLines()).snapshot.items.map(brief));
+});
+
+// (B): a newer conversation than the pinned one (a /clear nobody watched) means the pinned one may not be where the
+// session ended: not complete, and said so.
+test("a conversation newer than the pinned one makes the read after the stop cut short, with a note", async () => {
+  const pane: Pane = { sid: SID };
+  const t = setup(pane, () => true);
+  t.write(SID, fixtureLines());
+  await t.mirror.finalRefresh(TMUX.id);
+  t.write(SID2, fixtureLines().slice(0, 3));
+  const later = new Date(Date.now() + 60_000);
+  utimesSync(join(t.projects, `${SID2}.jsonl`), later, later);
+  pane.stopped = true;
+  expect(await t.mirror.finalTail(TMUX.id)).toEqual({ truncated: true,
+    threadNote: `The session's newest Claude conversation (${SID2}) is not the one the last read of its terminal named (${SID}); the transcript is that one.` });
+});
+
+// (D): the pinned conversation is not in the projects dir (a Codex thread in the pane of a Claude session): the read
+// after the stop has nothing to add, so the live read's result stands.
+test("the read after the stop leaves the live result when the pinned conversation's file is not there", async () => {
+  const pane: Pane = { sid: SID };
+  const t = setup(pane, () => true);
+  t.write(SID, fixtureLines());
+  await t.mirror.finalRefresh(TMUX.id);
+  rmSync(join(t.projects, `${SID}.jsonl`));
+  expect(await t.mirror.finalTail(TMUX.id)).toBeNull();
+});
+
+// Review of #157: finalTail never throws (end() runs it between the backup and docker rm) and leaves no state behind:
+// the session is ending again for everyone else, whichever way it returned.
+test("finalTail never throws and leaves no state behind, also when it has nothing to add", async () => {
+  const pane: Pane = { sid: SID };
+  const t = setup(pane, () => true);
+  t.write(SID, fixtureLines());
+  await t.mirror.finalRefresh(TMUX.id);
+  // Nothing to add (the pinned file is gone): no finalizing left over.
+  rmSync(join(t.projects, `${SID}.jsonl`));
+  expect(await t.mirror.finalTail(TMUX.id)).toBeNull();
+  expect(t.mirror.session(TMUX.id)).toEqual({ error: "session-ending" });
+  // The projects dir cannot be listed (here a file in its place): cut short, not a throw.
+  rmSync(t.projects, { recursive: true });
+  writeFileSync(t.projects, "");
+  expect(await t.mirror.finalTail(TMUX.id)).toEqual({ truncated: true });
+  expect(t.mirror.session(TMUX.id)).toEqual({ error: "session-ending" });
+  expect(t.logs.some((l) => l.startsWith(`mirror ${TMUX.id}: the read after the stop failed`))).toBe(true);
 });
 
 test("finalTail leaves an agent other than Claude to its live read", async () => {

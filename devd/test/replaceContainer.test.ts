@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { SessionManager } from "../src/sessions";
 import { getSession, insertSession, openDb } from "../src/db";
 import { workspacePath } from "../src/tree";
+import { sh } from "./helpers/sh";
 import { DEFAULT_CONFIG } from "../src/config";
 
 // The host's docker wrapper (infra/storage-guard/host-docker.py) lets `docker rm` of a session container through only
@@ -142,4 +143,66 @@ test("the backup gets the session's container name, not its id", async () => {
     await mgr.recreate("dev-a-b", "test");
     expect(seen).toEqual(["dev-a-b-box"]);
   } finally { process.env.PATH = orig; }
+});
+
+// open() of an existing stopped session replaces its container in two ways: a new env (here the agent baked in
+// differs from the one opened with) and a container without the canonical workspace mount. Real git, fake docker.
+function openFixture() {
+  const root = mkdtempSync(join(tmpdir(), "replace-open-"));
+  const bare = join(root, "origin.git");
+  sh(root, "git", "init", "--bare", "-b", "main", bare);
+  const seed = mkdtempSync(join(tmpdir(), "seed-"));
+  sh(seed, "git", "init", "-b", "main"); sh(seed, "git", "config", "user.email", "t@t"); sh(seed, "git", "config", "user.name", "t");
+  writeFileSync(join(seed, "f.txt"), "x\n");
+  sh(seed, "git", "add", "."); sh(seed, "git", "commit", "-m", "init"); sh(seed, "git", "push", bare, "HEAD:main");
+  const bin = mkdtempSync(join(tmpdir(), "fake-docker-"));
+  const log = join(bin, "log"), inspect = join(bin, "inspect"), env = join(bin, "env");
+  writeFileSync(log, "");
+  writeFileSync(join(bin, "docker"), `#!/usr/bin/env bash
+echo "docker $*" >> ${log}
+case "$*" in
+  *'--format'*) [ -s ${inspect} ] && cat ${inspect} || { echo "Error: No such object" >&2; exit 1; } ;;
+  *'.Config.Env'*) cat ${env} 2>/dev/null || echo '[]' ;;
+  *'.State.Status'*) echo exited ;;
+  exec*) echo 27.0 ;;
+esac
+exit 0
+`);
+  chmodSync(join(bin, "docker"), 0o755);
+  process.env.PATH = `${bin}:${savedPath}`;
+  const db = openDb(":memory:");
+  const order: string[] = [];
+  const mgr = new SessionManager({ db, cfg: structuredClone(DEFAULT_CONFIG), root, image: "alpine:3", extraMounts: [], cmd: ["sleep", "infinity"],
+    controlRoot: join(root, "ctl"), preserveForEnd: async (c) => { appendFileSync(log, `preserve ${c}\n`); } });
+  /** The session's container is now stopped, at its worktree; `canonical`: it has the canonical mount. */
+  const stopped = (canonical: boolean) => {
+    const ws = getSession(db, "dev-acme-app")!.worktree!;
+    const mounts = [{ Type: "bind", Source: ws, Destination: "/workspace" }, ...(canonical ? [{ Type: "bind", Source: ws, Destination: ws }] : [])];
+    writeFileSync(inspect, JSON.stringify({ id: "b".repeat(64), state: "exited", running: false, mounts }));
+    writeFileSync(log, "");
+  };
+  const replaced = () => readFileSync(log, "utf8").split("\n").filter((l) => l.startsWith("preserve") || l.startsWith("docker rm"));
+  return { db, mgr, bare, env, stopped, replaced, order };
+}
+const savedPath = process.env.PATH;
+
+test("open of a stopped session with another agent baked in backs the container up before it removes it", async () => {
+  const f = openFixture();
+  try {
+    await f.mgr.open({ folder: "acme", project: "acme", repo: "app", cloneUrl: f.bare });
+    f.stopped(true);
+    writeFileSync(f.env, JSON.stringify(["DEVD_AGENT=codex"]));
+    await f.mgr.open({ folder: "acme", project: "acme", repo: "app" });
+    expect(f.replaced()).toEqual(["preserve dev-acme-app", "docker rm -f dev-acme-app"]);
+  } finally { process.env.PATH = savedPath; }
+});
+
+test("open of a stopped session without the canonical mount backs the container up before it removes it", async () => {
+  const f = openFixture();
+  try {
+    await f.mgr.open({ folder: "acme", project: "acme", repo: "app", cloneUrl: f.bare });
+    f.stopped(false);
+    await f.mgr.open({ folder: "acme", project: "acme", repo: "app" });
+    expect(f.replaced()).toEqual(["preserve dev-acme-app", `docker rm ${"b".repeat(64)}`]);
+  } finally { process.env.PATH = savedPath; }
 });

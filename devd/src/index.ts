@@ -886,6 +886,7 @@ const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // The Chat view of tmux sessions. `-i` only when the command reads stdin (the message typed into the pane).
 const transcriptMirror: TranscriptMirror = new TranscriptMirror({
   db, root, bus, isEnding: (id) => mgr.isEnding(id), live: (id) => agentEvents.liveSnapshot(id),
+  containerState,
   exec: (container, cmd, timeoutMs, stdin) =>
     runDocker(container, ["exec", ...(stdin === undefined ? [] : ["-i"]), container, ...cmd], stdin === undefined ? { timeoutMs } : { timeoutMs, stdin }),
 });
