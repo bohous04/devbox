@@ -13,7 +13,7 @@ import sys
 import tempfile
 import unicodedata
 
-TITLE_FORMAT = "#{?@devd_label,#{@devd_label},#{?@devd_session_name,#{@devd_session_name},#{?@devd_auto_title,#{@devd_auto_title},#{pane_title}}}}"
+TITLE_FORMAT = "#{?@devd_label,#{@devd_label},#{?@devd_session_name,#{@devd_session_name},#{?@devd_auto_title,#{@devd_auto_title},#{s/(^| [|] )[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f-]+([.][.][.])?$//:pane_title}}}}"
 
 
 def clean(value):

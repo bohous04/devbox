@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import tempfile
@@ -64,6 +65,9 @@ class RecordingTmux:
                 return expression
             assert expression.endswith("}")
             body = expression[2:-1]
+            substitution = re.fullmatch(r"s/(.*)/(.*)/:(\w+)", body)
+            if substitution:
+                return re.sub(substitution[1], substitution[2], values.get(substitution[3], ""))
             if not body.startswith("?"):
                 return values.get(body, "")
             pieces, start, depth = [], 1, 0
@@ -313,6 +317,8 @@ class WarpTitleTests(unittest.TestCase):
         self.assertEqual(self.tmux.rendered_title(), "Automatic title")
         del self.tmux.pane_options["@devd_auto_title"]
         self.assertEqual(self.tmux.rendered_title(pane_title="Existing pane title"), "Existing pane title")
+        # A Codex thread id devbox has Codex put in its title (image/co) is not shown.
+        self.assertEqual(self.tmux.rendered_title(pane_title="work | 01aaaaaa-0000-7000-8000-00000..."), "work")
 
     def test_devbox_name_survives_hook_updates(self):
         self.tmux.session_options["@devd_session_name"] = "PHD Banka"
