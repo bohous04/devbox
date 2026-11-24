@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -127,6 +127,30 @@ test("co runs codex with approvals, sandbox and hook trust disabled", async () =
   expect(co).toContain("--dangerously-bypass-approvals-and-sandbox");
   expect(co).toContain("--dangerously-bypass-hook-trust");
   expect(co).toContain('"$@"');
+});
+
+// DEVBOX-72: the chat mirror sends into a Codex pane only while its title names the thread the chat shows
+// (devd transcriptMirror.ts codexTitleThread). Only the codex agent-launch starts gets it; one typed by hand keeps the
+// user's own title.
+test("co puts the thread id in Codex's terminal title only when agent-launch started it", async () => {
+  const bin = fakeBin("codex");
+  const accounts = mkdtempSync(join(tmpdir(), "co-accounts-"));
+  const run = async (env: Record<string, string>, args: string[]) => {
+    const p = Bun.spawn(["bash", join(IMAGE, "co"), ...args], {
+      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: accounts, DEVD_CODEX_ACCOUNTS_DIR: accounts, ...env },
+      stdin: "ignore", stdout: "pipe", stderr: "ignore",
+    });
+    const out = await new Response(p.stdout).text();
+    await p.exited;
+    return out;
+  };
+  const title = `-c tui.terminal_title=["activity","project-name","thread-id"]`;
+  expect(await run({ DEVD_LAUNCH_PROFILE: "codex" }, [])).toContain(title);
+  // A subcommand still comes after the global options.
+  const resumed = await run({ DEVD_LAUNCH_PROFILE: "codex" }, ["resume", "01aaaaaa-0000-7000-8000-000000000001"]);
+  expect(resumed).toMatch(new RegExp(`${title.replace(/[[\]]/g, "\\$&")} .*resume 01aaaaaa-0000-7000-8000-000000000001`));
+  expect(await run({}, [])).not.toContain("terminal_title");
+  rmSync(accounts, { recursive: true, force: true });
 });
 
 test("claude-launch is just a shim for agent-launch claude", async () => {

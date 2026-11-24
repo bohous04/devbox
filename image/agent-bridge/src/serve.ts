@@ -60,6 +60,8 @@ export interface HarnessOpenOptions {
   /** Harness, account and model to open; `env` overrides the launch env for this harness process only. */
   target: SwitchTarget;
   resume: string | null;
+  /** No `resume`: the Codex thread opens as a fork of this one (BridgeState.forkFrom). */
+  forkFrom: string | null;
   usageBaseline: UsageBaseline | null;
   emit: (e: BridgeEvent) => void;
   onUsageBaseline: (b: UsageBaseline) => void;
@@ -100,8 +102,9 @@ export interface ServeOptions {
 export const DEFAULT_RESUME_FILE = "/run/devd/resume";
 const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** Reads and removes the resume file. `thread`: what to resume; `notice`: what bridge.started says about it. Only a
- *  first start (`fresh`) uses it: a bridge with state already has its thread. */
+/** Reads and removes the resume file. `thread`: what to resume; `notice`: what to say about it (that it continues
+ *  only once the harness has it open, that it does not at once). Only a first start (`fresh`) uses it: a bridge with
+ *  state already has its thread. */
 function takeResumeFile(path: string, harness: Harness, fresh: boolean): { thread: string | null; notice: string | null } {
   let text: string;
   try {
@@ -115,7 +118,7 @@ function takeResumeFile(path: string, harness: Harness, fresh: boolean): { threa
   if (!fresh) return { thread: null, notice: null };
   const [h, id] = text.trim().split(/\s+/);
   if (h === harness && id !== undefined && THREAD_ID.test(id)) {
-    return { thread: id, notice: `This session continues ${harness === "claude" ? "Claude" : harness} conversation ${id} of an ended session.` };
+    return { thread: id, notice: `This session continues ${harness === "claude" ? "Claude" : harness === "codex" ? "Codex" : harness} conversation ${id} of an ended session.` };
   }
   return { thread: null, notice: `The ended session's conversation was not resumed: devd asked for ${JSON.stringify(text.trim().slice(0, 80))}, which this ${harness} bridge cannot open; a new conversation starts.` };
 }
@@ -307,6 +310,7 @@ function harnessOpener(launchEnv: Env, logError: (msg: string) => void): OpenHar
         codexHome: env.CODEX_HOME,
         baseEnv: env,
         resume: o.resume,
+        forkFrom: o.forkFrom,
         mcpConfigArgs: [...codexMcpArgs(), ...codexAccountArgs(env)],
         developerInstructions: APPENDED_SYSTEM_PROMPT,
         emit: o.emit,
@@ -394,10 +398,15 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   }
   const resume = o.resumeFile === undefined ? { thread: null, notice: null } : takeResumeFile(o.resumeFile, o.harness, loaded === null);
   if (resume.thread === null && resume.notice !== null) logError(`agent-bridge: ${resume.notice}`);
-  if (resume.notice !== null) recoveryNotice = recoveryNotice === null ? resume.notice : `${recoveryNotice} ${resume.notice}`;
+  if (resume.thread === null && resume.notice !== null) recoveryNotice = recoveryNotice === null ? resume.notice : `${recoveryNotice} ${resume.notice}`;
+  // Said when the harness announces the thread: a resume (or fork) may still fail.
+  let continuesNotice = resume.thread !== null ? resume.notice : null;
+  // A Codex thread is forked, not resumed: another session continuing the same ended one may hold it (review M1).
+  const fork = resume.thread !== null && o.harness === "codex";
   const state: BridgeState = loaded ?? {
+    ...(fork ? { forkFrom: resume.thread! } : {}),
     harness: o.harness,
-    nativeThreadId: resume.thread,
+    nativeThreadId: fork ? null : resume.thread,
     account: o.account,
     model: o.model,
     activeRunId: null,
@@ -462,13 +471,21 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
         }
         server.publish(e);
         return;
-      case "thread.native":
+      case "thread.native": {
+        const forkedFrom = state.forkFrom;
+        delete state.forkFrom;
         state.nativeThreadId = e.nativeThreadId;
         // A resumed Claude thread is announced before the CLI names its model; that null is not a model change.
         if (e.model !== null) state.model = e.model;
         persist();
         server.publish({ ...e, account: state.account });
+        if (continuesNotice !== null) {
+          server.publish({ type: "bridge.notice", text: forkedFrom === undefined ? continuesNotice
+            : `${continuesNotice.replace(/\.$/, "")}, as its own conversation ${e.nativeThreadId}.` });
+          continuesNotice = null;
+        }
         return;
+      }
       case "run.started": {
         const entry = state.queue.find((q) => q.runId === e.runId);
         state.activeRunId = e.runId;
@@ -520,7 +537,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   // target that cannot open); any other end exits serve so the launcher starts a fresh bridge that resumes the thread.
   function openHarness(handlesFailure: (e: unknown) => boolean = () => false): { session: HarnessSession; retired: boolean } {
     // No thread yet: the harness opens a new one, whose first prompt is still to come.
-    if (state.nativeThreadId === null && !state.instructionsPending) {
+    if (state.nativeThreadId === null && state.forkFrom === undefined && !state.instructionsPending) {
       state.instructionsPending = true;
       persist();
     }
@@ -529,6 +546,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       session: o.openHarness({
         target: current!,
         resume: state.nativeThreadId,
+        forkFrom: state.forkFrom ?? null,
         usageBaseline: state.usageBaseline,
         emit: onHarnessEvent,
         onUsageBaseline: (b) => {
@@ -672,7 +690,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     const previous = {
       current, target: state.target, harness: state.harness, account: state.account, model: state.model,
       nativeThreadId: state.nativeThreadId, pendingHandoff: state.pendingHandoff, usageBaseline: state.usageBaseline,
-      instructionsPending: state.instructionsPending, appliedSwitchId: state.appliedSwitchId,
+      instructionsPending: state.instructionsPending, appliedSwitchId: state.appliedSwitchId, forkFrom: state.forkFrom,
     };
     // A different thread (or harness) does not continue the old running usage totals.
     if (target.harness !== state.harness || cmd.resume !== state.nativeThreadId) state.usageBaseline = null;
@@ -688,6 +706,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     // Another thread resumed: it had its first prompt (a new one is marked when it opens).
     if (cmd.resume !== state.nativeThreadId) state.instructionsPending = false;
     state.nativeThreadId = cmd.resume;
+    delete state.forkFrom;
     if (cmd.handoff !== null || !sameThread) state.pendingHandoff = cmd.handoff;
     // Saved with the target: whichever bridge opens it (this one, or one restarted mid-switch) reports it to devd.
     state.appliedSwitchId = cmd.switchId ?? null;
@@ -705,6 +724,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       state.usageBaseline = previous.usageBaseline;
       state.instructionsPending = previous.instructionsPending;
       state.appliedSwitchId = previous.appliedSwitchId;
+      if (previous.forkFrom !== undefined) state.forkFrom = previous.forkFrom;
       persist();
     };
     let h: { session: HarnessSession; retired: boolean };
@@ -757,6 +777,8 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
   function resumeFailed(e: ResumeFailedError): void {
     logError(`agent-bridge: ${e.message}; waiting for devd's fresh target`);
     state.nativeThreadId = null;
+    delete state.forkFrom;
+    continuesNotice = null;
     state.pendingHandoff = null;
     // Persisted: a bridge restarted before devd's target arrives would otherwise open a fresh thread without the
     // handoff (P26).

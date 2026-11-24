@@ -169,7 +169,7 @@ describe("Codex session account switching", () => {
     const result = await f.service.switch(ROW.id, EXTRA);
     expect(result).toEqual({ ok: true, accountId: EXTRA, label: "Acme", unchanged: false, panes: [{ target: "main:0.0", outcome: "restarted", threadId: THREAD }] });
     const start = starts(f)[0]![4]!;
-    expect(start).toBe(`unset CODEX_SQLITE_HOME DEVD_CODEX_SHARED_HOME DEVD_CODEX_REMOTE; export CODEX_HOME='/home/dev/.codex' DEVD_CODEX_ACCOUNT_ID='${EXTRA}'; /usr/local/bin/co -C '/workspace' -c 'projects={"/workspace"={trust_level="trusted"}}' resume ${THREAD}`);
+    expect(start).toBe(`unset CODEX_SQLITE_HOME DEVD_CODEX_SHARED_HOME DEVD_CODEX_REMOTE; export CODEX_HOME='/home/dev/.codex' DEVD_CODEX_ACCOUNT_ID='${EXTRA}' DEVD_LAUNCH_PROFILE=codex; /usr/local/bin/co -C '/workspace' -c 'projects={"/workspace"={trust_level="trusted"}}' resume ${THREAD}`);
     expect(start).not.toMatch(/--last|--continue|fork/);
     expect(f.calls.filter(c => c[0] === "kill")).toEqual([]);
     expect(exits(f)).toEqual(["main:0.0"]);

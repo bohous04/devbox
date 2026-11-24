@@ -1171,7 +1171,7 @@ export function createApp(d: ApiDeps): Hono {
   });
 
   /** Continues an ended session's work in a new session of the same repo, agent and runtime (endedSessions.ts
-   *  continuePlan). The response says how: `resume` (Claude Code starts on the ended conversation) or `handoff` (the new
+   *  continuePlan). The response says how: `resume` (the agent starts on the ended conversation) or `handoff` (the new
    *  session's first message points at the whole transcript), and `reason` why a resume became a handoff. */
   /** Ended sessions a continue is starting a session for. */
   const continuing = new Set<string>();
@@ -1192,7 +1192,12 @@ export function createApp(d: ApiDeps): Hono {
     continuing.add(row.id);
     try {
       // The image check only where a resume is in question: it asks docker.
-      const plan = await continuePlan(row, continueMode(row) === "resume" ? await d.mgr.resumeImageBlock() : null);
+      let plan = await continuePlan(row, continueMode(row) === "resume" ? await d.mgr.resumeImageBlock() : null);
+      // Before a resume is promised: a Codex conversation gone from the shared home hands off with the reason.
+      if (plan.mode === "resume" && plan.seed.harness === "codex") {
+        const gone = d.codexAccounts ? await d.codexAccounts.sharedRolloutBlock(plan.seed.thread) : "Codex accounts are not configured in devd";
+        if (gone !== null) plan = { mode: "handoff", reason: gone };
+      }
       let prompt: string | undefined, transcript: string | undefined;
       if (plan.mode === "handoff") {
         try { transcript = handoffTranscript(row); }
@@ -1204,7 +1209,7 @@ export function createApp(d: ApiDeps): Hono {
       }
       const r = await d.mgr.open({
         folder: row.folder, project: row.project, repo: row.repo, agent: row.agent, runtime: row.runtime, fresh: true,
-        ...(plan.mode === "resume" ? { resume: { thread: plan.thread, jsonl: plan.jsonl } } : { handoff: transcript! }),
+        ...(plan.mode === "resume" ? { resume: plan.seed } : { handoff: transcript! }),
         ...(row.runtime === "tmux" && prompt !== undefined ? { firstPrompt: prompt } : {}),
       });
       linkOpenedChat(r, row.runtime === "chat" ? prompt : undefined);

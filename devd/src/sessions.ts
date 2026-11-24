@@ -1,7 +1,7 @@
 import { loadRemoteRoute, inspectRemoteContainer, prepareRemoteWorkspace, restoreExactSession, retainRemoteWorkspace, type RemoteRoute } from "../../infra/codex-remote/restoreSession";
 import { archiveChats, archiveStamp } from "./chatArchive";
 import { archiveThreadImages, removeThreadImages } from "./threadImages";
-import { endedAlready, HANDOFF_TRANSCRIPT, recordEnded } from "./endedSessions";
+import { endedAlready, HANDOFF_TRANSCRIPT, recordEnded, type ResumeSeed } from "./endedSessions";
 import type { EndedSession } from "../../shared/ended";
 import { codexRemoteLaunchScope } from "./codexRemoteLaunch";
 import type { Database } from "bun:sqlite";
@@ -58,8 +58,6 @@ export class ExternalStartError extends Error {
 export const MAX_FIRST_PROMPT_BYTES = 64_000;
 
 /** A first prompt that would not reach the agent: refused before anything changes (POST /api/sessions answers 409). */
-/** An ended Claude conversation a new session starts on (endedSessions.ts continuePlan). */
-export interface ResumeSeed { thread: string; jsonl: Buffer }
 /** The handoff transcript's name in the control dir (/run/devd), endedSessions.ts HANDOFF_TRANSCRIPT. */
 const HANDOFF_FILE = basename(HANDOFF_TRANSCRIPT);
 
@@ -670,9 +668,9 @@ export class SessionManager {
     }
   }
 
-  /** A new session that continues an ended one (POST /api/ended/:id/continue). `resume`: the Claude conversation's jsonl
-   *  goes into the session's Claude projects dir and `/run/devd/resume` tells agent-launch.sh (tmux) or the bridge (chat)
-   *  to start on it, once. `handoff`: the ended transcript as Markdown, at /run/devd/ended-transcript.md
+  /** A new session that continues an ended one (POST /api/ended/:id/continue). `resume`: `/run/devd/resume` tells
+   *  agent-launch.sh (tmux) or the bridge (chat) to start on that conversation, once; a Claude conversation's jsonl
+   *  goes into the session's Claude projects dir first (a Codex thread stays in the shared Codex home). `handoff`: the ended transcript as Markdown, at /run/devd/ended-transcript.md
    *  (endedSessions.ts HANDOFF_TRANSCRIPT). Both live in this session's own control dir or projects dir, which no
    *  other container mounts. Files an earlier session with this id left are removed. Runs before the container does. */
   private async syncContinueFiles(id: string, t: { resume?: ResumeSeed; handoff?: string }): Promise<void> {
@@ -683,11 +681,13 @@ export class SessionManager {
     }
     const resume = t.resume;
     if (!resume) return;
-    const projects = await this.ensureClaudeProjectsDir(id);
-    const owner = process.getuid?.() === 0 ? { owner: { uid: 1000, gid: 1000 } } : {};
-    // Claude Code appends to it as the conversation goes on: the agent's file.
-    withDir(projects, [], false, (d) => writeFileAt(d, `${resume.thread}.jsonl`, resume.jsonl, { mode: 0o600, replace: true, ...owner }));
-    withDir(dir, [], false, (d) => writeFileAt(d, "resume", `claude ${resume.thread}\n`, { mode: 0o666, replace: true }));
+    if (resume.harness === "claude") {
+      const projects = await this.ensureClaudeProjectsDir(id);
+      const owner = process.getuid?.() === 0 ? { owner: { uid: 1000, gid: 1000 } } : {};
+      // Claude Code appends to it as the conversation goes on: the agent's file.
+      withDir(projects, [], false, (d) => writeFileAt(d, `${resume.thread}.jsonl`, resume.jsonl, { mode: 0o600, replace: true, ...owner }));
+    }
+    withDir(dir, [], false, (d) => writeFileAt(d, "resume", `${resume.harness} ${resume.thread}\n`, { mode: 0o666, replace: true }));
   }
 
   /** Why the session image cannot start a session on an ended conversation, null when it can. An image built before

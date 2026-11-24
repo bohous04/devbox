@@ -1157,7 +1157,7 @@ struct MirrorInfo: Decodable, Equatable {
     let activity: String?
     /// The agent waits for an answer only the terminal can give.
     let terminalPrompt: TerminalPrompt?
-    /// Why sending would be refused now (Codex: always, `codex-send-unsupported`); nil = devd knows no reason.
+    /// Why sending would be refused now (Codex: whenever its terminal title does not name the mirrored thread); nil = devd knows no reason.
     let sendBlock: SendBlock?
 }
 

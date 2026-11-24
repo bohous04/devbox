@@ -24,6 +24,8 @@ test("slug/stamp/scheduledPrompt", () => {
   expect(p).toContain("auto/x-1");
   expect(p).toContain("bump deps");
   expect(p).toContain("pull request");
+  // Nobody is there to answer: a question (Codex's request_user_input, Claude's AskUserQuestion) would stall the run.
+  expect(p).toContain("Nobody is watching this run: do not ask questions; decide yourself and say what you decided and why in the pull request.");
 });
 
 test("fireSchedule: running session → skip + notification, no open", async () => {

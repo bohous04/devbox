@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_CONFIG } from "../src/config";
 import { openDb } from "../src/db";
+import type { ResumeSeed } from "../src/endedSessions";
 import { SessionManager } from "../src/sessions";
 
 // A tmux session that continues an ended one: agent-launch reads devd's one-time resume file
@@ -56,10 +57,10 @@ function manager() {
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const mgr = new SessionManager({ db, cfg: DEFAULT_CONFIG, root, image: "devbox:test", controlRoot: join(root, "ctl") });
   const priv = mgr as unknown as {
-    syncContinueFiles: (id: string, t: { resume?: { thread: string; jsonl: Buffer }; handoff?: string }) => Promise<void>;
+    syncContinueFiles: (id: string, t: { resume?: ResumeSeed; handoff?: string }) => Promise<void>;
     runOpts: (id: string, ws: string, portBase: number, project: string, repo: string, agent: string, runtime: string) => Promise<{ extraMounts: string[] }>;
   };
-  const seed = (id: string, resume?: { thread: string; jsonl: Buffer }) => priv.syncContinueFiles.call(mgr, id, resume ? { resume } : {});
+  const seed = (id: string, resume?: ResumeSeed) => priv.syncContinueFiles.call(mgr, id, resume ? { resume } : {});
   const handoff = (id: string, text: string) => priv.syncContinueFiles.call(mgr, id, { handoff: text });
   const mounts = async (id: string) => (await priv.runOpts.call(mgr, id, join(root, "ws"), 41500, "a", "b", "claude", "chat")).extraMounts;
   return { mgr, root, seed, handoff, mounts };
@@ -69,12 +70,19 @@ const THREAD = "0b1c2d3e-0000-4000-8000-000000000001";
 
 test("a session that continues a conversation gets its jsonl and the resume file; any other new session none", async () => {
   const { root, seed } = manager();
-  await seed("dev-a-b", { thread: THREAD, jsonl: Buffer.from('{"type":"user"}\n') });
+  await seed("dev-a-b", { harness: "claude", thread: THREAD, jsonl: Buffer.from('{"type":"user"}\n') });
   expect(readFileSync(join(root, "_claude-projects", "dev-a-b", `${THREAD}.jsonl`), "utf8")).toBe('{"type":"user"}\n');
   expect(readFileSync(join(root, "ctl", "dev-a-b", "resume"), "utf8")).toBe(`claude ${THREAD}\n`);
   // The id comes back for a later session, which must not resume what the old image left unread.
   await seed("dev-a-b");
   expect(existsSync(join(root, "ctl", "dev-a-b", "resume"))).toBe(false);
+});
+
+test("a session that continues a Codex chat thread gets only the resume file: the rollout stays in the shared Codex home", async () => {
+  const { root, seed } = manager();
+  await seed("dev-a-b", { harness: "codex", thread: THREAD });
+  expect(readFileSync(join(root, "ctl", "dev-a-b", "resume"), "utf8")).toBe(`codex ${THREAD}\n`);
+  expect(existsSync(join(root, "_claude-projects", "dev-a-b", `${THREAD}.jsonl`))).toBe(false);
 });
 
 test("resumeImageBlock asks the image for its resume label and says why it cannot", async () => {

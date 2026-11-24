@@ -126,6 +126,11 @@ function fakeHarness(opts: { deferStart?: boolean; caps?: Capabilities | (() => 
   return f;
 }
 
+async function until(cond: () => boolean) {
+  for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 5));
+  expect(cond()).toBe(true);
+}
+
 function baseState(over: Partial<BridgeState> = {}): BridgeState {
   return { harness: "claude", nativeThreadId: null, account: null, model: null, activeRunId: null, queue: [], continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, trimSeq: 0, ackCandidate: null, awaitingTarget: false, effort: null, appliedSwitchId: null, ...over };
 }
@@ -150,11 +155,11 @@ function codexAccount(id: string, auth = '{"tokens":{}}'): void {
   writeFileSync(join(homes().sharedHome, "config.toml"), 'model = "x"\n');
 }
 
-async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string | null; claudeExecutable?: string | null; acpBins?: string[]; logError?: (msg: string) => void; logCompactMinBytes?: number; now?: () => number; sweepMs?: number; resumeFile?: string } = {}) {
+async function start(f: ReturnType<typeof fakeHarness>, over: { account?: string | null; claudeExecutable?: string | null; acpBins?: string[]; logError?: (msg: string) => void; logCompactMinBytes?: number; now?: () => number; sweepMs?: number; resumeFile?: string; harness?: "claude" | "codex" } = {}) {
   const bridge = await serve({
     bridgeDir: dir,
     socketPath,
-    harness: "claude",
+    harness: over.harness ?? "claude",
     account: over.account ?? null,
     model: null,
     openHarness: (o) => f.open(o),
@@ -198,9 +203,45 @@ describe("serve", () => {
     await start(f, { resumeFile: file });
     expect(f.opens[0].resume).toBe("0b1c2d3e-0000-4000-8000-000000000001");
     expect(state().nativeThreadId).toBe("0b1c2d3e-0000-4000-8000-000000000001");
-    expect(events()[0]).toEqual({ type: "bridge.started", version: expect.any(String), resumed: true,
-      notice: "This session continues Claude conversation 0b1c2d3e-0000-4000-8000-000000000001 of an ended session." });
+    expect(events()[0]).toEqual({ type: "bridge.started", version: expect.any(String), resumed: true });
     expect(readdirSync(dir)).not.toContain("resume");
+    // Said once the harness has the conversation open, not before (it may yet fail to resume).
+    expect(events().filter((e) => e.type === "bridge.notice")).toEqual([]);
+    f.emit({ type: "thread.native", harness: "claude", nativeThreadId: "0b1c2d3e-0000-4000-8000-000000000001", account: null, model: null });
+    await until(() => events().some((e) => e.type === "bridge.notice"));
+    expect(events().filter((e) => e.type === "bridge.notice")).toEqual([
+      { type: "bridge.notice", text: "This session continues Claude conversation 0b1c2d3e-0000-4000-8000-000000000001 of an ended session." }]);
+  });
+
+  test("a Codex bridge forks the Codex thread devd left in the resume file: its own thread, the ended one's history", async () => {
+    const file = join(dir, "resume");
+    writeFileSync(file, "codex 01a1f354-0000-7000-8000-000000000001\n");
+    const f = fakeHarness();
+    await start(f, { resumeFile: file, harness: "codex", account: ACCT });
+    // Another session continuing the same ended one, or still on that thread, never shares it (review M1).
+    expect(f.opens[0]).toMatchObject({ resume: null, forkFrom: "01a1f354-0000-7000-8000-000000000001" });
+    expect(state()).toMatchObject({ nativeThreadId: null, forkFrom: "01a1f354-0000-7000-8000-000000000001" });
+    expect(events()[0]).toEqual({ type: "bridge.started", version: expect.any(String), resumed: false });
+    expect(readdirSync(dir)).not.toContain("resume");
+    // The fork is this session's thread from now on: a restart resumes it, never forks again.
+    f.emit({ type: "thread.native", harness: "codex", nativeThreadId: "01a1f354-0000-7000-8000-0000000000f0", account: null, model: "gpt-5.4" });
+    await until(() => events().some((e) => e.type === "bridge.notice"));
+    expect(state().nativeThreadId).toBe("01a1f354-0000-7000-8000-0000000000f0");
+    expect(state().forkFrom).toBeUndefined();
+    expect(events().filter((e) => e.type === "bridge.notice")).toEqual([{ type: "bridge.notice",
+      text: "This session continues Codex conversation 01a1f354-0000-7000-8000-000000000001 of an ended session, as its own conversation 01a1f354-0000-7000-8000-0000000000f0." }]);
+  });
+
+  test("a Codex fork that fails is a failed resume: devd re-plans, and nothing claims the conversation continues", async () => {
+    const file = join(dir, "resume");
+    writeFileSync(file, "codex 01a1f354-0000-7000-8000-000000000001\n");
+    const f = fakeHarness({ readyErrors: [new ResumeFailedError("thread/fork 01a1f354-0000-7000-8000-000000000001 failed: no rollout found")] });
+    await start(f, { resumeFile: file, harness: "codex", account: ACCT });
+    await until(() => events().some((e) => e.type === "run.failed"));
+    expect(events().find((e) => e.type === "run.failed")).toMatchObject({ error: "resume-failed" });
+    expect(state()).toMatchObject({ nativeThreadId: null, awaitingTarget: true });
+    expect(state().forkFrom).toBeUndefined();
+    expect(events().filter((e) => e.type === "bridge.notice")).toEqual([]);
   });
 
   test("a resume file for another harness, or not a thread id, is refused out loud and the thread opens new", async () => {

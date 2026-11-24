@@ -42,6 +42,9 @@ export interface BridgeState {
   /** (bridge 1.11.0) devd's switchId of the switch to `target` whose target.applied is not logged yet: saved with the
    *  target, so a bridge restarted mid-switch still reports it once the target is open. */
   appliedSwitchId: string | null;
+  /** (bridge 1.11.1) A Codex session continuing an ended one: its first thread forks from this one (devd's resume
+   *  file). Cleared once the fork is announced, after a failed fork and by a switch. */
+  forkFrom?: string;
 }
 
 /** state.json exists but cannot be used (empty, not JSON, wrong shape): serve recovers from the event log. */
@@ -95,6 +98,7 @@ const checkState = obj(
     awaitingTarget: bool,
     effort: nullable(str),
     appliedSwitchId: nullable(str),
+    forkFrom: str,
   },
 );
 

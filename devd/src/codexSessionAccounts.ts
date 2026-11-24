@@ -317,7 +317,9 @@ export class CodexSessionAccounts {
       }));
 
       const result: CodexSessionAccountSwitchResult = { ok: false, accountId, label: selected.label, unchanged: true, panes: [] };
-      const prefix = `unset CODEX_SQLITE_HOME DEVD_CODEX_SHARED_HOME DEVD_CODEX_REMOTE; export CODEX_HOME=${singleQuote(DEFAULT_HOME)} DEVD_CODEX_ACCOUNT_ID=${singleQuote(accountId)}; `;
+      // DEVD_LAUNCH_PROFILE: the relaunched codex is the pane's agent, as agent-launch would start it (image/co gives it
+      // the thread id in its title, which the chat mirror needs to send into it).
+      const prefix = `unset CODEX_SQLITE_HOME DEVD_CODEX_SHARED_HOME DEVD_CODEX_REMOTE; export CODEX_HOME=${singleQuote(DEFAULT_HOME)} DEVD_CODEX_ACCOUNT_ID=${singleQuote(accountId)} DEVD_LAUNCH_PROFILE=codex; `;
       if (accountId !== "default" && work.length > 1 && (pending.length || live.some(p => p.accountId !== accountId))) {
         const observed = new Map<string, string>();
         try {

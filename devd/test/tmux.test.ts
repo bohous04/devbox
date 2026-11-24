@@ -38,6 +38,9 @@ test("cleanTitle: strips state glyphs, drops uninformative titles", () => {
   expect(cleanTitle("zsh")).toBeNull();
   expect(cleanTitle("   ")).toBeNull();
   expect(cleanTitle(null)).toBeNull();
+  // Codex started by agent-launch ends its title with the thread id (image/co): devd's own marker, not a label.
+  expect(cleanTitle("⠋ app | 01a20f04-879d-7191-83d5-8dd05...")).toBe("app");
+  expect(cleanTitle("01a20f04-879d-7191-83d5-8dd05...")).toBeNull();
 });
 
 test("tmuxLabel: a manual label beats the Claude title, truncated to 45 chars", () => {

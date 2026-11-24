@@ -59,4 +59,12 @@ PY
 }
 CODEX_RESUME_ARGS=()
 codex_resume_cwd_fix "$@"
-exec codex -c check_for_update_on_startup=false --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust "${CODEX_ACCOUNT_ARGS[@]}" "$@" "${CODEX_RESUME_ARGS[@]}"
+# The Codex agent-launch starts (DEVD_LAUNCH_PROFILE) shows its thread id in the terminal title, after Codex's
+# default items: devd's chat mirror types a message into the pane only while the title names the conversation the
+# chat shows, since /new and /resume switch it with nothing else to see until the next prompt (transcriptMirror.ts).
+# A codex typed by hand keeps the user's own title and stays read-only in the chat.
+CODEX_TITLE_ARGS=()
+if [ "${DEVD_LAUNCH_PROFILE:-}" = codex ]; then
+  CODEX_TITLE_ARGS=(-c 'tui.terminal_title=["activity","project-name","thread-id"]')
+fi
+exec codex -c check_for_update_on_startup=false "${CODEX_TITLE_ARGS[@]}" --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust "${CODEX_ACCOUNT_ARGS[@]}" "$@" "${CODEX_RESUME_ARGS[@]}"

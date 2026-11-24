@@ -19,6 +19,8 @@ import type { ServerRequestResolvedNotification } from "./codex-protocol/v2/Serv
 import type { ThreadInjectItemsParams } from "./codex-protocol/v2/ThreadInjectItemsParams";
 import type { ThreadItem } from "./codex-protocol/v2/ThreadItem";
 import type { ThreadResumeParams } from "./codex-protocol/v2/ThreadResumeParams";
+import type { ThreadForkParams } from "./codex-protocol/v2/ThreadForkParams";
+import type { ThreadForkResponse } from "./codex-protocol/v2/ThreadForkResponse";
 import type { ThreadResumeResponse } from "./codex-protocol/v2/ThreadResumeResponse";
 import type { ThreadStartParams } from "./codex-protocol/v2/ThreadStartParams";
 import type { ThreadStartResponse } from "./codex-protocol/v2/ThreadStartResponse";
@@ -49,6 +51,10 @@ export interface CodexSessionOptions {
   /** Environment app-server starts from; the bridge's own when omitted. */
   baseEnv?: Record<string, string | undefined>;
   resume: string | null;
+  /** With no `resume`: the thread opens as a fork of this one (thread/fork), its history and a thread id of its own.
+   *  A session continuing an ended one (devd continue) never takes over the ended session's thread, which another
+   *  session continuing it may hold. */
+  forkFrom?: string | null;
   mcpConfigArgs: string[];
   developerInstructions: string;
   emit: (e: BridgeEvent) => void;
@@ -216,7 +222,9 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
   for (const [k, v] of Object.entries(o.baseEnv ?? process.env)) if (v !== undefined && !HOST_SESSION_VARS.includes(k)) env[k] = v;
   env.CODEX_HOME = o.codexHome;
 
-  const proc = spawn(["codex", "app-server", ...o.mcpConfigArgs], env);
+  // The default collaboration mode refuses request_user_input without this feature (off upstream, "under
+  // development"): the agent then asks in plain text and the chat never shows a question (DEVBOX-34).
+  const proc = spawn(["codex", "app-server", "-c", "features.default_mode_request_user_input=true", ...o.mcpConfigArgs], env);
   const peer = new JsonRpcPeer(
     {
       write(line) {
@@ -543,8 +551,14 @@ export function openCodexSession(o: CodexSessionOptions, spawn: CodexSpawn = spa
       await peer.request("initialize", init);
       peer.notify("initialized", undefined);
       const policy = { cwd: o.cwd, ...ACCESS, developerInstructions: o.developerInstructions };
-      let r: ThreadStartResponse | ThreadResumeResponse;
-      if (o.resume !== null) {
+      let r: ThreadStartResponse | ThreadResumeResponse | ThreadForkResponse;
+      if (o.resume === null && o.forkFrom) {
+        try {
+          r = await peer.request<ThreadForkResponse>("thread/fork", { threadId: o.forkFrom, ...policy } satisfies ThreadForkParams);
+        } catch (e) {
+          throw new ResumeFailedError(`thread/fork ${o.forkFrom} failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      } else if (o.resume !== null) {
         try {
           r = await peer.request<ThreadResumeResponse>("thread/resume", { threadId: o.resume, ...policy } satisfies ThreadResumeParams);
         } catch (e) {
