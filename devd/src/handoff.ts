@@ -123,8 +123,13 @@ export function buildHandoff(i: HandoffInput): Handoff {
   const budget = handoffBudget(i.window, i.used, cost(i.request), i.reserve);
   const runs = new Map(i.runs.map((r) => [r.runId, r]));
   const candidates: { seq: number; kind: Kind; text: string }[] = [];
-  for (const it of [...i.items].sort((a, b) => a.seq - b.seq)) {
+  const sorted = [...i.items].sort((a, b) => a.seq - b.seq);
+  // Each Codex plan update is the whole plan: a turn's latest one replaces its earlier ones.
+  const latestPlan = new Map<string | null, number>();
+  for (const it of sorted) if (it.kind === "tool" && it.tool === "update_plan") latestPlan.set(it.runId, it.seq);
+  for (const it of sorted) {
     if (it.runId !== null && i.coveredRunIds?.has(it.runId)) continue;
+    if (it.kind === "tool" && it.tool === "update_plan" && latestPlan.get(it.runId) !== it.seq) continue;
     const r = render(it, runs);
     if (r !== null) candidates.push({ seq: it.seq, ...r });
   }
