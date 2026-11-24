@@ -72,6 +72,8 @@ function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; pro
   const switchIds: (string | undefined)[] = [];
   /** Runs before a command resolves: may feed bridge events or throw the bridge's answer. */
   let onSend: (cmd: BridgeCommand) => void = () => {};
+  /** BridgeLinks.handshaken: the link is up and its handshake (after the replay) came. */
+  let linkUp = true;
   const feed = (events: BridgeEvent[]) => {
     for (const event of events) {
       const e = { seq: store.lastSeq() + 1, ts: NOW, event };
@@ -91,6 +93,7 @@ function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; pro
         } else sent.push(cmd);
         onSend(cmd);
       },
+      handshaken: () => linkUp,
     },
     threads: () => store,
     claudePool: () => ACCOUNT_POOL_DEFAULTS,
@@ -124,7 +127,7 @@ function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; pro
   };
   /** A handshake of the session's bridge (BridgeLinks.onHandshake). */
   const handshake = (awaitingTarget: boolean, version: string | null = "1.1.0") => sw.onHandshake(CHAT.id, { version, awaitingTarget });
-  return { db, deps, store, sent, switchIds, feed, post, sw, app, published, handshake, setOnSend: (f: (cmd: BridgeCommand) => void) => { onSend = f; } };
+  return { db, deps, store, sent, switchIds, feed, post, sw, app, published, handshake, setOnSend: (f: (cmd: BridgeCommand) => void) => { onSend = f; }, setLinkUp: (up: boolean) => { linkUp = up; } };
 }
 
 /** A Claude conversation of one completed turn on the `primary` account. */
@@ -1123,6 +1126,26 @@ test("an unconfirmed switch older than the wait is given up: the next switch goe
   // Its event, if it ever comes, no longer applies.
   t.feed([applied(t.switchIds[0]!)]);
   expect(getSession(t.db, CHAT.id)!.agent).toBe("claude");
+});
+
+test("an expired unconfirmed switch is not given up while the link is down: the replay after the reconnect confirms it", async () => {
+  const t = setup();
+  claudeThread(t);
+  t.setOnSend(() => { throw new CommandTimeout("timeout"); });
+  await t.post("harness", { agent: "codex" });
+  t.setOnSend(() => {});
+  t.setLinkUp(false);
+  t.deps.now = () => NOW + 3 * SWITCH_TIMEOUT_MS;
+  // The bridge may have logged its target.applied: devd cannot know before the link is back with its replay.
+  expect(await t.post("account", { accountId: "backup" })).toEqual({ status: 409, body: { error: "agent-disconnected" } });
+  expect(t.sent).toHaveLength(1);
+  expect(notices(t).some((n) => n.includes("did not go through"))).toBe(false);
+  // The reconnect: the replayed event, then the handshake.
+  t.setLinkUp(true);
+  t.feed([applied(t.switchIds[0]!)]);
+  t.handshake(false);
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("codex");
+  expect((await t.post("harness", { agent: "claude" })).status).toBe(202);
 });
 
 test("a re-sent target replaces a switch the bridge never confirmed, and the thread says it did not go through", async () => {

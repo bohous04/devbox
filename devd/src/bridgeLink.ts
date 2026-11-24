@@ -271,6 +271,12 @@ export class BridgeLinks {
 
   /** Since when the bridge's event log has been behind the thread store, or null. While it is, the bridge reuses
    *  seqs the store already holds, and the store drops those events as duplicates. */
+  /** The link is up and this connection's handshake came, so every event the bridge had logged was replayed. */
+  handshaken(sessionId: string): boolean {
+    const link = this.links.get(sessionId);
+    return link !== undefined && link.status === "connected" && link.socket !== null && link.version !== undefined;
+  }
+
   behind(sessionId: string): number | null {
     return this.links.get(sessionId)?.behindSince ?? null;
   }

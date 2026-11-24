@@ -95,7 +95,7 @@ export interface CurrentTarget extends Target { agent: AgentName; awaitingTarget
 
 export interface ChatSwitchDeps {
   db: Database;
-  links: { send(sessionId: string, cmd: BridgeCommand, timeoutMs?: number): Promise<void> };
+  links: { send(sessionId: string, cmd: BridgeCommand, timeoutMs?: number): Promise<void>; handshaken(sessionId: string): boolean };
   threads: (sessionId: string) => ThreadStore;
   claudePool: () => AccountPoolSettings;
   codexAccounts: { list(): { accounts: CodexAccountView[] }; select(): { accountId: string; label: string } };
@@ -226,6 +226,9 @@ export class ChatSwitch {
     const held = getUnconfirmedSwitch(this.d.db, s.id);
     if (held !== null) {
       if (this.d.now() - held.createdAt < UNCONFIRMED_HOLD_MS) throw new SwitchRefused(409, "switch-unconfirmed");
+      // Given up only over a link whose handshake came: the bridge replays its log before it, so a target.applied it
+      // logged has confirmed the switch by then. While the link is down the bridge may still hold one.
+      if (!this.d.links.handshaken(s.id)) throw new AgentNotConnected(`agent bridge of ${s.id} is not connected`);
       this.gaveUp(s.id, held, "the agent never confirmed it");
     }
     // A 1.0.0 bridge (no version in its handshake) does not know setModel/switchTarget and would drop the link.
