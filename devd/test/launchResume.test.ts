@@ -40,9 +40,10 @@ test("a Claude launch with a resume file resumes that conversation, once", async
 
 const ACCOUNT = "0c0c0c0c-0000-4000-8000-00000000000a";
 
-test("a Codex launch resumes the conversation on the account continue copied it to (DEVBOX-100)", async () => {
+test("a Codex launch forks the conversation on the account continue copied it to (DEVBOX-100)", async () => {
   const r = await launch(`codex 0b1c2d3e-0000-4000-8000-000000000001 ${ACCOUNT}\n`, "codex");
-  expect(r.argv).toEqual(["resume", "0b1c2d3e-0000-4000-8000-000000000001"]);
+  // A fork, not a resume: another session continuing the same ended one may have that thread open (review M1 of #151).
+  expect(r.argv).toEqual(["fork", "0b1c2d3e-0000-4000-8000-000000000001"]);
   // That launch alone: co picks the account from it (image/codex-account-env.sh) and pins the pane to it.
   expect(r.account).toBe(ACCOUNT);
   expect(r.consumed).toBe(true);

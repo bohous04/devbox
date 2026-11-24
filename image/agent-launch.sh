@@ -206,7 +206,8 @@ fi
 # A session that continues an ended one (devd POST /api/ended/:id/continue): devd leaves `claude <thread id>` in
 # /run/devd/resume and Claude Code starts on that conversation, once (the file is consumed). `codex <thread id>
 # <account>`: devd copied the Codex conversation into that account's home, so co starts on that account (this launch
-# only; co then pins the pane to it) and resumes it there. Anything else in it is said on stderr, never silently
+# only; co then pins the pane to it) and forks it there: a thread of its own with that history, since another session
+# continuing the same ended one may have the conversation itself open. Anything else in it is said on stderr, never silently
 # dropped; the agent then starts a new conversation. DEVD_RESUME_FILE: test hatch.
 RESUME_FILE="${DEVD_RESUME_FILE:-/run/devd/resume}"
 resume_env=()
@@ -218,7 +219,7 @@ if [ "${DEVD_RECOVERY_LAUNCH:-0}" != 1 ] && [ -s "$RESUME_FILE" ]; then
     extra+=(--resume "$resume_id")
   elif [ "$bin" = co ] && [ "$resume_harness" = codex ] && [[ "$resume_id" =~ $uuid_re ]] \
       && { [ "$resume_account" = default ] || [[ "$resume_account" =~ $uuid_re ]]; }; then
-    extra=(resume "$resume_id" "${extra[@]}")
+    extra=(fork "$resume_id" "${extra[@]}")
     resume_env=(DEVD_CODEX_ACCOUNT_ID="$resume_account")
   else
     printf 'devbox: the ended session'"'"'s conversation was not resumed (%s cannot open "%s %s"); starting a new one.\n' "$profile" "$resume_harness" "$resume_id" >&2
