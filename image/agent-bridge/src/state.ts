@@ -39,6 +39,9 @@ export interface BridgeState {
   /** (bridge 1.7.0) The user's reasoning effort, kept across restarts and switches; null = the harness's default.
    *  Files from before 1.7.0 have none. */
   effort: string | null;
+  /** (bridge 1.11.0) devd's switchId of the switch to `target` whose target.applied is not logged yet: saved with the
+   *  target, so a bridge restarted mid-switch still reports it once the target is open. */
+  appliedSwitchId: string | null;
 }
 
 /** state.json exists but cannot be used (empty, not JSON, wrong shape): serve recovers from the event log. */
@@ -91,6 +94,7 @@ const checkState = obj(
     ackCandidate: nullable(obj({ seq, at: num })),
     awaitingTarget: bool,
     effort: nullable(str),
+    appliedSwitchId: nullable(str),
   },
 );
 
@@ -112,6 +116,7 @@ export function loadState(path: string): BridgeState | null {
   // before 1.5.0 have no trimSeq or ackCandidate (nothing was trimmed) and never awaited a target across a restart.
   return {
     target: null, pendingHandoff: null, instructionsPending: false, trimSeq: 0, ackCandidate: null, awaitingTarget: false, effort: null,
+    appliedSwitchId: null,
     ...(raw as Partial<BridgeState>),
   } as BridgeState;
 }

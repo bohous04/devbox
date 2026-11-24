@@ -72,7 +72,11 @@ export type BridgeEvent =
   | { type: "effort.state"; model: string | null; supported: string[] | null; effective: string | null; chosen: string | null; unchecked?: string[] }
   // (bridge 1.9.0) The current harness's slash commands, replacing any earlier list; sent after its thread.native. A
   // harness that runs none (Codex) sends no list.
-  | { type: "commands.changed"; commands: AgentCommand[] };
+  | { type: "commands.changed"; commands: AgentCommand[] }
+  // (bridge 1.11.0) The target of devd's switch `switchId` is open (or its thread could not be resumed and a fresh one
+  // is awaited: the bridge is on it all the same). Logged also by a bridge restarted mid-switch, so devd confirms a
+  // switch whose answer it never got.
+  | { type: "target.applied"; switchId: string; harness: "claude" | "codex" | (string & {}); account: string | null; model: string | null };
 
 export interface LoggedEvent {
   seq: number;

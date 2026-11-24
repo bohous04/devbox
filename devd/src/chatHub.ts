@@ -229,6 +229,7 @@ export class ChatHub {
       case "bridge.started":
       case "bridge.notice":
       case "commands.changed":
+      case "target.applied":
         return; // nothing for the hub; the thread store keeps them
       case "message.final":
         if (ev.role !== "user" || this.state.get(sessionId)?.promptRun !== ev.runId) return;

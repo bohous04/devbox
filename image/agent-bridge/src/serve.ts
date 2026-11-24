@@ -351,6 +351,7 @@ function recoverState(scan: LogScan, launch: { harness: Harness; account: string
     continuations: [], usageBaseline: null, target: null, pendingHandoff: null, instructionsPending: false, trimSeq: 0, ackCandidate: null, awaitingTarget: false,
     // The log does not keep the choice: a rebuilt state starts on the harness's default (effort.state says so).
     effort: null,
+    appliedSwitchId: null,
   };
   if (native === null) return { state, outcome: "there is no thread to resume, a new one opens" };
   if (native.harness === launch.harness && native.account === launch.account) {
@@ -410,6 +411,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     ackCandidate: null,
     awaitingTarget: false,
     effort: null,
+    appliedSwitchId: null,
   };
   // A Claude/Codex target without its own home (a setModel on the launch target) keeps only the model choice: the
   // account is the one this launch leased, which a recreated container may have changed. An ACP target has no home
@@ -670,7 +672,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     const previous = {
       current, target: state.target, harness: state.harness, account: state.account, model: state.model,
       nativeThreadId: state.nativeThreadId, pendingHandoff: state.pendingHandoff, usageBaseline: state.usageBaseline,
-      instructionsPending: state.instructionsPending,
+      instructionsPending: state.instructionsPending, appliedSwitchId: state.appliedSwitchId,
     };
     // A different thread (or harness) does not continue the old running usage totals.
     if (target.harness !== state.harness || cmd.resume !== state.nativeThreadId) state.usageBaseline = null;
@@ -687,6 +689,8 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     if (cmd.resume !== state.nativeThreadId) state.instructionsPending = false;
     state.nativeThreadId = cmd.resume;
     if (cmd.handoff !== null || !sameThread) state.pendingHandoff = cmd.handoff;
+    // Saved with the target: whichever bridge opens it (this one, or one restarted mid-switch) reports it to devd.
+    state.appliedSwitchId = cmd.switchId ?? null;
     persist();
     // Persisting a target that cannot open would restart the bridge into it forever, while devd's DB still names
     // the previous one: go back to that.
@@ -700,6 +704,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       state.pendingHandoff = previous.pendingHandoff;
       state.usageBaseline = previous.usageBaseline;
       state.instructionsPending = previous.instructionsPending;
+      state.appliedSwitchId = previous.appliedSwitchId;
       persist();
     };
     let h: { session: HarnessSession; retired: boolean };
@@ -732,7 +737,17 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       state.awaitingTarget = false;
       persist();
     }
+    announceApplied();
     if (recoveryPending) await recover();
+  }
+
+  /** The saved target is open (or awaits a fresh thread on it): devd's switch, if one is still unreported, is applied. */
+  function announceApplied(): void {
+    const switchId = state.appliedSwitchId;
+    if (switchId === null) return;
+    server.publish({ type: "target.applied", switchId, harness: state.harness, account: state.account, model: state.model });
+    state.appliedSwitchId = null;
+    persist();
   }
 
   /** The harness could not resume the thread: devd re-plans a fresh thread with a full handoff and sends it as
@@ -750,6 +765,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     recoveryPending = true;
     awaitingTarget = true;
     server.publish({ type: "run.failed", runId: crypto.randomUUID(), error: RESUME_FAILED });
+    announceApplied();
   }
 
   async function handle(cmd: BridgeCommand): Promise<unknown> {
@@ -905,6 +921,7 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
       return;
     }
     awaitingTarget = false;
+    announceApplied();
     if (recoveryPending) await recover();
   }
 

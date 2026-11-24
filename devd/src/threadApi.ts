@@ -397,6 +397,8 @@ export function registerThreadRoutes(app: Hono, d: ThreadApiDeps | null): void {
             if (store) send(sseFrame("thread-commands", store.commands()));
             return;
           }
+          // A switch confirmation is devd's alone (chatSwitch.ts).
+          if (e.event.type === "target.applied") return;
           if (e.seq <= sentSeq) return;
           sentSeq = e.seq;
           send(sseFrame("thread", e, e.seq));

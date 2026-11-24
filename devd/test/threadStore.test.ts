@@ -213,6 +213,13 @@ test("a bridge.notice is shown in the thread", () => {
   expect(s.snapshot().items.map((i) => [i.kind, i.text])).toEqual([["notice", "events 1-2 are no longer available"]]);
 });
 
+test("a target.applied (devd's switch confirmation) adds nothing to the thread", () => {
+  const s = store();
+  s.apply(ev({ type: "target.applied", switchId: "sw-1", harness: "codex", account: "default", model: null }));
+  expect(s.snapshot().items).toEqual([]);
+  expect(s.lastSeq()).toBe(1);
+});
+
 test("runs carry when they were queued and the seq that ended them", () => {
   const s = store(); n = 0;
   s.apply(ev({ type: "run.queued", runId: "r1", text: "hi", attachments: [] }));
