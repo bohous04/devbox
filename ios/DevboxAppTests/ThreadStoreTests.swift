@@ -727,6 +727,36 @@ final class ThreadStoreLiveTests: XCTestCase {
         store.stop()
     }
 
+    /// Reopen starts the screen over: a dropped frame of the mirror is not said of the chat thread.
+    func testReopenClearsTheMirrorsErrors() async throws {
+        var chat = false
+        MockURLProtocol.handler = { req in
+            switch req.url?.path {
+            case "/api/sessions/s1/thread":
+                return chat ? .init(statusCode: 200, data: self.snapshot(lastSeq: 7, seenSeq: 7))
+                    : .init(statusCode: 409, data: Data(#"{"error":"not-a-chat-session"}"#.utf8))
+            case "/api/sessions/s1/mirror": return .init(statusCode: 200, data: self.mirrorBody(lastSeq: 1))
+            default: return .init(statusCode: 204)
+            }
+        }
+        var feed: AsyncThrowingStream<String, Error>.Continuation?
+        let store = ThreadStore(sessionId: "s1", client: client(), connect: { _, _ in
+            AsyncThrowingStream { c in if !chat { feed = c } }
+        })
+        await store.start()
+        try await waitUntil { feed != nil }
+        for l in ["event: thread", "data: {not json", ""] { feed?.yield(l) }
+        try await waitUntil { store.badFrame != nil }
+        chat = true
+        await store.reopen()
+        XCTAssertNil(store.badFrame)
+        XCTAssertNil(store.seenError)
+        XCTAssertNil(store.olderError)
+        XCTAssertFalse(store.ending)
+        XCTAssertEqual(store.thread?.lastSeq, 7)
+        store.stop()
+    }
+
     /// /mirror itself failing leaves the load error (the screen offers Open terminal), not a silent empty thread.
     func testMirrorLoadFailureIsShown() async throws {
         MockURLProtocol.handler = { req in

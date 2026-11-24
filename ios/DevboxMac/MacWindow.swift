@@ -286,7 +286,7 @@ struct MacInboxSidebar: View {
         // Not a look: the selected row changed under him (an inbox update), so an idle one is not posted again. A new
         // selection is the handler above's (which a move after a settle skips).
         .onChange(of: selectedItem) { old, item in
-            guard old == nil || old?.sessionId == item?.sessionId, activeState == .key else { return }
+            guard follow.isUpdate(from: old?.sessionId, to: item?.sessionId), activeState == .key else { return }
             markSeen(item?.sessionId, selected: true)
         }
         .onChange(of: activeState) { _, active in if active == .key { markSeen(selection, selected: true, look: true) } }
@@ -523,6 +523,8 @@ struct MacSettleFollow {
     private var pending: (id: String, before: [String], inList: Bool)?
     /// Where the move set the selection, until the selection's change handler sees it (`byOwner`).
     private var moved: (to: String?, set: Bool) = (nil, false)
+    /// The row the last move selected, until the owner's own pick.
+    private var movedTo: String?
 
     /// A settle of `id` starts; only the selected row's moves the selection.
     mutating func settle(_ id: String, selection: String?, parts: Parts) {
@@ -543,13 +545,23 @@ struct MacSettleFollow {
         guard selection == p.id else { return }
         let next = MacSidebarLayout.afterSettle(p.id, before: p.before, now: p.inList ? parts.list : parts.shelves)
         moved = (next, true)
+        movedTo = next
         selection = next
     }
 
     /// The selection changed to `new`: false when that is the move after a settle, not the owner's own pick.
     mutating func byOwner(_ new: String?) -> Bool {
         defer { moved = (nil, false) }
-        return !(moved.set && moved.to == new)
+        let owner = !(moved.set && moved.to == new)
+        if owner { movedTo = nil }
+        return owner
+    }
+
+    /// Whether the selected row changing from `old` to `new` (session ids, nil while not in the inbox) is an update
+    /// of the row he is on: the same row, or the selected one arriving in the inbox. The move's row arriving is not:
+    /// it was selected for him, so it is not seen.
+    func isUpdate(from old: String?, to new: String?) -> Bool {
+        old == new || (old == nil && new != movedTo)
     }
 }
 
