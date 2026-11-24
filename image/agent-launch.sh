@@ -204,14 +204,22 @@ if [ "$profile" = claude ] && [ "${DEVD_RECOVERY_LAUNCH:-0}" != 1 ] && [ -x /usr
 fi
 
 # A session that continues an ended one (devd POST /api/ended/:id/continue): devd leaves `claude <thread id>` in
-# /run/devd/resume and Claude Code starts on that conversation, once (the file is consumed). Anything else in it is
-# said on stderr, never silently dropped; the agent then starts a new conversation. DEVD_RESUME_FILE: test hatch.
+# /run/devd/resume and Claude Code starts on that conversation, once (the file is consumed). `codex <thread id>
+# <account>`: devd copied the Codex conversation into that account's home, so co starts on that account (this launch
+# only; co then pins the pane to it) and resumes it there. Anything else in it is said on stderr, never silently
+# dropped; the agent then starts a new conversation. DEVD_RESUME_FILE: test hatch.
 RESUME_FILE="${DEVD_RESUME_FILE:-/run/devd/resume}"
+resume_env=()
+uuid_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 if [ "${DEVD_RECOVERY_LAUNCH:-0}" != 1 ] && [ -s "$RESUME_FILE" ]; then
-  read -r resume_harness resume_id _ < "$RESUME_FILE"
+  read -r resume_harness resume_id resume_account _ < "$RESUME_FILE"
   rm -f "$RESUME_FILE"
-  if [ "$bin" = cc ] && [ "$resume_harness" = claude ] && [[ "$resume_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+  if [ "$bin" = cc ] && [ "$resume_harness" = claude ] && [[ "$resume_id" =~ $uuid_re ]]; then
     extra+=(--resume "$resume_id")
+  elif [ "$bin" = co ] && [ "$resume_harness" = codex ] && [[ "$resume_id" =~ $uuid_re ]] \
+      && { [ "$resume_account" = default ] || [[ "$resume_account" =~ $uuid_re ]]; }; then
+    extra=(resume "$resume_id" "${extra[@]}")
+    resume_env=(DEVD_CODEX_ACCOUNT_ID="$resume_account")
   else
     printf 'devbox: the ended session'"'"'s conversation was not resumed (%s cannot open "%s %s"); starting a new one.\n' "$profile" "$resume_harness" "$resume_id" >&2
   fi
@@ -242,9 +250,9 @@ if [ "${DEVD_RECOVERY_LAUNCH:-0}" != 1 ] && [ -s "$PROMPT_FILE" ]; then
     if [ -t 0 ]; then printf 'devbox: press Enter to continue…\n' >&2; read -r _; fi
     prompt=""; prompt_flag=()
   fi
-  if [ -n "$prompt" ]; then "$bin" "${extra[@]}" "${prompt_flag[@]}" "$prompt"; else "$bin" "${extra[@]}"; fi
+  if [ -n "$prompt" ]; then env "${resume_env[@]}" "$bin" "${extra[@]}" "${prompt_flag[@]}" "$prompt"; else env "${resume_env[@]}" "$bin" "${extra[@]}"; fi
 else
-  "$bin" "${extra[@]}"
+  env "${resume_env[@]}" "$bin" "${extra[@]}"
 fi
 if [ "${DEVD_RECOVERY_LAUNCH:-0}" = 1 ]; then
   unset DEVD_RECOVERY_LAUNCH DEVD_AGENT_AUTO_UPDATE

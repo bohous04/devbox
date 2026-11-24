@@ -34,7 +34,9 @@ const THREAD = "0b1c2d3e-0000-4000-8000-000000000001";
  *  says about an image that cannot take a resume. */
 function setup(o: { runtime?: "chat" | "tmux"; remote?: string; open?: (t: Record<string, unknown>) => Promise<unknown>; claude?: boolean; codex?: boolean; imageBlock?: string;
   /** What devd finds about the Codex conversation in the shared home (null: it is there). */
-  sharedRollout?: string | null } = {}) {
+  sharedRollout?: string | null;
+  /** The Codex account the mirror read the conversation in, and what copying it for the new session gives. */
+  codexAccount?: string; resumeCopy?: (from: string, thread: string) => Promise<{ account: string } | { reason: string }> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "ended-api-"));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const db = openDb(":memory:");
@@ -43,7 +45,7 @@ function setup(o: { runtime?: "chat" | "tmux"; remote?: string; open?: (t: Recor
   writeFileSync(join(dir, "images", IMG), png(1, 1));
   const store = ThreadStore.openFile(join(dir, o.runtime === "tmux" ? "dev-acme-app.mirror.sqlite" : "dev-acme-app.sqlite"));
   const native = o.claude ? "claude" : o.codex ? "codex" : null;
-  const events_: BridgeEvent[] = native ? [{ type: "thread.native", harness: native, nativeThreadId: THREAD, account: null, model: null }, ...CONVO] : CONVO;
+  const events_: BridgeEvent[] = native ? [{ type: "thread.native", harness: native, nativeThreadId: THREAD, account: o.codexAccount ?? null, model: null }, ...CONVO] : CONVO;
   events_.forEach((event, i) => store.apply({ seq: i + 1, ts: 1000 * (i + 1), event }));
   store.close();
   if (o.claude) writeFileSync(join(dir, `${THREAD}.jsonl`), '{"type":"user"}\n');
@@ -54,7 +56,11 @@ function setup(o: { runtime?: "chat" | "tmux"; remote?: string; open?: (t: Recor
   const opened: Record<string, unknown>[] = [];
   const firstTurns: [string, string][] = [];
   const looked: string[] = [];
-  const codexAccounts = { sharedRolloutBlock: async (thread: string) => { looked.push(thread); return o.sharedRollout ?? null; } };
+  const copies: [string, string][] = [];
+  const codexAccounts = {
+    sharedRolloutBlock: async (thread: string) => { looked.push(thread); return o.sharedRollout ?? null; },
+    resumeCopy: async (from: string, thread: string) => { copies.push([from, thread]); return o.resumeCopy ? o.resumeCopy(from, thread) : { account: from }; },
+  };
   const open = o.open ?? (async (t: Record<string, unknown>) => ({ created: true, session: { ...S, id: "dev-acme-app-2", runtime: t.runtime, status: "running" } }));
   const a = createApp({
     db, root, mgr: { isEnding: () => false, resumeImageBlock: async () => o.imageBlock ?? null, open: async (t: Record<string, unknown>) => { opened.push(t); return open(t); } } as never,
@@ -64,7 +70,7 @@ function setup(o: { runtime?: "chat" | "tmux"; remote?: string; open?: (t: Recor
     remoteAddr: () => o.remote ?? "127.0.0.1", codexAccounts,
     links: { send: async () => {}, ensure: () => {}, startTurnWhenConnected: (id: string, text: string) => { firstTurns.push([id, text]); }, hasFirstTurn: () => false },
   } as never);
-  return { a, db, root, events, opened, firstTurns, looked };
+  return { a, db, root, events, opened, firstTurns, looked, copies };
 }
 
 const post = (path: string) => new Request(`http://x${path}`, { method: "POST" });
@@ -192,10 +198,40 @@ test("continue resumes a Codex chat thread by its id alone; a tmux Codex session
     resume: { harness: "codex", thread: THREAD } }]);
   expect(t.firstTurns).toEqual([]);
   expect(t.looked).toEqual([THREAD]);
-  const tmux = setup({ codex: true, runtime: "tmux" });
-  const h = (await (await tmux.a.fetch(post(`/api/ended/${ID}/continue`))).json()) as ContinueResult;
-  expect(h).toMatchObject({ mode: "handoff", reason: null });
-  expect(tmux.opened[0]!.resume).toBeUndefined();
+  expect(t.copies).toEqual([]);
+});
+
+const ACCOUNT_A = "0c0c0c0c-0000-4000-8000-00000000000a";
+const ACCOUNT_B = "0c0c0c0c-0000-4000-8000-00000000000b";
+
+test("continue copies a tmux Codex conversation into the account the new session gets and resumes it there (DEVBOX-100)", async () => {
+  const t = setup({ codex: true, runtime: "tmux", codexAccount: ACCOUNT_A, resumeCopy: async () => ({ account: ACCOUNT_B }) });
+  const r = await t.a.fetch(post(`/api/ended/${ID}/continue`));
+  expect((await r.json()) as ContinueResult).toEqual({ mode: "resume", sessionId: "dev-acme-app-2", runtime: "tmux", reason: null });
+  expect(t.copies).toEqual([[ACCOUNT_A, THREAD]]);
+  // Its conversation is in the account's home, not the chat sessions' shared one.
+  expect(t.looked).toEqual([]);
+  expect(t.opened).toEqual([{ folder: "acme", project: "acme", repo: "app", agent: "codex", runtime: "tmux", fresh: true,
+    resume: { harness: "codex", thread: THREAD, account: ACCOUNT_B } }]);
+});
+
+test("a tmux Codex conversation that cannot be copied, or whose account was never recorded, hands off and says why", async () => {
+  const reason = "the Codex conversation could not be copied to the account Work: The selected account already has a different copy of this conversation; both were left unchanged";
+  const t = setup({ codex: true, runtime: "tmux", codexAccount: ACCOUNT_A, resumeCopy: async () => ({ reason }) });
+  const r = await t.a.fetch(post(`/api/ended/${ID}/continue`));
+  expect((await r.json()) as ContinueResult).toEqual({ mode: "handoff", sessionId: "dev-acme-app-2", runtime: "tmux", reason });
+  expect(t.opened[0]!.resume).toBeUndefined();
+  expect(t.opened[0]!.handoff).toContain("Make the header sticky");
+  expect(t.opened[0]!.firstPrompt).toContain(reason);
+  // Ended before devd recorded the account: there is nothing to copy from.
+  const old = setup({ codex: true, runtime: "tmux" });
+  const h = (await (await old.a.fetch(post(`/api/ended/${ID}/continue`))).json()) as ContinueResult;
+  expect(h).toMatchObject({ mode: "handoff", reason: "the ended session did not record which Codex account held its conversation" });
+  expect(old.copies).toEqual([]);
+  // An image that cannot resume tmux Codex yet copies nothing either.
+  const image = setup({ codex: true, runtime: "tmux", codexAccount: ACCOUNT_A, imageBlock: "the session image predates resuming tmux Codex" });
+  expect(((await (await image.a.fetch(post(`/api/ended/${ID}/continue`))).json()) as ContinueResult).reason).toBe("the session image predates resuming tmux Codex");
+  expect(image.copies).toEqual([]);
 });
 
 test("a Codex conversation gone from the shared home hands off the ended transcript and says why (review M2)", async () => {

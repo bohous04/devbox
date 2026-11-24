@@ -299,7 +299,34 @@ def scan_rollouts(home, selected):
     rollout is necessary context; unrelated sibling threads are not selected.
     Dependency owners are writer-locked by transfer, never recursively archived.
     """
-    owned, index = {}, {}
+    owned, index = {}, index_rollouts(home)
+    for rid, found in index.items():
+        for path, meta in found:
+            if meta.get("id") in selected:
+                require(rid not in owned, "Duplicate selected rollout identities prevent a safe handoff.")
+                owned[rid] = (path, meta)
+    require(selected <= {meta.get("id") for _, meta in owned.values()},
+            "A conversation rollout is missing or uses unsupported compression.")
+    pending = list(owned)
+    while pending:
+        _, meta = owned[pending.pop()]
+        base = meta.get("history_base")
+        if base:
+            require(isinstance(base, dict), "A required conversation history reference is invalid.")
+            rid = thread_id(base.get("thread_id"))
+            if rid not in owned:
+                candidates = index.get(rid, [])
+                require(len(candidates) == 1, "A required ancestor conversation rollout is missing or ambiguous.")
+                dependency = candidates[0]
+                thread_id(dependency[1].get("id"))
+                owned[rid] = dependency
+                pending.append(rid)
+    return owned
+
+
+def index_rollouts(home):
+    """Every rollout under the home's history directories by the thread id in its name, with its session_meta."""
+    index = {}
     for directory in (home / "sessions", home / "archived_sessions"):
         if not directory.exists():
             continue
@@ -321,30 +348,8 @@ def scan_rollouts(home, selected):
                     continue
                 if item.get("type") != "session_meta":
                     continue
-                meta = item.get("payload", {})
-                ident = meta.get("id")
-                rid = match.group(1)
-                index.setdefault(rid, []).append((path, meta))
-                if ident in selected:
-                    require(rid not in owned, "Duplicate selected rollout identities prevent a safe handoff.")
-                    owned[rid] = (path, meta)
-    require(selected <= {meta.get("id") for _, meta in owned.values()},
-            "A conversation rollout is missing or uses unsupported compression.")
-    pending = list(owned)
-    while pending:
-        _, meta = owned[pending.pop()]
-        base = meta.get("history_base")
-        if base:
-            require(isinstance(base, dict), "A required conversation history reference is invalid.")
-            rid = thread_id(base.get("thread_id"))
-            if rid not in owned:
-                candidates = index.get(rid, [])
-                require(len(candidates) == 1, "A required ancestor conversation rollout is missing or ambiguous.")
-                dependency = candidates[0]
-                thread_id(dependency[1].get("id"))
-                owned[rid] = dependency
-                pending.append(rid)
-    return owned
+                index.setdefault(match.group(1), []).append((path, item.get("payload", {})))
+    return index
 
 
 @contextlib.contextmanager
@@ -550,7 +555,13 @@ def copy_selected(source, target, root, ids):
     for ident in ids:
         require(source_rows[ident].get("rollout_path") in path_map,
                 "The conversation's active rollout could not be identified safely.")
+    commit_copy(source, target, root, ids, source_rows, source_edges, copies, path_map)
 
+
+def commit_copy(source, target, root, ids, source_rows, source_edges, copies, path_map):
+    """Writes the rollouts (`copies`: source, destination) and the threads' rows into the target in one transaction,
+    restoring the target's files if it fails. Never copies schema migrations, authentication, enrollments or unrelated
+    account-global rows."""
     snapshots = {}
     for name, tables in TABLES.items():
         if not (source / name).exists():
@@ -641,6 +652,60 @@ def copy_selected(source, target, root, ids):
             raise
         finally:
             shutil.rmtree(backup)
+
+
+def same_bytes(left, right):
+    return left.stat().st_size == right.stat().st_size and is_prefix(left, right)
+
+
+def copy_conversation(source, target, root, rpc_factory=Rpc):
+    """Copies one conversation (its spawned agents and the history it builds on included) into another account's home,
+    for a new session to resume it there (devd continue of an ended tmux session, DEVBOX-100).
+
+    The source is only read, under its writer locks: nothing there is archived, moved or deleted, so it can be copied
+    again. A target that already has a rollout with one of these ids keeps it: the same bytes are reused, anything else
+    refuses. The same home only checks the conversation is there. An account Codex never ran in has no databases yet:
+    Codex itself creates them first (a private `codex app-server`, started and closed), so their schema is its own.
+    """
+    source, target, root = home_path(source), home_path(target), thread_id(root)
+    rows, edges = rows_and_edges(source)
+    require(root in rows, "The conversation is not in the account it was last used on.")
+    selected = subtree(rows, edges, root)
+    for ident in selected:
+        safe_path(source, rows[ident]["rollout_path"])
+    histories = scan_rollouts(source, selected)
+    if source == target:
+        return {"ok": True, "threadId": root, "copiedIds": []}
+    if not (target / "state_5.sqlite").exists():
+        rpc_factory(target).close()
+        require((target / "state_5.sqlite").is_file(), "The selected account could not create its databases; nothing was copied.")
+    with writer_locks((source, target), selected | {meta["id"] for _, meta in histories.values()}):
+        rows, edges = rows_and_edges(source)
+        require(subtree(rows, edges, root) == selected, "The agent tree changed while it was copied; please retry.")
+        histories = scan_rollouts(source, selected)
+        present = index_rollouts(target)
+        target_rows = rows_and_edges(target)[0]
+        copies, path_map = [], {}
+        for rid, (path, _) in histories.items():
+            found = present.get(rid, [])
+            require(all(same_bytes(path, other) for other, _ in found) and len(found) <= 1,
+                    "The selected account already has a different copy of this conversation; both were left unchanged.")
+            if found:
+                path_map[str(path)] = str(found[0][0])
+                continue
+            relative = account_path(source, path).relative_to(source)
+            require(relative.parts[0] in ("sessions", "archived_sessions"), "Conversation history points outside its account home.")
+            destination = safe_path(target, target / relative, exists=False)
+            require(not destination.exists() and not destination.is_symlink(),
+                    "The selected account already has a different copy of this conversation; both were left unchanged.")
+            copies.append((path, destination))
+            path_map[str(path)] = str(destination)
+        for ident in selected:
+            require(rows[ident].get("rollout_path") in path_map, "The conversation's active rollout could not be identified safely.")
+        if not copies and selected <= target_rows.keys():
+            return {"ok": True, "threadId": root, "copiedIds": []}
+        commit_copy(source, target, root, selected, rows, edges, copies, path_map)
+    return {"ok": True, "threadId": root, "copiedIds": [root, *sorted(selected - {root})]}
 
 
 def empty_conversation(home, root, rpc_factory=Rpc):
@@ -851,6 +916,10 @@ def main():
     move.add_argument("--target-home", required=True)
     move.add_argument("--thread-id", required=True)
     move.add_argument("--protected-thread-id", action="append", default=[])
+    duplicate = sub.add_parser("copy")
+    duplicate.add_argument("--source-home", required=True)
+    duplicate.add_argument("--target-home", required=True)
+    duplicate.add_argument("--thread-id", required=True)
     check = sub.add_parser("verify")
     check.add_argument("--home", required=True)
     check.add_argument("--thread-id", required=True)
@@ -863,6 +932,8 @@ def main():
     try:
         if args.operation == "transfer":
             result = transfer(args.source_home, args.target_home, args.thread_id, protected_thread_ids=args.protected_thread_id)
+        elif args.operation == "copy":
+            result = copy_conversation(args.source_home, args.target_home, args.thread_id)
         elif args.operation == "grant-full-access":
             result = grant_full_access(args.home, args.thread_id)
         else:

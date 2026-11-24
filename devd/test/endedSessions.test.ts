@@ -256,12 +256,35 @@ test("continue resumes a Codex chat thread from the shared Codex home, and hands
   expect(continueMode(row)).toBe("resume");
   expect(await continuePlan(row, null)).toEqual({ mode: "resume", seed: { harness: "codex", thread: CODEX_THREAD } });
   expect(await continuePlan(row, "the session image predates resume")).toEqual({ mode: "handoff", reason: "the session image predates resume" });
-  // A tmux Codex conversation lives in its account's own home, which a new session may not get: not wired.
+  // A tmux Codex conversation lives in its account's own home: without the account the mirror read it from, the
+  // conversation cannot be found to copy (DEVBOX-100).
   expect(continueMode({ ...row, runtime: "tmux" })).toBe("handoff");
-  expect(await continuePlan({ ...row, runtime: "tmux" }, null)).toEqual({ mode: "handoff", reason: null });
+  expect(await continuePlan({ ...row, runtime: "tmux" }, null)).toEqual({ mode: "handoff",
+    reason: "the ended session did not record which Codex account held its conversation" });
   // A Claude profile that switched to Codex starts the new session on Claude, which cannot open the Codex thread.
   expect(await continuePlan({ ...row, agent: "claude" }, null)).toEqual({ mode: "handoff", reason: null });
   expect(await continuePlan({ ...row, native_thread: "../secret" }, null)).toEqual({ mode: "handoff", reason: null });
+});
+
+const ACCOUNT = "0c0c0c0c-0000-4000-8000-00000000000a";
+
+test("continue resumes a tmux Codex conversation from the account its mirror read it in (DEVBOX-100)", async () => {
+  const root = tmp();
+  const db = openDb(":memory:");
+  const dir = join(root, "_chat-archive", "dev-acme-app-20261120-101500");
+  archivedStore(dir, "dev-acme-app.mirror.sqlite", [{ type: "thread.native", harness: "codex", nativeThreadId: CODEX_THREAD, account: ACCOUNT, model: null }, ...CONVO.slice(1)]);
+  const row = getEnded(db, recordEnded(db, { ...S, agent: "codex", runtime: "tmux" }, dir, 5_000)!.id)!;
+  expect(row.native_account).toBe(ACCOUNT);
+  expect(continueMode(row)).toBe("resume");
+  // `account`: where the conversation is now; continue copies it to the account the new session gets (api.ts).
+  expect(await continuePlan(row, null)).toEqual({ mode: "resume", seed: { harness: "codex", thread: CODEX_THREAD, account: ACCOUNT } });
+  expect(await continuePlan({ ...row, native_account: "default" }, null)).toEqual({ mode: "resume", seed: { harness: "codex", thread: CODEX_THREAD, account: "default" } });
+  expect(await continuePlan(row, "the session image predates resume")).toEqual({ mode: "handoff", reason: "the session image predates resume" });
+  // Only an account id ever names a home.
+  for (const bad of ["../codex", "default/..", "", "0C0C0C0C-0000-4000-8000-00000000000A"]) {
+    expect(await continuePlan({ ...row, native_account: bad }, null)).toEqual({ mode: "handoff",
+      reason: "the ended session did not record which Codex account held its conversation" });
+  }
 });
 
 test("continue never reads a planted link as the conversation, and never a thread id that is a path", async () => {

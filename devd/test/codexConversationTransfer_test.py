@@ -380,6 +380,149 @@ class TransferTests(unittest.TestCase):
         self.assertFalse(transfer.rows_and_edges(self.source)[0][ROOT]["archived"])
 
 
+def snapshot_home(home):
+    """Every file's bytes and every database row: a copy must leave its source exactly as it was."""
+    files = {str(p.relative_to(home)): p.read_bytes() for p in sorted(home.rglob("*")) if p.is_file() and not p.name.endswith((".sqlite-wal", ".sqlite-shm"))
+             and "thread-writer-locks" not in p.parts}
+    rows = {}
+    for name in sorted(p.name for p in home.glob("*.sqlite")):
+        with contextlib.closing(sqlite3.connect(home / name)) as db:
+            for (table,) in db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"):
+                rows[name + ":" + table] = sorted(db.execute("SELECT * FROM " + transfer.q(table)).fetchall(), key=repr)
+    return files, rows
+
+
+class CopyTests(unittest.TestCase):
+    """DEVBOX-100: continuing an ended tmux session copies its conversation into the account the new session gets."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name).resolve()
+        self.source, self.target = root / "source", root / "target"
+        initialize(self.source)
+        initialize(self.target)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_copies_the_conversation_with_its_agents_and_context_and_leaves_the_source_as_it_was(self):
+        path = add_thread(self.source, ROOT)
+        add_thread(self.source, CHILD, ROOT, archived=True)
+        add_thread(self.target, OTHER)
+        with contextlib.closing(sqlite3.connect(self.source / "goals_1.sqlite")) as db, db:
+            db.execute("INSERT INTO thread_goals VALUES (?, 'Finish the work', 'active')", (ROOT,))
+        before = snapshot_home(self.source)
+        result = transfer.copy_conversation(self.source, self.target, ROOT)
+        self.assertEqual(result, {"ok": True, "threadId": ROOT, "copiedIds": [ROOT, CHILD]})
+        self.assertEqual(snapshot_home(self.source), before)
+        rows, edges = transfer.rows_and_edges(self.target)
+        # Same place in the target's own tree, so Codex finds it as it would its own.
+        self.assertEqual(Path(rows[ROOT]["rollout_path"]), self.target / path.relative_to(self.source))
+        self.assertEqual(Path(rows[ROOT]["rollout_path"]).read_bytes(), path.read_bytes())
+        self.assertFalse(rows[ROOT]["archived"])
+        self.assertTrue(rows[CHILD]["archived"])
+        self.assertIn(OTHER, rows)
+        self.assertIsNone(rows[ROOT]["project_id"])
+        self.assertEqual(edges, [{"parent_thread_id": ROOT, "child_thread_id": CHILD, "status": "closed"}])
+        self.assertEqual((self.target / "auth.json").read_text(), "credentials-target")
+        with contextlib.closing(sqlite3.connect(self.target / "goals_1.sqlite")) as db, db:
+            self.assertEqual(db.execute("SELECT objective FROM thread_goals").fetchone()[0], "Finish the work")
+
+    def test_the_same_copy_again_changes_nothing(self):
+        add_thread(self.source, ROOT)
+        transfer.copy_conversation(self.source, self.target, ROOT)
+        before = snapshot_home(self.target)
+        self.assertEqual(transfer.copy_conversation(self.source, self.target, ROOT)["copiedIds"], [])
+        self.assertEqual(snapshot_home(self.target), before)
+
+    def test_a_different_file_with_that_id_in_the_target_refuses_and_both_stay(self):
+        add_thread(self.source, ROOT)
+        transfer.copy_conversation(self.source, self.target, ROOT)
+        with Path(transfer.rows_and_edges(self.source)[0][ROOT]["rollout_path"]).open("a") as stream:
+            stream.write('{"type":"newer-turn"}\n')
+        source, target = snapshot_home(self.source), snapshot_home(self.target)
+        with self.assertRaisesRegex(transfer.TransferError, "already has a different copy"):
+            transfer.copy_conversation(self.source, self.target, ROOT)
+        self.assertEqual((snapshot_home(self.source), snapshot_home(self.target)), (source, target))
+        # A file the target's database does not list counts too.
+        other = Path(self.temp.name).resolve() / "other"
+        initialize(other)
+        (other / "sessions/2026/01/01").mkdir(parents=True)
+        (other / "sessions/2026/01/01" / ("rollout-2026-01-01T00-00-00-" + ROOT + ".jsonl")).write_text(json.dumps({"type": "session_meta", "payload": {"id": ROOT}}) + "\n")
+        with self.assertRaisesRegex(transfer.TransferError, "already has a different copy"):
+            transfer.copy_conversation(self.source, other, ROOT)
+        self.assertNotIn(ROOT, transfer.rows_and_edges(other)[0])
+
+    def test_only_an_exact_conversation_id_is_taken(self):
+        add_thread(self.source, ROOT)
+        for bad in ["../" + ROOT, ROOT + "/..", "AAAAAAAA-1111-4111-8111-111111111111", ROOT + "\n", "*", ""]:
+            with self.assertRaisesRegex(transfer.TransferError, "Invalid conversation ID"):
+                transfer.copy_conversation(self.source, self.target, bad)
+        self.assertEqual(transfer.rows_and_edges(self.target)[0], {})
+
+    def test_a_conversation_missing_from_the_source_refuses(self):
+        add_thread(self.source, OTHER)
+        with self.assertRaisesRegex(transfer.TransferError, "not in the account"):
+            transfer.copy_conversation(self.source, self.target, ROOT)
+        # Its rollout gone, with the row left: no copy without history.
+        path = add_thread(self.source, ROOT)
+        path.unlink()
+        with self.assertRaisesRegex(transfer.TransferError, "missing or unsafe"):
+            transfer.copy_conversation(self.source, self.target, ROOT)
+        self.assertNotIn(ROOT, transfer.rows_and_edges(self.target)[0])
+
+    def test_a_running_writer_refuses(self):
+        add_thread(self.source, ROOT)
+        locks = self.source / "thread-writer-locks"
+        locks.mkdir()
+        with open(locks / (ROOT + ".lock"), "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            with self.assertRaisesRegex(transfer.TransferError, "active writer"):
+                transfer.copy_conversation(self.source, self.target, ROOT)
+        self.assertNotIn(ROOT, transfer.rows_and_edges(self.target)[0])
+
+    def test_an_account_codex_never_ran_in_gets_its_databases_from_codex_first(self):
+        add_thread(self.source, ROOT)
+        fresh = Path(self.temp.name).resolve() / "fresh"
+        fresh.mkdir()
+        started = []
+
+        class Starting:
+            """What `codex app-server` does in a home without databases: creates them (here: the test schema)."""
+            def __init__(self, home, **kwargs):
+                started.append(home)
+                fresh.rmdir()
+                initialize(fresh)
+
+            def close(self):
+                pass
+
+        self.assertEqual(transfer.copy_conversation(self.source, fresh, ROOT, Starting)["copiedIds"], [ROOT])
+        self.assertEqual(started, [fresh])
+        self.assertIn(ROOT, transfer.rows_and_edges(fresh)[0])
+
+        class Failing:
+            def __init__(self, home, **kwargs):
+                pass
+
+            def close(self):
+                pass
+
+        empty = Path(self.temp.name).resolve() / "empty"
+        empty.mkdir()
+        with self.assertRaisesRegex(transfer.TransferError, "could not create its databases"):
+            transfer.copy_conversation(self.source, empty, ROOT, Failing)
+        self.assertEqual(list(empty.iterdir()), [])
+
+    def test_the_account_it_ended_on_only_checks_the_conversation_is_there(self):
+        add_thread(self.source, ROOT)
+        before = snapshot_home(self.source)
+        self.assertEqual(transfer.copy_conversation(self.source, self.source, ROOT), {"ok": True, "threadId": ROOT, "copiedIds": []})
+        self.assertEqual(snapshot_home(self.source), before)
+        with self.assertRaisesRegex(transfer.TransferError, "not in the account"):
+            transfer.copy_conversation(self.target, self.target, ROOT)
+
+
 class SocketTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(dir="/tmp")

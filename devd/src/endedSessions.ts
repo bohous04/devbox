@@ -22,7 +22,9 @@ export interface EndedRow {
   id: string; session_id: string; folder: string; project: string; repo: string; agent: string; runtime: "tmux" | "chat";
   title: string; branch: string | null; topic: string | null; last_text: string | null; ended_at: number;
   /** "" with transcript `missing` when end() archived nothing. */
-  archive_dir: string; store_file: string; native_harness: string | null; native_thread: string | null; hidden_at: number | null;
+  archive_dir: string; store_file: string; native_harness: string | null; native_thread: string | null;
+  /** The Codex account (`default` or its id) a tmux session's conversation was in, as the mirror last read it. */
+  native_account: string | null; hidden_at: number | null;
   transcript: TranscriptState;
   kept_worktree: string | null;
   /** Why no conversation was recorded (several in the session, none confirmed at the end); null otherwise. */
@@ -32,15 +34,19 @@ export interface EndedRow {
 const clip = (t: string, max: number) => (t.length > max ? `${t.slice(0, max)}…` : t);
 
 const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** A Codex account as `co` takes it (image/codex-account-env.sh codex_account_valid_id). */
+export const CODEX_ACCOUNT_ID = /^(?:default|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
 /** The ended conversation a new session starts on. `claude`: its jsonl, which continue copies into the new session.
- *  `codex`: the thread id alone (see resumeBlock). */
-export type ResumeSeed = { harness: "claude"; thread: string; jsonl: Buffer } | { harness: "codex"; thread: string };
+ *  `codex`: the thread id; a tmux session's also the account whose home holds it (see resumeBlock). */
+export type ResumeSeed = { harness: "claude"; thread: string; jsonl: Buffer } | { harness: "codex"; thread: string; account?: string };
 
 /** How continue goes on with this transcript. `resume`: the new session starts on the ended session's own
  *  conversation (`seed`). `handoff`: the new session's first message points at the whole transcript. `reason` says why
  *  a conversation that should resume does not; it is null where resume is not wired (tmux Codex, the other agents). */
 export type ContinuePlan = { mode: "resume"; seed: ResumeSeed } | { mode: "handoff"; reason: string | null };
+
+const NO_CODEX_ACCOUNT = "the ended session did not record which Codex account held its conversation";
 
 /** Claude resumes because its jsonl sits in the session's own `_claude-projects/<id>`, which archiveChats moves into
  *  the archive: resume depends on that. A chat session's Codex thread lives in the `codex-v2-shared` volume
@@ -48,15 +54,19 @@ export type ContinuePlan = { mode: "resume"; seed: ResumeSeed } | { mode: "hando
  *  home shares (agent-bridge codexHomes.ts): the new session's bridge forks it by id on whatever account it gets (its
  *  own thread with that history). devd checks the rollout is still there before promising that (api.ts, codexContinue.ts);
  *  should the fork fail anyway, the bridge reports a failed resume and devd starts a fresh thread (chatSwitch.ts), as for
- *  a Claude thread whose copied jsonl the agent rejects. A tmux Codex
- *  conversation stays in its account's own home (codex-home or a standalone account volume), which `co` picks per
- *  launch: not wired, it hands off. */
+ *  a Claude thread whose copied jsonl the agent rejects. A tmux Codex conversation stays in its account's own home
+ *  (codex-home or a standalone account volume), the one the mirror read it in (`native_account`): continue copies it
+ *  from there into the account the new session gets (api.ts, codexResumeCopy.ts), where co forks it (agent-launch.sh),
+ *  or hands off saying why it could not. */
 /** Why this transcript cannot resume, without reading the conversation: null when it can (as far as the archive
  *  shows); `wired: false` when resume does not exist for its agent at all. */
 function resumeBlock(row: EndedRow): { wired: boolean; reason: string } | null {
   if (row.thread_note !== null && row.native_thread === null && row.agent === "claude") return { wired: true, reason: row.thread_note };
   if (row.native_thread === null || !THREAD_ID.test(row.native_thread)) return { wired: false, reason: "" };
   if (row.native_harness === "codex" && row.runtime === "chat" && isAgentName(row.agent) && chatHarness(row.agent) === "codex") return null;
+  if (row.native_harness === "codex" && row.runtime === "tmux" && row.agent === "codex") {
+    return row.native_account !== null && CODEX_ACCOUNT_ID.test(row.native_account) ? null : { wired: true, reason: NO_CODEX_ACCOUNT };
+  }
   if (row.native_harness !== "claude" || row.agent !== "claude" || row.archive_dir === "") return { wired: false, reason: "" };
   const file = join(row.archive_dir, `${row.native_thread}.jsonl`);
   let st;
@@ -78,7 +88,9 @@ export async function continuePlan(row: EndedRow, imageBlock: string | null): Pr
   if (block !== null) return { mode: "handoff", reason: block.wired ? block.reason : null };
   if (imageBlock !== null) return { mode: "handoff", reason: imageBlock };
   const thread = row.native_thread!;
-  if (row.native_harness === "codex") return { mode: "resume", seed: { harness: "codex", thread } };
+  if (row.native_harness === "codex") {
+    return { mode: "resume", seed: { harness: "codex", thread, ...(row.runtime === "tmux" ? { account: row.native_account! } : {}) } };
+  }
   try {
     const f = await open(join(row.archive_dir, `${thread}.jsonl`), C.O_RDONLY | C.O_NOFOLLOW);
     try {
@@ -119,7 +131,7 @@ export function recordEnded(db: Database, s: SessionRow, archiveDir: string | nu
   if (file === null && runtime !== "tmux") return null;
   const id = archiveDir === null ? o.id : archiveDir.slice(archiveDir.lastIndexOf("/") + 1);
   if (id === undefined) throw new Error(`recordEnded: no archive and no id for ${s.id}`);
-  let first: string | null = null, last: string | null = null, native: { harness: string; nativeThreadId: string } | null = null;
+  let first: string | null = null, last: string | null = null, native: { harness: string; nativeThreadId: string; account: string | null } | null = null;
   if (file !== null) {
     const path = join(archiveDir!, file);
     ThreadStore.sealArchive(path);
@@ -135,13 +147,14 @@ export function recordEnded(db: Database, s: SessionRow, archiveDir: string | nu
     // `agent` is optional in SessionRow only for insert literals; the column is NOT NULL.
     agent: s.agent!, runtime, title: s.name || `${s.project}/${s.repo}`, branch: s.branch ?? null,
     topic: first === null ? null : threadTitle(first), last_text: last === null ? null : clip(last, LAST_TEXT_MAX), ended_at: endedAt,
-    archive_dir: archiveDir ?? "", store_file: file ?? "", native_harness: native?.harness ?? null, native_thread: native?.nativeThreadId ?? null, hidden_at: null,
+    archive_dir: archiveDir ?? "", store_file: file ?? "", native_harness: native?.harness ?? null, native_thread: native?.nativeThreadId ?? null,
+    native_account: native?.account ?? null, hidden_at: null,
     transcript: file === null ? "missing" : o.truncated ? "truncated" : "complete", kept_worktree: o.keptWorktree ?? null,
     thread_note: o.threadNote ?? null,
   };
-  db.query(`INSERT OR REPLACE INTO ended_sessions (id,session_id,folder,project,repo,agent,runtime,title,branch,topic,last_text,ended_at,archive_dir,store_file,native_harness,native_thread,hidden_at,transcript,kept_worktree,thread_note)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?)`).run(row.id, row.session_id, row.folder, row.project, row.repo, row.agent, row.runtime, row.title,
-    row.branch, row.topic, row.last_text, row.ended_at, row.archive_dir, row.store_file, row.native_harness, row.native_thread, row.transcript, row.kept_worktree, row.thread_note);
+  db.query(`INSERT OR REPLACE INTO ended_sessions (id,session_id,folder,project,repo,agent,runtime,title,branch,topic,last_text,ended_at,archive_dir,store_file,native_harness,native_thread,native_account,hidden_at,transcript,kept_worktree,thread_note)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?)`).run(row.id, row.session_id, row.folder, row.project, row.repo, row.agent, row.runtime, row.title,
+    row.branch, row.topic, row.last_text, row.ended_at, row.archive_dir, row.store_file, row.native_harness, row.native_thread, row.native_account, row.transcript, row.kept_worktree, row.thread_note);
   return toEnded(row);
 }
 

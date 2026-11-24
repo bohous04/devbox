@@ -17,18 +17,19 @@ async function launch(resume: string | null, profile = "claude") {
   const dir = mkdtempSync(join(tmpdir(), "launch-resume-"));
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   const argvOut = join(dir, "argv");
-  for (const bin of ["cc", "co"]) writeFileSync(join(dir, bin), `#!/bin/sh\nfor a in "$@"; do printf '%s\\0' "$a"; done > '${argvOut}'\n`);
+  const accountOut = join(dir, "account");
+  for (const bin of ["cc", "co"]) writeFileSync(join(dir, bin), `#!/bin/sh\nfor a in "$@"; do printf '%s\\0' "$a"; done > '${argvOut}'\nprintf '%s' "\${DEVD_CODEX_ACCOUNT_ID-unset}" > '${accountOut}'\n`);
   writeFileSync(join(dir, "zsh"), "#!/bin/sh\nexit 0\n");
   for (const f of ["cc", "co", "zsh"]) chmodSync(join(dir, f), 0o755);
   const resumeFile = join(dir, "resume");
   if (resume !== null) writeFileSync(resumeFile, resume);
   const p = Bun.spawn(["bash", join(IMAGE, "agent-launch.sh"), profile], {
-    env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, DEVD_AGENT: "", DEVD_PROMPT_FILE: join(dir, "prompt"), DEVD_RESUME_FILE: resumeFile },
+    env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, DEVD_AGENT: "", DEVD_PROMPT_FILE: join(dir, "prompt"), DEVD_RESUME_FILE: resumeFile, DEVD_CODEX_ACCOUNT_ID: "" },
     stdin: "ignore", stdout: "ignore", stderr: "pipe",
   });
   const stderr = await new Response(p.stderr).text();
   await p.exited;
-  return { argv: readFileSync(argvOut, "utf8").split("\0").slice(0, -1), stderr, consumed: !existsSync(resumeFile) };
+  return { argv: readFileSync(argvOut, "utf8").split("\0").slice(0, -1), stderr, consumed: !existsSync(resumeFile), account: readFileSync(accountOut, "utf8") };
 }
 
 test("a Claude launch with a resume file resumes that conversation, once", async () => {
@@ -37,8 +38,24 @@ test("a Claude launch with a resume file resumes that conversation, once", async
   expect(r.consumed).toBe(true);
 });
 
+const ACCOUNT = "0c0c0c0c-0000-4000-8000-00000000000a";
+
+test("a Codex launch resumes the conversation on the account continue copied it to (DEVBOX-100)", async () => {
+  const r = await launch(`codex 0b1c2d3e-0000-4000-8000-000000000001 ${ACCOUNT}\n`, "codex");
+  expect(r.argv).toEqual(["resume", "0b1c2d3e-0000-4000-8000-000000000001"]);
+  // That launch alone: co picks the account from it (image/codex-account-env.sh) and pins the pane to it.
+  expect(r.account).toBe(ACCOUNT);
+  expect(r.consumed).toBe(true);
+  expect((await launch("codex 0b1c2d3e-0000-4000-8000-000000000001 default\n", "codex")).account).toBe("default");
+  // A plain launch leaves the account to co.
+  expect((await launch(null, "codex")).account).toBe("");
+});
+
 test("a resume file it cannot use is said on stderr and consumed; the agent starts new", async () => {
-  for (const [text, profile] of [["claude $(touch /tmp/x) ; rm", "claude"], ["claude 0b1c2d3e-0000-4000-8000-000000000001", "codex"]] as const) {
+  for (const [text, profile] of [["claude $(touch /tmp/x) ; rm", "claude"], ["claude 0b1c2d3e-0000-4000-8000-000000000001", "codex"],
+    // A tmux Codex resume names the account the conversation was copied to; a chat seed or a bad one is not used.
+    ["codex 0b1c2d3e-0000-4000-8000-000000000001", "codex"], [`codex 0b1c2d3e-0000-4000-8000-000000000001 ../${ACCOUNT}`, "codex"],
+    [`codex ../0b1c2d3e-0000-4000-8000-000000000001 ${ACCOUNT}`, "codex"], [`codex 0b1c2d3e-0000-4000-8000-000000000001 ${ACCOUNT}`, "claude"]] as const) {
     const r = await launch(text, profile);
     expect(r.argv).toEqual([]);
     expect(r.stderr).toContain("not resumed");
@@ -85,6 +102,12 @@ test("a session that continues a Codex chat thread gets only the resume file: th
   expect(existsSync(join(root, "_claude-projects", "dev-a-b", `${THREAD}.jsonl`))).toBe(false);
 });
 
+test("a session that continues a tmux Codex conversation gets the account it was copied to in the resume file", async () => {
+  const { root, seed } = manager();
+  await seed("dev-a-b", { harness: "codex", thread: THREAD, account: ACCOUNT });
+  expect(readFileSync(join(root, "ctl", "dev-a-b", "resume"), "utf8")).toBe(`codex ${THREAD} ${ACCOUNT}\n`);
+});
+
 test("resumeImageBlock asks the image for its resume label and says why it cannot", async () => {
   const bin = mkdtempSync(join(tmpdir(), "fake-docker-"));
   cleanups.push(() => rmSync(bin, { recursive: true, force: true }));
@@ -96,9 +119,14 @@ test("resumeImageBlock asks the image for its resume label and says why it canno
   try {
     const { mgr } = manager();
     writeFileSync(label, "1\n");
-    expect(await mgr.resumeImageBlock()).toBeNull();
+    expect(await mgr.resumeImageBlock("any")).toBeNull();
+    // Label 2: agent-launch also resumes a tmux Codex conversation on the account named in the resume file.
+    expect(await mgr.resumeImageBlock("tmux-codex")).toContain("devbox:test predates resuming tmux Codex conversations");
+    writeFileSync(label, "2\n");
+    expect(await mgr.resumeImageBlock("any")).toBeNull();
+    expect(await mgr.resumeImageBlock("tmux-codex")).toBeNull();
     writeFileSync(label, "<no value>\n");
-    expect(await mgr.resumeImageBlock()).toContain("devbox:test predates");
+    expect(await mgr.resumeImageBlock("any")).toContain("devbox:test predates");
   } finally {
     process.env.PATH = orig;
   }
