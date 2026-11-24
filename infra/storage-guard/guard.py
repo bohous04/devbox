@@ -254,7 +254,9 @@ class Guard:
         import shlex
         env.update(BORG_PASSCOMMAND='cat ' + shlex.quote(self.c['borg_passfile']),
                    BORG_RSH='ssh -i ' + shlex.quote(self.c['borg_key']) +
-                   ' -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15',
+                   ' -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15'
+                   # A stalled connection would otherwise hang borg until the unit's 4 h timeout.
+                   ' -o ServerAliveInterval=30 -o ServerAliveCountMax=4',
                    BORG_REMOTE_PATH='borg-1.4', BORG_RELOCATED_REPO_ACCESS_IS_OK='no',
                    BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK='no')
         return env
@@ -267,15 +269,21 @@ class Guard:
             raise RuntimeError(f'borg {args[0]} failed (rc={p.returncode}): ' + p.stderr.decode(errors='replace')[-800:])
         return p.stdout
 
-    def archive(self, paths, kind, shared=(), require_stable=True, verify_only=None, hash_content=True):
+    def archive(self, paths, kind, shared=(), require_stable=True, verify_only=None, hash_content=True,
+                registrations=None):
         """`shared` = Git common store of a repo other live sessions keep writing to
         (new objects, refs, their worktrees/*). It is archived, but not required to
         be stable: removal never deletes it, and requiring it would deny every End
         while any sibling session commits. Only `paths` authorize deletion.
         `verify_only` limits the full read-back to these archived paths (what the caller
-        deletes); None reads back the whole archive. hash_content=False: see prepare_end."""
+        deletes); None reads back the whole archive. hash_content=False: see prepare_end.
+        `registrations` (batch mode) = {path: its worktree registration dir}, deleted with that
+        path; archived with `shared` and listing-checked for it."""
         paths = [Path(p).resolve() for p in paths]
+        registrations = {Path(k).resolve(): Path(v).resolve() for k, v in (registrations or {}).items()}
+        covered = lambda a, roots: any(a == r or r in a.parents for r in roots)
         shared = [Path(p).resolve() for p in shared if Path(p).resolve() not in paths]
+        shared += [a for a in dict.fromkeys(registrations.values()) if not covered(a, paths + shared)]
         if not paths or any(p == Path('/') for p in paths + shared):
             raise RuntimeError('Unsafe archive path')
         name = 'storage-guard-' + kind + '-' + time.strftime('%Y%m%dT%H%M%S') + '-' + uuid.uuid4().hex[:8]
@@ -291,6 +299,22 @@ class Guard:
                     before[str(p)] = sign(p)
                 except (RuntimeError, OSError):
                     pass
+            # A registration is signed once, metadata only, and fails every root pointing at it
+            # (a copied worktree shares its registration). One inside its own root is already
+            # covered by that root's signature. Registrations are not signed again after the
+            # archive: the listing proves the archive holds them as they were before it, the
+            # worktree is released and unreferenced, and the window to removal is short; a
+            # changed registration would at worst lose what changed in that window.
+            reg_expect, reg_owner, unsigned = {}, {}, set()
+            for root, admin in registrations.items():
+                if str(root) not in before or admin == root or root in admin.parents:
+                    continue
+                try:
+                    if str(admin) not in reg_expect:
+                        reg_expect[str(admin)] = signature(admin, hash_content=False)
+                    reg_owner.setdefault(str(admin), set()).add(str(root))
+                except (RuntimeError, OSError):
+                    unsigned.add(str(root))
         # What the listing check below must find, by type and size: the deleted paths, plus any
         # verify_only path outside them (a worktree registration inside the shared store).
         expect = {**before, **{str(Path(v).resolve()): signature(v, hash_content=False)
@@ -307,7 +331,17 @@ class Guard:
         # pp: is a literal path prefix; one that matches nothing makes borg exit 1, which fails here.
         check = [] if verify_only is None else ['pp:' + str(Path(p).resolve()).lstrip('/') for p in verify_only]
         self.borg(['extract', '--dry-run', dest, *check])
-        if verify_only is not None or not hash_content:
+        if not require_stable:
+            # Same hole in a sweep batch (rc=1 is accepted there too): a root with a file borg
+            # left out is dropped from `before`, so the caller keeps it like a busy one.
+            failed = set(unsigned)
+            listed = ['pp:' + str(p).lstrip('/') for p in paths + [Path(a) for a in reg_expect]]
+            self.require_listed(dest, {**before, **reg_expect}, listed, failed, reg_owner)
+            for root in failed:
+                before.pop(root, None)
+            if failed:
+                self.audit('archive-incomplete', archive=name, paths=sorted(failed))
+        elif verify_only is not None or not hash_content:
             # create accepts rc=1 when shared sources are included; a per-file read error (EIO)
             # on an owned file is also only a warning, and borg then leaves the file out. The
             # read-back above only reads what is in the archive, and metadata signatures do not
@@ -336,41 +370,55 @@ class Guard:
                 err.seek(0)
                 raise RuntimeError(f'borg {args[0]} failed (rc={rc}): ' + err.read().decode(errors='replace')[-800:])
 
-    def require_listed(self, dest, expect, patterns):
+    def require_listed(self, dest, expect, patterns, failed=None, owner=None):
         """Every expected item must be in the archive listing with its type and, for a regular
         file, its size. borg prints paths through remove_surrogates (an undecodable byte becomes
-        '?'), so expected paths are mapped the same way."""
+        '?'), so expected paths are mapped the same way. With a `failed` set (a sweep batch) a
+        root whose items do not match is added to it instead of failing the whole archive;
+        `owner` maps an expect key to the roots it fails (a registration to every worktree that
+        points at it). The same file reached from two keys counts for the roots of both."""
         as_borg = lambda path: path.encode('utf-8', 'replace').decode('utf-8')
-        pending = {}
-        for root, sig in expect.items():
+        def bad(roots, message):
+            if failed is None:
+                raise RuntimeError(message + '; deletion denied')
+            failed.update(roots)
+        pending = {}  # listed path -> [kind, size, roots, raw path]
+        for key, sig in expect.items():
+            roots = set((owner or {}).get(key, {key}))
             for rel, mode, _dev, _ino, size, *_ in sig:
                 kind = stat.filemode(mode)[0]
                 if kind == 's':
                     continue  # borg skips sockets; they hold no data
-                raw = str(Path(root).parent / rel).lstrip('/')
+                raw = str(Path(key).parent / rel).lstrip('/')
                 path = as_borg(raw)
-                if path in pending:
-                    raise RuntimeError(f'{raw!r}: two names differ only in non-UTF-8 bytes, so the archive listing '
-                                       'cannot tell them apart; deletion denied')
-                pending[path] = (kind, size)
+                seen = pending.get(path)
+                if seen is None:
+                    pending[path] = [kind, size, roots, raw]
+                    continue
+                if seen[3] != raw:
+                    bad(seen[2] | roots, f'{raw!r}: two names differ only in non-UTF-8 bytes, so the archive '
+                                         'listing cannot tell them apart')
+                elif seen[:2] != [kind, size]:
+                    bad(seen[2] | roots, f'{raw!r} changed between its two signatures')
+                seen[2] = seen[2] | roots
         sizes = {}  # path -> size of verified regular files, for hardlinks listed after them
         for line in self.borg_lines(['list', '--json-lines', dest, *patterns]):
             it = json.loads(line)
             want = pending.pop(it['path'], None)
             if want is None:
                 continue
-            kind, size = want
+            kind, size, roots, _raw = want
             if kind == '-' and it['mode'].startswith('h'):
                 # A hardlink after the first is listed with mode h... and size 0; its data is the source's.
                 listed = sizes.get(it['source'])
             else:
                 listed = it['size']
             if it['type'] != kind or not it['healthy'] or (kind == '-' and listed != size):
-                raise RuntimeError(f"{it['path']} differs in the archive (type/size/health); deletion denied")
-            if kind == '-':
+                bad(roots, f"{it['path']} differs in the archive (type/size/health)")
+            elif kind == '-':
                 sizes[it['path']] = size
-        if pending:
-            raise RuntimeError(f'{next(iter(pending))} and {len(pending) - 1} more are missing from the archive; deletion denied')
+        for path, (_kind, _size, roots, _raw) in pending.items():
+            bad(roots, f'{path} and {len(pending) - 1} more are missing from the archive')
 
     def notify(self, key, message, title='Devbox: místo na disku'):
         if not self.c.get('notify_enabled', True):
@@ -750,6 +798,10 @@ class Guard:
         # Stop both writers before preserving the layer and nested databases.
         run([DOCKER,'stop','--time','30',name],timeout=90)
         side = subprocess.run([DOCKER,'inspect','dind-'+name],capture_output=True)
+        if side.returncode and not re.search(r'no such (object|container)', side.stderr.decode(errors='replace'), re.I):
+            # Only a sidecar that does not exist may be skipped; an unanswered inspect could hide
+            # a running nested daemon and its volume.
+            raise RuntimeError('Cannot inspect dind-'+name+'; removal denied: '+side.stderr.decode(errors='replace')[-300:])
         sidecar = json.loads(side.stdout)[0] if side.returncode == 0 else None
         if sidecar:
             run([DOCKER,'stop','--time','30','dind-'+name],timeout=90)
@@ -1178,11 +1230,23 @@ class Guard:
         # Shared bare repo goes into every batch archive; borg deduplicates it.
         shared=list(dict.fromkeys([x for _,c in todo.values() if c for x in self.git_storage(c)]+orphan_admin))
         try:
-            archive,sigs=self.archive([p for p,_ in todo.values()]+orphans,'worktrees',shared,require_stable=False)
+            # Removal also deletes each worktree's registration (HEAD, index, reflog): check it in the archive too.
+            regs,unparsed={},[]
+            for p,owner in [(p,self.root/'_sessions'/registry[k]['session']) for k,(p,_) in todo.items()]+[(o,o) for o in orphans]:
+                try:
+                    a=self.admin_dir(p,owner,strict=True)
+                except RuntimeError:
+                    unparsed.append(p);continue
+                if a and a.is_dir():regs[p]=a
+            archive,sigs=self.archive([p for p,_ in todo.values()]+orphans,'worktrees',shared,require_stable=False,registrations=regs)
         except (RuntimeError,OSError,subprocess.SubprocessError) as err:
             self.audit('released-worktree-archive-failed',paths=[str(p) for p,_ in todo.values()]+list(map(str,orphans)),error=str(err)[-300:])
             report.append(dict(path='(batch)',reason='Archive of released worktrees failed: '+str(err)[-300:]))
             return
+        for p in unparsed:
+            # Its registration cannot be located, so it cannot be checked in the archive: keep it.
+            sigs.pop(str(p.resolve()),None)
+            self.audit('worktree-pointer-unreadable',path=str(p),archive=archive)
         try:
             # The archive can take hours: a session may have claimed its directory meanwhile.
             live=self.devd_sessions() if orphans else set()
@@ -1254,12 +1318,17 @@ class Guard:
             out.append(d)
         return out
 
-    def admin_dir(self, p, owner):
+    def admin_dir(self, p, owner, strict=False):
+        """strict: a `.git` file without a gitdir line raises instead of meaning "no registration"."""
         try:
             admin=(p/'.git').read_text().split('gitdir:',1)[1].strip()
-        except (OSError,IndexError):
+        except OSError:
             return None
-        admin=owner/admin[len('/workspace/'):] if admin.startswith('/workspace/') else Path(admin)
+        except IndexError:
+            if strict:raise RuntimeError(f'Unreadable worktree pointer {p/".git"}')
+            return None
+        # A relative gitdir is relative to the worktree, as git reads it.
+        admin=owner/admin[len('/workspace/'):] if admin.startswith('/workspace/') else p/admin
         return admin if admin.parent.name=='worktrees' and beneath(admin,self.root) else None
 
     def claimed_elsewhere(self, admin, owner, target):
