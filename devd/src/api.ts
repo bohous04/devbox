@@ -1192,7 +1192,12 @@ export function createApp(d: ApiDeps): Hono {
     continuing.add(row.id);
     try {
       // The image check only where a resume is in question: it asks docker.
-      const plan = await continuePlan(row, continueMode(row) === "resume" ? await d.mgr.resumeImageBlock() : null);
+      let plan = await continuePlan(row, continueMode(row) === "resume" ? await d.mgr.resumeImageBlock() : null);
+      // Before a resume is promised: a Codex conversation gone from the shared home hands off with the reason.
+      if (plan.mode === "resume" && plan.seed.harness === "codex") {
+        const gone = d.codexAccounts ? await d.codexAccounts.sharedRolloutBlock(plan.seed.thread) : "Codex accounts are not configured in devd";
+        if (gone !== null) plan = { mode: "handoff", reason: gone };
+      }
       let prompt: string | undefined, transcript: string | undefined;
       if (plan.mode === "handoff") {
         try { transcript = handoffTranscript(row); }

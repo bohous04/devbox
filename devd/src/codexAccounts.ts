@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import type { CodexAuthDeps } from "./agentAuth";
 import { buildCodexView, codexUsageView, pollCodex, type CodexView } from "./codexPoller";
 import { parseCodexAuthJson } from "./codexUsageFetch";
+import { sharedRolloutBlock } from "./codexContinue";
 import { codexPreference, getCodexAccount, initCodexAccounts, listCodexAccounts, storedCodexAccountUsage } from "./codexAccountsDb";
 import { accountLoginStatus, installAccountAuth, cancelAccountLogin, codexAccountVolume, CodexProfileInUseError, readAccountAuth, removeAccountProfile, startAccountLogin } from "./codexAccountProfiles";
 
@@ -235,6 +236,10 @@ export class CodexAccounts {
     const account = chooseCodexAccount(candidates, preferredAccountId, this.now());
     if (!account) throw new AccountError("No enabled Codex account is available in this session. Reopen the session after adding an account.", 409);
     return { accountId: account.id, label: account.label };
+  }
+  /** Why an ended chat session's Codex conversation cannot be continued (codexContinue.ts); null when it can. */
+  sharedRolloutBlock(thread: string): Promise<string | null> {
+    return sharedRolloutBlock(this.d.auth, thread);
   }
   async refresh(id: string, force = true) {
     const row = this.require(id);
