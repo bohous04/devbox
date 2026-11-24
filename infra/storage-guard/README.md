@@ -66,7 +66,11 @@ Docker daemon or active session restart is needed to install this protection.
 * Explicit session End/removal is intercepted at host Docker CLI level: stop the
   target and its nested daemon, preserve the writable rootfs, workspace, Git common
   directory, nested databases and session transcript directory offsite, then allow
-  removal. When this takes more than 40 seconds End returns an actionable retry;
+  removal. The read-back covers what End deletes (owned data, the workspace's worktree
+  registration, the rootfs once through `tar`); the shared Git store is archived but not
+  re-downloaded. Sources are signed by inode/size/mtime/ctime, not content hashes, which is
+  sound only because the session and its sidecar stay stopped (same StartedAt) throughout.
+  When this takes more than 40 seconds End returns an actionable retry;
   the systemd archive job continues and no removal occurs until it is verified.
   A simple session Stop does not trigger archival/removal.
 * Archived Codex `.jsonl` conversations older than 30 days are offloaded only after
