@@ -126,7 +126,13 @@ test("resumeImageBlock asks the image for its resume label and says why it canno
     writeFileSync(label, "2\n");
     expect(await mgr.resumeImageBlock("any")).toBeNull();
     expect(await mgr.resumeImageBlock("tmux-codex")).toBeNull();
+    // A later level still does everything the earlier ones did.
+    writeFileSync(label, "3\n");
+    expect(await mgr.resumeImageBlock("any")).toBeNull();
+    expect(await mgr.resumeImageBlock("tmux-codex")).toBeNull();
     writeFileSync(label, "<no value>\n");
+    expect(await mgr.resumeImageBlock("any")).toContain("devbox:test predates");
+    writeFileSync(label, "2b\n");
     expect(await mgr.resumeImageBlock("any")).toContain("devbox:test predates");
   } finally {
     process.env.PATH = orig;
