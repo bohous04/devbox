@@ -52,6 +52,10 @@ jobs:
         working-directory: listener
         run: bun test
 
+      - name: agent-bridge
+        working-directory: image/agent-bridge
+        run: bun test
+
       - name: infra and tools
         run: bun test infra tools
 
