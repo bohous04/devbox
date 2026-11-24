@@ -2672,7 +2672,9 @@ export function createApp(d: ApiDeps): Hono {
   // Rebuild of a session's container (see SessionManager.recreate). Needed after removing an
   // account from the pool: its volume is held by every container built with the old list
   // of mounts, so `docker volume rm` fails until all of them are rebuilt.
+  // Both may wait for the old container's offsite backup (sessions.ts preserveBeforeReplace): minutes.
   app.post("/api/sessions/:id/recreate", async (c) => {
+    noIdleTimeout(c);
     const id = c.req.param("id");
     const s = getSession(d.db, id);
     if (!s) return c.json({ error: "unknown session" }, 404);
@@ -2688,6 +2690,7 @@ export function createApp(d: ApiDeps): Hono {
   });
 
   app.post("/api/sessions/:id/restart", async (c) => {
+    noIdleTimeout(c);
     try { await d.mgr.restartSolo(c.req.param("id")); return c.body(null, 204); }
     catch (e) {
       const b = busy(c, e);

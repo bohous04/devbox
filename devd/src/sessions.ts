@@ -527,9 +527,15 @@ export class SessionManager {
   /** The host's docker wrapper lets `docker rm` of a session container through only once it is backed up offsite, and
    *  waits for that only 40 s, so replacing a container (a recreate, a reopen with a new env) timed out at 60 s while the
    *  backup ran on. The backup runs first with its own long cap, as for an end (storageGuard.ts). */
-  private async preserveBeforeReplace(id: string): Promise<void> {
-    try { await this.d.preserveForEnd?.(id); }
-    catch (e) { throw new Error(`${id}: its old container must be backed up offsite before it is replaced, and that failed: ${(e as Error).message}`); }
+  private async preserveBeforeReplace(id: string, container: string): Promise<void> {
+    try { await this.d.preserveForEnd?.(container); }
+    catch (e) {
+      // The backup stops the container before archiving: as after a failed end, the row must not keep saying
+      // "running". Only a container docker reports as exited; reading it must not replace the backup's error.
+      try { if (await containerState(container) === "exited") updateSession(this.d.db, id, { status: "stopped" }); }
+      catch (inspectErr) { console.error(`after the failed backup of ${id}, reading its container failed:`, inspectErr); }
+      throw new Error(`${id}: its old container must be backed up offsite before it is replaced, and that failed: ${(e as Error).message}`);
+    }
   }
 
   isEnding(id: string): boolean { return this.opNames.get(id) === "end"; }
@@ -898,8 +904,9 @@ export class SessionManager {
    *    started in it — i.e. when it lacked a key or model and agent-launch therefore
    *    fell into zsh. A key rotation under a live agent waits for the next stop.
    *
-   *  For a stopped session a recreate is cheap: the workspace is a bind mount and a stopped
-   *  container has no live tmux sessions anyway. */
+   *  For a stopped session a recreate loses nothing: the workspace is a bind mount and a stopped
+   *  container has no live tmux sessions anyway. It is not quick: the old container is backed up offsite first
+   *  (preserveBeforeReplace). */
   private agentCtx(agent: AgentName): Promise<number | null> {
     return agentContextTokens(agent, sessionSettings(this.d), (m) => contextLengthCached(m, DEFAULT_OPENROUTER_URL));
   }
@@ -1227,12 +1234,14 @@ export class SessionManager {
       if (state === "missing" || switching || staleProxy || staleCanonicalMount || staleAccounts) {
         this.revokeShares(id); // the container is being (re)created — the old sharing would lead nowhere
         if (staleCanonicalMount) {
-          await this.preserveBeforeReplace(id);
+          progress({ step: "container", detail: "backing up the old container offsite before replacing it" });
+          await this.preserveBeforeReplace(id, existing.container);
           await removeStoppedWorkspaceContainer(observed);
         } else if ((switching || staleProxy || staleAccounts) && state !== "missing") {
           // Agent switch = a new container with the correct DEVD_AGENT. Safe: a stopped
           // container has no live tmux sessions anyway, the workspace is a bind mount.
-          await this.preserveBeforeReplace(id);
+          progress({ step: "container", detail: "backing up the old container offsite before replacing it" });
+          await this.preserveBeforeReplace(id, existing.container);
           await removeContainer(id);
         }
         await this.ensureDind(id);
@@ -1377,7 +1386,7 @@ export class SessionManager {
     const agent = s.agent ?? "claude";
     this.revokeShares(id);
     await this.checkpointRecovery(id);
-    await this.preserveBeforeReplace(id);
+    await this.preserveBeforeReplace(id, s.container);
     await removeContainer(id);
     await this.ensureDind(id);
     await this.runContainer(await this.runOpts(id, dir, s.port_base, s.project, s.repo, agent, storedRuntime(s), s.worktree ? bare : null));
@@ -1495,7 +1504,8 @@ export class SessionManager {
         clearPrompt: () => { this.syncPromptFile(id, "tmux", { status: "clean" }); },
         ensureDind: () => this.ensureDind(id),
         start: () => startContainer(id),
-        removeStopped: async (observed) => { await this.preserveBeforeReplace(id); await removeStoppedWorkspaceContainer(observed); },
+        // The container restoreExactSession inspected is the one named by the session id (inspectRemoteContainer).
+        removeStopped: async (observed) => { await this.preserveBeforeReplace(id, id); await removeStoppedWorkspaceContainer(observed); },
         create: async (row) => {
           this.revokeShares(id); // no-op if the session did not have a row yet (fresh Remote resume)
           await this.runContainer(await this.runOpts(id, route.cwd, row.port_base,
@@ -1574,11 +1584,12 @@ export class SessionManager {
       // old/empty proxy key or model stayed in it, after unlocking the vault the user would get
       // a reopened session with the same "unlock the vault" message forever. `running:
       // false` lets proxyEnvStale return true right away once the fresh env differs — for
-      // a stopped session there is nothing to lose, a recreate is cheap (the workspace is a bind mount).
+      // a stopped session there is nothing to lose (the workspace is a bind mount), though the replace waits for the
+      // old container's offsite backup (preserveBeforeReplace).
       const staleProxy = await this.proxyEnvStale(await containerEnv(id), agent, false);
       if (staleProxy || staleCanonicalMount) {
         this.revokeShares(id);
-        await this.preserveBeforeReplace(id);
+        await this.preserveBeforeReplace(id, s.container);
         if (staleCanonicalMount) await removeStoppedWorkspaceContainer(observed);
         else await removeContainer(id);
         await this.ensureDind(id);
