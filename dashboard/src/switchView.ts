@@ -43,9 +43,16 @@ export function bridgeOutdatedText(t: Pick<ChatTarget, "bridgeVersion"> & { brid
   return t.bridgeOutdated === true ? `This session's agent bridge (${t.bridgeVersion ?? "older than 1.1.0"}) is outdated: recreate the session's container for the newer fixes.` : null;
 }
 
-/** Shown while the bridge awaits its target: picking any model, account or agent (also the current one) sends it. */
-export function awaitingTargetText(t: Pick<ChatTarget, "awaitingTarget">): string | null {
-  return t.awaitingTarget ? "Agent is waiting for a target: pick a model, account or agent to continue" : null;
+/** Shown while the bridge awaits its target: picking any model, account or agent (also the current one) sends it.
+ *  Not from a `stale` target (its latest re-read failed): devd keeps re-sending on its own and may have delivered it. */
+export function awaitingTargetText(t: Pick<ChatTarget, "awaitingTarget">, o: { stale: boolean } = { stale: false }): string | null {
+  return t.awaitingTarget && !o.stale ? "Agent is waiting for a target: pick a model, account or agent to continue" : null;
+}
+
+/** devd settles an awaited target by re-sending it in the background, which the thread may not show (no new native
+ *  thread, no run): while the agent waits, the target is re-read this often so the waiting line goes away. */
+export function targetPollMs(t: Pick<ChatTarget, "awaitingTarget">): number | null {
+  return t.awaitingTarget ? 5_000 : null;
 }
 
 /** A proxy profile's model is set in settings.proxyModels (devd: 400 model-set-by-profile). */

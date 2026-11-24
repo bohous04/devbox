@@ -4,7 +4,7 @@ import type { AccountView, ChatTarget, CodexAccountView } from "./api";
 import {
   effortChipLabel, effortFooter, effortMenuBlocked, effortOptions, newSessionEffort, newSessionEffortBlock, newSessionEffortHint,
   accountMenuBlocked, claudeAccountOptions, codexAccountOptions, harnessOptions, modelMenuBlocked, modelOptions,
-  awaitingTargetText, bridgeOutdatedText, modelLabel, switchNoticeCount, switchBlocked, switchErrorText, switchResultText,
+  awaitingTargetText, targetPollMs, bridgeOutdatedText, modelLabel, switchNoticeCount, switchBlocked, switchErrorText, switchResultText,
 } from "./switchView";
 import { CHAT_MODELS } from "../../shared/chatModels";
 // Tests may import devd (see newSession.test.ts): the model list is the one devd accepts.
@@ -47,6 +47,17 @@ test("P24a: while the agent waits for a target, switching is allowed despite que
   const waiting = { ...CLAUDE, awaitingTarget: true };
   expect(switchBlocked({ runs: [run({ status: "queued", endedSeq: null })] }, waiting)).toBeNull();
   expect(awaitingTargetText(waiting)).toMatch(/waiting for a target/);
+});
+
+test("the waiting line is not shown from a target whose re-read failed: devd may have delivered it since", () => {
+  const waiting = { ...CLAUDE, awaitingTarget: true };
+  expect(awaitingTargetText(waiting, { stale: true })).toBeNull();
+  expect(awaitingTargetText(waiting, { stale: false })).toMatch(/waiting for a target/);
+});
+
+test("the target is re-read on a timer only while the agent waits for one", () => {
+  expect(targetPollMs(CLAUDE)).toBeNull();
+  expect(targetPollMs({ ...CLAUDE, awaitingTarget: true })).toBeGreaterThan(0);
 });
 
 test("model menu: the models devd accepts for the current harness, the current one marked", () => {
