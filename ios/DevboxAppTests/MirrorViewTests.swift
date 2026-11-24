@@ -37,6 +37,24 @@ final class MirrorViewTests: XCTestCase {
         XCTAssertNil(MirrorView.sendLock(URLError(.notConnectedToInternet)))
     }
 
+    /// Only a request cut off on the way may have been typed; an error raised before anything went out, or a connect
+    /// that never reached devd, is said as it is.
+    func testOnlyACutOffSendMayHaveArrived() {
+        XCTAssertTrue(MirrorView.mayHaveArrived(URLError(.timedOut)))
+        XCTAssertTrue(MirrorView.mayHaveArrived(URLError(.networkConnectionLost)))
+        XCTAssertTrue(MirrorView.mayHaveArrived(CancellationError()))
+        XCTAssertFalse(MirrorView.mayHaveArrived(URLError(.notConnectedToInternet)), "never left the device")
+        XCTAssertFalse(MirrorView.mayHaveArrived(URLError(.cannotConnectToHost)))
+        XCTAssertFalse(MirrorView.mayHaveArrived(DevdClientError(description: "No network path configured")))
+        XCTAssertFalse(MirrorView.mayHaveArrived(DevdClientError(description: "Invalid URL: /x")))
+        XCTAssertFalse(MirrorView.mayHaveArrived(DevdClientError(description: "CF path missing service token")))
+        XCTAssertFalse(MirrorView.mayHaveArrived(DevdHTTPError(statusCode: 500, serverMessage: "boom")), "devd answered")
+        XCTAssertFalse(MirrorView.mayHaveArrived(DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "x"))))
+        // Both paths failed: the fallback's attempt decides.
+        XCTAssertTrue(MirrorView.mayHaveArrived(DevdClientError(description: "both", underlying: [URLError(.cannotConnectToHost), URLError(.timedOut)])))
+        XCTAssertFalse(MirrorView.mayHaveArrived(DevdClientError(description: "both", underlying: [URLError(.cannotConnectToHost), URLError(.cannotFindHost)])))
+    }
+
     func testTheLineAboveTheComposerPromptFirstThenTheRefusedSendThenDevdsReason() {
         XCTAssertNil(MirrorView.notice(live, lock: nil))
         let exited = with(live, state: "agent-exited", block: .init(code: "agent-not-running", message: "No agent runs."))

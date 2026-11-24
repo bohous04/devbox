@@ -817,12 +817,11 @@ final class ThreadStore: ObservableObject {
             guard let lock = MirrorView.sendLock(e) else { throw e }
             sendLock = lock
             return false
-        } catch let e as DecodingError {
-            // devd answered, with a body this app does not read: said as such (errorText), not as unconfirmed.
-            throw e
         } catch {
             // No answer (a timeout, a dropped connection): devd may have typed it already, and nothing is retried.
-            throw MirrorSendUnconfirmed()
+            // Anything else (devd's body unreadable, no path configured, a CF path without its token) is said as it is.
+            if MirrorView.mayHaveArrived(error) { throw MirrorSendUnconfirmed() }
+            throw error
         }
     }
 

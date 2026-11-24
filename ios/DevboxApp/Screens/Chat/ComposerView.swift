@@ -307,6 +307,10 @@ struct ComposerView: View {
         .buttonStyle(SendButtonStyle())
         .disabled(!canSend)
         .accessibilityLabel("Send")
+        #if DEBUG && os(macOS)
+        // The offscreen screenshot test has no accessibility tree to find the button by: it finds this view instead.
+        .background(TestMarker(identifier: "composer-send"))
+        #endif
     }
 
     /// Pasted or dropped items.
@@ -363,6 +367,22 @@ struct ComposerView: View {
         }
     }
 }
+
+#if DEBUG && os(macOS)
+/// An empty AppKit view with an identifier, laid out where its SwiftUI view is: a test finds it by the identifier
+/// and clicks its frame, as SwiftUI offscreen exposes neither views nor accessibility elements for its controls.
+struct TestMarker: NSViewRepresentable {
+    let identifier: String
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.identifier = NSUserInterfaceItemIdentifier(identifier)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+#endif
 
 /// The send button drawn as its label says, pressed a little dimmer; disabled, it keeps the label's own empty look.
 private struct SendButtonStyle: ButtonStyle {

@@ -648,6 +648,20 @@ final class ThreadStoreLiveTests: XCTestCase {
         XCTAssertNil(store.sendLock)
     }
 
+    /// A send that never left the device (here: no connection at all) is its own error, not "may have reached".
+    func testSendToPaneThatNeverLeftSaysWhy() async throws {
+        MockURLProtocol.handler = { _ in .init(statusCode: 0, error: URLError(.notConnectedToInternet)) }
+        let store = ThreadStore(sessionId: "s1", client: client(), connect: { _, _ in AsyncThrowingStream { _ in } })
+        do {
+            _ = try await store.sendToPane(text: "hi")
+            XCTFail("no connection is not a sent message")
+        } catch {
+            XCTAssertFalse(error is MirrorSendUnconfirmed)
+            XCTAssertNotEqual(chatErrorText(error), MirrorView.sendUnconfirmed)
+        }
+        XCTAssertNil(store.sendLock)
+    }
+
     /// The mirror stream refusing a session that is no longer a tmux session: final, but not "Session ended" (the
     /// session lives on), and the Mac does not forget its window.
     func testMirrorStreamRefusedAsNoLongerTmuxIsNotEnded() async throws {

@@ -398,7 +398,6 @@ final class MacScreenshotTests: XCTestCase {
             while !done { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
             RunLoop.main.run(until: Date().addingTimeInterval(0.8))
         }
-        var fieldFrame: NSRect?
         if let draft {
             // Typed as a user would: the field's editor takes the text and SwiftUI's binding follows.
             let field = try XCTUnwrap(Self.allViews(window.contentView!).first {
@@ -411,14 +410,13 @@ final class MacScreenshotTests: XCTestCase {
             let editor = try XCTUnwrap(window.firstResponder as? NSTextView, "the composer has no editor")
             editor.insertText(draft, replacementRange: NSRange(location: NSNotFound, length: 0))
             RunLoop.main.run(until: Date().addingTimeInterval(0.5))
-            fieldFrame = field.convert(field.bounds, to: nil)
         }
-        if refuse, let chat, let fieldFrame {
-            // The composer's Send button, clicked: offscreen SwiftUI has no accessibility tree to find it by, so it is
-            // found where the Mac's two-tier box puts it, at the right end of the controls row under the field
-            // (ComposerView: 6 pt padding, 4 pt spacing, a 34 pt button).
+        if refuse, let chat, let draft {
             let store = state.windows.store(for: chat, client: state.appModel.client!)
-            let send = NSPoint(x: fieldFrame.maxX - 17, y: fieldFrame.minY - 6 - 4 - 17)
+            // The composer's Send button, found by its marker (ComposerView's TestMarker) and clicked at its centre.
+            let marker = try XCTUnwrap(Self.allViews(window.contentView!).first { $0.identifier?.rawValue == "composer-send" }, "no Send button")
+            let frame = marker.convert(marker.bounds, to: nil)
+            let send = NSPoint(x: frame.midX, y: frame.midY)
             for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
                 let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: send, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                                                              windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
@@ -428,6 +426,8 @@ final class MacScreenshotTests: XCTestCase {
             while store.sendLock == nil, Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
             XCTAssertEqual(store.sendLock?.code, "terminal-has-draft", "the Send button's message is refused by the fixture")
             RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+            let editor = try XCTUnwrap(window.firstResponder as? NSTextView, "the composer lost its editor")
+            XCTAssertEqual(editor.string, draft, "a refused message stays in the composer")
         }
 
         let frame = try XCTUnwrap(window.contentView?.superview, "the window has no frame view")

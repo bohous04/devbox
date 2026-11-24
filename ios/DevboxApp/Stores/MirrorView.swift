@@ -26,6 +26,23 @@ enum MirrorView {
         imagePaths.isEmpty ? text : text + "\n\n" + imagePaths.map { "Attached image: \($0)" }.joined(separator: "\n")
     }
 
+    /// Whether a send that failed may still have been typed into the pane: only a request cut off on the way (a
+    /// URLError, a cancelled task). Errors raised before anything went out ("No network path configured", "Invalid
+    /// URL", "CF path missing service token") and a connect that never reached devd (the same codes DevdClient
+    /// falls back on) are not. When both paths failed, the last one decides: it is the attempt that may have arrived.
+    static func mayHaveArrived(_ error: Error) -> Bool {
+        let last: Error
+        if let both = error as? DevdClientError {
+            guard let l = both.underlying.last else { return false }
+            last = l
+        } else {
+            last = error
+        }
+        if last is CancellationError { return true }
+        guard let code = (last as? URLError)?.code else { return false }
+        return ![.cannotConnectToHost, .cannotFindHost, .dnsLookupFailed, .notConnectedToInternet].contains(code)
+    }
+
     /// devd's session-level refusals (devd/src/mirrorApi.ts) come as bare codes: what they mean for the user.
     static let sessionRefusals: [String: String] = [
         "session-ending": "This session is ending; nothing more can be sent to it.",
