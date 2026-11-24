@@ -33,7 +33,8 @@ export interface BridgeState {
   /** (bridge 1.5.0+) The latest ack not yet old enough to trim to, with when it came (epoch ms). */
   ackCandidate: { seq: number; at: number } | null;
   /** (bridge 1.5.0+) No harness opens until devd sends switchTarget: set when a lost state.json was rebuilt from a
-   *  thread of another harness than the launch one (its target is devd's to say). */
+   *  thread of another harness than the launch one (its target is devd's to say), and (1.10.1+) after a failed
+   *  resume, until devd's fresh target with the full handoff arrives. */
   awaitingTarget: boolean;
   /** (bridge 1.7.0) The user's reasoning effort, kept across restarts and switches; null = the harness's default.
    *  Files from before 1.7.0 have none. */

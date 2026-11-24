@@ -743,6 +743,9 @@ export async function serve(o: ServeOptions): Promise<Bridge> {
     logError(`agent-bridge: ${e.message}; waiting for devd's fresh target`);
     state.nativeThreadId = null;
     state.pendingHandoff = null;
+    // Persisted: a bridge restarted before devd's target arrives would otherwise open a fresh thread without the
+    // handoff (P26).
+    state.awaitingTarget = true;
     persist();
     recoveryPending = true;
     awaitingTarget = true;

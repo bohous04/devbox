@@ -1113,6 +1113,25 @@ describe("final review fixes", () => {
     expect(f.turns).toEqual([{ runId: r.runId, text: "full\n\nUser message:\nhi", origin: "user" }]);
   });
 
+  test("P26: a bridge restarted after a failed resume still awaits devd's target instead of opening a thread without context", async () => {
+    const f = fakeHarness({ readyErrors: [undefined, new ResumeFailedError("no transcript")] });
+    const bridge = await start(f);
+    const target: SwitchTarget = { harness: "claude", account: "b", model: null, env: { CLAUDE_CONFIG_DIR: claudeProfile("b") } };
+    await switchCmd(target, "thread-dead");
+    expect(state()).toMatchObject({ nativeThreadId: null, awaitingTarget: true });
+    await bridge.close();
+
+    const g = fakeHarness();
+    await start(g);
+    expect(g.opens).toEqual([]);
+    expect(await handshake()).toMatchObject({ awaitingTarget: true });
+    expect(events().filter((e) => e.type === "bridge.started").at(-1)).toMatchObject({ resumed: true, awaitingTarget: true });
+    await switchCmd(target, null, { preamble: "full" });
+    expect(g.opens[0]).toMatchObject({ resume: null, target: { harness: "claude", account: "b" } });
+    expect(state()).toMatchObject({ awaitingTarget: false, pendingHandoff: { preamble: "full" } });
+    expect((await handshake()).awaitingTarget).toBe(false);
+  });
+
   test("I1: after a VPS reboot, the re-sent target without a handoff keeps the bridge's pending handoff", async () => {
     const f = fakeHarness();
     const bridge = await start(f);
