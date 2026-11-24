@@ -13,7 +13,7 @@ import { SettleProblem } from "../components/SettleProblem";
 import { agoLabel } from "../format";
 import { profileFor } from "../newSession";
 import { endedHref, endedMetaTail, endedSecondLine, endedTitle, settledShelf, upsertEnded } from "../endedView";
-import { applyHold, HOLD_IDLE_MS, onHoldEvent, type Hold, type HoldEvent } from "../inboxHold";
+import { applyHold, onHoldEvent, type Hold, type HoldEvent } from "../inboxHold";
 import { claimsUndo, failureText, focusOwnsUndo, settleKey, settleShortcut } from "../inboxSettle";
 import { badgeSlots, canEnd, groupInbox, inboxHref, inboxList, metaTail, mixedAgents, projectBadge, reasonLabel, rowStatus, rowTitle, secondLine, shelfBlock, shortAgo, snoozeEnd, snoozeTimes, statusParts, upsertInbox, type StatusTone } from "../inboxView";
 import { cn } from "@/lib/utils";
@@ -380,30 +380,22 @@ export function Inbox() {
   }, []);
   const onHidden = (id: string) => setEnded((cur) => upsertEnded(cur, { id, removed: true }));
   const g = items ? groupInbox(items) : null;
-  // Under the mouse the rows keep their order (inboxHold.ts); leaving the column, the window losing focus or
-  // HOLD_IDLE_MS without a move lets go and re-sorts.
+  // Under the mouse the rows keep their order (inboxHold.ts); leaving the column or the window losing focus lets go
+  // and re-sorts.
   const [hold, setHold] = useState<Hold | null>(null);
   const shown = applyHold(hold, { list: g ? inboxList(g) : [], working: g?.working ?? [], snoozed: g?.snoozed ?? [] });
   const { list, working, snoozed } = shown.lists;
   // A row that came during the hold keeps the line it got.
   useLayoutEffect(() => { if (shown.hold !== hold) setHold(shown.hold); });
-  const idle = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const onHold = (e: HoldEvent) => {
-    clearTimeout(idle.current);
-    if ((e.type === "enter" || e.type === "move") && e.pointerType === "mouse") idle.current = setTimeout(() => setHold((h) => onHoldEvent(h, { type: "idle" })), HOLD_IDLE_MS);
-    setHold((h) => onHoldEvent(h, e));
-  };
-  const onHoldRef = useRef(onHold);
-  onHoldRef.current = onHold;
+  const onHold = (e: HoldEvent) => setHold((h) => onHoldEvent(h, e));
   useEffect(() => {
-    const blur = () => onHoldRef.current({ type: "blur" });
-    const hidden = () => { if (document.hidden) onHoldRef.current({ type: "hidden" }); };
+    const blur = () => onHold({ type: "blur" });
+    const hidden = () => { if (document.hidden) onHold({ type: "hidden" }); };
     window.addEventListener("blur", blur);
     document.addEventListener("visibilitychange", hidden);
     return () => {
       window.removeEventListener("blur", blur);
       document.removeEventListener("visibilitychange", hidden);
-      clearTimeout(idle.current);
     };
   }, []);
   // A row action answers the session's new item: shown at once, the SSE event that follows is the same.

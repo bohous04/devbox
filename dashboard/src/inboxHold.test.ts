@@ -44,7 +44,7 @@ test("holdOrder: rows keep their order; a row that left goes; a new ask comes fi
   expect(holdOrder(order, [done("c", 8), done("a", 1)]).order).toBe(order);
 });
 
-test("the page holds under the mouse, re-sorts on leave, blur, hiding and idle, and never holds for touch", () => {
+test("the page holds under the mouse, re-sorts on leave, blur and hiding, and never holds for touch", () => {
   const p = page();
   expect(p.update([done("a", 3), done("b", 2), done("c", 1)])).toEqual(["a", "b", "c"]);
   p.event({ type: "enter", pointerType: "touch" });
@@ -59,7 +59,7 @@ test("the page holds under the mouse, re-sorts on leave, blur, hiding and idle, 
   // A move while held keeps the hold as it is.
   expect(p.event({ type: "move", pointerType: "mouse" })).toEqual(["q", "a", "b", "c"]);
   expect(p.event({ type: "leave" })).toEqual(["q", "c", "a", "b"]);
-  for (const type of ["blur", "hidden", "idle"] as const) {
+  for (const type of ["blur", "hidden"] as const) {
     p.event({ type: "move", pointerType: "mouse" });
     expect(p.held).toBe(true);
     p.event({ type });

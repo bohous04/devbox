@@ -11,9 +11,6 @@ export type Lists = Record<HoldKey, InboxItem[]>;
  *  (an undo) returns to its old line. */
 export type Hold = Record<HoldKey, readonly string[]>;
 
-/** How long the mouse may rest without moving before the hold lets go and the rows re-sort. */
-export const HOLD_IDLE_MS = 8_000;
-
 const ids = (rows: InboxItem[]) => rows.map((i) => i.sessionId);
 
 /** `items` laid out on `order`; the same `order` back when no row is new to it. */
@@ -40,10 +37,11 @@ export function applyHold(hold: Hold | null, lists: Lists): { lists: Lists; hold
 }
 
 /** What the page sees: the mouse entering or moving over the column (with the lists as shown right then), leaving it,
- *  the window losing focus or being hidden, or HOLD_IDLE_MS passing without a move. */
+ *  or the window losing focus or being hidden. A mouse resting while he reads keeps the hold (a timer letting go would
+ *  re-sort the rows under it); a new ask still comes on top. */
 export type HoldEvent =
   | { type: "enter" | "move"; pointerType: string; shown: Lists }
-  | { type: "leave" | "blur" | "hidden" | "idle" };
+  | { type: "leave" | "blur" | "hidden" };
 
 export function onHoldEvent(hold: Hold | null, e: HoldEvent): Hold | null {
   if (e.type === "enter" || e.type === "move") {
