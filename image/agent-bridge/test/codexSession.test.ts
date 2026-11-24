@@ -441,6 +441,23 @@ describe("openCodexSession", () => {
     expect(events.at(-1)).toEqual({ type: "tool.finished", runId: "run-1", itemId: "patch_1", isError: false, output: "add a.txt" });
   });
 
+  test("a plan update (update_plan) is a tool item of its own per update, so the thread and a handoff keep it", async () => {
+    const fake = fakeCodex();
+    const { session, events } = open(fake);
+    await session.startTurn("run-1", "x", "user");
+    await until(() => fake.requests("turn/start").length === 1);
+    const plan = [{ step: "Read the code", status: "completed" as const }, { step: "Fix the bug", status: "inProgress" as const }];
+    fake.push({ method: "turn/plan/updated", params: { threadId: THREAD_ID, turnId: "turn-1", explanation: "Two steps", plan } });
+    fake.push({ method: "turn/plan/updated", params: { threadId: THREAD_ID, turnId: "turn-1", explanation: null, plan: [] } });
+    await until(() => events.filter((e) => e.type === "tool.finished").length === 2);
+    expect(events.filter((e) => e.type === "tool.started" || e.type === "tool.finished")).toEqual([
+      { type: "tool.started", runId: "run-1", itemId: "plan:turn-1:1", tool: "update_plan", input: { explanation: "Two steps", plan } },
+      { type: "tool.finished", runId: "run-1", itemId: "plan:turn-1:1", isError: false, output: "" },
+      { type: "tool.started", runId: "run-1", itemId: "plan:turn-1:2", tool: "update_plan", input: { explanation: null, plan: [] } },
+      { type: "tool.finished", runId: "run-1", itemId: "plan:turn-1:2", isError: false, output: "" },
+    ]);
+  });
+
   test("a failed turn is run.failed with the turn error", async () => {
     const fake = fakeCodex();
     const { session, events } = open(fake);

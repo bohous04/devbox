@@ -150,6 +150,12 @@ export async function readThread(devd: DevdAccess, args: { beforeSeq?: number; l
   let cursor = args.beforeSeq;
   let next: number | null = null;
   let scanned = 0;
+  /** Where the answer ends: the first `limit` matches plus the rest of the last one's seq group. */
+  const cut = (): number => {
+    let end = args.limit;
+    while (end < matches.length && matches[end]!.seq === matches[args.limit - 1]!.seq) end++;
+    return end;
+  };
   for (;;) {
     const qs = new URLSearchParams({ limit: String(THREAD_PAGE) });
     if (cursor !== undefined) qs.set("beforeSeq", String(cursor));
@@ -172,16 +178,16 @@ export async function readThread(devd: DevdAccess, args: { beforeSeq?: number; l
       if (needle && !`${i.text}\n${i.output ?? ""}`.toLowerCase().includes(needle)) continue;
       matches.push(i);
     }
-    if (matches.length >= args.limit) {
-      const lastSeq = matches[args.limit - 1]!.seq;
-      let end = args.limit;
-      while (end < matches.length && matches[end]!.seq === lastSeq) end++;
-      if (end < matches.length || full) next = lastSeq;
-      matches.length = end;
+    // A next page is promised only once a match past the cut is seen: a query's last match must not lead the agent to
+    // an empty follow-up page.
+    if (matches.length >= args.limit && cut() < matches.length) {
+      next = matches[args.limit - 1]!.seq;
+      matches.length = cut();
       break;
     }
     if (!full) break;
-    // Scan budget spent: return what was found; `cursor` re-includes the held-back seq group.
+    // Scan budget spent: return what was found (all of it is within the cut here); `cursor` re-includes the held-back
+    // seq group.
     if (scanned >= THREAD_SCAN_MAX) { next = cursor!; break; }
   }
   return { items: matches.map(renderItem), nextBeforeSeq: next };

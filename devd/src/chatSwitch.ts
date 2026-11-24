@@ -225,7 +225,10 @@ export class ChatSwitch {
     if (same && !awaiting) return r.exhausted ? { ...UNCHANGED, exhausted: true } : UNCHANGED;
     if (r.target.account !== null && r.target.account !== current.account) await this.attachProfile(s, r.target);
     const opts = { window: r.window, reserve: RESERVE_TOKENS, now: this.d.now() };
-    const caps = store.providerThread(r.target.harness)?.caps ?? NO_CAPS;
+    const threadCaps = store.providerThread(r.target.harness)?.caps ?? NO_CAPS;
+    // Another profile on the same harness (a proxy profile and back) is another env (upstream, key, ANTHROPIC_MODEL):
+    // a live setModel would keep the old one, so the harness restarts on the target's env.
+    const caps = profile === from ? threadCaps : { ...threadCaps, liveModelSwitch: false };
     const plan = planTransition(current, { harness: r.target.harness, account: r.target.account, model: r.target.model }, store, "", caps, opts);
 
     const h = handoffOf(plan);
@@ -406,9 +409,10 @@ export class ChatSwitch {
     return this.d.links.send(sessionId, { kind: "switchTarget", target: l.target, resume: l.resume, handoff: l.handoff }, SWITCH_TIMEOUT_MS);
   }
 
-  /** The bridge could not resume the thread `l` asked for: a fresh thread with the full handoff on the same target. */
+  /** The bridge could not resume the thread `l` asked for: a fresh thread with the full handoff on the same target.
+   *  devd may not know that thread (`l.resume` null: rebuilt after a devd restart from a store that never saw it
+   *  announced); the bridge still awaits a fresh target, so it gets one, with nothing to mark as failed. */
   private replan(store: ThreadStore, l: LastSwitch): Transition {
-    if (l.resume === null) throw new Error("the bridge reported a failed resume, but no thread was being resumed");
     const t = planAfterResumeFailure(l.target, l.resume, store, "", { window: l.window, reserve: RESERVE_TOKENS, now: this.d.now() });
     const h = handoffOf(t);
     l.resume = null;

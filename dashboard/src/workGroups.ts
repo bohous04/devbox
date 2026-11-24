@@ -122,7 +122,7 @@ export function toolLabel(tool: string | undefined, input: unknown): ToolLabel {
       return { kind: "web", verb: "Searched the web for", target: str(o, "query") ?? "", code: false };
     case "Task": case "Agent":
       return { kind: "agent", verb: "Ran agent", target: str(o, "description") ?? "", code: false };
-    case "TodoWrite":
+    case "TodoWrite": case "update_plan":
       return { kind: "other", verb: "Updated the plan", target: "", code: false };
     default: {
       // MCP tools arrive as mcp__<server>__<tool>; show "server · tool".

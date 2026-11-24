@@ -70,8 +70,9 @@ export function planTransition(current: Target & { nativeThreadId: string | null
 }
 
 /** The bridge reported `run.failed{error:"resume-failed"}` for a planned resume of `failedThreadId`: mark that
- *  thread dead and start a fresh native thread with the full handoff. The caller says it in one notice. */
-export function planAfterResumeFailure(target: Target, failedThreadId: string, store: ThreadStore, request: string, o: PlanOptions): Transition {
-  store.markResumeFailed(target.harness, failedThreadId, o.now);
+ *  thread dead (null: one devd never saw announced, nothing to mark) and start a fresh native thread with the full
+ *  handoff. The caller says it in one notice. */
+export function planAfterResumeFailure(target: Target, failedThreadId: string | null, store: ThreadStore, request: string, o: PlanOptions): Transition {
+  if (failedThreadId !== null) store.markResumeFailed(target.harness, failedThreadId, o.now);
   return fresh(target, store, request, o);
 }

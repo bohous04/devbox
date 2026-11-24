@@ -9,7 +9,7 @@ import { api, ApiError, type ChatSwitchResult, type ChatTarget } from "../../api
 import { profileFor } from "../../newSession";
 import { AgentLogo, logoForAgent } from "../agentLogos";
 import {
-  accountMenuBlocked, awaitingTargetText, bridgeOutdatedText, switchNoticeCount, claudeAccountOptions, codexAccountOptions, effortChipLabel, effortFooter, effortMenuBlocked, effortOptions, harnessOptions,
+  accountMenuBlocked, awaitingTargetText, targetPollMs, bridgeOutdatedText, switchNoticeCount, claudeAccountOptions, codexAccountOptions, effortChipLabel, effortFooter, effortMenuBlocked, effortOptions, harnessOptions,
   modelLabel, modelMenuBlocked, modelOptions, switchBlocked, switchErrorText, switchResultText, type SwitchOption,
 } from "../../switchView";
 
@@ -43,6 +43,12 @@ export function Switchers({ sessionId, thread, children }: {
     (e) => setTargetErr(`Could not read the current agent: ${errorText(e)}`),
   ), [sessionId]);
   useEffect(() => { void loadTarget(); }, [loadTarget, n?.harness, n?.nativeThreadId, n?.model, n?.account, ended, runCount, notices]);
+  const pollMs = target === null ? null : targetPollMs(target);
+  useEffect(() => {
+    if (pollMs === null) return;
+    const id = setInterval(() => void loadTarget(), pollMs);
+    return () => clearInterval(id);
+  }, [loadTarget, pollMs]);
   // A result note belongs to the last switch; the next message the user sends is a new action.
   const runs = thread.runs.length;
   useEffect(() => { setNote(null); }, [runs]);
@@ -79,17 +85,15 @@ export function Switchers({ sessionId, thread, children }: {
     setBusy(null);
   }
 
-  if (!target) {
-    const status = targetErr ? (
-      <p role="alert" className="flex flex-wrap items-center gap-2 text-xs text-destructive">
-        {targetErr}
-        <Button type="button" variant="outline" size="xs" onClick={() => void loadTarget()}>Retry</Button>
-      </p>
-    ) : null;
-    return children({ menus: null, status });
-  }
+  const targetErrLine = targetErr ? (
+    <p key="targetErr" role="alert" className="flex flex-wrap items-center gap-2 text-xs text-destructive">
+      {targetErr}
+      <Button type="button" variant="outline" size="xs" onClick={() => void loadTarget()}>Retry</Button>
+    </p>
+  ) : null;
+  if (!target) return children({ menus: null, status: targetErrLine });
   const blocked = switchBlocked(thread, target);
-  const awaiting = awaitingTargetText(target);
+  const awaiting = awaitingTargetText(target, { stale: targetErr !== null });
   const outdated = bridgeOutdatedText(target);
   const profile = profileFor(target.agent);
 
@@ -159,7 +163,7 @@ export function Switchers({ sessionId, thread, children }: {
     outdated && <p key="outdated" role="status" className="text-xs text-muted-foreground">{outdated}</p>,
     note && <p key="note" role="status" className="text-xs text-amber-700 dark:text-amber-300">{note}</p>,
     err && <p key="err" role="alert" className="text-xs text-destructive">{err}</p>,
-    targetErr && <p key="targetErr" role="alert" className="text-xs text-destructive">{targetErr}</p>,
+    targetErrLine,
   ].filter(Boolean);
   return children({ menus, status: lines.length > 0 ? <div className="flex flex-col gap-1">{lines}</div> : null });
 }

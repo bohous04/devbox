@@ -212,6 +212,21 @@ test("thread_read query is a case-insensitive substring filter and scans past on
   expect(r.nextBeforeSeq).toBeNull();
 });
 
+test("thread_read promises a next page only when there is one: a query's last match ends the paging", async () => {
+  const all = msgs(250);
+  all[199]!.text = "foo one";
+  all[209]!.text = "foo two";
+  const c = await threadClient(all);
+  const r = await read(c, { query: "foo", limit: 2 });
+  expect(r.items).toEqual(["[210] assistant: foo two", "[200] assistant: foo one"]);
+  expect(r.nextBeforeSeq).toBeNull();
+  // A third, older match: the cursor leads to it.
+  all[19]!.text = "foo three";
+  const more = await read(c, { query: "foo", limit: 2 });
+  expect(more.nextBeforeSeq).toBe(200);
+  expect((await read(c, { query: "foo", limit: 2, beforeSeq: more.nextBeforeSeq })).items).toEqual(["[20] assistant: foo three"]);
+});
+
 test("thread_read keeps items that share a seq (notice after an item) across pages", async () => {
   const all: FakeItem[] = [];
   for (let s = 1; s <= 30; s++) { all.push({ seq: s, kind: "user", text: `m${s}` }); all.push({ seq: s, kind: "notice", text: `n${s}` }); }

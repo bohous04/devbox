@@ -117,7 +117,7 @@ function setup(o: { agent?: SessionRow["agent"]; codex?: CodexAccountView[]; pro
 }
 
 /** A Claude conversation of one completed turn on the `primary` account. */
-function claudeThread(t: ReturnType<typeof setup>, account = "primary", model = "claude-opus-5-5") {
+function claudeThread(t: ReturnType<typeof setup>, account: string | null = "primary", model = "claude-opus-5-5") {
   t.feed([
     { type: "run.queued", runId: "r1", text: "Fix the login bug", attachments: [] },
     { type: "run.started", runId: "r1", origin: "user", nativeThreadId: null, model: null },
@@ -353,6 +353,17 @@ test("harness: a proxy profile resumes the Claude thread with the profile env", 
   expect(cmd.resume).toBe("t-claude");
   expect(getSession(t.db, CHAT.id)!.agent).toBe("claude-gemini");
   expect(activeLeases(t)).toEqual([]);
+});
+
+test("harness: one proxy profile to another restarts on the new upstream's env, never a setModel on the old one", async () => {
+  const t = setup({ agent: "claude-gemini" });
+  claudeThread(t, null, "gpt-x");
+  expect(await t.post("harness", { agent: "claude-openrouter" })).toEqual({ status: 202, body: { kind: "restart-resume" } });
+  expect(t.sent).toEqual([{
+    kind: "switchTarget", target: { harness: "claude", account: null, model: "gpt-x", env: { ...proxyProfileEnv("claude-openrouter", PROXY_INPUTS), CLAUDE_CONFIG_DIR: "/home/dev/.claude" } },
+    resume: "t-claude", handoff: null,
+  }]);
+  expect(getSession(t.db, CHAT.id)!.agent).toBe("claude-openrouter");
 });
 
 test("harness: a proxy profile without its key is refused before anything is sent", async () => {
@@ -713,6 +724,24 @@ test("C1: a resume failure reported at the bridge's start (no switch in flight, 
   expect(targets(t)[0].handoff!.preamble).toContain("[user] hello");
   expect(t.store.providerThread("codex")).toMatchObject({ nativeThreadId: "t-step2", resumeFailed: true });
   expect(notices(t)).toEqual(["Agent bridge restarted (v1.1.0)", "Could not resume the earlier codex thread; started a fresh one · context handed over (1 items)"]);
+});
+
+test("a resume failure devd has no thread for (none announced on this harness) sends a fresh target once instead of retrying forever", async () => {
+  const t = setup();
+  t.feed([
+    { type: "run.queued", runId: "r1", text: "hello", attachments: [] },
+    { type: "bridge.started", version: "1.1.0", resumed: true },
+    { type: "run.failed", runId: "never-started", error: "resume-failed" },
+  ]);
+  await waitUntil(() => t.sent.length > 0, "re-plan");
+  await Bun.sleep(60);
+  expect(targets(t)).toHaveLength(1);
+  expect(targets(t)[0]).toMatchObject({ target: { harness: "claude", account: "primary" }, resume: null });
+  expect(targets(t)[0].handoff!.preamble).toContain("[user] hello");
+  // No thread was marked: there was none devd knew of.
+  expect(t.store.providerThread("claude")).toBeNull();
+  expect(notices(t).some((n) => n.startsWith("The agent waits for its target"))).toBe(false);
+  expect(t.sw.target(CHAT.id).awaitingTarget).toBe(false);
 });
 
 test("I1: a re-send after a devd restart carries no handoff, so the bridge keeps its own; a message that started at once clears devd's copy", async () => {

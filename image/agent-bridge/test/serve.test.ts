@@ -1113,6 +1113,25 @@ describe("final review fixes", () => {
     expect(f.turns).toEqual([{ runId: r.runId, text: "full\n\nUser message:\nhi", origin: "user" }]);
   });
 
+  test("P26: a bridge restarted after a failed resume still awaits devd's target instead of opening a thread without context", async () => {
+    const f = fakeHarness({ readyErrors: [undefined, new ResumeFailedError("no transcript")] });
+    const bridge = await start(f);
+    const target: SwitchTarget = { harness: "claude", account: "b", model: null, env: { CLAUDE_CONFIG_DIR: claudeProfile("b") } };
+    await switchCmd(target, "thread-dead");
+    expect(state()).toMatchObject({ nativeThreadId: null, awaitingTarget: true });
+    await bridge.close();
+
+    const g = fakeHarness();
+    await start(g);
+    expect(g.opens).toEqual([]);
+    expect(await handshake()).toMatchObject({ awaitingTarget: true });
+    expect(events().filter((e) => e.type === "bridge.started").at(-1)).toMatchObject({ resumed: true, awaitingTarget: true });
+    await switchCmd(target, null, { preamble: "full" });
+    expect(g.opens[0]).toMatchObject({ resume: null, target: { harness: "claude", account: "b" } });
+    expect(state()).toMatchObject({ awaitingTarget: false, pendingHandoff: { preamble: "full" } });
+    expect((await handshake()).awaitingTarget).toBe(false);
+  });
+
   test("I1: after a VPS reboot, the re-sent target without a handoff keeps the bridge's pending handoff", async () => {
     const f = fakeHarness();
     const bridge = await start(f);
@@ -1264,6 +1283,19 @@ describe("launch env", () => {
     });
     closers.push(() => bridge.close());
     expect(f.opens[0].target).toEqual({ harness: "claude", account: null, model: "gpt-x", env: { ANTHROPIC_MODEL: "gpt-x" } });
+  });
+
+  test("setModel on a proxy profile is refused: the profile's env names the model (devd switches profiles with switchTarget)", async () => {
+    const f = fakeHarness();
+    const env = { ANTHROPIC_BASE_URL: "http://proxy:8317", ANTHROPIC_AUTH_TOKEN: "k-secret", ANTHROPIC_MODEL: "gpt-x", DEVBOX_PROXY_PROFILE: "1" };
+    const bridge = await serve({
+      bridgeDir: dir, socketPath, harness: "claude", account: null, model: "gpt-x", targetEnv: env,
+      openHarness: (o) => f.open(o), resolveTarget: (t) => t, now: () => NOW, logError: () => {},
+    });
+    closers.push(() => bridge.close());
+    await expect(cmd({ kind: "setModel", model: "gpt-y" })).rejects.toThrow("proxy profile");
+    // Nothing persisted that would make the next start wait for devd's target.
+    expect(state()).toMatchObject({ target: null, model: "gpt-x" });
   });
 
   test("serveConfigFromEnv binds the bridge to its session when devd gave it a secret", () => {
