@@ -19,6 +19,7 @@ function setup(addr: string) {
   const db = openDb(":memory:");
   const calls: { cmd: string[]; input?: string }[] = [];
   let poolExit = false;
+  const profileCalls: { cmd: string[]; input?: string }[] = [];
   const codexAuth: CodexAuthDeps = {
     run: async (cmd, input) => {
       calls.push({ cmd, input });
@@ -47,12 +48,12 @@ function setup(addr: string) {
     backup: { build: async () => "/tmp/x", restore: async () => {} },
     remoteAddr: () => addr, codexAuth,
     accounts: {
-      profiles: { run: async () => ({ code: 0, stdout: '{"loggedIn":true}', stderr: "" }) },
+      profiles: { run: async (cmd, input) => { profileCalls.push({ cmd, input }); return { code: 0, stdout: '{"loggedIn":true}', stderr: "" }; } },
       leaseMaxAgeMs: () => 3600000, settings: () => resolveAccountPool(DEFAULT_CONFIG.settings),
       switchAccount: async () => ({ status: "unknown-session" }), refresh: async () => {},
     },
   });
-  return { a, calls, finishPool: () => { poolExit = true; } };
+  return { a, calls, profileCalls, finishPool: () => { poolExit = true; }, resetPool: () => { poolExit = false; } };
 }
 
 const post = (body: unknown) => ({ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -100,11 +101,31 @@ test("pool login registers the account and never returns credentials", async () 
   expect((await a.request("/api/accounts/extra/login/start", post({}))).status).toBe(409);
 });
 
+test("re-login replaces the credentials of an existing account in place", async () => {
+  const { a, profileCalls, finishPool, resetPool } = setup("127.0.0.1");
+  expect((await a.request("/api/accounts/extra/relogin/start", post({}))).status).toBe(404);
+  await a.request("/api/accounts/extra/login/start", post({}));
+  finishPool();
+  expect(await (await a.request("/api/accounts/extra/login/status")).json()).toEqual({ status: "done" });
+
+  resetPool();
+  const writes = () => profileCalls.filter((c) => c.cmd.join(" ").includes("cat > /profile/.credentials.json") && c.cmd.join(" ").includes("extra") && c.input?.includes("secret-token")).length;
+  const before = writes();
+  expect((await a.request("/api/accounts/extra/relogin/start", post({}))).status).toBe(200);
+  expect((await a.request("/api/accounts/extra/login/code", post({ code: "abc#s" }))).status).toBe(204);
+  finishPool();
+  expect(await (await a.request("/api/accounts/extra/login/status")).json()).toEqual({ status: "done" });
+  expect(writes()).toBe(before + 1);
+  const accounts = (await (await a.request("/api/accounts")).json()) as { accounts: { id: string }[] };
+  expect(accounts.accounts.map((x) => x.id)).toEqual(["extra"]);
+});
+
 test("pool login endpoints reject session-container addresses", async () => {
   const { a, calls } = setup("172.18.0.5");
   for (const [method, suffix] of [["POST", "start"], ["POST", "code"], ["GET", "status"], ["DELETE", ""]]) {
     const r = await a.request(`/api/accounts/extra/login${suffix ? "/" + suffix : ""}`, { method });
     expect(r.status).toBe(403);
   }
+  expect((await a.request("/api/accounts/extra/relogin/start", { method: "POST" })).status).toBe(403);
   expect(calls).toHaveLength(0);
 });

@@ -8,14 +8,16 @@ export type LoginStatus = "pending" | "done" | "error";
 /** One isolated login at a time. Tokens stay in container tmpfs until registered server-side.
  * The timer finishes/cleans up even after the browser closes. No shared profile is mounted. */
 export class AccountLogin {
-  private job?: { id: string; container: string; status: LoginStatus; timer?: ReturnType<typeof setTimeout> };
+  private job?: { id: string; replace: boolean; container: string; status: LoginStatus; timer?: ReturnType<typeof setTimeout> };
   private working = false;
-  constructor(private d: CodexAuthDeps, private save: (id: string, credentials: string, label?: string) => Promise<void>) {}
+  constructor(private d: CodexAuthDeps, private save: (id: string, credentials: string, label: string | undefined, replace: boolean) => Promise<void>) {}
 
-  async start(id: string): Promise<{ url: string }> {
+  /** `replace` = sign an EXISTING account in again; decided at start, so a login begun as "add"
+   * can never overwrite an account that appeared under the same id in the meantime. */
+  async start(id: string, replace = false): Promise<{ url: string }> {
     if (this.job?.status === "pending") throw new Error("An account login is already running. Finish or cancel it first.");
     const container = `devbox-account-login-${randomUUID()}`;
-    const job = this.job = { id, container, status: "pending" as LoginStatus, timer: undefined as ReturnType<typeof setTimeout> | undefined };
+    const job = this.job = { id, replace, container, status: "pending" as LoginStatus, timer: undefined as ReturnType<typeof setTimeout> | undefined };
     try {
       const r = await this.d.run(["run", "-d", "--rm", "--name", container,
         "--tmpfs", "/home/dev/.claude:uid=1000,gid=1000,mode=700",
@@ -68,7 +70,7 @@ export class AccountLogin {
         const identity = await this.d.run(["exec", job.container, "claude", "auth", "status"]);
         const ident = parseAuthStatus(identity.stdout);
         const label = ident.email ? (ident.orgName ? `${ident.email} (${ident.orgName})` : ident.email) : undefined;
-        await this.save(id, creds.stdout, label);
+        await this.save(id, creds.stdout, label, job.replace);
         job.status = "done";
         await this.cleanup(job);
       } else {

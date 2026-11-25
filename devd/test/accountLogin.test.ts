@@ -4,6 +4,7 @@ import { AccountLogin } from "../src/accountLogin";
 function fixture() {
   const calls: { cmd: string[]; input?: string }[] = [];
   const saved: { id: string; credentials: string }[] = [];
+  const replaced: boolean[] = [];
   let exit: string | null = null;
   let running = true;
   const login = new AccountLogin({
@@ -17,8 +18,8 @@ function fixture() {
       if (cmd[0] === "exec" && cmd.at(-1)?.endsWith(".credentials.json")) return { code: 0, stdout: "secret-json", stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
     },
-  }, async (id, credentials) => { saved.push({ id, credentials }); });
-  return { login, calls, saved, finish: (code = "0") => { exit = code; }, expire: () => { running = false; } };
+  }, async (id, credentials, _label, replace) => { saved.push({ id, credentials }); replaced.push(replace); });
+  return { login, calls, saved, replaced, finish: (code = "0") => { exit = code; }, expire: () => { running = false; } };
 }
 
 test("isolated login saves server-side only after successful exit, then removes container", async () => {
@@ -57,4 +58,14 @@ for (const failure of ["exit", "expired"] as const) test(`${failure} cleans up w
   expect(await f.login.status("extra")).toBe("error");
   expect(f.saved).toHaveLength(0);
   expect(f.calls.at(-1)?.cmd.slice(0, 2)).toEqual(["rm", "-f"]);
+});
+
+test("a re-login of an existing account is saved as a replacement, a new login is not", async () => {
+  for (const replace of [true, false]) {
+    const f = fixture();
+    await f.login.start("extra", replace);
+    f.finish();
+    expect(await f.login.status("extra")).toBe("done");
+    expect(f.replaced).toEqual([replace]);
+  }
 });

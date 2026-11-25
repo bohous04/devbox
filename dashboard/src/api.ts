@@ -484,6 +484,8 @@ export const api = {
   agyLogout: () => j<void>("/api/auth/antigravity/logout", post({})),
   accounts: () => j<{ accounts: AccountView[]; pool: AccountPoolView }>("/api/accounts"),
   accountLoginStart: (id: string) => j<{ url: string }>(`/api/accounts/${encodeURIComponent(id)}/login/start`, post({})),
+  // Same flow for an account that already exists; code/status/cancel are shared with accountLogin*.
+  accountReloginStart: (id: string) => j<{ url: string }>(`/api/accounts/${encodeURIComponent(id)}/relogin/start`, post({})),
   accountLoginCode: (id: string, code: string) => j<void>(`/api/accounts/${encodeURIComponent(id)}/login/code`, post({ code })),
   accountLoginStatus: (id: string) => j<{ status: "pending" | "done" | "error" }>(`/api/accounts/${encodeURIComponent(id)}/login/status`),
   accountLoginCancel: (id: string) => j<void>(`/api/accounts/${encodeURIComponent(id)}/login`, { method: "DELETE" }),

@@ -88,6 +88,10 @@ even after the page closes; an unfinished container expires after 15 minutes. Ca
 Existing account-selection settings still apply. This adds an account to the pool; it does not
 force running agents to switch accounts.
 
+An account whose sign-in expired (or that turned out to be the wrong identity) is signed in
+again the same way: **Replace credentials → Sign in with Claude** on its card. The profile is
+rewritten in place, so running sessions keep their mounts.
+
 Manual JSON import is available under **Import credentials manually**. For a separate local
 Mac profile, use a separate login grant:
 
