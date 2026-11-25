@@ -89,7 +89,9 @@ Docker daemon or active session restart is needed to install this protection.
 * The existing recovery set is backed up offsite and retained locally at least
   30 days from successful verification. Removal requires the entire set to remain
   unchanged and another offsite integrity read. Retain storage-guard-* archives
-  for 180 days, plus 12 monthly recovery points, in a dedicated encrypted offsite repository (devbox-storage-guard).
+  for 14 days (`offsite_keep_days`), plus 12 monthly recovery points, in a dedicated encrypted offsite
+  repository (devbox-storage-guard). At 180 days the repository grew ~70 GB a week and would have filled
+  the Storage Box; the nightly devbox-borg backup (which includes /srv/dev) keeps 6 monthly archives.
 * Log rotation, 1 GiB journal limit and core=0 for existing session processes and
   new containers prevent unbounded diagnostic output. A kernel core-pipe sink
   also prevents dumps from old Docker exec processes that inherit unlimited
