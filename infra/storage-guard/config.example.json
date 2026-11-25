@@ -18,7 +18,7 @@
   "released_pin_days": 90,
   "history_local_days": 30,
   "recovery_local_days": 30,
-  "offsite_keep_days": 180,
+  "offsite_keep_days": 14,
   "notify_cooldown_seconds": 21600,
   "borg_repo": "ssh://u000000@u000000.your-storagebox.de:23/./devbox-storage-guard",
   "borg_passfile": "/etc/devd/borg-passphrase",
