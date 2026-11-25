@@ -2895,7 +2895,15 @@ export function createApp(d: ApiDeps): Hono {
     }
   });
 
-  const poolLogin = d.codexAuth ? new AccountLogin(d.codexAuth, async (id, credentials, label) => {
+  const poolLogin = d.codexAuth ? new AccountLogin(d.codexAuth, async (id, credentials, label, replace) => {
+    if (replace) {
+      const acc = needAccounts();
+      // Checked again here: the account may have been removed while the operator was signing in.
+      if (!acc || !getAccount(d.db, id)) throw new Error("The account no longer exists.");
+      const r = await replaceAccountCredentials(acc, id, credentials);
+      if ("error" in r) throw new Error(r.error);
+      return;
+    }
     const result = await app.request("/api/accounts", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ id, credentials, label }),
@@ -2903,6 +2911,16 @@ export function createApp(d: ApiDeps): Hono {
     if (!result.ok) throw new Error("Could not register the signed-in account.");
     await d.accounts?.refresh(id).catch(() => {});
   }) : null;
+  // The same guided sign-in for an account that already exists (expired refresh token, wrong identity).
+  // Only the start differs; code/status/cancel are the `/login/*` routes below.
+  app.post("/api/accounts/:id/relogin/start", async (c) => {
+    const denied = claudeLoginGate(c); if (denied) return denied;
+    if (!needAccounts() || !poolLogin) return c.json({ error: "account login is not configured" }, 503);
+    const id = c.req.param("id");
+    if (!getAccount(d.db, id)) return c.json({ error: "unknown account" }, 404);
+    try { return c.json(await poolLogin.start(id, true)); }
+    catch (e) { return c.json({ error: (e as Error).message }, 409); }
+  });
   app.post("/api/accounts/:id/login/start", async (c) => {
     const denied = claudeLoginGate(c); if (denied) return denied;
     if (!needAccounts() || !poolLogin) return c.json({ error: "account login is not configured" }, 503);
@@ -2982,8 +3000,16 @@ export function createApp(d: ApiDeps): Hono {
     if (!getAccount(d.db, id)) return c.json({ error: "unknown account" }, 404);
     const b = (await c.req.json().catch(() => null)) as { credentials?: string } | null;
     if (typeof b?.credentials !== "string") return c.json({ error: "credentials must be the contents of .credentials.json with claudeAiOauth" }, 400);
-    const input = normalizeCredentialsInput(b.credentials);
-    if (!input.ok) return c.json({ error: credentialsInputError(input.reason) }, 400);
+    const r = await replaceAccountCredentials(acc, id, b.credentials);
+    return "error" in r ? c.json({ error: r.error }, r.status) : c.json(r);
+  });
+  // A function, not only a route: the guided re-login calls it server-side. Going through
+  // `app.request` would have no remote address, and sharedContainerGuard refuses that whenever a
+  // shared session exists.
+  async function replaceAccountCredentials(acc: NonNullable<ApiDeps["accounts"]>, id: string, credentials: string):
+    Promise<{ error: string; status: 400 | 502 } | { account: ReturnType<typeof buildAccountViews>[number] | null }> {
+    const input = normalizeCredentialsInput(credentials);
+    if (!input.ok) return { error: credentialsInputError(input.reason), status: 400 };
     const creds = input.blob;
     try {
       await writeProfileCredentials(acc.profiles, id, input.text);
@@ -3002,13 +3028,12 @@ export function createApp(d: ApiDeps): Hono {
       setAccountQuarantined(d.db, id, null);    // a new sign-in clears the quarantine reason
       logEvent(d.db, null, "account_credentials_replaced", { id, email: ident.email, orgId: ident.orgId });
     } catch (e) {
-      return c.json({ error: (e as Error).message }, 502);
+      return { error: (e as Error).message, status: 502 };
     }
     // Measure right away, so the card redraws with fresh numbers of THAT account, not leftovers from the previous one.
     await acc.refresh(id);
-    const view = buildAccountViews(d.db, Date.now(), acc.leaseMaxAgeMs()).find((v) => v.id === id) ?? null;
-    return c.json({ account: view });
-  });
+    return { account: buildAccountViews(d.db, Date.now(), acc.leaseMaxAgeMs()).find((v) => v.id === id) ?? null };
+  }
 
   // Codex quota. Deliberately a SEPARATE route, not part of /api/accounts: Codex can
   // break (deactivated workspace, moved endpoint) without taking down the Anthropic

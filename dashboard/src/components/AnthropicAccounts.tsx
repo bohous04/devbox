@@ -23,7 +23,8 @@ export function AnthropicAccounts() {
   const [pool, setPool] = useState<AccountPoolView | null>(null);
   const [poolOff, setPoolOff] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
-  const [login, setLogin] = useState<{ id: string; url: string } | null>(null);
+  // One guided sign-in at a time, shared by "add" and "replace credentials" (`replace`).
+  const [login, setLogin] = useState<{ id: string; url: string; replace?: boolean } | null>(null);
   const [loginCode, setLoginCode] = useState("");
   const [manual, setManual] = useState(false);
   const [newId, setNewId] = useState("");
@@ -74,7 +75,8 @@ export function AnthropicAccounts() {
         if (stopped || r.status === "pending") return;
         setLogin(null); setLoginCode("");
         if (r.status === "done") {
-          setAddOpen(false); setNewId(""); setNotice("Account added. It is now available across Devbox.");
+          if (login.replace) { setReplaceId(null); setNotice("Signed in again. The account keeps its profile and its sessions keep running."); }
+          else { setAddOpen(false); setNewId(""); setNotice("Account added. It is now available across Devbox."); }
           await refreshAccounts();
         } else setErr("Sign-in failed or expired. Start again.");
       } catch (e) { if (!stopped) setErr((e as Error).message); }
@@ -139,7 +141,17 @@ export function AnthropicAccounts() {
     await refreshAccounts();
   }
 
-  function closeReplace() { setReplaceId(null); setReplaceCreds(""); }
+  function closeReplace() {
+    if (login) void api.accountLoginCancel(login.id).catch((e) => setErr((e as Error).message));
+    setLogin(null); setLoginCode(""); setReplaceId(null); setReplaceCreds(""); setManual(false);
+  }
+
+  async function startRelogin(a: AccountView) {
+    setBusy(true); setErr(null);
+    try { const r = await api.accountReloginStart(a.id); setLogin({ id: a.id, url: r.url, replace: true }); }
+    catch (e) { setErr((e as Error).message); }
+    finally { setBusy(false); }
+  }
 
   async function replaceCredentials(a: AccountView) {
     setErr(null); setBusy(true);
@@ -170,13 +182,8 @@ export function AnthropicAccounts() {
       <FormDialog open={addOpen} onOpenChange={(open) => { if (!open) closeAdd(); }} busy={busy} title="Add Anthropic account" description="Add a separate account to the automatic selection pool.">
         <div className="space-y-4">
           {!manual ? login ? (
-            <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); void submitLoginCode(); }}>
-              <p className="text-sm text-muted-foreground">Open the sign-in link and choose the Claude account you want to add. Use a private window if your browser is signed in to another account.</p>
-              <Button asChild className="min-h-11"><a href={login.url} target="_blank" rel="noopener noreferrer">Open Claude sign-in</a></Button>
-              <SecretInput aria-label="Claude authorization code" placeholder="Paste the authorization code" value={loginCode} onChange={(e) => setLoginCode(e.target.value)} />
-              <Button type="submit" className="min-h-11" disabled={busy || !loginCode.trim()}>{busy ? "Signing in…" : "Finish sign-in"}</Button>
-              <p role="status" className="text-sm text-muted-foreground">Waiting for sign-in. Devbox will save the account and close the temporary session automatically.</p>
-            </form>
+            <LoginCodeForm url={login.url} code={loginCode} setCode={setLoginCode} busy={busy} onSubmit={submitLoginCode}
+              intro="Open the sign-in link and choose the Claude account you want to add. Use a private window if your browser is signed in to another account." />
           ) : (
             <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); void startLogin(); }}>
               <p className="text-sm text-muted-foreground">Sign in to Claude once. Devbox saves the account for automatic selection across sessions.</p>
@@ -287,7 +294,7 @@ export function AnthropicAccounts() {
                     {a.disabled ? "Enable" : "Disable"}
                   </ActionButton>
                   <Button size="sm" variant="ghost"
-                    onClick={() => (replaceId === a.id ? closeReplace() : (setReplaceCreds(""), setReplaceId(a.id)))}>
+                    onClick={() => (replaceId === a.id ? closeReplace() : (setErr(null), setReplaceCreds(""), setReplaceId(a.id)))}>
                     {replaceId === a.id ? "Cancel" : "Replace credentials"}
                   </Button>
                   <ConfirmButton size="sm" variant="ghost" confirmLabel="Remove it?" onError={setErr}
@@ -297,33 +304,47 @@ export function AnthropicAccounts() {
                 </div>
 
                 <FormDialog open={replaceId === a.id} onOpenChange={(open) => { if (!open) closeReplace(); }} busy={busy} title={`Replace credentials · ${name}`} description="Update this account’s sign-in while preserving its profile.">
-                  <div className="space-y-3">
-                    <p className="text-xs text-muted-foreground">
-                      Log in as the account this entry is supposed to be, then paste its credentials.
-                      The profile is rewritten in place — sessions keep running.
-                    </p>
-                    {/* `claude auth login` opens a browser, and that one is signed in under the account
-                        the operator normally uses it with — not the one that should come here.
-                        This is exactly how a profile reporting a foreign organization came about (see identityIssues). */}
-                    <p className="text-xs text-muted-foreground">
-                      The login opens your browser and takes whichever account is already signed in
-                      there — sign out of claude.ai first, or run it in a private window.
-                    </p>
-                    <pre className="overflow-x-auto rounded-md border bg-background px-2 py-1.5 text-[11px]">
+                  <div className="space-y-4">
+                    {!manual ? login ? (
+                      <LoginCodeForm url={login.url} code={loginCode} setCode={setLoginCode} busy={busy} onSubmit={submitLoginCode}
+                        intro="Open the sign-in link and choose the Claude account this entry is supposed to be. Use a private window if your browser is signed in to another account." />
+                    ) : (
+                      <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); void startRelogin(a); }}>
+                        <p className="text-sm text-muted-foreground">Sign in to Claude again as this account. The profile is rewritten in place — sessions keep running.</p>
+                        <Button type="submit" className="min-h-11" disabled={busy}>{busy ? "Starting sign-in…" : "Sign in with Claude"}</Button>
+                        <Button type="button" variant="ghost" className="min-h-11" disabled={busy} onClick={() => setManual(true)}>Import credentials manually</Button>
+                      </form>
+                    ) : (
+                      <div className="space-y-3">
+                        <p className="text-xs text-muted-foreground">
+                          Log in as the account this entry is supposed to be, then paste its credentials.
+                          The profile is rewritten in place — sessions keep running.
+                        </p>
+                        {/* `claude auth login` opens a browser, and that one is signed in under the account
+                            the operator normally uses it with — not the one that should come here.
+                            This is exactly how a profile reporting a foreign organization came about (see identityIssues). */}
+                        <p className="text-xs text-muted-foreground">
+                          The login opens your browser and takes whichever account is already signed in
+                          there — sign out of claude.ai first, or run it in a private window.
+                        </p>
+                        <pre className="overflow-x-auto rounded-md border bg-background px-2 py-1.5 text-[11px]">
 {`profile_dir=$(mktemp -d)
 docker run --rm -it --user "$(id -u):$(id -g)" \\
   -e HOME=/tmp -e CLAUDE_CONFIG_DIR=/profile \\
   -v "$profile_dir:/profile" --entrypoint claude devbox:latest auth login
 pbcopy < "$profile_dir/.credentials.json"`}
-                    </pre>
-                    <div className="grid gap-3">
-                      <SecretInput placeholder='{"claudeAiOauth":{…}}'
-                        value={replaceCreds} onChange={(e) => setReplaceCreds(e.target.value)}
-                        className="flex-1" aria-label={`New credentials for ${a.id}`} />
-                      <Button size="sm" disabled={busy || !replaceCreds.trim()} onClick={() => replaceCredentials(a)}>
-                        {busy ? "Saving…" : "Replace"}
-                      </Button>
-                    </div>
+                        </pre>
+                        <div className="grid gap-3">
+                          <SecretInput placeholder='{"claudeAiOauth":{…}}'
+                            value={replaceCreds} onChange={(e) => setReplaceCreds(e.target.value)}
+                            className="flex-1" aria-label={`New credentials for ${a.id}`} />
+                          <Button size="sm" disabled={busy || !replaceCreds.trim()} onClick={() => replaceCredentials(a)}>
+                            {busy ? "Saving…" : "Replace"}
+                          </Button>
+                          <Button type="button" variant="ghost" disabled={busy} onClick={() => { setManual(false); setReplaceCreds(""); }}>Back to sign-in</Button>
+                        </div>
+                      </div>
+                    )}
                     {err && <p role="alert" className="text-sm text-destructive">{err}</p>}
                   </div>
                 </FormDialog>
@@ -339,3 +360,18 @@ pbcopy < "$profile_dir/.credentials.json"`}
   );
 }
 
+
+/** Second step of the guided sign-in: the link to Claude and the field for the code it hands back. */
+function LoginCodeForm({ url, intro, code, setCode, busy, onSubmit }: {
+  url: string; intro: string; code: string; setCode: (v: string) => void; busy: boolean; onSubmit: () => Promise<void>;
+}) {
+  return (
+    <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); void onSubmit(); }}>
+      <p className="text-sm text-muted-foreground">{intro}</p>
+      <Button asChild className="min-h-11"><a href={url} target="_blank" rel="noopener noreferrer">Open Claude sign-in</a></Button>
+      <SecretInput aria-label="Claude authorization code" placeholder="Paste the authorization code" value={code} onChange={(e) => setCode(e.target.value)} />
+      <Button type="submit" className="min-h-11" disabled={busy || !code.trim()}>{busy ? "Signing in…" : "Finish sign-in"}</Button>
+      <p role="status" className="text-sm text-muted-foreground">Waiting for sign-in. Devbox will save the account and close the temporary session automatically.</p>
+    </form>
+  );
+}
