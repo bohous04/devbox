@@ -72,7 +72,9 @@ test("Dockerfile installs a checksummed lua-language-server (the lua-lsp plugin 
   const df = await Bun.file(new URL("../../image/Dockerfile", import.meta.url).pathname).text();
   expect(df).toMatch(/ARG LUALS_SHA256=[0-9a-f]{64}/);
   expect(df).toContain("sha256sum -c -");
-  expect(df).toMatch(/su -s \/bin\/sh -c 'lua-language-server --version' nobody/);
+  expect(df).toMatch(/COPY lua-language-server \/usr\/local\/bin\/lua-language-server/);
+  // the launcher writes its config into the cache dir, and nobody has no home to put one in
+  expect(df).toMatch(/su -s \/bin\/sh -c 'XDG_CACHE_HOME=\/tmp\/luals-check lua-language-server --version' nobody/);
 });
 
 test("Dockerfile installs agy root-owned outside dev's home and copies ag + agy-trust", async () => {
