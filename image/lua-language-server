@@ -1,0 +1,34 @@
+#!/bin/sh
+# Launcher for the Lua language server (the lua-lsp plugin declares `command: lua-language-server`
+# and starts it in the workspace root). The binary finds its runtime relative to its own path,
+# hence a wrapper, not a symlink. By default it writes its log and meta files next to itself, i.e.
+# into root-owned /opt — as `dev` it then hangs on initialize without a word. So both go into the
+# user's cache.
+c="${XDG_CACHE_HOME:-$HOME/.cache}/lua-language-server"
+
+# Agents keep full checkouts of the repo under <workspace>/.worktrees and LuaLS indexes every
+# one of them: 10-17 GB per session within an hour, which filled the host's 99 GB of swap.
+# ignoreDir can only be set in a config file, so LuaLS gets a copy of the workspace's
+# .luarc.json (or an empty config) with .worktrees added. Flat keys only ("Lua.workspace.ignoreDir"
+# or "workspace.ignoreDir"); the copy is rebuilt on every start. A .luarc.json this cannot be
+# done for (not plain JSON, nested keys) stops the launch: starting without the ignore is what
+# took the host down.
+cfg="$c/config-$(pwd | cksum | cut -d' ' -f1).json"
+mkdir -p "$c" || exit 1
+if [ -f .luarc.json ]; then src=.luarc.json; else src=/dev/null; fi
+jq -s '
+  (.[0] // {}) as $conf
+  | if ($conf | type) != "object" then error("the top level is not an object") else . end
+  | if ($conf.workspace?.ignoreDir? // $conf.Lua?.workspace?.ignoreDir?) != null
+    then error("nested workspace.ignoreDir is not supported, use the flat key") else . end
+  | (if $conf | has("Lua.workspace.ignoreDir") then "Lua.workspace.ignoreDir" else "workspace.ignoreDir" end) as $key
+  | ($conf[$key] // [".vscode"]) as $dirs
+  | if ($dirs | type) != "array" then error("ignoreDir is not an array") else . end
+  | $conf + {($key): (if $dirs | index(".worktrees") then $dirs else $dirs + [".worktrees"] end)}
+' "$src" > "$cfg.$$" && mv "$cfg.$$" "$cfg" || {
+  rm -f "$cfg.$$"
+  echo "lua-language-server: no config with .worktrees in ignoreDir could be built from $(pwd)/.luarc.json, not starting" >&2
+  exit 1
+}
+
+exec "${DEVBOX_LUALS_BIN:-/opt/lua-language-server/bin/lua-language-server}" --logpath="$c/log" --metapath="$c/meta" --configpath="$cfg" "$@"
