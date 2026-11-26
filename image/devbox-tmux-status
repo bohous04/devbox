@@ -1,16 +1,41 @@
 #!/bin/sh
 # Right side of the devbox tmux status bar: git branch + number of changed files
 # in the workspace, in the form `⎇ <branch> ±<N>` (no ±N when clean). tmux calls it via
-# `#(...)` every status-interval seconds; it runs as dev (uid 1000), /workspace has
-# `safe.directory` from the entrypoint. Silently prints nothing when it is not git / has no HEAD.
-cd /workspace 2>/dev/null || exit 0
+# `#(...)` on every status redraw (not just every status-interval); it runs as dev (uid 1000),
+# /workspace has `safe.directory` from the entrypoint. Silently prints nothing when it is not git / has no HEAD.
+#
+# The count comes from a cache refreshed in the background, never from a `git status` run
+# inline: on a large repo under load `git status` outlasted its timeout, was killed and
+# restarted on the next redraw, and a dozen sessions doing that saturated the host.
+# DEVBOX_STATUS_WORKSPACE / DEVBOX_STATUS_CACHE exist for the tests.
+cd "${DEVBOX_STATUS_WORKSPACE:-/workspace}" 2>/dev/null || exit 0
 b=$(timeout 1s git rev-parse --abbrev-ref HEAD 2>/dev/null) || exit 0
 [ -n "$b" ] || exit 0
-# Large or remote workspaces must not leave tmux's first status job pending.
-changes=$(timeout 2s git --no-optional-locks status --porcelain 2>/dev/null) || changes=""
-n=$(printf '%s\n' "$changes" | grep -c .)
+
+cache="${DEVBOX_STATUS_CACHE:-/tmp/devbox-tmux-status.$(id -u)}"
+n=""
+[ -r "$cache" ] && read -r n < "$cache"
+case "$n" in *[!0-9]*) n="" ;; esac
+
+# The lock is the rate limit: the refresh keeps holding it while it sleeps for ten times as
+# long as git status took (at least 10 s), so runs never overlap and a slow or failing one
+# backs off, whether or not the cache could be written. Output goes to /dev/null so tmux
+# does not wait for the job.
+(
+  flock -n 9 || exit 0
+  start=$(date +%s)
+  count=""
+  if out=$(timeout 60s git --no-optional-locks status --porcelain); then
+    count=$(printf '%s\n' "$out" | grep -c .)
+  fi
+  printf '%s\n' "$count" > "$cache.tmp" && mv "$cache.tmp" "$cache"
+  pause=$((($(date +%s) - start) * 10))
+  [ "$pause" -ge 10 ] || pause=10
+  sleep "$pause"
+) 2>/dev/null 9>"$cache.lock" >/dev/null &
+
 # The "· " separator is carried by the helper, so a lone "· time" does not remain on the right for a non-git workspace.
-if [ "${n:-0}" -gt 0 ]; then
+if [ "${n:-0}" -gt 0 ] 2>/dev/null; then
   printf '⎇ %s ±%s · ' "$b" "$n"
 else
   printf '⎇ %s · ' "$b"
