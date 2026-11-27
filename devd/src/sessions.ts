@@ -941,6 +941,23 @@ export class SessionManager {
     if (secret !== undefined) setBridgeSecret(this.d.db, o.name, secret);
   }
 
+  /** A failed `docker run` can still leave a container: a port conflict leaves it in "Created",
+   *  and a run that timed out under load starts moments later. Dropping only the row orphaned a
+   *  live container on 2026-11-26 — its port block looked free, so every later open got the same
+   *  block and failed with "port is already allocated". The row therefore goes only once the
+   *  container is gone; when it cannot be removed the row stays, which keeps the block reserved
+   *  and the leftover visible, so it can be ended like any other session. */
+  private async rollbackCreate(id: string, cause: unknown): Promise<never> {
+    try {
+      await removeContainer(id);
+    } catch (e) {
+      const text = (x: unknown) => x instanceof Error ? x.message : String(x);
+      throw new Error(`${text(cause)}; its container could not be removed (${text(e)}), so session ${id} is kept — end it to clean up`);
+    }
+    deleteSession(this.d.db, id);
+    throw cause;
+  }
+
   // `bare` != null only for a worktree session (see worktreeMounts). A repo in the old form
   // does not have it and gets exactly the same mounts as before.
   // `remote` = the container will run on an InstaBox VM: no dind (R2), no prod-db keys, no
@@ -1279,8 +1296,7 @@ export class SessionManager {
       progress({ step: "container", detail: "starting the container" });
       await this.runContainer(opts);
     } catch (e) {
-      deleteSession(this.d.db, id);
-      throw e;
+      await this.rollbackCreate(id, e);
     }
     logEvent(this.d.db, id, "open");
     return { session: row, pull, created: true, claudePrompt };
@@ -1318,8 +1334,7 @@ export class SessionManager {
           await this.ensureDind(id);
           await this.runContainer(await this.runOpts(id, ws, port_base, project, repo, chosen, "tmux" /* solo is tmux-only: the API refuses chat+solo */));
         } catch (e) {
-          deleteSession(this.d.db, id);
-          throw e;
+          await this.rollbackCreate(id, e);
         }
         logEvent(this.d.db, id, "open-solo");
         return { session: row, created: true };
