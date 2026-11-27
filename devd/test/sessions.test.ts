@@ -373,6 +373,18 @@ test.skipIf(!hasDocker)("open cleans up reserved port when runContainer fails", 
   expect(mgr.list()).toHaveLength(0);
 }, 120_000);
 
+// A port conflict fails `docker run` AFTER the daemon created the container. Left behind, it
+// outlives its row and (when it did start) keeps the port block that the allocator hands out again.
+test.skipIf(!hasDocker)("open removes the container a failed docker run left behind", async () => {
+  const d = makeDeps();
+  const blocker = `dev-${PROJECT}-blocker`;
+  expect(sh(d.root, "docker", "run", "-d", "--name", blocker, "-p", `127.0.0.1:${PORT_BASE}:80`, "alpine:3", "sleep", "infinity").code).toBe(0);
+  const mgr = new SessionManager(d);
+  await expect(mgr.open({ folder: "acme", project: PROJECT, repo: "app", cloneUrl: d.bareUrl })).rejects.toThrow(/port is already allocated/);
+  expect(mgr.list()).toHaveLength(0);
+  expect(sh(d.root, "docker", "inspect", APP_ID).code).not.toBe(0);
+}, 120_000);
+
 test.skipIf(!hasDocker)("claudeSolo numbering and delete-on-end", async () => {
   const d = makeDeps();
   const mgr = new SessionManager(d);
